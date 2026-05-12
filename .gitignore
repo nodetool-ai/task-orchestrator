@@ -8,3 +8,7 @@ out
 *.db-shm
 *.db-wal
 .worktrees/
+
+# Cloudflare Tunnel credentials (per-host, never share)
+cloudflared.local.yml
+*.cloudflared.json

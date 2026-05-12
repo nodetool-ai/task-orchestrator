@@ -45,6 +45,31 @@ Unauthenticated browser visitors are redirected to `/login`; API requests
 get a 401. The CLI talks to the DB directly, so the gate doesn't apply
 there.
 
+## Production deployment
+
+Production runs on `nodetool-api` at `https://tasks.nodetool.ai`. The
+box listens on plain HTTP at `localhost:3000`; a Cloudflare Tunnel
+(`nodetool-deploy`, remote-managed) routes the public hostname to it,
+and Cloudflare's edge presents Universal SSL — no certs live on the
+server.
+
+Install as a systemd service (one-time, as root):
+
+```bash
+sudo bash scripts/install-service.sh
+```
+
+That creates `/var/lib/task-orchestrator/`, writes
+`/etc/systemd/system/task-orchestrator.service`, and drops a scoped
+sudoers file at `/etc/sudoers.d/claude-task-orchestrator` so the
+service user can `systemctl start|stop|restart|enable|disable
+task-orchestrator` and tail `journalctl -u task-orchestrator`
+passwordless. The unit sources nvm (`. ~/.nvm/nvm.sh`) before invoking
+`npm run start`.
+
+Adding a new public hostname to the tunnel is a dashboard action:
+Zero Trust → Networks → Tunnels → `nodetool-deploy` → Public Hostnames.
+
 ## CLI
 
 `npm run task -- <cmd>` from the repo root:
