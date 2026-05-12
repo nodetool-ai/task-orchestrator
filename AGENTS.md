@@ -97,7 +97,8 @@ Triggering an agent is therefore equivalent to handing somebody a
 local shell in your repo. Implications:
 
 - Don't enable a publicly reachable `/api/tasks/:id/sessions` without
-  also setting `NODETOOL_TASKS_TOKEN` to gate it.
+  the auth gate (DB-backed email/password, configured in `auth.ts`)
+  protecting it.
 - A malicious task body could direct the agent to do anything inside
   the worktree (and only the worktree — repo-level state is isolated).
 - Agent sessions push branches and open PRs with your `gh` identity.

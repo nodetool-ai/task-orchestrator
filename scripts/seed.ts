@@ -12,12 +12,12 @@ function main() {
   console.log("Seeding demo data…");
   const plan = repo.createPlan({
     id: SEED_PLAN_ID,
-    title: "Markdown Task System for NodeTool",
+    title: "Markdown Task System",
     state: "accepted",
     owner: "claude",
     tags: ["tooling", "agents", "meta"],
     body:
-      "# Goal\n\nGive humans and AI agents a shared way to plan and execute NodeTool development. " +
+      "# Goal\n\nGive humans and AI agents a shared way to plan and execute software development. " +
       "Plans and tasks live in a SQLite database maintained by the server, with a Linear-style web UI and a CLI.\n\n" +
       "# Approach\n\n- Drizzle ORM + better-sqlite3 in the Next.js app\n- API routes for all CRUD + state transitions\n- CLI imports the same repo functions — no separate codepath\n- Web UI: server-rendered, with inline interaction for acceptance criteria\n",
   });

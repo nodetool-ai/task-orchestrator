@@ -30,10 +30,15 @@ import {
 } from "./types";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = resolve(__dirname, "..");
+// Target repo the orchestrator operates on. All `git worktree` / `gh pr`
+// commands run against this checkout. Defaults to the orchestrator's own
+// repo when TASK_ORCH_TARGET_REPO is unset.
+const REPO_ROOT = process.env.TASK_ORCH_TARGET_REPO
+  ? resolve(process.env.TASK_ORCH_TARGET_REPO)
+  : resolve(__dirname, "..");
 const WORKTREE_ROOT = resolve(REPO_ROOT, ".worktrees");
-const DEFAULT_MODEL = process.env.NODETOOL_AGENT_MODEL ?? "claude-sonnet-4-5";
-const KEEP_WORKTREES = !!process.env.NODETOOL_TASKS_KEEP_WORKTREES;
+const DEFAULT_MODEL = process.env.TASK_ORCH_AGENT_MODEL ?? "claude-sonnet-4-5";
+const KEEP_WORKTREES = !!process.env.TASK_ORCH_KEEP_WORKTREES;
 
 // ──────────────────────────────────────────────────────────
 // In-process state (held on globalThis so HMR doesn't drop sessions)
@@ -70,7 +75,7 @@ if (!globalThis.__agentReaperRan) {
 // Periodically check open PRs and transition the linked task to `done` once
 // the PR is merged. Opening a PR only moves a task to `review`; merge is what
 // completes it.
-const PR_POLL_MS = Number(process.env.NODETOOL_TASKS_PR_POLL_MS ?? 60_000);
+const PR_POLL_MS = Number(process.env.TASK_ORCH_PR_POLL_MS ?? 60_000);
 if (!globalThis.__agentPrWatcher && PR_POLL_MS > 0) {
   globalThis.__agentPrWatcher = setInterval(() => {
     pollMergedPrs().catch((err) => console.error("agent: pr watcher failed:", err));
@@ -496,7 +501,7 @@ async function runAgent({
         type: "preset",
         preset: "claude_code",
       },
-      mcpServers: { nodetool_tasks: mcpServer },
+      mcpServers: { task_orch: mcpServer },
       resume: resumeSdkSessionId,
     },
   });
@@ -579,11 +584,11 @@ function buildPrompt(task: NonNullable<ReturnType<typeof repo.getTask>>): string
   lines.push("- This is a non-interactive run. Make reasonable decisions; do not ask questions.");
   lines.push("");
   lines.push("# Task-system MCP tools");
-  lines.push("- mcp__nodetool_tasks__add_note(body): log a decision so the next person can see why.");
-  lines.push("- mcp__nodetool_tasks__check_criterion(criterion): mark an acceptance criterion done.");
-  lines.push("- mcp__nodetool_tasks__uncheck_criterion(criterion): undo if you check the wrong one.");
-  lines.push("- mcp__nodetool_tasks__add_criterion(text): add a criterion you discovered along the way.");
-  lines.push("- mcp__nodetool_tasks__list_criteria(): see the current state of criteria.");
+  lines.push("- mcp__task_orch__add_note(body): log a decision so the next person can see why.");
+  lines.push("- mcp__task_orch__check_criterion(criterion): mark an acceptance criterion done.");
+  lines.push("- mcp__task_orch__uncheck_criterion(criterion): undo if you check the wrong one.");
+  lines.push("- mcp__task_orch__add_criterion(text): add a criterion you discovered along the way.");
+  lines.push("- mcp__task_orch__list_criteria(): see the current state of criteria.");
   lines.push("Use these as you work — don't batch them until the end. Match criteria by substring.");
   lines.push("");
   lines.push("# Finishing");

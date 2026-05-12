@@ -135,6 +135,20 @@ export const agentEvents = sqliteTable(
   })
 );
 
+export const users = sqliteTable(
+  "users",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    email: text("email").notNull().unique(),
+    passwordHash: text("password_hash").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+  },
+  (t) => ({
+    emailIdx: index("users_email_idx").on(t.email),
+  })
+);
+
+export type User = typeof users.$inferSelect;
 export type Plan = typeof plans.$inferSelect;
 export type Task = typeof tasks.$inferSelect;
 export type TaskNote = typeof taskNotes.$inferSelect;

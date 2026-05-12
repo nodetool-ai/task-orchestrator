@@ -4,8 +4,8 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DB_PATH = process.env.NODETOOL_TASKS_DB
-  ? resolve(process.env.NODETOOL_TASKS_DB)
+const DB_PATH = process.env.TASK_ORCH_DB
+  ? resolve(process.env.TASK_ORCH_DB)
   : resolve(__dirname, "..", "..", "data.db");
 
 for (const suffix of ["", "-shm", "-wal"]) {

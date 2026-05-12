@@ -1,37 +1,27 @@
-import { NextRequest, NextResponse } from "next/server";
-import { safeEqual } from "./lib/safe-equal";
+import { NextResponse } from "next/server";
+import NextAuth from "next-auth";
+import { authConfig } from "@/auth.config";
 
-// Optional bearer-token gate. When NODETOOL_TASKS_TOKEN is set, every route
-// requires either a matching `Authorization: Bearer <token>` header (for CLI
-// / API clients) or the `nodetool_tasks_token` cookie (set via /login).
-// When unset, the site is open — the original local-only default.
+// Auth.js gate. Every route requires a signed-in user except /login itself
+// and Auth.js's own /api/auth/* handlers. Browser visitors are redirected
+// to /login with a `next` param; /api/* requests get a 401 JSON response.
+//
+// Middleware runs on the Edge runtime, so it uses auth.config (no DB,
+// no node:fs). Credential verification happens in auth.ts on the Node
+// runtime when /api/auth/callback/credentials fires.
+//
+// The CLI talks to lib/repo directly, so it bypasses this gate.
 
-const TOKEN = process.env.NODETOOL_TASKS_TOKEN;
-const COOKIE = "nodetool_tasks_token";
+const { auth } = NextAuth(authConfig);
 
-function authorized(req: NextRequest): boolean {
-  if (!TOKEN) return true;
-  const header = req.headers.get("authorization") ?? "";
-  if (header.startsWith("Bearer ")) {
-    return safeEqual(header.slice(7), TOKEN);
-  }
-  const cookie = req.cookies.get(COOKIE)?.value;
-  return cookie ? safeEqual(cookie, TOKEN) : false;
-}
-
-export function middleware(req: NextRequest) {
-  if (!TOKEN) return NextResponse.next();
-
+export default auth((req) => {
   const path = req.nextUrl.pathname;
-  if (
-    path === "/login" ||
-    path === "/api/auth/login" ||
-    path === "/api/auth/logout"
-  ) {
+
+  if (path === "/login" || path.startsWith("/api/auth/")) {
     return NextResponse.next();
   }
 
-  if (authorized(req)) return NextResponse.next();
+  if (req.auth) return NextResponse.next();
 
   if (path.startsWith("/api/")) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -41,7 +31,7 @@ export function middleware(req: NextRequest) {
   url.pathname = "/login";
   url.searchParams.set("next", path);
   return NextResponse.redirect(url);
-}
+});
 
 export const config = {
   matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],

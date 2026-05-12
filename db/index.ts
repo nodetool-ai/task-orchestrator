@@ -9,7 +9,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = join(__dirname, "migrations");
 
 function resolveDbPath(): string {
-  if (process.env.NODETOOL_TASKS_DB) return resolve(process.env.NODETOOL_TASKS_DB);
+  if (process.env.TASK_ORCH_DB) return resolve(process.env.TASK_ORCH_DB);
   return resolve(__dirname, "..", "..", "data.db");
 }
 

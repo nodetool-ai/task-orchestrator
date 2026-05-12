@@ -4,6 +4,7 @@
 
 import * as repo from "./lib/repo";
 import * as agent from "./lib/agent";
+import * as users from "./lib/users";
 import { db } from "./db";
 import { TASK_STATES, isTerminalStatus, type TaskState } from "./lib/types";
 import { assistantText, toolUses, type SdkMessageEnvelope } from "./lib/sdk-message";
@@ -367,6 +368,100 @@ function printAgentEvent(event: { type: string; payload: unknown; createdAt: Dat
   }
 }
 
+async function readPasswordInteractive(prompt: string): Promise<string> {
+  process.stdout.write(prompt);
+  const stdin = process.stdin;
+  const wasRaw = stdin.isTTY ? stdin.isRaw : false;
+  if (stdin.isTTY) stdin.setRawMode(true);
+  stdin.resume();
+  stdin.setEncoding("utf8");
+  let buf = "";
+  return await new Promise<string>((resolve, reject) => {
+    const onData = (chunk: string) => {
+      for (const ch of chunk) {
+        if (ch === "\n" || ch === "\r" || ch === "") {
+          stdin.removeListener("data", onData);
+          if (stdin.isTTY) stdin.setRawMode(wasRaw);
+          stdin.pause();
+          process.stdout.write("\n");
+          resolve(buf);
+          return;
+        }
+        if (ch === "") {
+          stdin.removeListener("data", onData);
+          if (stdin.isTTY) stdin.setRawMode(wasRaw);
+          stdin.pause();
+          reject(new Error("Aborted"));
+          return;
+        }
+        if (ch === "" || ch === "\b") {
+          buf = buf.slice(0, -1);
+        } else {
+          buf += ch;
+        }
+      }
+    };
+    stdin.on("data", onData);
+  });
+}
+
+async function resolvePassword(args: Args): Promise<string> {
+  const inline = asString(args.password);
+  if (inline) return inline;
+  const pw = await readPasswordInteractive("Password: ");
+  if (!pw) throw new Error("Password is required (use --password=... for non-interactive)");
+  return pw;
+}
+
+async function cmdUser(args: Args): Promise<number> {
+  const sub = args._.shift();
+  switch (sub) {
+    case "add": {
+      const email = args._.shift();
+      if (!email) throw new Error("Usage: user add <email> [--password=...]");
+      const pw = await resolvePassword(args);
+      const u = await users.createUser(email, pw);
+      console.log(`+ ${u.email}`);
+      return 0;
+    }
+    case "passwd": {
+      const email = args._.shift();
+      if (!email) throw new Error("Usage: user passwd <email> [--password=...]");
+      const pw = await resolvePassword(args);
+      await users.setPassword(email, pw);
+      console.log(`updated ${email}`);
+      return 0;
+    }
+    case "rm": {
+      const email = args._.shift();
+      if (!email) throw new Error("Usage: user rm <email>");
+      const ok = users.deleteUser(email);
+      if (!ok) throw new Error(`No user with email ${email}`);
+      console.log(`- ${email}`);
+      return 0;
+    }
+    case "list":
+    case undefined: {
+      const all = users.listUsers();
+      if (args.json) {
+        console.log(JSON.stringify(all.map((u) => ({ id: u.id, email: u.email, createdAt: u.createdAt })), null, 2));
+        return 0;
+      }
+      if (all.length === 0) {
+        console.log("(no users)");
+        return 0;
+      }
+      console.log(`${pad("ID", 6)} ${pad("EMAIL", 32)} CREATED`);
+      for (const u of all) {
+        console.log(`${pad(String(u.id), 6)} ${pad(u.email, 32)} ${u.createdAt.toISOString()}`);
+      }
+      return 0;
+    }
+    default:
+      throw new Error("Usage: user <add|passwd|rm|list> ...");
+  }
+}
+
 function help() {
   console.log(`Usage: npm run task -- <command> [args]
 
@@ -395,10 +490,16 @@ Commands:
   agent resume <session-id>         Resume a prior (terminal) session; pass
                                     --model=... to change models on resume.
 
+  user list [--json]                List sign-in users.
+  user add <email> [--password=...] Create a user. Prompts for password if omitted.
+  user passwd <email> [--password=...]
+                                    Update a user's password.
+  user rm <email>                   Delete a user.
+
 States:
   Tasks: ${TASK_STATES.join(", ")}
 
-DB: data.db (override with NODETOOL_TASKS_DB env var).
+DB: data.db (override with TASK_ORCH_DB env var).
 `);
 }
 
@@ -442,6 +543,9 @@ async function main() {
         break;
       case "agent":
         code = await cmdAgent(args);
+        break;
+      case "user":
+        code = await cmdUser(args);
         break;
       case "help":
       case undefined:

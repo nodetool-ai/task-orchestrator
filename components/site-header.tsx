@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { LayoutDashboard, ListTodo, Target, Sparkles } from "lucide-react";
+import { auth } from "@/auth";
+import { SignOutButton } from "./sign-out-button";
 
 const nav = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -8,13 +10,16 @@ const nav = [
   { href: "/sessions", label: "Sessions", icon: Sparkles },
 ];
 
-export function SiteHeader() {
+export async function SiteHeader() {
+  const session = await auth();
+  const email = session?.user?.email;
+
   return (
     <header className="sticky top-0 z-40 border-b border-border/60 bg-background/80 backdrop-blur">
       <div className="container flex h-12 items-center gap-1">
         <Link href="/" className="mr-4 flex items-center gap-2">
           <span className="size-4 rounded-sm bg-foreground" />
-          <span className="text-sm font-semibold tracking-tight">NodeTool Tasks</span>
+          <span className="text-sm font-semibold tracking-tight">Task Orchestrator</span>
         </Link>
         <nav className="flex items-center gap-1">
           {nav.map((item) => (
@@ -29,14 +34,12 @@ export function SiteHeader() {
           ))}
         </nav>
         <div className="ml-auto flex items-center gap-3 text-xs text-muted-foreground">
-          <a
-            className="hover:text-foreground transition-colors"
-            href="https://github.com/nodetool-ai/task-orchestrator"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Source ↗
-          </a>
+          {email && (
+            <>
+              <span className="font-mono">{email}</span>
+              <SignOutButton />
+            </>
+          )}
         </div>
       </div>
     </header>

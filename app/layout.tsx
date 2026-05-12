@@ -7,8 +7,8 @@ const inter = Inter({ subsets: ["latin"], variable: "--font-sans", display: "swa
 const mono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono", display: "swap" });
 
 export const metadata: Metadata = {
-  title: "NodeTool Tasks",
-  description: "Plans and tasks for developing NodeTool — markdown-native, conflict-free.",
+  title: "Task Orchestrator",
+  description: "Plans and tasks for software projects — markdown-native, conflict-free.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

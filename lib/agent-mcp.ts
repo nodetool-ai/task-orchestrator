@@ -1,7 +1,7 @@
 // SDK MCP server exposing repo mutations the agent can call mid-run.
 // Bound to a specific task ID — the agent never sees other tasks.
 //
-// Tool names appear to the model as `mcp__nodetool_tasks__<name>`.
+// Tool names appear to the model as `mcp__task_orch__<name>`.
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import * as repo from "./repo";
@@ -21,7 +21,7 @@ export function createTaskMcpServer(taskId: string, author: string) {
   };
 
   return createSdkMcpServer({
-    name: "nodetool_tasks",
+    name: "task_orch",
     version: "1.0.0",
     tools: [
       tool(

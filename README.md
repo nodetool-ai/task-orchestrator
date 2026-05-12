@@ -17,14 +17,33 @@ npm run dev        # http://localhost:3000
 ```
 
 The SQLite file lives at `data.db` (gitignored). Override with
-`NODETOOL_TASKS_DB=/path/to/db`.
+`TASK_ORCH_DB=/path/to/db`.
 
-By default the dev server is open — anyone with network access can
-mutate state and start agent runs. To gate it, set
-`NODETOOL_TASKS_TOKEN=<secret>`: every HTTP route then requires a
-matching `Authorization: Bearer <token>` header (CLI clients) or
-session cookie (web users sign in at `/login`). The CLI talks to the
-DB directly, so the gate doesn't apply there.
+Set `TASK_ORCH_TARGET_REPO=/path/to/your/repo` to point agent sessions at
+a different checkout. All `git worktree` operations and `gh pr create`
+calls run against that repo; if unset, the orchestrator works on its own
+source tree.
+
+HTTP access is gated by email + password sign-in (Auth.js v5, Credentials
+provider). User accounts live in the `users` table with bcrypt password
+hashes. Set:
+
+- `AUTH_SECRET` — random string for signing session JWTs (`openssl rand -base64 32`)
+- `NEXTAUTH_URL` — public origin in production (e.g. `https://orch.example.com`)
+
+Create the first user from the CLI:
+
+```bash
+npm run task -- user add you@example.com           # prompts for password
+npm run task -- user add bot@example.com --password=...  # non-interactive
+npm run task -- user list
+npm run task -- user passwd you@example.com
+npm run task -- user rm bot@example.com
+```
+
+Unauthenticated browser visitors are redirected to `/login`; API requests
+get a 401. The CLI talks to the DB directly, so the gate doesn't apply
+there.
 
 ## CLI
 
@@ -115,11 +134,11 @@ While running, the agent has access to an in-process MCP server with
 five tools scoped to its task:
 
 ```
-mcp__nodetool_tasks__add_note(body)
-mcp__nodetool_tasks__check_criterion(criterion)     # match by id or text substring
-mcp__nodetool_tasks__uncheck_criterion(criterion)
-mcp__nodetool_tasks__add_criterion(text)
-mcp__nodetool_tasks__list_criteria()
+mcp__task_orch__add_note(body)
+mcp__task_orch__check_criterion(criterion)     # match by id or text substring
+mcp__task_orch__uncheck_criterion(criterion)
+mcp__task_orch__add_criterion(text)
+mcp__task_orch__list_criteria()
 ```
 
 Each tool call goes straight to the same `lib/repo.ts` the web UI

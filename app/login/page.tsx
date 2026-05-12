@@ -2,6 +2,7 @@
 
 import { Suspense, useState, useTransition } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { signIn } from "next-auth/react";
 import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -14,60 +15,86 @@ export default function LoginPage() {
 }
 
 function LoginForm() {
-  const router = useRouter();
   const sp = useSearchParams();
+  const router = useRouter();
   const next = sp.get("next") || "/";
-  const [token, setToken] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(sp.get("error"));
   const [pending, startTransition] = useTransition();
 
-  const submit = (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     startTransition(async () => {
-      const res = await fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token }),
+      const res = await signIn("credentials", {
+        email,
+        password,
+        redirect: false,
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        setError(body.error ?? `HTTP ${res.status}`);
+      if (!res || res.error) {
+        setError("Invalid email or password.");
         return;
       }
-      router.replace(next);
+      router.push(next);
       router.refresh();
     });
   };
 
   return (
-    <div className="mx-auto max-w-sm pt-20">
-      <h1 className="text-xl font-semibold tracking-tight">Sign in</h1>
-      <p className="mt-1 text-sm text-muted-foreground">
-        Enter the value of <code className="font-mono">NODETOOL_TASKS_TOKEN</code>.
-      </p>
-      <form onSubmit={submit} className="mt-6 space-y-3">
+    <form onSubmit={handleSubmit} className="mx-auto max-w-sm pt-20 space-y-4">
+      <div>
+        <h1 className="text-xl font-semibold tracking-tight">Sign in</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Access is restricted to the team.
+        </p>
+      </div>
+
+      <div className="space-y-1.5">
+        <label htmlFor="email" className="text-xs font-medium text-muted-foreground">
+          Email
+        </label>
         <input
-          type="password"
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
-          placeholder="Token"
-          autoFocus
-          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm font-mono outline-none focus:border-foreground/40"
+          id="email"
+          type="email"
+          autoComplete="email"
+          required
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-foreground"
         />
-        <button
-          type="submit"
-          disabled={pending || !token}
-          className={cn(
-            "inline-flex w-full items-center justify-center gap-1.5 rounded-md bg-foreground text-background px-3 py-2 text-sm font-medium",
-            "hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-          )}
-        >
-          {pending && <Loader2 className="size-3.5 animate-spin" />}
-          Continue
-        </button>
-        {error && <p className="text-xs text-state-blocked">{error}</p>}
-      </form>
-    </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <label htmlFor="password" className="text-xs font-medium text-muted-foreground">
+          Password
+        </label>
+        <input
+          id="password"
+          type="password"
+          autoComplete="current-password"
+          required
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-foreground"
+        />
+      </div>
+
+      <button
+        type="submit"
+        disabled={pending}
+        className={cn(
+          "inline-flex w-full items-center justify-center gap-2 rounded-md bg-foreground text-background px-3 py-2 text-sm font-medium",
+          "hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+        )}
+      >
+        {pending && <Loader2 className="size-3.5 animate-spin" />}
+        Sign in
+      </button>
+
+      {error && (
+        <p className="text-xs text-state-blocked">{error}</p>
+      )}
+    </form>
   );
 }
