@@ -32,7 +32,7 @@ export function RunAgentButton({
         return;
       }
       const session = await res.json();
-      router.push(`/sessions/${session.id}`);
+      router.push(`/runs/${session.id}`);
     });
   };
 

@@ -202,7 +202,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
                 className="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/40 transition-colors group"
               >
                 <Link
-                  href={`/sessions/${s.id}`}
+                  href={`/runs/${s.id}`}
                   className="flex items-center gap-3 flex-1 min-w-0"
                 >
                   <span className="font-mono text-xs text-muted-foreground tabular-nums">
