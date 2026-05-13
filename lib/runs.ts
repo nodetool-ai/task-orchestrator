@@ -275,6 +275,14 @@ const PROFILES: Record<string, ProfileDef> = {
       },
     },
   },
+  spawn: {
+    servers: {
+      spawn: async (ctx) => {
+        const { createSpawnMcpServer } = await import("./spawn-mcp");
+        return createSpawnMcpServer({ runId: ctx.runId, runRow: ctx.run });
+      },
+    },
+  },
 };
 
 interface ResolvedProfile {
