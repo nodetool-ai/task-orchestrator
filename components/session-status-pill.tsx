@@ -11,6 +11,9 @@ const labels: Record<SessionStatus, string> = {
   completed: "Completed",
   failed: "Failed",
   cancelled: "Cancelled",
+  idle: "Idle",
+  budget_exhausted: "Budget hit",
+  closed: "Closed",
 };
 
 const tones: Record<SessionStatus, string> = {
@@ -22,6 +25,9 @@ const tones: Record<SessionStatus, string> = {
   completed: "text-state-done",
   failed: "text-state-blocked",
   cancelled: "text-muted-foreground",
+  idle: "text-muted-foreground",
+  budget_exhausted: "text-state-blocked",
+  closed: "text-muted-foreground",
 };
 
 export function SessionStatusPill({
@@ -31,7 +37,7 @@ export function SessionStatusPill({
   status: SessionStatus;
   className?: string;
 }) {
-  const isLive = !["completed", "failed", "cancelled"].includes(status);
+  const isLive = !["completed", "failed", "cancelled", "idle", "budget_exhausted", "closed"].includes(status);
   return (
     <span
       className={cn(
