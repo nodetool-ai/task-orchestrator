@@ -222,6 +222,8 @@ export interface ProfileContext {
   author: string;
   /** Optional taskId scoping for the orchestrator MCP server. */
   taskId: string | null;
+  /** Resolved cwd for the SDK turn — repos that shell out (gh, git) use this. */
+  cwd: string;
 }
 
 interface ProfileDef {
@@ -259,9 +261,9 @@ const PROFILES: Record<string, ProfileDef> = {
   },
   gh_pr: {
     servers: {
-      gh_pr: async () => {
+      gh_pr: async (ctx) => {
         const { createGhPrMcpServer } = await import("./gh-pr-mcp");
-        return createGhPrMcpServer();
+        return createGhPrMcpServer({ cwd: ctx.cwd });
       },
     },
   },
@@ -920,6 +922,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     run,
     author,
     taskId: run.taskId,
+    cwd,
   };
   const { servers } = await resolveProfiles(run.toolsProfile, profileCtx);
 
