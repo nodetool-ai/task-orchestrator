@@ -267,6 +267,14 @@ const PROFILES: Record<string, ProfileDef> = {
       },
     },
   },
+  gh_ci: {
+    servers: {
+      gh_ci: async (ctx) => {
+        const { createGhCiMcpServer } = await import("./gh-ci-mcp");
+        return createGhCiMcpServer({ cwd: ctx.cwd });
+      },
+    },
+  },
 };
 
 interface ResolvedProfile {
