@@ -557,7 +557,10 @@ async function runAgent({
   // Lazy import the MCP server too — it pulls in zod via the SDK.
   const { createTaskMcpServer } = await import("./agent-mcp");
 
-  const env = sanitizeEnv(process.env);
+  // Sandbox DB lives inside the worktree so any tsx/npm scripts the agent
+  // runs from there hit a throwaway file. It vanishes with the worktree.
+  const sandboxDbPath = resolve(worktreePath, ".task-orch-sandbox.db");
+  const env = sanitizeEnv(process.env, { sandboxDbPath });
   const mcpServer = createTaskMcpServer(task.id, "claude-agent");
 
   const stream = sdk.query({
@@ -862,10 +865,19 @@ function describe(err: unknown): string {
   return typeof err === "string" ? err : JSON.stringify(err);
 }
 
-function sanitizeEnv(input: NodeJS.ProcessEnv): Record<string, string> {
+function sanitizeEnv(
+  input: NodeJS.ProcessEnv,
+  opts: { sandboxDbPath: string }
+): Record<string, string> {
   // The Claude Agent SDK refuses to run when nested inside another Claude Code
   // session unless these vars are stripped. See CLAUDE.md § "Claude Agent
   // Provider in nested sessions".
+  //
+  // We also override TASK_ORCH_DB with a worktree-scoped sandbox path so any
+  // script the agent runs in its worktree (npx tsx, npm test, the seed/reset
+  // scripts) operates on a throwaway DB instead of the production data. Same
+  // protection for AUTH_SECRET — the agent doesn't need it and it shouldn't
+  // be visible in `env` dumps inside the worktree.
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(input)) {
     if (v === undefined) continue;
@@ -875,12 +887,15 @@ function sanitizeEnv(input: NodeJS.ProcessEnv): Record<string, string> {
       k.startsWith("CLAUDE_SESSION_") ||
       k.startsWith("CLAUDE_ENABLE_") ||
       k.startsWith("CLAUDE_AFTER_") ||
-      k.startsWith("CLAUDE_AUTO_")
+      k.startsWith("CLAUDE_AUTO_") ||
+      k === "TASK_ORCH_DB" ||
+      k === "AUTH_SECRET"
     ) {
       continue;
     }
     out[k] = v;
   }
+  out.TASK_ORCH_DB = opts.sandboxDbPath;
   return out;
 }
 

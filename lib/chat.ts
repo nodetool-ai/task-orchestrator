@@ -7,7 +7,8 @@
 // /chat UI keeps working until the new /runs UI lands. It will be deleted
 // in favour of lib/runs.ts in T-20260513-0048.
 
-import { dirname, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, asc, desc, eq, isNotNull, or } from "drizzle-orm";
 
@@ -245,7 +246,11 @@ export async function* runChat({
   const mcpServer = createOrchestratorMcpServer({ author: author ?? "chat" });
 
   const { cwd } = resolveChatCwd(chat);
-  const env = sanitizeEnv(process.env);
+  // Per-chat sandbox DB: any tsx/test invocation inside the target repo hits
+  // this file, not prod. Reused across turns of the same chat so script state
+  // built up earlier in the conversation is still there next message.
+  const sandboxDbPath = join(tmpdir(), `task-orch-chat-${chatId}.sandbox.db`);
+  const env = sanitizeEnv(process.env, { sandboxDbPath });
   // Capture stderr from the spawned `claude` process so failures (auth,
   // permission, missing credentials) surface in the chat error event instead
   // of just "Claude Code process exited with code 1".
@@ -414,9 +419,15 @@ function hydrateMessage(row: typeof agentMessages.$inferSelect): ChatMessageRow 
   };
 }
 
-function sanitizeEnv(input: NodeJS.ProcessEnv): Record<string, string> {
+function sanitizeEnv(
+  input: NodeJS.ProcessEnv,
+  opts: { sandboxDbPath: string }
+): Record<string, string> {
   // Mirrors lib/agent.ts: strip Claude Code session env vars so the nested
-  // SDK invocation isn't confused by a parent Claude Code process.
+  // SDK invocation isn't confused by a parent Claude Code process. Also
+  // override TASK_ORCH_DB with a per-chat sandbox path and drop AUTH_SECRET
+  // so the agent can't accidentally mutate prod or leak credentials when
+  // it runs scripts in the target repo.
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(input)) {
     if (v === undefined) continue;
@@ -426,11 +437,14 @@ function sanitizeEnv(input: NodeJS.ProcessEnv): Record<string, string> {
       k.startsWith("CLAUDE_SESSION_") ||
       k.startsWith("CLAUDE_ENABLE_") ||
       k.startsWith("CLAUDE_AFTER_") ||
-      k.startsWith("CLAUDE_AUTO_")
+      k.startsWith("CLAUDE_AUTO_") ||
+      k === "TASK_ORCH_DB" ||
+      k === "AUTH_SECRET"
     ) {
       continue;
     }
     out[k] = v;
   }
+  out.TASK_ORCH_DB = opts.sandboxDbPath;
   return out;
 }
