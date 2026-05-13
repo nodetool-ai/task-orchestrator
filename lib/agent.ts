@@ -37,6 +37,16 @@ const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
 const DEFAULT_MODEL = process.env.TASK_ORCH_AGENT_MODEL ?? "claude-sonnet-4-5";
 const KEEP_WORKTREES = !!process.env.TASK_ORCH_KEEP_WORKTREES;
 
+// SDK-built-in filesystem sandbox (bwrap on Linux, sandbox-exec on macOS).
+// Enabled by default; set TASK_ORCH_SANDBOX=false to disable (e.g. if
+// bubblewrap isn't installed). Network is left pass-through deliberately —
+// agents legitimately need to fetch from npm, pypi, docs sites, etc., and
+// our threat model doesn't justify the friction of an allowlist.
+const SANDBOX_ENABLED = process.env.TASK_ORCH_SANDBOX !== "false";
+const SANDBOX_OPTS = SANDBOX_ENABLED
+  ? { enabled: true as const, autoAllowBashIfSandboxed: true as const }
+  : undefined;
+
 interface SessionRepoResolution {
   root: string;
   repoId: string | null;
@@ -578,6 +588,7 @@ async function runAgent({
       },
       mcpServers: { task_orch: mcpServer },
       resume: resumeSdkSessionId,
+      sandbox: SANDBOX_OPTS,
     },
   });
 
