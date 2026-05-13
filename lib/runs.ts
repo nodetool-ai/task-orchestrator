@@ -40,7 +40,8 @@ import { and, asc, desc, eq, inArray, isNotNull, isNull, notInArray, or } from "
 import { db } from "@/db";
 import { agentEvents, agentMessages, agentSessions } from "@/db/schema";
 import * as repo from "./repo";
-import { buildImplementPrompt } from "./run-templates";
+import { buildImplementPrompt, extractReviewOutcome } from "./run-templates";
+import { parsePrUrl } from "./gh-url";
 import type { SdkContentBlock, SdkMessageEnvelope } from "./sdk-message";
 import type { AgentSessionFull, SessionStatus } from "./types";
 import { isTerminalStatus } from "./types";
@@ -59,8 +60,8 @@ const SANDBOX_OPTS = {
 // Public types
 // ──────────────────────────────────────────────────────────
 
-export type Goal = "<implement>" | "<chat>" | (string & {});
-export type CwdStrategy = "worktree" | "repo" | "none";
+export type Goal = "<implement>" | "<chat>" | "<review>" | (string & {});
+export type CwdStrategy = "worktree" | "worktree_at_pr" | "repo" | "none";
 
 export interface Budget {
   maxTurns?: number;
@@ -385,6 +386,18 @@ export function create(input: CreateRunInput): RunRow {
     );
   }
 
+  // Review-style runs: spin up a worktree at the PR's head ref and run a
+  // single agent turn against it. Requires a prUrl on the run.
+  if (!input.defer && cwdStrategy === "worktree_at_pr") {
+    if (!input.prUrl) {
+      throw new repo.RepoError(
+        "cwd_strategy=worktree_at_pr requires a prUrl (the worktree is created from the PR's head ref).",
+        400
+      );
+    }
+    void runReview(run.id, input.prUrl, input.initialPrompt ?? null);
+  }
+
   return run;
 }
 
@@ -555,6 +568,12 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // Stream end → idle (chat-style) unless we hit a budget cap.
     const budgetHit = checkBudget(run, result);
     const nextStatus: SessionStatus = budgetHit ? "budget_exhausted" : "idle";
+    // Review-style runs surface a structured verdict in `outcome`. Gated on
+    // goal so chat/implement append flows are unaffected.
+    const outcomeUpdate =
+      run.goal === "<review>"
+        ? extractReviewOutcome(result.summary) ?? run.outcome
+        : run.outcome;
     db.update(agentSessions)
       .set({
         status: nextStatus,
@@ -562,6 +581,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
         totalCostUsd: result.totalCostUsd ?? run.totalCostUsd,
         inputTokens: result.inputTokens ?? run.inputTokens,
         outputTokens: result.outputTokens ?? run.outputTokens,
+        outcome: outcomeUpdate,
         completedAt: budgetHit ? new Date() : null,
       })
       .where(eq(agentSessions.id, run.id))
@@ -637,17 +657,18 @@ async function prepareCwd(run: RunRow): Promise<string> {
   if (run.cwdStrategy === "repo") {
     return repoRoot(run);
   }
-  // worktree: re-materialize if missing.
+  // worktree / worktree_at_pr: re-materialize if missing.
   if (!run.branch || !run.worktreePath) {
     throw new Error(
-      `Run #${run.id} has cwd_strategy=worktree but no branch/worktree_path recorded yet.`
+      `Run #${run.id} has cwd_strategy=${run.cwdStrategy} but no branch/worktree_path recorded yet.`
     );
   }
   const root = repoRoot(run);
   if (!existsSync(run.worktreePath)) {
     await mkdir(dirname(run.worktreePath), { recursive: true });
     // The branch already exists on the remote (it was pushed by the initial
-    // implement turn), so a plain `git worktree add <path> <branch>` is
+    // implement turn for implement runs, or fetched from the PR head for
+    // review runs), so a plain `git worktree add <path> <branch>` is
     // sufficient — git checks out the existing branch into the new path.
     await sh(["git", "worktree", "add", run.worktreePath, run.branch], root);
   }
@@ -767,6 +788,113 @@ async function runImplement(
     } catch {
       // Ignore — task may not accept blocked from its current state.
     }
+  } finally {
+    closeBus(runId);
+    runners.delete(runId);
+    cleanupWorktree(worktreePath, root).catch(() => {});
+  }
+}
+
+// ──────────────────────────────────────────────────────────
+// Review-style worker (worktree at PR head → single turn → outcome)
+// ──────────────────────────────────────────────────────────
+
+async function runReview(
+  runId: number,
+  prUrl: string,
+  initialPrompt: string | null
+): Promise<void> {
+  const abort = new AbortController();
+  const bus = new EventEmitter();
+  runners.set(runId, { abort, bus });
+
+  let run = get(runId)!;
+  const root = repoRoot(run);
+  const worktreeRoot = resolve(root, ".worktrees");
+  const branch = `review-${runId}`;
+  const worktreePath = resolve(worktreeRoot, `review-${runId}`);
+
+  try {
+    const parsed = parsePrUrl(prUrl);
+    if (!parsed) {
+      fail(runId, `Could not parse PR url: ${prUrl}`);
+      runners.delete(runId);
+      return;
+    }
+
+    setStatus(runId, "preparing");
+    await mkdir(worktreeRoot, { recursive: true });
+
+    // Fetch the PR head ref into a local ref, then create a worktree on a
+    // throwaway review branch pointing at FETCH_HEAD. Equivalent to
+    // `gh pr checkout` but keeps git as the source of truth (gh's checkout
+    // mutates the current working tree which we don't want here).
+    try {
+      await sh(
+        ["git", "fetch", "origin", `pull/${parsed.number}/head`],
+        root
+      );
+    } catch (err) {
+      fail(
+        runId,
+        `git fetch failed for ${prUrl}: ${describe(err)}. Is the PR's origin remote configured?`
+      );
+      runners.delete(runId);
+      return;
+    }
+    await sh(
+      ["git", "worktree", "add", "-b", branch, worktreePath, "FETCH_HEAD"],
+      root
+    );
+    db.update(agentSessions)
+      .set({ branch, worktreePath })
+      .where(eq(agentSessions.id, runId))
+      .run();
+    run = get(runId)!;
+
+    setStatus(runId, "running");
+    const prompt =
+      initialPrompt ??
+      `Review the PR at ${prUrl} against the task's acceptance criteria. End with a JSON verdict block.`;
+    const author = "claude-reviewer";
+    const result = await runOneTurn({
+      run,
+      cwd: worktreePath,
+      prompt,
+      abort,
+      author,
+      onSdk: (m) => bus.emit("event", { type: "sdk", sdk: m }),
+    });
+
+    if (abort.signal.aborted) {
+      runners.delete(runId);
+      return;
+    }
+
+    // Extract structured verdict from the final assistant text for the
+    // outcome column. Falls back to the first non-empty line if no JSON
+    // verdict block was emitted.
+    const outcome = extractReviewOutcome(result.summary);
+
+    db.update(agentSessions)
+      .set({
+        status: "completed",
+        completedAt: new Date(),
+        outcome,
+        sdkSessionId: result.sdkSessionId ?? run.sdkSessionId,
+        totalCostUsd: result.totalCostUsd ?? run.totalCostUsd,
+        inputTokens: result.inputTokens ?? run.inputTokens,
+        outputTokens: result.outputTokens ?? run.outputTokens,
+      })
+      .where(eq(agentSessions.id, runId))
+      .run();
+    emitStatus(runId, "completed");
+  } catch (err) {
+    if (abort.signal.aborted) {
+      runners.delete(runId);
+      return;
+    }
+    fail(runId, describe(err));
   } finally {
     closeBus(runId);
     runners.delete(runId);

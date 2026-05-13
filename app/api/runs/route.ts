@@ -12,7 +12,7 @@ export const dynamic = "force-dynamic";
 const createRunSchema = z.object({
   goal: z.string().min(1).optional(),
   toolsProfile: z.string().min(1).optional(),
-  cwdStrategy: z.enum(["worktree", "repo", "none"]).optional(),
+  cwdStrategy: z.enum(["worktree", "worktree_at_pr", "repo", "none"]).optional(),
   repoId: z.string().nullable().optional(),
   taskId: z.string().nullable().optional(),
   prUrl: z.string().nullable().optional(),

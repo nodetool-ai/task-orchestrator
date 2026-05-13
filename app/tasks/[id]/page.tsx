@@ -9,9 +9,12 @@ import { StateChanger } from "@/components/state-changer";
 import { MarkdownBody } from "@/components/markdown-body";
 import { CriterionCheckbox } from "@/components/criterion-checkbox";
 import { RunAgentButton } from "@/components/run-agent-button";
+import { RunReviewButton } from "@/components/run-review-button";
 import {
   IMPLEMENT_DEFAULT_BUDGET_USD,
+  REVIEW_DEFAULT_BUDGET_USD,
   buildImplementPrompt,
+  buildReviewPrompt,
 } from "@/lib/run-templates";
 import { SessionStatusPill } from "@/components/session-status-pill";
 import { AddNoteForm } from "@/components/add-note-form";
@@ -61,12 +64,22 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
           </div>
           <h1 className="mt-2 text-2xl font-semibold tracking-tight leading-tight">{task.title}</h1>
         </div>
-        <RunAgentButton
-          taskId={task.id}
-          hasActive={Boolean(activeSession)}
-          initialPrompt={buildImplementPrompt(task)}
-          budgetMaxUsd={IMPLEMENT_DEFAULT_BUDGET_USD}
-        />
+        <div className="flex flex-col items-end gap-1.5">
+          <RunAgentButton
+            taskId={task.id}
+            hasActive={Boolean(activeSession)}
+            initialPrompt={buildImplementPrompt(task)}
+            budgetMaxUsd={IMPLEMENT_DEFAULT_BUDGET_USD}
+          />
+          {latestPr && (
+            <RunReviewButton
+              taskId={task.id}
+              prUrl={latestPr}
+              initialPrompt={buildReviewPrompt(task, latestPr)}
+              budgetMaxUsd={REVIEW_DEFAULT_BUDGET_USD}
+            />
+          )}
+        </div>
       </div>
 
       <dl className="mt-5 grid grid-cols-2 md:grid-cols-4 gap-y-3 gap-x-6 text-xs">
