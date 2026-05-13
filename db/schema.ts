@@ -129,7 +129,7 @@ export const acceptanceCriteria = sqliteTable(
 );
 
 export const agentSessions = sqliteTable(
-  "agent_sessions",
+  "agent_runs",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     taskId: text("task_id")
@@ -147,13 +147,25 @@ export const agentSessions = sqliteTable(
     sdkSessionId: text("sdk_session_id"),
     resumeOf: integer("resume_of"),
     repoId: text("repo_id").references(() => repositories.id, { onDelete: "set null" }),
+    goal: text("goal").notNull().default("<implement>"),
+    toolsProfile: text("tools_profile").notNull().default("orchestrator,repo_write"),
+    cwdStrategy: text("cwd_strategy").notNull().default("worktree"),
+    parentRunId: integer("parent_run_id"),
+    budgetMaxTurns: integer("budget_max_turns"),
+    budgetMaxUsd: real("budget_max_usd"),
+    budgetMaxSeconds: integer("budget_max_seconds"),
+    outcome: text("outcome"),
+    title: text("title"),
+    userId: integer("user_id").references(() => users.id, { onDelete: "set null" }),
     startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull().default(NOW),
     completedAt: integer("completed_at", { mode: "timestamp_ms" }),
   },
   (t) => ({
-    taskIdx: index("agent_sessions_task_idx").on(t.taskId),
-    statusIdx: index("agent_sessions_status_idx").on(t.status),
-    repoIdx: index("agent_sessions_repo_idx").on(t.repoId),
+    taskIdx: index("agent_runs_task_idx").on(t.taskId),
+    statusIdx: index("agent_runs_status_idx").on(t.status),
+    repoIdx: index("agent_runs_repo_idx").on(t.repoId),
+    parentIdx: index("agent_runs_parent_idx").on(t.parentRunId),
+    userIdx: index("agent_runs_user_idx").on(t.userId),
   })
 );
 
@@ -161,7 +173,7 @@ export const agentEvents = sqliteTable(
   "agent_events",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
-    sessionId: integer("session_id")
+    sessionId: integer("run_id")
       .notNull()
       .references(() => agentSessions.id, { onDelete: "cascade" }),
     type: text("type").notNull(),
@@ -169,7 +181,7 @@ export const agentEvents = sqliteTable(
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
   },
   (t) => ({
-    sessionIdx: index("agent_events_session_idx").on(t.sessionId),
+    sessionIdx: index("agent_events_run_idx").on(t.sessionId),
     createdIdx: index("agent_events_created_idx").on(t.createdAt),
   })
 );
