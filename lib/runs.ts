@@ -40,6 +40,7 @@ import { and, asc, desc, eq, inArray, isNotNull, isNull, notInArray, or } from "
 import { db } from "@/db";
 import { agentEvents, agentMessages, agentSessions } from "@/db/schema";
 import * as repo from "./repo";
+import { buildImplementPrompt } from "./run-templates";
 import type { SdkContentBlock, SdkMessageEnvelope } from "./sdk-message";
 import type { AgentSessionFull, SessionStatus } from "./types";
 import { isTerminalStatus } from "./types";
@@ -376,7 +377,12 @@ export function create(input: CreateRunInput): RunRow {
         400
       );
     }
-    void runImplement(run.id, input.taskId, input.baseBranch ?? "main");
+    void runImplement(
+      run.id,
+      input.taskId,
+      input.baseBranch ?? "main",
+      input.initialPrompt ?? null
+    );
   }
 
   return run;
@@ -652,7 +658,12 @@ async function prepareCwd(run: RunRow): Promise<string> {
 // Implement-style worker (initial turn → push → PR → idle)
 // ──────────────────────────────────────────────────────────
 
-async function runImplement(runId: number, taskId: string, baseBranch: string): Promise<void> {
+async function runImplement(
+  runId: number,
+  taskId: string,
+  baseBranch: string,
+  initialPrompt: string | null
+): Promise<void> {
   const abort = new AbortController();
   const bus = new EventEmitter();
   runners.set(runId, { abort, bus });
@@ -693,7 +704,9 @@ async function runImplement(runId: number, taskId: string, baseBranch: string): 
 
     setStatus(runId, "running");
     task = repo.getTask(taskId)!;
-    const prompt = buildImplementPrompt(task);
+    // Caller-supplied prompt (from the modal preview) wins; otherwise
+    // generate the canonical implement template from the task state.
+    const prompt = initialPrompt ?? buildImplementPrompt(task);
     const author = "claude-agent";
     const result = await runOneTurn({
       run,
@@ -759,105 +772,6 @@ async function runImplement(runId: number, taskId: string, baseBranch: string): 
     runners.delete(runId);
     cleanupWorktree(worktreePath, root).catch(() => {});
   }
-}
-
-function buildImplementPrompt(task: NonNullable<ReturnType<typeof repo.getTask>>): string {
-  const lines: string[] = [];
-  lines.push(`You are an autonomous coding agent working on task ${task.id}.`);
-  lines.push("");
-  lines.push(`# ${task.title}`);
-  if (task.body.trim()) {
-    lines.push("");
-    lines.push("## Description");
-    lines.push(task.body.trim());
-  }
-  if (task.criteria.length > 0) {
-    lines.push("");
-    lines.push("## Acceptance criteria");
-    for (const c of task.criteria) lines.push(`- [${c.done ? "x" : " "}] ${c.text}`);
-  }
-  if (task.dependencies.length > 0) {
-    lines.push("");
-    lines.push("## Depends on (already done)");
-    for (const dep of task.dependencies) lines.push(`- ${dep}`);
-  }
-
-  // Parent plan context: the broader goal this task belongs to, plus a
-  // snapshot of sibling tasks so the agent knows what's already shipped
-  // and what's still open. The agent can fetch more detail via
-  // mcp__task_orch__get_plan / get_task; this is proactive lookahead.
-  const plan = repo.getPlan(task.planId);
-  if (plan) {
-    lines.push("");
-    lines.push(`# Parent plan: ${plan.id} — ${plan.title}`);
-    lines.push(`(state: ${plan.state}${plan.owner ? `, owner: @${plan.owner}` : ""})`);
-    if (plan.body.trim()) {
-      lines.push("");
-      lines.push("## Plan description");
-      const body = plan.body.trim();
-      const capped =
-        body.length > 6000
-          ? body.slice(0, 6000) +
-            "\n\n…(truncated; call mcp__task_orch__get_plan for the full body)"
-          : body;
-      lines.push(capped);
-    }
-    const siblings = repo
-      .listTasks({ planId: plan.id })
-      .filter((t) => t.id !== task.id);
-    if (siblings.length > 0) {
-      lines.push("");
-      lines.push("## Other tasks in this plan");
-      const rank: Record<string, number> = {
-        in_progress: 0,
-        review: 1,
-        todo: 2,
-        blocked: 3,
-        done: 4,
-        cancelled: 5,
-      };
-      const sorted = [...siblings].sort(
-        (a, b) =>
-          (rank[a.state] ?? 9) - (rank[b.state] ?? 9) || a.id.localeCompare(b.id)
-      );
-      const MAX = 25;
-      for (const s of sorted.slice(0, MAX)) {
-        const meta = [s.state, s.assignee ? `@${s.assignee}` : null]
-          .filter(Boolean)
-          .join(", ");
-        lines.push(`- ${s.id} [${meta}] ${s.title}`);
-      }
-      if (sorted.length > MAX) {
-        lines.push(
-          `- … and ${sorted.length - MAX} more (use mcp__task_orch__list_tasks with plan_id=${plan.id} to see all)`
-        );
-      }
-    }
-  }
-
-  lines.push("");
-  lines.push("# Working environment");
-  lines.push("- You are in an isolated git worktree on a fresh branch.");
-  lines.push("- Make all changes here. Commit with a clear message.");
-  lines.push("- Do NOT push and do NOT open a PR — the orchestrator does both after you finish.");
-  lines.push("- Run typecheck and lint where it applies; fix any errors you introduce.");
-  lines.push("- This is a non-interactive run. Make reasonable decisions; do not ask questions.");
-  lines.push("");
-  lines.push("# Task-system MCP tools");
-  lines.push("- mcp__task_orch__add_note(body): log a decision so the next person can see why.");
-  lines.push("- mcp__task_orch__check_criterion(criterion): mark an acceptance criterion done.");
-  lines.push("- mcp__task_orch__uncheck_criterion(criterion): undo if you check the wrong one.");
-  lines.push("- mcp__task_orch__add_criterion(text): add a criterion you discovered along the way.");
-  lines.push("- mcp__task_orch__list_criteria(): see the current state of criteria.");
-  lines.push("Use these as you work — don't batch them until the end. Match criteria by substring.");
-  lines.push("");
-  lines.push("# Finishing");
-  lines.push("- Commit, then stop. Do NOT push, do NOT open the PR — the orchestrator does both.");
-  lines.push("- Your final assistant message becomes the PR description. Write a clean summary:");
-  lines.push("  - 1-3 sentences explaining what you did and why");
-  lines.push("  - bullet list of the main files / behaviours that changed if non-trivial");
-  lines.push("  - call out any caveats, follow-ups, or skipped acceptance criteria");
-  return lines.join("\n");
 }
 
 interface OpenPrArgs {

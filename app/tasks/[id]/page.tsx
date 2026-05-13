@@ -9,6 +9,10 @@ import { StateChanger } from "@/components/state-changer";
 import { MarkdownBody } from "@/components/markdown-body";
 import { CriterionCheckbox } from "@/components/criterion-checkbox";
 import { RunAgentButton } from "@/components/run-agent-button";
+import {
+  IMPLEMENT_DEFAULT_BUDGET_USD,
+  buildImplementPrompt,
+} from "@/lib/run-templates";
 import { SessionStatusPill } from "@/components/session-status-pill";
 import { AddNoteForm } from "@/components/add-note-form";
 import { AddCriterionForm } from "@/components/add-criterion-form";
@@ -57,7 +61,12 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
           </div>
           <h1 className="mt-2 text-2xl font-semibold tracking-tight leading-tight">{task.title}</h1>
         </div>
-        <RunAgentButton taskId={task.id} hasActive={Boolean(activeSession)} />
+        <RunAgentButton
+          taskId={task.id}
+          hasActive={Boolean(activeSession)}
+          initialPrompt={buildImplementPrompt(task)}
+          budgetMaxUsd={IMPLEMENT_DEFAULT_BUDGET_USD}
+        />
       </div>
 
       <dl className="mt-5 grid grid-cols-2 md:grid-cols-4 gap-y-3 gap-x-6 text-xs">
