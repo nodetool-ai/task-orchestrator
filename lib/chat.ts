@@ -23,12 +23,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
 const DEFAULT_MODEL = process.env.TASK_ORCH_CHAT_MODEL ?? "claude-sonnet-4-5";
 
-// SDK-built-in filesystem sandbox; see lib/agent.ts for the rationale and
-// the TASK_ORCH_SANDBOX env override.
-const SANDBOX_ENABLED = process.env.TASK_ORCH_SANDBOX !== "false";
-const SANDBOX_OPTS = SANDBOX_ENABLED
-  ? { enabled: true as const, autoAllowBashIfSandboxed: true as const }
-  : undefined;
+// SDK-built-in filesystem sandbox; see lib/agent.ts for rationale.
+const SANDBOX_OPTS = {
+  enabled: true as const,
+  autoAllowBashIfSandboxed: true as const,
+};
 
 export type { ChatRole, ChatRow, ChatMessageRow };
 

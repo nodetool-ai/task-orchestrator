@@ -38,14 +38,18 @@ const DEFAULT_MODEL = process.env.TASK_ORCH_AGENT_MODEL ?? "claude-sonnet-4-5";
 const KEEP_WORKTREES = !!process.env.TASK_ORCH_KEEP_WORKTREES;
 
 // SDK-built-in filesystem sandbox (bwrap on Linux, sandbox-exec on macOS).
-// Enabled by default; set TASK_ORCH_SANDBOX=false to disable (e.g. if
-// bubblewrap isn't installed). Network is left pass-through deliberately —
-// agents legitimately need to fetch from npm, pypi, docs sites, etc., and
-// our threat model doesn't justify the friction of an allowlist.
-const SANDBOX_ENABLED = process.env.TASK_ORCH_SANDBOX !== "false";
-const SANDBOX_OPTS = SANDBOX_ENABLED
-  ? { enabled: true as const, autoAllowBashIfSandboxed: true as const }
-  : undefined;
+// Always on. Filesystem isolation prevents the env-leak class of incidents
+// (an agent's scripts opening the orchestrator's prod DB, leaking ~/.ssh,
+// etc.) by restricting writes to the worktree. Network stays pass-through —
+// agents need npm, pypi, docs, etc., and our threat model doesn't justify
+// the friction of an egress allowlist.
+//
+// Requires bubblewrap on Linux. If it's missing, the SDK will error
+// loudly; that's preferable to silently running unsandboxed.
+const SANDBOX_OPTS = {
+  enabled: true as const,
+  autoAllowBashIfSandboxed: true as const,
+};
 
 interface SessionRepoResolution {
   root: string;
