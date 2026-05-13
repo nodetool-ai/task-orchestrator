@@ -36,7 +36,11 @@ function applyMigrations(sqlite: Database.Database) {
     const version = parseInt(m[1], 10);
     if (applied.has(version)) continue;
     const sqlText = readFileSync(join(MIGRATIONS_DIR, file), "utf8");
-    sqlite.transaction(() => {
+    // A migration may opt out of the wrapping transaction with a top-of-file
+    // marker. Needed when the migration toggles `PRAGMA foreign_keys` (a
+    // no-op inside transactions) to do a SQLite table-recreate.
+    const noTx = /^\s*--\s*@migration-mode:\s*no-transaction/m.test(sqlText);
+    const applyStmts = () => {
       // Apply statement-by-statement so we can tolerate idempotent failures
       // like "duplicate column" — happens if the _migrations row was lost
       // but the schema change had already landed. SQLite has no IF NOT EXISTS
@@ -60,7 +64,22 @@ function applyMigrations(sqlite: Database.Database) {
       sqlite
         .prepare("INSERT INTO _migrations (version, name, applied_at) VALUES (?, ?, ?)")
         .run(version, m[2], Date.now());
-    })();
+    };
+    if (noTx) {
+      try {
+        applyStmts();
+      } catch (err) {
+        // Bail out of any explicit BEGIN the migration may have left open
+        // so the next statement (or the next migration) doesn't trip on a
+        // dangling transaction. Best-effort; ignored if no tx is active.
+        if (sqlite.inTransaction) {
+          try { sqlite.exec("ROLLBACK"); } catch { /* nothing to roll back */ }
+        }
+        throw err;
+      }
+    } else {
+      sqlite.transaction(applyStmts)();
+    }
   }
 }
 

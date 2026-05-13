@@ -132,9 +132,8 @@ export const agentSessions = sqliteTable(
   "agent_runs",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
-    taskId: text("task_id")
-      .notNull()
-      .references(() => tasks.id, { onDelete: "cascade" }),
+    // Nullable since 0009: chat-derived runs have no task.
+    taskId: text("task_id").references(() => tasks.id, { onDelete: "cascade" }),
     status: text("status").notNull().default("pending"),
     model: text("model"),
     branch: text("branch"),
@@ -157,6 +156,9 @@ export const agentSessions = sqliteTable(
     outcome: text("outcome"),
     title: text("title"),
     userId: integer("user_id").references(() => users.id, { onDelete: "set null" }),
+    // Old chats.id for rows backfilled from chats by 0009. Lets the
+    // future /chat/[id] redirect resolve the new run.
+    legacyChatId: integer("legacy_chat_id"),
     startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull().default(NOW),
     completedAt: integer("completed_at", { mode: "timestamp_ms" }),
   },
@@ -166,6 +168,28 @@ export const agentSessions = sqliteTable(
     repoIdx: index("agent_runs_repo_idx").on(t.repoId),
     parentIdx: index("agent_runs_parent_idx").on(t.parentRunId),
     userIdx: index("agent_runs_user_idx").on(t.userId),
+    legacyChatIdx: index("agent_runs_legacy_chat_idx").on(t.legacyChatId),
+  })
+);
+
+export const agentMessages = sqliteTable(
+  "agent_messages",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    runId: integer("run_id")
+      .notNull()
+      .references(() => agentSessions.id, { onDelete: "cascade" }),
+    // 'user' | 'agent' | 'tool' | 'system'.
+    role: text("role").notNull(),
+    // JSON array of SDK content blocks for user/agent/tool messages;
+    // single-element array carrying {type,...payload} for system messages
+    // backfilled from agent_events.
+    content: text("content").notNull().default("[]"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+  },
+  (t) => ({
+    runIdx: index("agent_messages_run_idx").on(t.runId),
+    runOrdIdx: index("agent_messages_run_id_ord_idx").on(t.runId, t.id),
   })
 );
 
@@ -199,44 +223,6 @@ export const users = sqliteTable(
   })
 );
 
-export const chats = sqliteTable(
-  "chats",
-  {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    userId: integer("user_id").references(() => users.id, { onDelete: "set null" }),
-    title: text("title").notNull().default("New chat"),
-    model: text("model"),
-    sdkSessionId: text("sdk_session_id"),
-    totalCostUsd: real("total_cost_usd"),
-    inputTokens: integer("input_tokens"),
-    outputTokens: integer("output_tokens"),
-    repoId: text("repo_id").references(() => repositories.id, { onDelete: "set null" }),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().default(NOW),
-  },
-  (t) => ({
-    userIdx: index("chats_user_idx").on(t.userId),
-    updatedIdx: index("chats_updated_idx").on(t.updatedAt),
-    repoIdx: index("chats_repo_idx").on(t.repoId),
-  })
-);
-
-export const chatMessages = sqliteTable(
-  "chat_messages",
-  {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    chatId: integer("chat_id")
-      .notNull()
-      .references(() => chats.id, { onDelete: "cascade" }),
-    role: text("role").notNull(),
-    content: text("content").notNull().default("[]"),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
-  },
-  (t) => ({
-    chatIdx: index("chat_messages_chat_idx").on(t.chatId),
-  })
-);
-
 export type User = typeof users.$inferSelect;
 export type Plan = typeof plans.$inferSelect;
 export type Task = typeof tasks.$inferSelect;
@@ -244,6 +230,5 @@ export type TaskNote = typeof taskNotes.$inferSelect;
 export type AcceptanceCriterion = typeof acceptanceCriteria.$inferSelect;
 export type AgentSession = typeof agentSessions.$inferSelect;
 export type AgentEvent = typeof agentEvents.$inferSelect;
-export type Chat = typeof chats.$inferSelect;
-export type ChatMessage = typeof chatMessages.$inferSelect;
+export type AgentMessage = typeof agentMessages.$inferSelect;
 export type Repository = typeof repositories.$inferSelect;

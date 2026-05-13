@@ -1,15 +1,18 @@
 // Chat session persistence and Claude Agent SDK runner.
 //
-// Each chat lives in the `chats` table with a stream of `chat_messages`. The
-// Claude Agent SDK is invoked with the Claude Code preset so the assistant
-// has bash/edit tools. Sessions resume across turns via `sdk_session_id`.
+// Since migration 0009, chats are stored as agent_runs with goal='<chat>'
+// and conversation history lives in agent_messages. This module is a thin
+// shim that exposes the legacy chat API surface (ChatRow / ChatMessageRow /
+// listChats / runChat) on top of the unified tables, so the existing
+// /chat UI keeps working until the new /runs UI lands. It will be deleted
+// in favour of lib/runs.ts in T-20260513-0048.
 
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, or } from "drizzle-orm";
 
 import { db } from "@/db";
-import { chatMessages, chats } from "@/db/schema";
+import { agentMessages, agentSessions } from "@/db/schema";
 import * as repo from "./repo";
 import type { SdkContentBlock, SdkMessageEnvelope } from "./sdk-message";
 import type { ChatMessageRow, ChatRole, ChatRow } from "./types";
@@ -41,6 +44,13 @@ export function getDefaultModel(): string {
   return DEFAULT_MODEL;
 }
 
+// A "chat run" is any agent_runs row that originated as a chat: either
+// freshly created via createChat() (goal='<chat>') or backfilled from the
+// old chats table (legacy_chat_id IS NOT NULL).
+function isChatRunPredicate() {
+  return or(eq(agentSessions.goal, "<chat>"), isNotNull(agentSessions.legacyChatId));
+}
+
 // Resolve the cwd a chat agent runs in: chat → repository → local_path,
 // falling back to the orchestrator's own checkout when nothing is configured.
 export function resolveChatCwd(chat: ChatRow): { cwd: string; repoId: string | null } {
@@ -59,23 +69,25 @@ export function resolveChatCwd(chat: ChatRow): { cwd: string; repoId: string | n
 // ──────────────────────────────────────────────────────────
 
 export function listChats(userId?: number | null): ChatRow[] {
-  const rows =
-    userId == null
-      ? db.select().from(chats).orderBy(desc(chats.updatedAt)).all()
-      : db
-          .select()
-          .from(chats)
-          .where(eq(chats.userId, userId))
-          .orderBy(desc(chats.updatedAt))
-          .all();
+  const isChatRun = isChatRunPredicate();
+  const where =
+    userId == null ? isChatRun : and(isChatRun, eq(agentSessions.userId, userId));
+  const rows = db
+    .select()
+    .from(agentSessions)
+    .where(where)
+    .orderBy(desc(agentSessions.startedAt))
+    .all();
   return rows.map(hydrateChat);
 }
 
 export function getChat(id: number, userId?: number | null): ChatRow | null {
-  const where = userId == null
-    ? eq(chats.id, id)
-    : and(eq(chats.id, id), eq(chats.userId, userId));
-  const row = db.select().from(chats).where(where).get();
+  const isChatRun = isChatRunPredicate();
+  const where =
+    userId == null
+      ? and(eq(agentSessions.id, id), isChatRun)
+      : and(eq(agentSessions.id, id), isChatRun, eq(agentSessions.userId, userId));
+  const row = db.select().from(agentSessions).where(where).get();
   return row ? hydrateChat(row) : null;
 }
 
@@ -88,14 +100,17 @@ export function createChat(
     throw new repo.RepoError(`Repository ${repoId} not found`, 404);
   }
   const inserted = db
-    .insert(chats)
+    .insert(agentSessions)
     .values({
       userId,
       title,
       model: DEFAULT_MODEL,
       repoId,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      goal: "<chat>",
+      toolsProfile: "orchestrator,repo_write",
+      cwdStrategy: "none",
+      status: "idle",
+      startedAt: new Date(),
     })
     .returning()
     .all();
@@ -103,17 +118,21 @@ export function createChat(
 }
 
 export function deleteChat(id: number, userId?: number | null): void {
-  const where = userId == null
-    ? eq(chats.id, id)
-    : and(eq(chats.id, id), eq(chats.userId, userId));
-  db.delete(chats).where(where).run();
+  const isChatRun = isChatRunPredicate();
+  const where =
+    userId == null
+      ? and(eq(agentSessions.id, id), isChatRun)
+      : and(eq(agentSessions.id, id), isChatRun, eq(agentSessions.userId, userId));
+  db.delete(agentSessions).where(where).run();
 }
 
 export function renameChat(id: number, title: string, userId?: number | null): void {
-  const where = userId == null
-    ? eq(chats.id, id)
-    : and(eq(chats.id, id), eq(chats.userId, userId));
-  db.update(chats).set({ title, updatedAt: new Date() }).where(where).run();
+  const isChatRun = isChatRunPredicate();
+  const where =
+    userId == null
+      ? and(eq(agentSessions.id, id), isChatRun)
+      : and(eq(agentSessions.id, id), isChatRun, eq(agentSessions.userId, userId));
+  db.update(agentSessions).set({ title }).where(where).run();
 }
 
 export interface UpdateChatSettings {
@@ -132,23 +151,30 @@ export function updateChatSettings(
       throw new repo.RepoError(`Repository ${patch.repoId} not found`, 404);
     }
   }
-  const values: Record<string, unknown> = { updatedAt: new Date() };
+  const values: Record<string, unknown> = {};
   if (patch.title !== undefined) values.title = patch.title;
   if (patch.model !== undefined) values.model = patch.model;
   if (patch.repoId !== undefined) values.repoId = patch.repoId;
-  const where = userId == null
-    ? eq(chats.id, id)
-    : and(eq(chats.id, id), eq(chats.userId, userId));
-  db.update(chats).set(values).where(where).run();
+  if (Object.keys(values).length === 0) return;
+  const isChatRun = isChatRunPredicate();
+  const where =
+    userId == null
+      ? and(eq(agentSessions.id, id), isChatRun)
+      : and(eq(agentSessions.id, id), isChatRun, eq(agentSessions.userId, userId));
+  db.update(agentSessions).set(values).where(where).run();
 }
 
 export function listMessages(chatId: number): ChatMessageRow[] {
+  // Only surface "conversational" roles (user/agent/tool) here; the
+  // /chat UI was designed for chat_messages-shaped rows. System messages
+  // backfilled from agent_events are rendered by the new /runs UI.
   return db
     .select()
-    .from(chatMessages)
-    .where(eq(chatMessages.chatId, chatId))
-    .orderBy(asc(chatMessages.id))
+    .from(agentMessages)
+    .where(eq(agentMessages.runId, chatId))
+    .orderBy(asc(agentMessages.id))
     .all()
+    .filter((row) => row.role !== "system")
     .map(hydrateMessage);
 }
 
@@ -158,16 +184,15 @@ function appendMessage(
   content: SdkContentBlock[]
 ): ChatMessageRow {
   const inserted = db
-    .insert(chatMessages)
+    .insert(agentMessages)
     .values({
-      chatId,
-      role,
+      runId: chatId,
+      role: chatRoleToMessageRole(role),
       content: JSON.stringify(content),
       createdAt: new Date(),
     })
     .returning()
     .all();
-  db.update(chats).set({ updatedAt: new Date() }).where(eq(chats.id, chatId)).run();
   return hydrateMessage(inserted[0]);
 }
 
@@ -294,15 +319,14 @@ export async function* runChat({
       appendMessage(chatId, "assistant", assistantBlocks);
     }
 
-    db.update(chats)
+    db.update(agentSessions)
       .set({
         sdkSessionId: newSdkSessionId ?? chat.sdkSessionId,
         totalCostUsd: totalCostUsd ?? chat.totalCostUsd,
         inputTokens: inputTokens ?? chat.inputTokens,
         outputTokens: outputTokens ?? chat.outputTokens,
-        updatedAt: new Date(),
       })
-      .where(eq(chats.id, chatId))
+      .where(eq(agentSessions.id, chatId))
       .run();
 
     yield { type: "done" };
@@ -323,23 +347,56 @@ export async function* runChat({
 // Helpers
 // ──────────────────────────────────────────────────────────
 
-function hydrateChat(row: typeof chats.$inferSelect): ChatRow {
+// agent_messages stores roles as 'user' | 'agent' | 'tool' | 'system'.
+// The legacy chat API uses 'user' | 'assistant' | 'tool_result'.
+function messageRoleToChatRole(role: string): ChatRole {
+  switch (role) {
+    case "agent":
+      return "assistant";
+    case "tool":
+      return "tool_result";
+    case "user":
+      return "user";
+    default:
+      // System messages don't have a chat-side equivalent; fall back to
+      // 'tool_result' so the UI renders them as a generic non-assistant
+      // entry. listMessages() filters them out anyway.
+      return "tool_result";
+  }
+}
+
+function chatRoleToMessageRole(role: ChatRole): string {
+  switch (role) {
+    case "assistant":
+      return "agent";
+    case "tool_result":
+      return "tool";
+    case "user":
+      return "user";
+  }
+}
+
+function hydrateChat(row: typeof agentSessions.$inferSelect): ChatRow {
   return {
     id: row.id,
     userId: row.userId,
-    title: row.title,
+    title: row.title ?? "New chat",
     model: row.model,
     sdkSessionId: row.sdkSessionId,
     totalCostUsd: row.totalCostUsd,
     inputTokens: row.inputTokens,
     outputTokens: row.outputTokens,
     repoId: row.repoId,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
+    createdAt: row.startedAt,
+    // Chats don't have a separate updated_at on agent_runs; use the
+    // latest message's created_at if any, falling back to started_at.
+    // (Cheap path: just use started_at; it's only used for sort order
+    // in listChats which is already by startedAt DESC.)
+    updatedAt: row.startedAt,
   };
 }
 
-function hydrateMessage(row: typeof chatMessages.$inferSelect): ChatMessageRow {
+function hydrateMessage(row: typeof agentMessages.$inferSelect): ChatMessageRow {
   let content: SdkContentBlock[] = [];
   try {
     const parsed = JSON.parse(row.content);
@@ -350,8 +407,8 @@ function hydrateMessage(row: typeof chatMessages.$inferSelect): ChatMessageRow {
   }
   return {
     id: row.id,
-    chatId: row.chatId,
-    role: row.role as ChatRole,
+    chatId: row.runId,
+    role: messageRoleToChatRole(row.role),
     content,
     createdAt: row.createdAt,
   };

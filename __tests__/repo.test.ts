@@ -4,9 +4,8 @@ import { db } from "../db";
 import {
   acceptanceCriteria,
   agentEvents,
+  agentMessages,
   agentSessions,
-  chats,
-  chatMessages,
   plans,
   repositories,
   taskDependencies,
@@ -17,10 +16,9 @@ import * as repo from "../lib/repo";
 
 beforeEach(() => {
   // Reverse-FK order so parent-cascade can't bite us if FKs ever get tightened.
+  db.delete(agentMessages).run();
   db.delete(agentEvents).run();
   db.delete(agentSessions).run();
-  db.delete(chatMessages).run();
-  db.delete(chats).run();
   db.delete(acceptanceCriteria).run();
   db.delete(taskNotes).run();
   db.delete(taskDependencies).run();
