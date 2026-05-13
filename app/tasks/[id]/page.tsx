@@ -4,15 +4,18 @@ import { ArrowLeft, GitPullRequest } from "lucide-react";
 import { TaskRepoSelector } from "@/components/task-repo-selector";
 import * as repo from "@/lib/repo";
 import * as agent from "@/lib/agent";
+import * as runs from "@/lib/runs";
 import { StateIcon } from "@/components/state-icon";
 import { StateChanger } from "@/components/state-changer";
 import { MarkdownBody } from "@/components/markdown-body";
 import { CriterionCheckbox } from "@/components/criterion-checkbox";
 import { RunAgentButton } from "@/components/run-agent-button";
 import { RunReviewButton } from "@/components/run-review-button";
+import { TaskChatBox } from "@/components/task-chat-box";
 import {
   IMPLEMENT_DEFAULT_BUDGET_USD,
   REVIEW_DEFAULT_BUDGET_USD,
+  buildChatPromptPrefix,
   buildImplementPrompt,
   buildReviewPrompt,
 } from "@/lib/run-templates";
@@ -42,10 +45,15 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
     .filter((t): t is NonNullable<typeof t> => Boolean(t));
   const sessions = agent.listSessions(task.id);
   const activeSession = sessions.find((s) => !isTerminalStatus(s.status));
+  // Inbox: every run scoped to this task (chat + implement + review),
+  // newest first, capped at the 10 most recent so the page doesn't grow
+  // unbounded. listRuns already orders by startedAt desc.
+  const inbox = runs.listRuns({ taskId: task.id }).slice(0, 10);
   // Sessions are listed newest-first; first one with a PR is the latest PR.
   const latestPr = sessions.find((s) => s.prUrl)?.prUrl ?? null;
   const repository = task.repoId ? repo.getRepository(task.repoId) : null;
   const planRepoOptions = plan?.repos ?? [];
+  const chatPromptPrefix = buildChatPromptPrefix(task, latestPr);
 
   return (
     <article className="mx-auto max-w-3xl">
@@ -214,50 +222,77 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         )}
       </section>
 
-      {sessions.length > 0 && (
-        <section className="mt-10 space-y-3">
-          <h2 className="text-sm font-semibold tracking-tight">Agent sessions</h2>
+      <section className="mt-10 space-y-3">
+        <h2 className="text-sm font-semibold tracking-tight">Inbox</h2>
+        {inbox.length === 0 ? (
+          <p className="text-xs text-muted-foreground italic">
+            No runs yet. Start one with the buttons above, or ask the agent in the chat box below.
+          </p>
+        ) : (
           <div className="rounded-lg border border-border/60 bg-card/30 divide-y divide-border/60 overflow-hidden">
-            {sessions.map((s) => (
+            {inbox.map((r) => (
               <div
-                key={s.id}
+                key={r.id}
                 className="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/40 transition-colors group"
               >
                 <Link
-                  href={`/runs/${s.id}`}
+                  href={`/runs/${r.id}`}
                   className="flex items-center gap-3 flex-1 min-w-0"
                 >
                   <span className="font-mono text-xs text-muted-foreground tabular-nums">
-                    #{s.id}
+                    #{r.id}
                   </span>
-                  <SessionStatusPill status={s.status} />
-                  {s.branch && (
+                  <span
+                    className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground/80"
+                    title={`goal: ${r.goal}`}
+                  >
+                    {goalLabel(r.goal)}
+                  </span>
+                  <SessionStatusPill status={r.status} />
+                  {r.branch && (
                     <code className="font-mono text-[11px] text-muted-foreground truncate">
-                      {s.branch}
+                      {r.branch}
                     </code>
                   )}
                 </Link>
-                {s.prUrl && (
+                {r.prUrl && (
                   <a
-                    href={s.prUrl}
+                    href={r.prUrl}
                     target="_blank"
                     rel="noreferrer"
                     className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline decoration-dotted"
                   >
                     <GitPullRequest className="size-3" />
-                    {prShortLabel(s.prUrl)}
+                    {prShortLabel(r.prUrl)}
                     <span>↗</span>
                   </a>
                 )}
                 <span className="text-[11px] text-muted-foreground tabular-nums">
-                  {relativeDate(s.startedAt)}
+                  {relativeDate(r.startedAt)}
                 </span>
               </div>
             ))}
           </div>
-        </section>
-      )}
+        )}
+      </section>
+
+      <section className="mt-10 space-y-3">
+        <h2 className="text-sm font-semibold tracking-tight">Chat about this task</h2>
+        <TaskChatBox
+          taskId={task.id}
+          repoId={task.repoId ?? null}
+          promptPrefix={chatPromptPrefix}
+        />
+      </section>
     </article>
   );
+}
+
+// Short uppercase label for an inbox row's run kind. Goal strings are
+// surrounded by angle brackets in storage (`<implement>`, `<chat>`, `<review>`);
+// strip those for display, and fall back to the raw goal otherwise.
+function goalLabel(goal: string): string {
+  const m = goal.match(/^<(.+)>$/);
+  return (m ? m[1] : goal).toUpperCase();
 }
 

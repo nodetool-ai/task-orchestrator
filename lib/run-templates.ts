@@ -251,6 +251,50 @@ export function buildReviewPrompt(task: TaskFull, prUrl: string): string {
 }
 
 /**
+ * Build a context block for a task-scoped chat run. Prepended to the user's
+ * free-form message so the agent sees the task's title, body, criteria,
+ * recent notes, and the latest PR url (if any) before reading the user's
+ * actual question.
+ *
+ * Unlike buildImplementPrompt this is intentionally compact — chat runs are
+ * conversational, so we want context without burying the user's message under
+ * pages of orchestrator boilerplate.
+ */
+export function buildChatPromptPrefix(
+  task: TaskFull,
+  latestPrUrl: string | null = null
+): string {
+  const lines: string[] = [];
+  lines.push(`Context: task ${task.id} — "${task.title}"`);
+  if (task.body.trim()) {
+    lines.push("");
+    lines.push("## Description");
+    lines.push(task.body.trim());
+  }
+  if (task.criteria.length > 0) {
+    lines.push("");
+    lines.push("## Acceptance criteria");
+    for (const c of task.criteria) {
+      lines.push(`- [${c.done ? "x" : " "}] ${c.text}`);
+    }
+  }
+  if (task.notes.length > 0) {
+    const recent = task.notes.slice(-5);
+    lines.push("");
+    lines.push("## Recent notes");
+    for (const n of recent) {
+      lines.push(`- @${n.author}: ${n.body.trim().replace(/\n+/g, " ")}`);
+    }
+  }
+  if (latestPrUrl) {
+    lines.push("");
+    lines.push(`## Latest PR`);
+    lines.push(latestPrUrl);
+  }
+  return lines.join("\n");
+}
+
+/**
  * Template descriptor for the "Review" run kind.
  */
 export interface ReviewTemplate {

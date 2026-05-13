@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   REVIEW_DEFAULT_BUDGET_USD,
+  buildChatPromptPrefix,
   buildReviewPrompt,
   extractReviewOutcome,
 } from "../lib/run-templates";
@@ -63,6 +64,50 @@ describe("buildReviewPrompt", () => {
   it("uses a smaller default budget than implement", () => {
     expect(REVIEW_DEFAULT_BUDGET_USD).toBeLessThan(20);
     expect(REVIEW_DEFAULT_BUDGET_USD).toBeGreaterThan(0);
+  });
+});
+
+describe("buildChatPromptPrefix", () => {
+  it("includes task id, title, body and criteria", () => {
+    const prefix = buildChatPromptPrefix(fakeTask());
+    expect(prefix).toContain("T-test");
+    expect(prefix).toContain('"Test task"');
+    expect(prefix).toContain("Body text");
+    expect(prefix).toContain("- [x] first criterion");
+    expect(prefix).toContain("- [ ] second criterion");
+  });
+
+  it("includes recent notes when present", () => {
+    const prefix = buildChatPromptPrefix(
+      fakeTask({
+        notes: [
+          { id: 1, author: "matti", body: "first note", createdAt: new Date() },
+          { id: 2, author: "claude", body: "second note", createdAt: new Date() },
+        ],
+      })
+    );
+    expect(prefix).toContain("Recent notes");
+    expect(prefix).toContain("@matti: first note");
+    expect(prefix).toContain("@claude: second note");
+  });
+
+  it("includes the latest PR url when provided", () => {
+    const prefix = buildChatPromptPrefix(
+      fakeTask(),
+      "https://github.com/o/r/pull/42"
+    );
+    expect(prefix).toContain("Latest PR");
+    expect(prefix).toContain("https://github.com/o/r/pull/42");
+  });
+
+  it("omits the PR section when no PR url is given", () => {
+    const prefix = buildChatPromptPrefix(fakeTask());
+    expect(prefix).not.toContain("Latest PR");
+  });
+
+  it("omits the criteria section when the task has no criteria", () => {
+    const prefix = buildChatPromptPrefix(fakeTask({ criteria: [] }));
+    expect(prefix).not.toContain("Acceptance criteria");
   });
 });
 
