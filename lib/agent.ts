@@ -116,10 +116,17 @@ if (!globalThis.__agentPrWatcher && PR_POLL_MS > 0) {
 }
 
 function reapOrphans() {
+  // Only task-derived runs need reaping; chat runs (task_id IS NULL) have
+  // no worktree to clean up and use status='idle' which isn't in this set.
   const orphans = db
     .select()
     .from(agentSessions)
-    .where(notInArray(agentSessions.status, ["completed", "failed", "cancelled"]))
+    .where(
+      and(
+        notInArray(agentSessions.status, ["completed", "failed", "cancelled"]),
+        isNotNull(agentSessions.taskId)
+      )
+    )
     .all();
   for (const orphan of orphans) {
     if (runners.has(orphan.id)) continue;
@@ -140,7 +147,7 @@ function reapOrphans() {
         createdAt: now,
       })
       .run();
-    if (orphan.worktreePath) {
+    if (orphan.worktreePath && orphan.taskId) {
       const repoRoot = repoRootForSession(orphan.taskId);
       cleanupWorktree(orphan.worktreePath, repoRoot).catch(() => {});
     }
@@ -165,12 +172,14 @@ async function pollMergedPrs(): Promise<void> {
 
   const latestByTask = new Map<string, (typeof rows)[number]>();
   for (const r of rows) {
+    // taskId is non-null by virtue of the innerJoin above; narrow for TS.
+    if (!r.taskId) continue;
     const prev = latestByTask.get(r.taskId);
     if (!prev || r.startedAt > prev.startedAt) latestByTask.set(r.taskId, r);
   }
 
   for (const r of latestByTask.values()) {
-    if (!r.prUrl) continue;
+    if (!r.prUrl || !r.taskId) continue;
     const info = await ghPrState(r.prUrl);
     if (!info) continue;
     if (info.state !== "MERGED") continue;
@@ -289,14 +298,17 @@ export function startSession(input: StartSessionInput): AgentSessionFull {
 }
 
 export function listSessions(taskId?: string): AgentSessionFull[] {
-  const q = db
+  // Restrict to task-derived runs; chat runs (task_id IS NULL) belong to /chat.
+  const where = taskId
+    ? eq(agentSessions.taskId, taskId)
+    : isNotNull(agentSessions.taskId);
+  return db
     .select()
     .from(agentSessions)
-    .orderBy(desc(agentSessions.startedAt));
-  const rows = taskId
-    ? q.where(eq(agentSessions.taskId, taskId)).all()
-    : q.all();
-  return rows.map(hydrateSession);
+    .where(where)
+    .orderBy(desc(agentSessions.startedAt))
+    .all()
+    .map(hydrateSession);
 }
 
 const TERMINAL_STATUSES = ["completed", "failed", "cancelled"];
@@ -307,7 +319,10 @@ export function listActiveSessions(taskId?: string): AgentSessionFull[] {
         notInArray(agentSessions.status, TERMINAL_STATUSES),
         eq(agentSessions.taskId, taskId)
       )
-    : notInArray(agentSessions.status, TERMINAL_STATUSES);
+    : and(
+        notInArray(agentSessions.status, TERMINAL_STATUSES),
+        isNotNull(agentSessions.taskId)
+      );
   return db
     .select()
     .from(agentSessions)
@@ -318,7 +333,11 @@ export function listActiveSessions(taskId?: string): AgentSessionFull[] {
 }
 
 export function getSession(id: number): AgentSessionFull | null {
-  const row = db.select().from(agentSessions).where(eq(agentSessions.id, id)).get();
+  const row = db
+    .select()
+    .from(agentSessions)
+    .where(and(eq(agentSessions.id, id), isNotNull(agentSessions.taskId)))
+    .get();
   return row ? hydrateSession(row) : null;
 }
 
@@ -790,6 +809,12 @@ function buildPrBody(
 // ──────────────────────────────────────────────────────────
 
 function hydrateSession(row: typeof agentSessions.$inferSelect): AgentSessionFull {
+  // All callers in this module filter to rows with task_id non-null, so the
+  // cast is safe. AgentSessionFull is the task-derived view; chat runs use
+  // the ChatRow shape in lib/chat.ts.
+  if (row.taskId == null) {
+    throw new Error(`hydrateSession called on chat run #${row.id} (task_id IS NULL)`);
+  }
   return {
     id: row.id,
     taskId: row.taskId,

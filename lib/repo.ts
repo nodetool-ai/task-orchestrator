@@ -2,7 +2,7 @@ import { and, asc, count, eq, inArray, like, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
   acceptanceCriteria,
-  chats,
+  agentSessions,
   planRepositories,
   plans,
   repositories,
@@ -866,14 +866,18 @@ export function deleteRepository(id: string) {
     .from(planRepositories)
     .where(eq(planRepositories.repoId, id))
     .all();
-  const chatRefs = db
-    .select({ id: chats.id })
-    .from(chats)
-    .where(eq(chats.repoId, id))
+  // Since 0009, chats are folded into agent_runs. A chat-derived run is one
+  // with legacy_chat_id IS NOT NULL; newly-created chat runs (post-0009)
+  // also fit the same shape with goal='<chat>'. Both block deletion the
+  // same way agent task runs do via the agentSessions FK.
+  const runRefs = db
+    .select({ id: agentSessions.id })
+    .from(agentSessions)
+    .where(eq(agentSessions.repoId, id))
     .all();
-  if (planRefs.length > 0 || chatRefs.length > 0) {
+  if (planRefs.length > 0 || runRefs.length > 0) {
     throw new RepoError(
-      `Cannot delete ${id}: ${planRefs.length} plan(s) and ${chatRefs.length} chat(s) still reference it. Reassign them first.`,
+      `Cannot delete ${id}: ${planRefs.length} plan(s) and ${runRefs.length} run(s) still reference it. Reassign them first.`,
       409
     );
   }
