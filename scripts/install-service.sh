@@ -52,6 +52,22 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   echo "warning: ${ENV_FILE} not found — service will fail to start until you create it" >&2
 fi
 
+# If the env file points the agent/chat at a different repo, give the service
+# write access to it too. Otherwise ProtectHome=read-only blocks SDK writes.
+TARGET_REPO=""
+if [[ -f "${ENV_FILE}" ]]; then
+  TARGET_REPO="$(grep -E '^TASK_ORCH_TARGET_REPO=' "${ENV_FILE}" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
+fi
+EXTRA_RW=""
+if [[ -n "${TARGET_REPO}" ]]; then
+  if [[ -d "${TARGET_REPO}" ]]; then
+    EXTRA_RW=" ${TARGET_REPO}"
+    echo "→ TASK_ORCH_TARGET_REPO=${TARGET_REPO} → adding to ReadWritePaths"
+  else
+    echo "warning: TASK_ORCH_TARGET_REPO=${TARGET_REPO} not a directory; skipping" >&2
+  fi
+fi
+
 # 1. Data directory
 echo "→ ensuring ${DATA_DIR} (owned by ${SERVICE_USER})"
 install -d -o "${SERVICE_USER}" -g "${SERVICE_USER}" -m 0755 "${DATA_DIR}"
@@ -74,11 +90,15 @@ ExecStart=${EXEC_START}
 Restart=on-failure
 RestartSec=5s
 
-# Hardening — orchestrator only needs the app dir + data dir writable.
+# Hardening — orchestrator needs app dir + data dir writable. The Claude
+# Agent SDK writes to ~/.claude.json via atomic rename (tempfile → rename),
+# which breaks systemd's per-file bind mounts on the next write. We expose
+# the whole service-user home dir instead so directory bind mounts survive
+# atomic writes; other users' homes stay read-only.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=${APP_DIR} ${DATA_DIR}
+ReadWritePaths=${APP_DIR} ${DATA_DIR} ${SERVICE_HOME}${EXTRA_RW}
 PrivateTmp=true
 
 [Install]

@@ -117,3 +117,35 @@ export interface AgentEventRow {
 export function isTerminalStatus(s: SessionStatus): boolean {
   return s === "completed" || s === "failed" || s === "cancelled";
 }
+
+export type ChatRole = "user" | "assistant" | "tool_result";
+
+export interface ChatRow {
+  id: number;
+  userId: number | null;
+  title: string;
+  model: string | null;
+  sdkSessionId: string | null;
+  totalCostUsd: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface ChatMessageRow {
+  id: number;
+  chatId: number;
+  role: ChatRole;
+  // Stored as JSON-encoded SdkContentBlock[]. Imported as `unknown[]` here to
+  // avoid a circular dep on sdk-message; consumers cast as needed.
+  content: unknown[];
+  createdAt: Date;
+}
+
+export interface ChatStreamEvent {
+  type: "user_message" | "sdk" | "done" | "error";
+  message?: ChatMessageRow;
+  sdk?: unknown;
+  error?: string;
+}

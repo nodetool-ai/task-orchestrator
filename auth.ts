@@ -22,4 +22,18 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       },
     }),
   ],
+  callbacks: {
+    // Persist the user id on the JWT so server components / API routes can
+    // scope queries (e.g. chat history) without a DB lookup.
+    jwt({ token, user }) {
+      if (user?.id) token.id = user.id;
+      return token;
+    },
+    session({ session, token }) {
+      if (token.id && session.user) {
+        (session.user as { id?: string }).id = String(token.id);
+      }
+      return session;
+    },
+  },
 });

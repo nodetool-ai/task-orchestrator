@@ -148,6 +148,42 @@ export const users = sqliteTable(
   })
 );
 
+export const chats = sqliteTable(
+  "chats",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id").references(() => users.id, { onDelete: "set null" }),
+    title: text("title").notNull().default("New chat"),
+    model: text("model"),
+    sdkSessionId: text("sdk_session_id"),
+    totalCostUsd: real("total_cost_usd"),
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+  },
+  (t) => ({
+    userIdx: index("chats_user_idx").on(t.userId),
+    updatedIdx: index("chats_updated_idx").on(t.updatedAt),
+  })
+);
+
+export const chatMessages = sqliteTable(
+  "chat_messages",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    chatId: integer("chat_id")
+      .notNull()
+      .references(() => chats.id, { onDelete: "cascade" }),
+    role: text("role").notNull(),
+    content: text("content").notNull().default("[]"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+  },
+  (t) => ({
+    chatIdx: index("chat_messages_chat_idx").on(t.chatId),
+  })
+);
+
 export type User = typeof users.$inferSelect;
 export type Plan = typeof plans.$inferSelect;
 export type Task = typeof tasks.$inferSelect;
@@ -155,3 +191,5 @@ export type TaskNote = typeof taskNotes.$inferSelect;
 export type AcceptanceCriterion = typeof acceptanceCriteria.$inferSelect;
 export type AgentSession = typeof agentSessions.$inferSelect;
 export type AgentEvent = typeof agentEvents.$inferSelect;
+export type Chat = typeof chats.$inferSelect;
+export type ChatMessage = typeof chatMessages.$inferSelect;
