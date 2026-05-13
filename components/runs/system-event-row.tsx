@@ -3,9 +3,12 @@
 import {
   AlertCircle,
   CheckCircle2,
+  ChevronRight,
   GitBranch,
   GitPullRequest,
   Info,
+  MessageSquare,
+  Terminal,
   Wallet,
 } from "lucide-react";
 import { formatDateTime } from "@/lib/utils";
@@ -134,6 +137,79 @@ function render(
         body: (
           <span className="text-state-blocked">
             {text ?? String(payload.error ?? "error")}
+          </span>
+        ),
+      };
+    case "shell":
+      return {
+        icon: <Terminal className="size-3.5 text-muted-foreground" />,
+        body: (
+          <code className="font-mono text-foreground/90 text-[11px]">
+            $ {String(payload.cmd ?? "")}
+          </code>
+        ),
+      };
+    case "shell_out": {
+      const data = String(payload.data ?? "").trim();
+      const isErr = payload.stream === "stderr";
+      return {
+        icon: (
+          <ChevronRight
+            className={`size-3.5 ${isErr ? "text-state-blocked" : "text-muted-foreground"}`}
+          />
+        ),
+        body: (
+          <pre
+            className={`whitespace-pre-wrap font-mono text-[11px] leading-5 ${
+              isErr ? "text-state-blocked/80" : "text-muted-foreground"
+            }`}
+          >
+            {data}
+          </pre>
+        ),
+      };
+    }
+    case "stderr": {
+      const data = String(payload.data ?? "").trim();
+      return {
+        icon: <AlertCircle className="size-3.5 text-state-blocked" />,
+        body: (
+          <pre className="whitespace-pre-wrap font-mono text-[11px] leading-5 text-state-blocked/80">
+            {data}
+          </pre>
+        ),
+      };
+    }
+    case "warning":
+      return {
+        icon: <AlertCircle className="size-3.5 text-state-progress" />,
+        body: (
+          <span className="text-state-progress">
+            {text ?? String(payload.message ?? "warning")}
+          </span>
+        ),
+      };
+    case "prompt":
+      return {
+        icon: <MessageSquare className="size-3.5 text-muted-foreground" />,
+        body: (
+          <details className="text-[11px]">
+            <summary className="cursor-pointer text-foreground">prompt</summary>
+            <pre className="mt-2 whitespace-pre-wrap font-mono text-muted-foreground text-[11px] leading-5">
+              {String(payload.prompt ?? text ?? "")}
+            </pre>
+          </details>
+        ),
+      };
+    case "resume":
+      return {
+        icon: <Info className="size-3.5 text-muted-foreground" />,
+        body: (
+          <span>
+            resumed SDK session{" "}
+            <code className="font-mono text-foreground">
+              {String(payload.sdkSessionId ?? "")}
+            </code>
           </span>
         ),
       };

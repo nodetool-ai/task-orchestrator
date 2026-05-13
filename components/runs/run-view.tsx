@@ -57,7 +57,15 @@ export type SystemKind =
   | "budget"
   | "status"
   | "error"
-  | "info";
+  | "info"
+  // From the legacy `agent_events` types backfilled into agent_messages by
+  // migration 0009:
+  | "shell"
+  | "shell_out"
+  | "stderr"
+  | "warning"
+  | "prompt"
+  | "resume";
 
 let tmpIdCounter = -1;
 const nextTmpId = () => tmpIdCounter--;
@@ -87,6 +95,11 @@ export function RunView({
       role: m.role,
       content: m.content,
       createdAt: m.createdAt,
+      // Persisted system messages store the event type inside the first
+      // content block (migration 0009 wrote `[{type: <event_type>, ...payload}]`).
+      // Surface it as systemKind so SystemEventRow doesn't fall through to
+      // the JSON fallback for everything.
+      ...(m.role === "system" ? extractSystemMeta(m.content) : {}),
     }))
   );
   const [input, setInput] = useState("");
@@ -571,6 +584,23 @@ async function consumeSse(
       }
     }
   }
+}
+
+// Persisted system messages were written by migration 0009 (and by live
+// `runs.append` inserts) as a single content block: [{type:<kind>, …payload}].
+// Pull the kind + payload back out so SystemEventRow can render them with
+// the right icon/format instead of the JSON fallback.
+function extractSystemMeta(content: SdkContentBlock[]):
+  | { systemKind: SystemKind; systemPayload: Record<string, unknown> }
+  | object {
+  const first = content?.[0];
+  if (!first || typeof first !== "object") return {};
+  const raw = first as Record<string, unknown>;
+  const kind = typeof raw.type === "string" ? (raw.type as SystemKind) : undefined;
+  if (!kind) return {};
+  const { type: _drop, ...payload } = raw;
+  void _drop;
+  return { systemKind: kind, systemPayload: payload };
 }
 
 function greetingFor(
