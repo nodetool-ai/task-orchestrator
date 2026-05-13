@@ -39,8 +39,8 @@ function applyMigrations(sqlite: Database.Database) {
     sqlite.transaction(() => {
       // Apply statement-by-statement so we can tolerate idempotent failures
       // like "duplicate column" — happens if the _migrations row was lost
-      // but the schema change had already landed. SQLite's `ADD COLUMN`
-      // has no IF NOT EXISTS variant; this is the workaround.
+      // but the schema change had already landed. SQLite has no IF NOT EXISTS
+      // form for ADD COLUMN / RENAME, so we match the resulting errors instead.
       for (const stmt of splitSqlStatements(sqlText)) {
         try {
           sqlite.exec(stmt);
@@ -48,7 +48,9 @@ function applyMigrations(sqlite: Database.Database) {
           const message = err instanceof Error ? err.message : String(err);
           if (
             /duplicate column name/i.test(message) ||
-            /already exists/i.test(message)
+            /already exists/i.test(message) ||
+            /no such table/i.test(message) ||
+            /no such column/i.test(message)
           ) {
             continue;
           }
