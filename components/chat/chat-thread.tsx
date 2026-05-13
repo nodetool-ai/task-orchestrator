@@ -7,12 +7,19 @@ import { ChatMessage } from "@/components/chat/chat-message";
 import type { ChatMessageRow, ChatRole, ChatRow } from "@/lib/types";
 import type { SdkContentBlock, SdkMessageEnvelope } from "@/lib/sdk-message";
 
+interface SidebarRepo {
+  id: string;
+  name: string;
+  localPath: string | null;
+}
+
 interface Props {
   chat: ChatRow;
   initialMessages: ChatMessageRow[];
   userEmail: string | null;
   repoRoot: string;
   defaultModel: string;
+  repositories: SidebarRepo[];
 }
 
 const MODEL_OPTIONS = [
@@ -38,6 +45,7 @@ export function ChatThread({
   userEmail,
   repoRoot,
   defaultModel,
+  repositories,
 }: Props) {
   const router = useRouter();
   const [messages, setMessages] = useState<UiMessage[]>(() =>
@@ -51,10 +59,30 @@ export function ChatThread({
   const [sending, setSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [model, setModel] = useState<string>(chat.model ?? defaultModel);
+  const [repoId, setRepoId] = useState<string | null>(chat.repoId);
   const [savingModel, setSavingModel] = useState(false);
+  const [savingRepo, setSavingRepo] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  async function patchChat(patch: Record<string, unknown>, onError: () => void) {
+    try {
+      const res = await fetch(`/api/chats/${chat.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({} as { error?: string }));
+        setErrorMsg(body.error ?? `HTTP ${res.status}`);
+        onError();
+      }
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : String(e));
+      onError();
+    }
+  }
 
   async function changeModel(next: string) {
     if (next === model) return;
@@ -62,22 +90,27 @@ export function ChatThread({
     setModel(next);
     setSavingModel(true);
     try {
-      const res = await fetch(`/api/chats/${chat.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: next }),
-      });
-      if (!res.ok) {
-        setModel(prev);
-        setErrorMsg(`Couldn't save model: HTTP ${res.status}`);
-      }
-    } catch (e) {
-      setModel(prev);
-      setErrorMsg(e instanceof Error ? e.message : String(e));
+      await patchChat({ model: next }, () => setModel(prev));
     } finally {
       setSavingModel(false);
     }
   }
+
+  async function changeRepo(next: string) {
+    if (next === (repoId ?? "")) return;
+    const prev = repoId;
+    setRepoId(next || null);
+    setSavingRepo(true);
+    try {
+      await patchChat({ repoId: next || null }, () => setRepoId(prev));
+    } finally {
+      setSavingRepo(false);
+      router.refresh();
+    }
+  }
+
+  const selectedRepo = repositories.find((r) => r.id === repoId);
+  const repoCwdHint = selectedRepo?.localPath ?? repoRoot;
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -175,6 +208,21 @@ export function ChatThread({
           <Sparkles className="size-3.5 text-state-review" />
           <span className="font-medium truncate">{chat.title}</span>
           <div className="ml-auto flex items-center gap-2">
+            <label className="sr-only" htmlFor={`repo-${chat.id}`}>Repository</label>
+            <select
+              id={`repo-${chat.id}`}
+              value={repoId ?? ""}
+              onChange={(e) => changeRepo(e.target.value)}
+              disabled={savingRepo || repositories.length === 0}
+              className="rounded-md border border-border/60 bg-background/60 px-2 py-1 text-[11px] font-mono text-foreground hover:bg-muted/40 focus:outline-none focus:border-foreground/30 disabled:opacity-50"
+            >
+              {repositories.length === 0 && <option value="">no repos</option>}
+              {repositories.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.name} ({r.id})
+                </option>
+              ))}
+            </select>
             <label className="sr-only" htmlFor={`model-${chat.id}`}>Model</label>
             <select
               id={`model-${chat.id}`}
@@ -195,8 +243,8 @@ export function ChatThread({
             </select>
           </div>
         </div>
-        <div className="text-[11px] text-muted-foreground font-mono truncate" title={repoRoot}>
-          cwd: {repoRoot}
+        <div className="text-[11px] text-muted-foreground font-mono truncate" title={repoCwdHint}>
+          cwd: {repoCwdHint}
         </div>
       </header>
 

@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
+import { PlanRepositories } from "@/components/plan-repositories";
 import * as repo from "@/lib/repo";
 import { STATE_LABEL, TASK_BOARD_STATES, type TaskState } from "@/lib/types";
 import { StateBadge } from "@/components/state-badge";
@@ -20,6 +21,7 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
 
   const tasks = repo.listTasks({ planId: plan.id });
   const { done, total, pct } = repo.planProgress(plan.id);
+  const allRepositories = repo.listRepositories();
 
   const groupOrder: TaskState[] = [...TASK_BOARD_STATES, "cancelled"];
 
@@ -43,6 +45,14 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
         <span className="text-xs text-muted-foreground">Created {formatDate(plan.createdAt)}</span>
       </div>
 
+      <div className="mt-3">
+        <PlanRepositories
+          planId={plan.id}
+          repos={plan.repos}
+          allRepositories={allRepositories}
+        />
+      </div>
+
       {total > 0 && (
         <div className="mt-5 rounded-lg border border-border/60 bg-card/40 px-4 py-3">
           <div className="flex items-center justify-between text-xs">
@@ -62,7 +72,10 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
       <section className="mt-12">
         <div className="flex items-baseline justify-between mb-3">
           <h2 className="text-sm font-semibold tracking-tight">Tasks</h2>
-          <NewTaskForm planId={plan.id} />
+          <NewTaskForm
+            planId={plan.id}
+            repoOptions={plan.repos.map((r) => ({ id: r.id, name: r.name }))}
+          />
         </div>
         {tasks.length === 0 ? (
           <p className="text-sm text-muted-foreground">No tasks yet.</p>

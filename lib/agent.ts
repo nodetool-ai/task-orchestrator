@@ -30,15 +30,46 @@ import {
 } from "./types";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// Target repo the orchestrator operates on. All `git worktree` / `gh pr`
-// commands run against this checkout. Defaults to the orchestrator's own
-// repo when TASK_ORCH_TARGET_REPO is unset.
-const REPO_ROOT = process.env.TASK_ORCH_TARGET_REPO
-  ? resolve(process.env.TASK_ORCH_TARGET_REPO)
-  : resolve(__dirname, "..");
-const WORKTREE_ROOT = resolve(REPO_ROOT, ".worktrees");
+// Fallback repo path used only when no repository has a local_path set
+// (e.g. a brand-new install with R-default still unconfigured). The
+// resolved repo via task → plan → repository is the source of truth.
+const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
 const DEFAULT_MODEL = process.env.TASK_ORCH_AGENT_MODEL ?? "claude-sonnet-4-5";
 const KEEP_WORKTREES = !!process.env.TASK_ORCH_KEEP_WORKTREES;
+
+interface SessionRepoResolution {
+  root: string;
+  repoId: string | null;
+  error?: string;
+}
+
+function resolveRepoForSession(taskId: string): SessionRepoResolution {
+  const task = repo.getTask(taskId);
+  if (!task) return { root: ORCHESTRATOR_ROOT, repoId: null, error: `Task ${taskId} not found` };
+  if (!task.repoId) {
+    return {
+      root: ORCHESTRATOR_ROOT,
+      repoId: null,
+      error: `Task ${taskId} has no repository pinned. Set task.repo_id (or ensure its plan has exactly one repository) before starting a session.`,
+    };
+  }
+  const repoRow = repo.getRepository(task.repoId);
+  if (!repoRow) {
+    return {
+      root: ORCHESTRATOR_ROOT,
+      repoId: task.repoId,
+      error: `Repository ${task.repoId} not found`,
+    };
+  }
+  if (!repoRow.localPath) {
+    return {
+      root: ORCHESTRATOR_ROOT,
+      repoId: repoRow.id,
+      error: `Repository ${repoRow.id} has no local_path configured`,
+    };
+  }
+  return { root: resolve(repoRow.localPath), repoId: repoRow.id };
+}
 
 // ──────────────────────────────────────────────────────────
 // In-process state (held on globalThis so HMR doesn't drop sessions)
@@ -110,7 +141,8 @@ function reapOrphans() {
       })
       .run();
     if (orphan.worktreePath) {
-      cleanupWorktree(orphan.worktreePath).catch(() => {});
+      const repoRoot = repoRootForSession(orphan.taskId);
+      cleanupWorktree(orphan.worktreePath, repoRoot).catch(() => {});
     }
   }
 }
@@ -352,8 +384,18 @@ export function cancelSession(sessionId: number): AgentSessionFull {
   updateSession(sessionId, { status: "cancelled", completedAt: new Date() });
   emit(sessionId, "status", { status: "cancelled" });
   closeBus(sessionId);
-  if (session.worktreePath) cleanupWorktree(session.worktreePath).catch(() => {});
+  if (session.worktreePath) {
+    cleanupWorktree(session.worktreePath, repoRootForSession(session.taskId)).catch(() => {});
+  }
   return getSession(sessionId)!;
+}
+
+// Best-effort repo-root lookup for cleanup paths. Falls back to the
+// orchestrator's own checkout so cleanup never throws.
+function repoRootForSession(taskId: string): string {
+  const repoRow = repo.resolveRepoForTask(taskId);
+  if (repoRow?.localPath) return resolve(repoRow.localPath);
+  return ORCHESTRATOR_ROOT;
 }
 
 // ──────────────────────────────────────────────────────────
@@ -372,18 +414,25 @@ async function runSession(
   runners.set(sessionId, { abort, bus });
 
   const branch = `claude/agent-${sessionId}`;
-  const worktreePath = resolve(WORKTREE_ROOT, String(sessionId));
   let task = repo.getTask(taskId);
   if (!task) {
     fail(sessionId, `Task ${taskId} disappeared before session could start`);
     return;
   }
+  const resolution = resolveRepoForSession(taskId);
+  if (resolution.error) {
+    fail(sessionId, resolution.error);
+    return;
+  }
+  const { root: repoRoot, repoId } = resolution;
+  const worktreeRoot = resolve(repoRoot, ".worktrees");
+  const worktreePath = resolve(worktreeRoot, String(sessionId));
 
   try {
     setStatus(sessionId, "preparing");
-    await mkdir(WORKTREE_ROOT, { recursive: true });
-    await sh(["git", "worktree", "add", "-b", branch, worktreePath, baseBranch], REPO_ROOT, sessionId);
-    updateSession(sessionId, { branch, worktreePath });
+    await mkdir(worktreeRoot, { recursive: true });
+    await sh(["git", "worktree", "add", "-b", branch, worktreePath, baseBranch], repoRoot, sessionId);
+    updateSession(sessionId, { branch, worktreePath, repoId });
     emit(sessionId, "worktree", { branch, worktreePath });
     if (resumeSdkSessionId) emit(sessionId, "resume", { sdkSessionId: resumeSdkSessionId });
 
@@ -449,7 +498,7 @@ async function runSession(
     }
   } finally {
     closeBus(sessionId);
-    if (worktreePath) cleanupWorktree(worktreePath).catch(() => {});
+    if (worktreePath) cleanupWorktree(worktreePath, repoRoot).catch(() => {});
   }
 }
 
@@ -751,6 +800,7 @@ function hydrateSession(row: typeof agentSessions.$inferSelect): AgentSessionFul
     outputTokens: row.outputTokens,
     sdkSessionId: row.sdkSessionId,
     resumeOf: row.resumeOf,
+    repoId: row.repoId,
     startedAt: row.startedAt,
     completedAt: row.completedAt,
   };
@@ -805,11 +855,11 @@ function sanitizeEnv(input: NodeJS.ProcessEnv): Record<string, string> {
   return out;
 }
 
-function cleanupWorktree(path: string): Promise<void> {
+function cleanupWorktree(path: string, repoRoot: string): Promise<void> {
   if (KEEP_WORKTREES) return Promise.resolve();
   if (!path || !existsSync(path)) return Promise.resolve();
   return new Promise((resolveP) => {
-    const child = spawn("git", ["worktree", "remove", "--force", path], { cwd: REPO_ROOT });
+    const child = spawn("git", ["worktree", "remove", "--force", path], { cwd: repoRoot });
     child.on("close", () => resolveP());
     child.on("error", () => resolveP());
   });

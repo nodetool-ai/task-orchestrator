@@ -52,19 +52,47 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   echo "warning: ${ENV_FILE} not found — service will fail to start until you create it" >&2
 fi
 
-# If the env file points the agent/chat at a different repo, give the service
-# write access to it too. Otherwise ProtectHome=read-only blocks SDK writes.
+# Gather extra paths the service needs write access to beyond APP_DIR/DATA_DIR.
+# These come from two sources, in order:
+#   1. TASK_ORCH_TARGET_REPO from .env.local (legacy single-repo deployments).
+#   2. Every repositories.local_path from the SQLite data.db (multi-repo).
+# Duplicates are collapsed.
+declare -A SEEN_RW=()
+EXTRA_RW=""
+add_rw() {
+  local path="$1"
+  [[ -z "${path}" ]] && return
+  if [[ -z "${SEEN_RW[$path]:-}" ]] && [[ -d "${path}" ]]; then
+    SEEN_RW[$path]=1
+    EXTRA_RW+=" ${path}"
+    echo "→ ${path} → ReadWritePaths"
+  elif [[ ! -d "${path}" ]]; then
+    echo "warning: ${path} is not a directory; skipping" >&2
+  fi
+}
+
 TARGET_REPO=""
 if [[ -f "${ENV_FILE}" ]]; then
   TARGET_REPO="$(grep -E '^TASK_ORCH_TARGET_REPO=' "${ENV_FILE}" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
 fi
-EXTRA_RW=""
-if [[ -n "${TARGET_REPO}" ]]; then
-  if [[ -d "${TARGET_REPO}" ]]; then
-    EXTRA_RW=" ${TARGET_REPO}"
-    echo "→ TASK_ORCH_TARGET_REPO=${TARGET_REPO} → adding to ReadWritePaths"
+[[ -n "${TARGET_REPO}" ]] && add_rw "${TARGET_REPO}"
+
+# Pull local_path values from the SQLite DB. Locate the DB via TASK_ORCH_DB in
+# the env file, falling back to the conventional location.
+DB_PATH=""
+if [[ -f "${ENV_FILE}" ]]; then
+  DB_PATH="$(grep -E '^TASK_ORCH_DB=' "${ENV_FILE}" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
+fi
+[[ -z "${DB_PATH}" ]] && DB_PATH="${DATA_DIR}/data.db"
+
+if [[ -f "${DB_PATH}" ]]; then
+  SQLITE3="$(command -v sqlite3 || true)"
+  if [[ -n "${SQLITE3}" ]]; then
+    while IFS= read -r path; do
+      [[ -n "${path}" ]] && add_rw "${path}"
+    done < <("${SQLITE3}" "${DB_PATH}" "SELECT local_path FROM repositories WHERE local_path IS NOT NULL AND local_path != '';" 2>/dev/null || true)
   else
-    echo "warning: TASK_ORCH_TARGET_REPO=${TARGET_REPO} not a directory; skipping" >&2
+    echo "note: sqlite3 not installed — skipping per-repository ReadWritePaths discovery" >&2
   fi
 fi
 

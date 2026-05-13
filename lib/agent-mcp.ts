@@ -42,6 +42,7 @@ function summarisePlan(p: PlanFull) {
     state: p.state,
     owner: p.owner,
     tags: p.tags,
+    repos: p.repos.map((r) => r.id),
     progress: `${progress.done}/${progress.total} done (${progress.pct}%)`,
     updated_at: p.updatedAt.toISOString(),
   };
@@ -53,6 +54,7 @@ function summariseTask(t: TaskFull) {
     title: t.title,
     state: t.state,
     plan_id: t.planId,
+    repo_id: t.repoId,
     assignee: t.assignee,
     estimate: t.estimate,
     tags: t.tags,
@@ -114,6 +116,101 @@ export function createOrchestratorMcpServer(opts: OrchestratorMcpOptions) {
     version: "2.0.0",
     tools: [
       // ──────────────────────────────────────────────────────
+      // Repositories
+      // ──────────────────────────────────────────────────────
+      tool(
+        "list_repositories",
+        "List configured repositories. Each repository is a git checkout the orchestrator can drive (worktrees for sessions, cwd for chat agents).",
+        {},
+        async () => {
+          return json(
+            repo.listRepositories().map((r) => ({
+              id: r.id,
+              name: r.name,
+              local_path: r.localPath,
+              remote: r.remote,
+              default_branch: r.defaultBranch,
+              description: r.description,
+            }))
+          );
+        }
+      ),
+      tool(
+        "get_repository",
+        "Get a repository's full details.",
+        { id: z.string().min(1) },
+        async ({ id }) => {
+          const r = repo.getRepository(id);
+          if (!r) return err(`Repository ${id} not found`);
+          return json({
+            ...r,
+            createdAt: r.createdAt.toISOString(),
+            updatedAt: r.updatedAt.toISOString(),
+          });
+        }
+      ),
+      tool(
+        "create_repository",
+        "Register a new repository. local_path should point at a git checkout the service user can read and (for agent sessions) write to.",
+        {
+          name: z.string().min(1),
+          local_path: z.string().optional(),
+          remote: z.string().optional(),
+          default_branch: z.string().optional(),
+          description: z.string().optional(),
+        },
+        async (input) => {
+          const result = safe(() =>
+            repo.createRepository({
+              name: input.name,
+              localPath: input.local_path,
+              remote: input.remote,
+              defaultBranch: input.default_branch,
+              description: input.description,
+            })
+          );
+          if ("_error" in result) return err(result._error);
+          return ok(`Created repository ${result.id}: ${result.name}`);
+        }
+      ),
+      tool(
+        "update_repository",
+        "Patch a repository's name, local_path, remote, default_branch, or description.",
+        {
+          id: z.string().min(1),
+          name: z.string().optional(),
+          local_path: z.string().nullable().optional(),
+          remote: z.string().nullable().optional(),
+          default_branch: z.string().optional(),
+          description: z.string().optional(),
+        },
+        async ({ id, ...patch }) => {
+          const result = safe(() =>
+            repo.updateRepository(id, {
+              name: patch.name,
+              localPath: patch.local_path ?? undefined,
+              remote: patch.remote ?? undefined,
+              defaultBranch: patch.default_branch,
+              description: patch.description,
+            })
+          );
+          if ("_error" in result) return err(result._error);
+          return ok(`Updated repository ${result.id}.`);
+        }
+      ),
+      tool(
+        "delete_repository",
+        "Delete a repository. Blocked if any plans or chats still reference it; reassign them first.",
+        { id: z.string().min(1) },
+        async ({ id }) => {
+          const result = safe(() => repo.deleteRepository(id));
+          if (result && typeof result === "object" && "_error" in result)
+            return err((result as { _error: string })._error);
+          return ok(`Deleted repository ${id}.`);
+        }
+      ),
+
+      // ──────────────────────────────────────────────────────
       // Plans
       // ──────────────────────────────────────────────────────
       tool(
@@ -145,13 +242,14 @@ export function createOrchestratorMcpServer(opts: OrchestratorMcpOptions) {
       ),
       tool(
         "create_plan",
-        "Create a new plan. Returns the plan id.",
+        "Create a new plan across one or more repositories. Returns the plan id. Tasks under this plan must target one of the listed repositories. If repo_ids is omitted, defaults to [the default repo].",
         {
           title: z.string().min(1),
           body: z.string().optional(),
           owner: z.string().optional(),
           tags: z.array(z.string()).optional(),
           state: z.enum(PLAN_STATES).optional(),
+          repo_ids: z.array(z.string()).optional(),
         },
         async (input) => {
           const result = safe(() =>
@@ -161,21 +259,23 @@ export function createOrchestratorMcpServer(opts: OrchestratorMcpOptions) {
               owner: input.owner,
               tags: input.tags,
               state: input.state,
+              repoIds: input.repo_ids,
             })
           );
           if ("_error" in result) return err(result._error);
-          return ok(`Created plan ${result.id}: ${result.title}`);
+          return ok(`Created plan ${result.id}: ${result.title} (${result.repos.length} repo${result.repos.length === 1 ? "" : "s"})`);
         }
       ),
       tool(
         "update_plan",
-        "Patch a plan's title, body, owner, tags. Use transition_plan to change state.",
+        "Patch a plan's title, body, owner, tags, or entire repository set (repo_ids replaces all). Use add_plan_repository/remove_plan_repository for granular changes. Use transition_plan to change state.",
         {
           id: z.string().min(1),
           title: z.string().optional(),
           body: z.string().optional(),
           owner: z.string().nullable().optional(),
           tags: z.array(z.string()).optional(),
+          repo_ids: z.array(z.string()).optional(),
         },
         async ({ id, ...patch }) => {
           const result = safe(() =>
@@ -184,10 +284,31 @@ export function createOrchestratorMcpServer(opts: OrchestratorMcpOptions) {
               body: patch.body,
               owner: patch.owner ?? undefined,
               tags: patch.tags,
+              repoIds: patch.repo_ids,
             })
           );
           if ("_error" in result) return err(result._error);
-          return ok(`Updated plan ${result.id} (state: ${result.state}).`);
+          return ok(`Updated plan ${result.id} (state: ${result.state}, ${result.repos.length} repo${result.repos.length === 1 ? "" : "s"}).`);
+        }
+      ),
+      tool(
+        "add_plan_repository",
+        "Attach an additional repository to a plan. The new repo becomes the last in the plan's repo list. No-op if already attached.",
+        { plan_id: z.string().min(1), repo_id: z.string().min(1) },
+        async ({ plan_id, repo_id }) => {
+          const result = safe(() => repo.addPlanRepository(plan_id, repo_id));
+          if ("_error" in result) return err(result._error);
+          return ok(`Plan ${result.id} now spans ${result.repos.map((r) => r.id).join(", ")}.`);
+        }
+      ),
+      tool(
+        "remove_plan_repository",
+        "Detach a repository from a plan. Any tasks pinned to it are unset and will refuse to start until reassigned.",
+        { plan_id: z.string().min(1), repo_id: z.string().min(1) },
+        async ({ plan_id, repo_id }) => {
+          const result = safe(() => repo.removePlanRepository(plan_id, repo_id));
+          if ("_error" in result) return err(result._error);
+          return ok(`Plan ${result.id} now spans ${result.repos.map((r) => r.id).join(", ") || "(no repos)"}.`);
         }
       ),
       tool(
@@ -247,7 +368,7 @@ export function createOrchestratorMcpServer(opts: OrchestratorMcpOptions) {
       ),
       tool(
         "create_task",
-        "Create a new task under a plan. Returns the new task id.",
+        "Create a new task under a plan. The task targets one of the plan's repositories: if the plan has exactly one repo it's inherited, otherwise repo_id is required and must be in the plan's set.",
         {
           plan_id: z.string().min(1),
           title: z.string().min(1),
@@ -257,6 +378,7 @@ export function createOrchestratorMcpServer(opts: OrchestratorMcpOptions) {
           tags: z.array(z.string()).optional(),
           dependencies: z.array(z.string()).optional(),
           criteria: z.array(z.string()).optional(),
+          repo_id: z.string().optional(),
         },
         async (input) => {
           const result = safe(() =>
@@ -269,15 +391,16 @@ export function createOrchestratorMcpServer(opts: OrchestratorMcpOptions) {
               tags: input.tags,
               dependencies: input.dependencies,
               criteria: input.criteria,
+              repoId: input.repo_id,
             })
           );
           if ("_error" in result) return err(result._error);
-          return ok(`Created task ${result.id}: ${result.title}`);
+          return ok(`Created task ${result.id}: ${result.title}${result.repoId ? ` → ${result.repoId}` : ""}`);
         }
       ),
       tool(
         "update_task",
-        "Patch a task's fields (title, body, assignee, estimate, tags, dependencies). Use transition_task to change state.",
+        "Patch a task's fields (title, body, assignee, estimate, tags, dependencies, repo_id). The new repo_id must be one of the plan's repositories. Use transition_task to change state.",
         {
           id: z.string().optional(),
           title: z.string().optional(),
@@ -286,6 +409,7 @@ export function createOrchestratorMcpServer(opts: OrchestratorMcpOptions) {
           estimate: z.string().nullable().optional(),
           tags: z.array(z.string()).optional(),
           dependencies: z.array(z.string()).optional(),
+          repo_id: z.string().nullable().optional(),
         },
         async ({ id, ...patch }) => {
           const taskId = resolveTaskId(id);
@@ -298,6 +422,7 @@ export function createOrchestratorMcpServer(opts: OrchestratorMcpOptions) {
               estimate: patch.estimate ?? undefined,
               tags: patch.tags,
               dependencies: patch.dependencies,
+              repoId: patch.repo_id === undefined ? undefined : patch.repo_id,
             })
           );
           if ("_error" in result) return err(result._error);

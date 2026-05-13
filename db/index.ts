@@ -89,7 +89,28 @@ function createDb(): DB {
   sqlite.pragma("foreign_keys = ON");
   sqlite.pragma("busy_timeout = 2000");
   applyMigrations(sqlite);
+  syncDefaultRepoFromEnv(sqlite);
   return drizzle(sqlite, { schema }) as DB;
+}
+
+// One-shot bridge: if TASK_ORCH_TARGET_REPO is set, ensure R-default's
+// local_path reflects it. Lets users run the v1 "one repo per deployment"
+// setup purely via env without touching the DB. Skipped silently if the
+// repositories table isn't present yet (e.g. migrations failed).
+function syncDefaultRepoFromEnv(sqlite: Database.Database) {
+  const target = process.env.TASK_ORCH_TARGET_REPO;
+  if (!target) return;
+  try {
+    sqlite
+      .prepare(
+        "UPDATE repositories SET local_path = ?, updated_at = ? WHERE id = 'R-default' AND (local_path IS NULL OR local_path != ?)"
+      )
+      .run(target, Date.now(), target);
+  } catch (err) {
+    // Table missing or other oddity — log and continue. Migrations should
+    // have run by now; if they didn't, that's the real problem to surface.
+    console.warn("db: failed to sync R-default.local_path from env:", err);
+  }
 }
 
 export const db: DB = globalThis.__tasksDb ?? createDb();

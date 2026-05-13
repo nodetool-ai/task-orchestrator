@@ -1,10 +1,14 @@
+import { ne } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
 import { db } from "../db";
 import {
   acceptanceCriteria,
   agentEvents,
   agentSessions,
+  chats,
+  chatMessages,
   plans,
+  repositories,
   taskDependencies,
   taskNotes,
   tasks,
@@ -15,11 +19,15 @@ beforeEach(() => {
   // Reverse-FK order so parent-cascade can't bite us if FKs ever get tightened.
   db.delete(agentEvents).run();
   db.delete(agentSessions).run();
+  db.delete(chatMessages).run();
+  db.delete(chats).run();
   db.delete(acceptanceCriteria).run();
   db.delete(taskNotes).run();
   db.delete(taskDependencies).run();
   db.delete(tasks).run();
   db.delete(plans).run();
+  // Keep the seeded R-default repo; clear the rest so each test starts clean.
+  db.delete(repositories).where(ne(repositories.id, "R-default")).run();
 });
 
 describe("plans", () => {
@@ -217,5 +225,192 @@ describe("plan progress", () => {
     expect(prog.total).toBe(2);
     expect(prog.done).toBe(1);
     expect(prog.pct).toBe(50);
+  });
+});
+
+describe("repositories", () => {
+  it("derives the id from the name slug", () => {
+    const r = repo.createRepository({ name: "Hello World" });
+    expect(r.id).toBe("R-hello-world");
+    expect(r.name).toBe("Hello World");
+    expect(r.defaultBranch).toBe("main");
+  });
+
+  it("rejects duplicates", () => {
+    repo.createRepository({ name: "Same" });
+    expect(() => repo.createRepository({ name: "Same" })).toThrow(/already/);
+  });
+
+  it("trims fields and treats empty strings as null", () => {
+    const r = repo.createRepository({
+      name: "Trimmy",
+      remote: "  ",
+      localPath: "",
+      defaultBranch: "",
+    });
+    expect(r.remote).toBeNull();
+    expect(r.localPath).toBeNull();
+    expect(r.defaultBranch).toBe("main"); // empty falls back to default
+  });
+
+  it("updates fields", () => {
+    const r = repo.createRepository({ name: "U" });
+    const updated = repo.updateRepository(r.id, {
+      localPath: "/tmp/u",
+      defaultBranch: "trunk",
+      description: "hello",
+    });
+    expect(updated.localPath).toBe("/tmp/u");
+    expect(updated.defaultBranch).toBe("trunk");
+    expect(updated.description).toBe("hello");
+  });
+
+  it("rejects empty name on update", () => {
+    const r = repo.createRepository({ name: "U" });
+    expect(() => repo.updateRepository(r.id, { name: "" })).toThrow(/empty/);
+  });
+
+  it("blocks delete while plans reference it (via attached repo)", () => {
+    const r = repo.createRepository({ name: "Linked", localPath: "/tmp/x" });
+    repo.createPlan({ title: "P", date: "2026-01-15", repoIds: [r.id] });
+    expect(() => repo.deleteRepository(r.id)).toThrow(/reference/);
+  });
+
+  it("allows delete once references are removed", () => {
+    const r = repo.createRepository({ name: "Unlink" });
+    const p = repo.createPlan({ title: "P", date: "2026-01-15", repoIds: [r.id] });
+    repo.updatePlan(p.id, { repoIds: [] });
+    expect(() => repo.deleteRepository(r.id)).not.toThrow();
+    expect(repo.getRepository(r.id)).toBeNull();
+  });
+});
+
+describe("plan ↔ repository M2M", () => {
+  it("defaults a new plan to the default repository", () => {
+    expect(repo.defaultRepoId()).toBe("R-default");
+    const p = repo.createPlan({ title: "A", date: "2026-01-15" });
+    expect(p.repos.map((r) => r.id)).toEqual(["R-default"]);
+  });
+
+  it("accepts multiple repos on create", () => {
+    const a = repo.createRepository({ name: "A" });
+    const b = repo.createRepository({ name: "B" });
+    const p = repo.createPlan({
+      title: "P",
+      date: "2026-01-15",
+      repoIds: [a.id, b.id],
+    });
+    expect(p.repos.map((r) => r.id)).toEqual([a.id, b.id]);
+  });
+
+  it("preserves repo ordering by position", () => {
+    const a = repo.createRepository({ name: "A" });
+    const b = repo.createRepository({ name: "B" });
+    const c = repo.createRepository({ name: "C" });
+    const p = repo.createPlan({
+      title: "P",
+      date: "2026-01-15",
+      repoIds: [c.id, a.id, b.id],
+    });
+    expect(p.repos.map((r) => r.id)).toEqual([c.id, a.id, b.id]);
+  });
+
+  it("rejects an unknown repo on create", () => {
+    expect(() =>
+      repo.createPlan({ title: "P", date: "2026-01-15", repoIds: ["R-nope"] })
+    ).toThrow(/not found/);
+  });
+
+  it("replaces the entire repo set via updatePlan", () => {
+    const a = repo.createRepository({ name: "A" });
+    const b = repo.createRepository({ name: "B" });
+    const p = repo.createPlan({ title: "P", date: "2026-01-15", repoIds: [a.id] });
+    const after = repo.updatePlan(p.id, { repoIds: [b.id] });
+    expect(after.repos.map((r) => r.id)).toEqual([b.id]);
+  });
+
+  it("add_plan_repository is idempotent and append-positioned", () => {
+    const a = repo.createRepository({ name: "A" });
+    const b = repo.createRepository({ name: "B" });
+    const p = repo.createPlan({ title: "P", date: "2026-01-15", repoIds: [a.id] });
+    const after = repo.addPlanRepository(p.id, b.id);
+    expect(after.repos.map((r) => r.id)).toEqual([a.id, b.id]);
+    // idempotent: re-adding doesn't dup
+    const again = repo.addPlanRepository(p.id, b.id);
+    expect(again.repos.map((r) => r.id)).toEqual([a.id, b.id]);
+  });
+
+  it("remove_plan_repository unsets task.repoId for tasks pinned to it", () => {
+    const a = repo.createRepository({ name: "A" });
+    const b = repo.createRepository({ name: "B" });
+    const plan = repo.createPlan({
+      title: "P",
+      date: "2026-01-15",
+      repoIds: [a.id, b.id],
+    });
+    const t = repo.createTask({
+      planId: plan.id,
+      title: "T",
+      date: "2026-01-15",
+      repoId: b.id,
+    });
+    expect(t.repoId).toBe(b.id);
+    repo.removePlanRepository(plan.id, b.id);
+    const after = repo.getTask(t.id)!;
+    expect(after.repoId).toBeNull();
+  });
+});
+
+describe("task ↔ repository", () => {
+  it("inherits the plan's repo when the plan has exactly one", () => {
+    const r = repo.createRepository({ name: "Solo", localPath: "/tmp/s" });
+    const plan = repo.createPlan({ title: "P", date: "2026-01-15", repoIds: [r.id] });
+    const t = repo.createTask({ planId: plan.id, title: "T", date: "2026-01-15" });
+    expect(t.repoId).toBe(r.id);
+  });
+
+  it("requires repo_id when the plan has multiple repos", () => {
+    const a = repo.createRepository({ name: "A" });
+    const b = repo.createRepository({ name: "B" });
+    const plan = repo.createPlan({
+      title: "P",
+      date: "2026-01-15",
+      repoIds: [a.id, b.id],
+    });
+    expect(() =>
+      repo.createTask({ planId: plan.id, title: "T", date: "2026-01-15" })
+    ).toThrow(/repo_id/);
+  });
+
+  it("rejects a repo_id that's not on the plan", () => {
+    const a = repo.createRepository({ name: "A" });
+    const b = repo.createRepository({ name: "B" });
+    const plan = repo.createPlan({ title: "P", date: "2026-01-15", repoIds: [a.id] });
+    expect(() =>
+      repo.createTask({
+        planId: plan.id,
+        title: "T",
+        date: "2026-01-15",
+        repoId: b.id,
+      })
+    ).toThrow(/not attached/);
+  });
+
+  it("uses task.repoId at resolution, not the plan's set", () => {
+    const a = repo.createRepository({ name: "A", localPath: "/tmp/a" });
+    const b = repo.createRepository({ name: "B", localPath: "/tmp/b" });
+    const plan = repo.createPlan({
+      title: "P",
+      date: "2026-01-15",
+      repoIds: [a.id, b.id],
+    });
+    const t = repo.createTask({
+      planId: plan.id,
+      title: "T",
+      date: "2026-01-15",
+      repoId: b.id,
+    });
+    const resolved = repo.resolveRepoForTask(t.id);
+    expect(resolved?.id).toBe(b.id);
   });
 });

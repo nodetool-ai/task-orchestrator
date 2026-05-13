@@ -6,6 +6,7 @@ export const planStateEnum = z.enum(PLAN_STATES);
 
 const idTaskRe = /^T-\d{8}-\d{4}$/;
 const idPlanRe = /^P-\d{4}-\d{2}-\d{2}-[a-z0-9-]+$/;
+const idRepoRe = /^R-[a-z0-9-]+$/;
 
 export const createPlanSchema = z.object({
   id: z.string().regex(idPlanRe).optional(),
@@ -15,6 +16,7 @@ export const createPlanSchema = z.object({
   body: z.string().optional().default(""),
   tags: z.array(z.string()).optional().default([]),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  repoIds: z.array(z.string().regex(idRepoRe)).optional(),
 });
 
 export const updatePlanSchema = z.object({
@@ -23,6 +25,28 @@ export const updatePlanSchema = z.object({
   owner: z.string().nullable().optional(),
   body: z.string().optional(),
   tags: z.array(z.string()).optional(),
+  repoIds: z.array(z.string().regex(idRepoRe)).optional(),
+});
+
+export const planRepositorySchema = z.object({
+  repoId: z.string().regex(idRepoRe),
+});
+
+export const createRepositorySchema = z.object({
+  id: z.string().regex(idRepoRe).optional(),
+  name: z.string().min(1).max(100),
+  remote: z.string().min(1).max(500).nullable().optional(),
+  localPath: z.string().min(1).max(500).nullable().optional(),
+  defaultBranch: z.string().min(1).max(100).optional(),
+  description: z.string().max(1000).optional(),
+});
+
+export const updateRepositorySchema = z.object({
+  name: z.string().min(1).max(100).optional(),
+  remote: z.string().max(500).nullable().optional(),
+  localPath: z.string().max(500).nullable().optional(),
+  defaultBranch: z.string().min(1).max(100).optional(),
+  description: z.string().max(1000).optional(),
 });
 
 export const createTaskSchema = z.object({
@@ -36,6 +60,7 @@ export const createTaskSchema = z.object({
   dependencies: z.array(z.string()).optional().default([]),
   criteria: z.array(z.string()).optional().default([]),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  repoId: z.string().regex(idRepoRe).nullable().optional(),
 });
 
 export const updateTaskSchema = z.object({
@@ -45,6 +70,7 @@ export const updateTaskSchema = z.object({
   estimate: z.string().nullable().optional(),
   tags: z.array(z.string()).optional(),
   dependencies: z.array(z.string()).optional(),
+  repoId: z.string().regex(idRepoRe).nullable().optional(),
 });
 
 export const transitionTaskSchema = z.object({

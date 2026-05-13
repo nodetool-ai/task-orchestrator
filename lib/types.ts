@@ -51,6 +51,7 @@ export interface TaskFull {
   body: string;
   estimate: string | null;
   tags: string[];
+  repoId: string | null;
   createdAt: Date;
   updatedAt: Date;
   dependencies: string[];
@@ -65,6 +66,19 @@ export interface PlanFull {
   owner: string | null;
   body: string;
   tags: string[];
+  /** Repositories attached to this plan, ordered by position. */
+  repos: RepositoryRow[];
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface RepositoryRow {
+  id: string;
+  name: string;
+  remote: string | null;
+  localPath: string | null;
+  defaultBranch: string;
+  description: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -102,6 +116,7 @@ export interface AgentSessionFull {
   outputTokens: number | null;
   sdkSessionId: string | null;
   resumeOf: number | null;
+  repoId: string | null;
   startedAt: Date;
   completedAt: Date | null;
 }
@@ -129,6 +144,7 @@ export interface ChatRow {
   totalCostUsd: number | null;
   inputTokens: number | null;
   outputTokens: number | null;
+  repoId: string | null;
   createdAt: Date;
   updatedAt: Date;
 }

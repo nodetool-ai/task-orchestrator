@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, GitPullRequest } from "lucide-react";
+import { TaskRepoSelector } from "@/components/task-repo-selector";
 import * as repo from "@/lib/repo";
 import * as agent from "@/lib/agent";
 import { StateIcon } from "@/components/state-icon";
@@ -17,6 +18,12 @@ import { isTerminalStatus } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
+// Render a GitHub PR URL as `owner/repo#NNN` (or just the URL for non-GH hosts).
+function prShortLabel(url: string): string {
+  const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+  return m ? `${m[1]}/${m[2]}#${m[3]}` : url;
+}
+
 export default async function TaskPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const task = repo.getTask(id);
@@ -28,6 +35,10 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
     .filter((t): t is NonNullable<typeof t> => Boolean(t));
   const sessions = agent.listSessions(task.id);
   const activeSession = sessions.find((s) => !isTerminalStatus(s.status));
+  // Sessions are listed newest-first; first one with a PR is the latest PR.
+  const latestPr = sessions.find((s) => s.prUrl)?.prUrl ?? null;
+  const repository = task.repoId ? repo.getRepository(task.repoId) : null;
+  const planRepoOptions = plan?.repos ?? [];
 
   return (
     <article className="mx-auto max-w-3xl">
@@ -63,6 +74,14 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
             <span className="text-muted-foreground">{task.planId}</span>
           )}
         </Meta>
+        <Meta label="Repository">
+          <TaskRepoSelector
+            taskId={task.id}
+            currentRepoId={task.repoId}
+            currentRepo={repository}
+            options={planRepoOptions}
+          />
+        </Meta>
         <Meta label="Updated" hint={relativeDate(task.updatedAt)}>
           {formatDate(task.updatedAt)}
         </Meta>
@@ -81,6 +100,20 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
             </div>
           </Meta>
         ) : null}
+        {latestPr && (
+          <Meta label="Pull request" className="col-span-2 md:col-span-4">
+            <a
+              href={latestPr}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 rounded-md border border-border/60 bg-secondary/40 px-2 py-1 text-xs hover:bg-secondary transition-colors"
+            >
+              <GitPullRequest className="size-3.5 text-state-review" />
+              <span className="font-mono text-foreground">{prShortLabel(latestPr)}</span>
+              <span className="text-muted-foreground">↗</span>
+            </a>
+          </Meta>
+        )}
         {deps.length > 0 && (
           <Meta label="Depends on" className="col-span-2 md:col-span-4">
             <div className="flex flex-wrap gap-2">
@@ -164,25 +197,40 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
           <h2 className="text-sm font-semibold tracking-tight">Agent sessions</h2>
           <div className="rounded-lg border border-border/60 bg-card/30 divide-y divide-border/60 overflow-hidden">
             {sessions.map((s) => (
-              <Link
+              <div
                 key={s.id}
-                href={`/sessions/${s.id}`}
-                className="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/40 transition-colors"
+                className="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/40 transition-colors group"
               >
-                <span className="font-mono text-xs text-muted-foreground tabular-nums">
-                  #{s.id}
-                </span>
-                <SessionStatusPill status={s.status} />
-                {s.branch && (
-                  <code className="font-mono text-[11px] text-muted-foreground">{s.branch}</code>
-                )}
+                <Link
+                  href={`/sessions/${s.id}`}
+                  className="flex items-center gap-3 flex-1 min-w-0"
+                >
+                  <span className="font-mono text-xs text-muted-foreground tabular-nums">
+                    #{s.id}
+                  </span>
+                  <SessionStatusPill status={s.status} />
+                  {s.branch && (
+                    <code className="font-mono text-[11px] text-muted-foreground truncate">
+                      {s.branch}
+                    </code>
+                  )}
+                </Link>
                 {s.prUrl && (
-                  <span className="text-[11px] text-muted-foreground">PR ↗</span>
+                  <a
+                    href={s.prUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline decoration-dotted"
+                  >
+                    <GitPullRequest className="size-3" />
+                    {prShortLabel(s.prUrl)}
+                    <span>↗</span>
+                  </a>
                 )}
-                <span className="ml-auto text-[11px] text-muted-foreground tabular-nums">
+                <span className="text-[11px] text-muted-foreground tabular-nums">
                   {relativeDate(s.startedAt)}
                 </span>
-              </Link>
+              </div>
             ))}
           </div>
         </section>

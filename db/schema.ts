@@ -1,7 +1,25 @@
 import { sql } from "drizzle-orm";
-import { sqliteTable, text, integer, real, primaryKey, index } from "drizzle-orm/sqlite-core";
+import {
+  sqliteTable,
+  text,
+  integer,
+  real,
+  primaryKey,
+  index,
+} from "drizzle-orm/sqlite-core";
 
 const NOW = sql`(unixepoch('subsec') * 1000)`;
+
+export const repositories = sqliteTable("repositories", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  remote: text("remote"),
+  localPath: text("local_path"),
+  defaultBranch: text("default_branch").notNull().default("main"),
+  description: text("description").notNull().default(""),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+});
 
 export const plans = sqliteTable(
   "plans",
@@ -20,6 +38,23 @@ export const plans = sqliteTable(
   })
 );
 
+export const planRepositories = sqliteTable(
+  "plan_repositories",
+  {
+    planId: text("plan_id")
+      .notNull()
+      .references(() => plans.id, { onDelete: "cascade" }),
+    repoId: text("repo_id")
+      .notNull()
+      .references(() => repositories.id, { onDelete: "cascade" }),
+    position: integer("position").notNull().default(0),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.planId, t.repoId] }),
+    repoIdx: index("plan_repos_repo_idx").on(t.repoId),
+  })
+);
+
 export const tasks = sqliteTable(
   "tasks",
   {
@@ -33,6 +68,7 @@ export const tasks = sqliteTable(
     body: text("body").notNull().default(""),
     estimate: text("estimate"),
     tags: text("tags").notNull().default("[]"),
+    repoId: text("repo_id").references(() => repositories.id, { onDelete: "set null" }),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().default(NOW),
   },
@@ -40,6 +76,7 @@ export const tasks = sqliteTable(
     planIdx: index("tasks_plan_idx").on(t.planId),
     stateIdx: index("tasks_state_idx").on(t.state),
     assigneeIdx: index("tasks_assignee_idx").on(t.assignee),
+    repoIdx: index("tasks_repo_idx").on(t.repoId),
   })
 );
 
@@ -109,12 +146,14 @@ export const agentSessions = sqliteTable(
     outputTokens: integer("output_tokens"),
     sdkSessionId: text("sdk_session_id"),
     resumeOf: integer("resume_of"),
+    repoId: text("repo_id").references(() => repositories.id, { onDelete: "set null" }),
     startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull().default(NOW),
     completedAt: integer("completed_at", { mode: "timestamp_ms" }),
   },
   (t) => ({
     taskIdx: index("agent_sessions_task_idx").on(t.taskId),
     statusIdx: index("agent_sessions_status_idx").on(t.status),
+    repoIdx: index("agent_sessions_repo_idx").on(t.repoId),
   })
 );
 
@@ -159,12 +198,14 @@ export const chats = sqliteTable(
     totalCostUsd: real("total_cost_usd"),
     inputTokens: integer("input_tokens"),
     outputTokens: integer("output_tokens"),
+    repoId: text("repo_id").references(() => repositories.id, { onDelete: "set null" }),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().default(NOW),
   },
   (t) => ({
     userIdx: index("chats_user_idx").on(t.userId),
     updatedIdx: index("chats_updated_idx").on(t.updatedAt),
+    repoIdx: index("chats_repo_idx").on(t.repoId),
   })
 );
 
@@ -193,3 +234,4 @@ export type AgentSession = typeof agentSessions.$inferSelect;
 export type AgentEvent = typeof agentEvents.$inferSelect;
 export type Chat = typeof chats.$inferSelect;
 export type ChatMessage = typeof chatMessages.$inferSelect;
+export type Repository = typeof repositories.$inferSelect;

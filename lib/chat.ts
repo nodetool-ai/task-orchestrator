@@ -10,13 +10,13 @@ import { and, asc, desc, eq } from "drizzle-orm";
 
 import { db } from "@/db";
 import { chatMessages, chats } from "@/db/schema";
+import * as repo from "./repo";
 import type { SdkContentBlock, SdkMessageEnvelope } from "./sdk-message";
 import type { ChatMessageRow, ChatRole, ChatRow } from "./types";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = process.env.TASK_ORCH_TARGET_REPO
-  ? resolve(process.env.TASK_ORCH_TARGET_REPO)
-  : resolve(__dirname, "..");
+// Fallback cwd if a chat's repository has no local_path yet.
+const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
 const DEFAULT_MODEL = process.env.TASK_ORCH_CHAT_MODEL ?? "claude-sonnet-4-5";
 
 export type { ChatRole, ChatRow, ChatMessageRow };
@@ -26,23 +26,32 @@ export type { ChatRole, ChatRow, ChatMessageRow };
 // user asks for plan/task/session work.
 const TASK_ORCH_TOOL_HINT = [
   "You have an `mcp__task_orch__*` toolset that exposes the full task orchestrator:",
-  "  • plans: list_plans, get_plan, create_plan, update_plan, transition_plan, delete_plan",
+  "  • repositories: list_repositories, get_repository, create_repository, update_repository, delete_repository",
+  "  • plans: list_plans, get_plan, create_plan, update_plan, transition_plan, delete_plan, add_plan_repository, remove_plan_repository",
   "  • tasks: list_tasks, get_task, create_task, update_task, transition_task, delete_task",
   "  • notes: add_note, list_notes",
   "  • acceptance criteria: list_criteria, add_criterion, check_criterion, uncheck_criterion, update_criterion, delete_criterion",
   "  • agent sessions: list_sessions, get_session, start_session, cancel_session",
   "",
+  "Repository model: a plan is attached to one or more repositories (the git checkouts agents work in). Every task pins to exactly one of its plan's repositories. When creating a plan, pass repo_ids — call list_repositories first if you don't know which IDs exist. When creating a task on a multi-repo plan, repo_id is required. Sessions refuse to start if the task has no repo pinned.",
   "Prefer these tools over shell or file edits when the user asks anything about plans, tasks, criteria, notes, or background agent runs — they go through the same code paths as the UI and respect all invariants (state transitions, criteria-before-done, etc.). Reach for bash/edit only for actual code work in the target repo.",
 ].join("\n");
 
-// The directory the SDK runs in. Project-wide setting via TASK_ORCH_TARGET_REPO,
-// falls back to the orchestrator's own repo.
-export function getRepoRoot(): string {
-  return REPO_ROOT;
-}
-
 export function getDefaultModel(): string {
   return DEFAULT_MODEL;
+}
+
+// Resolve the cwd a chat agent runs in: chat → repository → local_path,
+// falling back to the orchestrator's own checkout when nothing is configured.
+export function resolveChatCwd(chat: ChatRow): { cwd: string; repoId: string | null } {
+  if (chat.repoId) {
+    const r = repo.getRepository(chat.repoId);
+    if (r?.localPath) return { cwd: resolve(r.localPath), repoId: r.id };
+    if (r) return { cwd: ORCHESTRATOR_ROOT, repoId: r.id };
+  }
+  const fallback = repo.defaultRepo();
+  if (fallback?.localPath) return { cwd: resolve(fallback.localPath), repoId: fallback.id };
+  return { cwd: ORCHESTRATOR_ROOT, repoId: fallback?.id ?? null };
 }
 
 // ──────────────────────────────────────────────────────────
@@ -70,13 +79,21 @@ export function getChat(id: number, userId?: number | null): ChatRow | null {
   return row ? hydrateChat(row) : null;
 }
 
-export function createChat(userId: number | null, title = "New chat"): ChatRow {
+export function createChat(
+  userId: number | null,
+  title = "New chat",
+  repoId: string | null = repo.defaultRepoId()
+): ChatRow {
+  if (repoId && !repo.getRepository(repoId)) {
+    throw new repo.RepoError(`Repository ${repoId} not found`, 404);
+  }
   const inserted = db
     .insert(chats)
     .values({
       userId,
       title,
       model: DEFAULT_MODEL,
+      repoId,
       createdAt: new Date(),
       updatedAt: new Date(),
     })
@@ -102,6 +119,7 @@ export function renameChat(id: number, title: string, userId?: number | null): v
 export interface UpdateChatSettings {
   title?: string;
   model?: string | null;
+  repoId?: string | null;
 }
 
 export function updateChatSettings(
@@ -109,9 +127,15 @@ export function updateChatSettings(
   patch: UpdateChatSettings,
   userId?: number | null
 ): void {
+  if (patch.repoId !== undefined && patch.repoId !== null) {
+    if (!repo.getRepository(patch.repoId)) {
+      throw new repo.RepoError(`Repository ${patch.repoId} not found`, 404);
+    }
+  }
   const values: Record<string, unknown> = { updatedAt: new Date() };
   if (patch.title !== undefined) values.title = patch.title;
   if (patch.model !== undefined) values.model = patch.model;
+  if (patch.repoId !== undefined) values.repoId = patch.repoId;
   const where = userId == null
     ? eq(chats.id, id)
     : and(eq(chats.id, id), eq(chats.userId, userId));
@@ -195,6 +219,7 @@ export async function* runChat({
   const { createOrchestratorMcpServer } = await import("./agent-mcp");
   const mcpServer = createOrchestratorMcpServer({ author: author ?? "chat" });
 
+  const { cwd } = resolveChatCwd(chat);
   const env = sanitizeEnv(process.env);
   // Capture stderr from the spawned `claude` process so failures (auth,
   // permission, missing credentials) surface in the chat error event instead
@@ -203,7 +228,7 @@ export async function* runChat({
   const stream = sdk.query({
     prompt: userText,
     options: {
-      cwd: REPO_ROOT,
+      cwd,
       permissionMode: "bypassPermissions",
       model: chat.model ?? DEFAULT_MODEL,
       env,
@@ -308,6 +333,7 @@ function hydrateChat(row: typeof chats.$inferSelect): ChatRow {
     totalCostUsd: row.totalCostUsd,
     inputTokens: row.inputTokens,
     outputTokens: row.outputTokens,
+    repoId: row.repoId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };

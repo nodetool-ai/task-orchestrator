@@ -51,6 +51,7 @@ export async function PATCH(
     const body = (await req.json()) as {
       title?: string;
       model?: string | null;
+      repoId?: string | null;
     };
 
     const patch: chat.UpdateChatSettings = {};
@@ -62,6 +63,10 @@ export async function PATCH(
         typeof body.model === "string" && body.model.trim()
           ? body.model.trim().slice(0, 100)
           : null;
+    }
+    if (body.repoId !== undefined) {
+      patch.repoId =
+        typeof body.repoId === "string" && body.repoId.trim() ? body.repoId.trim() : null;
     }
 
     chat.updateChatSettings(Number(id), patch, uid);

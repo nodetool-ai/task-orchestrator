@@ -2,11 +2,15 @@ import { and, asc, count, eq, inArray, like, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
   acceptanceCriteria,
+  chats,
+  planRepositories,
   plans,
+  repositories,
   taskDependencies,
   taskNotes,
   tasks,
   type Plan as PlanRow,
+  type Repository as RepositoryDbRow,
   type Task as TaskRow,
 } from "@/db/schema";
 import {
@@ -15,6 +19,7 @@ import {
   type PlanFull,
   type PlanProgress,
   type PlanState,
+  type RepositoryRow,
   type TaskFull,
   type TaskState,
 } from "./types";
@@ -59,7 +64,7 @@ function nextTaskId(date: string): string {
 // Hydration helpers
 // ──────────────────────────────────────────────────────────
 
-function hydratePlan(row: PlanRow): PlanFull {
+function hydratePlan(row: PlanRow, repos: RepositoryRow[]): PlanFull {
   return {
     id: row.id,
     title: row.title,
@@ -67,12 +72,83 @@ function hydratePlan(row: PlanRow): PlanFull {
     owner: row.owner,
     body: row.body,
     tags: safeJsonArray(row.tags),
+    repos,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
 }
 
-function hydrateTask(row: TaskRow, deps: string[], notes: TaskFull["notes"], criteria: TaskFull["criteria"]): TaskFull {
+function reposForPlan(planId: string): RepositoryRow[] {
+  return db
+    .select({
+      id: repositories.id,
+      name: repositories.name,
+      remote: repositories.remote,
+      localPath: repositories.localPath,
+      defaultBranch: repositories.defaultBranch,
+      description: repositories.description,
+      createdAt: repositories.createdAt,
+      updatedAt: repositories.updatedAt,
+    })
+    .from(planRepositories)
+    .innerJoin(repositories, eq(repositories.id, planRepositories.repoId))
+    .where(eq(planRepositories.planId, planId))
+    .orderBy(asc(planRepositories.position), asc(repositories.id))
+    .all();
+}
+
+function reposForPlans(planIds: string[]): Map<string, RepositoryRow[]> {
+  const out = new Map<string, RepositoryRow[]>();
+  for (const id of planIds) out.set(id, []);
+  if (planIds.length === 0) return out;
+  const rows = db
+    .select({
+      planId: planRepositories.planId,
+      position: planRepositories.position,
+      id: repositories.id,
+      name: repositories.name,
+      remote: repositories.remote,
+      localPath: repositories.localPath,
+      defaultBranch: repositories.defaultBranch,
+      description: repositories.description,
+      createdAt: repositories.createdAt,
+      updatedAt: repositories.updatedAt,
+    })
+    .from(planRepositories)
+    .innerJoin(repositories, eq(repositories.id, planRepositories.repoId))
+    .where(inArray(planRepositories.planId, planIds))
+    .orderBy(asc(planRepositories.position), asc(repositories.id))
+    .all();
+  for (const r of rows) {
+    const list = out.get(r.planId);
+    if (!list) continue;
+    const { planId: _planId, position: _position, ...repo } = r;
+    void _planId;
+    void _position;
+    list.push(repo);
+  }
+  return out;
+}
+
+function hydrateRepository(row: RepositoryDbRow): RepositoryRow {
+  return {
+    id: row.id,
+    name: row.name,
+    remote: row.remote,
+    localPath: row.localPath,
+    defaultBranch: row.defaultBranch,
+    description: row.description,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function hydrateTask(
+  row: TaskRow,
+  deps: string[],
+  notes: TaskFull["notes"],
+  criteria: TaskFull["criteria"]
+): TaskFull {
   return {
     id: row.id,
     title: row.title,
@@ -82,6 +158,7 @@ function hydrateTask(row: TaskRow, deps: string[], notes: TaskFull["notes"], cri
     body: row.body,
     estimate: row.estimate,
     tags: safeJsonArray(row.tags),
+    repoId: row.repoId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     dependencies: deps,
@@ -104,12 +181,15 @@ function safeJsonArray(s: string): string[] {
 // ──────────────────────────────────────────────────────────
 
 export function listPlans(): PlanFull[] {
-  return db.select().from(plans).orderBy(asc(plans.id)).all().map(hydratePlan);
+  const rows = db.select().from(plans).orderBy(asc(plans.id)).all();
+  if (rows.length === 0) return [];
+  const byPlan = reposForPlans(rows.map((r) => r.id));
+  return rows.map((r) => hydratePlan(r, byPlan.get(r.id) ?? []));
 }
 
 export function getPlan(id: string): PlanFull | null {
   const row = db.select().from(plans).where(eq(plans.id, id)).get();
-  return row ? hydratePlan(row) : null;
+  return row ? hydratePlan(row, reposForPlan(id)) : null;
 }
 
 export function planProgress(planId: string): PlanProgress {
@@ -270,6 +350,8 @@ export interface CreatePlanInput {
   body?: string;
   tags?: string[];
   date?: string;
+  /** Repositories this plan spans. If omitted, defaults to [defaultRepo()]. */
+  repoIds?: string[];
 }
 
 export function createPlan(input: CreatePlanInput): PlanFull {
@@ -278,26 +360,51 @@ export function createPlan(input: CreatePlanInput): PlanFull {
   if (db.select().from(plans).where(eq(plans.id, id)).get()) {
     throw new RepoError(`Plan ${id} already exists`, 409);
   }
+  const explicitRepos = input.repoIds;
+  const repoIds = explicitRepos
+    ? Array.from(new Set(explicitRepos.filter((r): r is string => Boolean(r))))
+    : (() => {
+        const fallback = defaultRepoId();
+        return fallback ? [fallback] : [];
+      })();
+  // Validate each before any insert so the plan isn't created half-attached.
+  for (const rid of repoIds) {
+    if (!getRepository(rid)) throw new RepoError(`Repository ${rid} not found`, 404);
+  }
   const now = new Date();
-  db.insert(plans)
-    .values({
-      id,
-      title: input.title,
-      state: input.state ?? "draft",
-      owner: input.owner ?? null,
-      body: input.body ?? "",
-      tags: JSON.stringify(input.tags ?? []),
-      createdAt: now,
-      updatedAt: now,
-    })
-    .run();
+  db.transaction((tx) => {
+    tx.insert(plans)
+      .values({
+        id,
+        title: input.title,
+        state: input.state ?? "draft",
+        owner: input.owner ?? null,
+        body: input.body ?? "",
+        tags: JSON.stringify(input.tags ?? []),
+        createdAt: now,
+        updatedAt: now,
+      })
+      .run();
+    if (repoIds.length > 0) {
+      tx.insert(planRepositories)
+        .values(repoIds.map((r, i) => ({ planId: id, repoId: r, position: i })))
+        .run();
+    }
+  });
   return getPlan(id)!;
 }
 
-export function updatePlan(
-  id: string,
-  patch: Partial<Pick<PlanFull, "title" | "state" | "owner" | "body" | "tags">>
-): PlanFull {
+export interface UpdatePlanInput {
+  title?: string;
+  state?: PlanState;
+  owner?: string | null;
+  body?: string;
+  tags?: string[];
+  /** Replace the plan's full repository set. Pass [] to unattach all. */
+  repoIds?: string[];
+}
+
+export function updatePlan(id: string, patch: UpdatePlanInput): PlanFull {
   const existing = getPlan(id);
   if (!existing) throw new RepoError(`Plan ${id} not found`, 404);
   if (patch.state && patch.state !== existing.state) {
@@ -309,14 +416,66 @@ export function updatePlan(
       );
     }
   }
+  if (patch.repoIds) {
+    for (const rid of patch.repoIds) {
+      if (!getRepository(rid)) throw new RepoError(`Repository ${rid} not found`, 404);
+    }
+  }
   const values: Record<string, unknown> = { updatedAt: new Date() };
   if (patch.title !== undefined) values.title = patch.title;
   if (patch.state !== undefined) values.state = patch.state;
   if (patch.owner !== undefined) values.owner = patch.owner;
   if (patch.body !== undefined) values.body = patch.body;
   if (patch.tags !== undefined) values.tags = JSON.stringify(patch.tags);
-  db.update(plans).set(values).where(eq(plans.id, id)).run();
+  db.transaction((tx) => {
+    tx.update(plans).set(values).where(eq(plans.id, id)).run();
+    if (patch.repoIds !== undefined) {
+      tx.delete(planRepositories).where(eq(planRepositories.planId, id)).run();
+      const unique = Array.from(new Set(patch.repoIds));
+      if (unique.length > 0) {
+        tx.insert(planRepositories)
+          .values(unique.map((r, i) => ({ planId: id, repoId: r, position: i })))
+          .run();
+      }
+    }
+  });
   return getPlan(id)!;
+}
+
+// Granular helpers — preferred over `updatePlan({ repoIds })` for adding /
+// removing a single repo from a plan because they don't disturb position
+// ordering of the unaffected repos.
+export function addPlanRepository(planId: string, repoId: string): PlanFull {
+  const plan = getPlan(planId);
+  if (!plan) throw new RepoError(`Plan ${planId} not found`, 404);
+  if (!getRepository(repoId)) throw new RepoError(`Repository ${repoId} not found`, 404);
+  if (plan.repos.some((r) => r.id === repoId)) return plan;
+  const nextPosition = plan.repos.length;
+  db.insert(planRepositories)
+    .values({ planId, repoId, position: nextPosition })
+    .run();
+  db.update(plans).set({ updatedAt: new Date() }).where(eq(plans.id, planId)).run();
+  return getPlan(planId)!;
+}
+
+export function removePlanRepository(planId: string, repoId: string): PlanFull {
+  const plan = getPlan(planId);
+  if (!plan) throw new RepoError(`Plan ${planId} not found`, 404);
+  // Clear repoId on any task pinned to the repo being removed so we don't
+  // leave dangling references that the resolver can't satisfy.
+  db.transaction((tx) => {
+    tx.delete(planRepositories)
+      .where(
+        and(eq(planRepositories.planId, planId), eq(planRepositories.repoId, repoId))
+      )
+      .run();
+    tx.update(tasks)
+      .set({ repoId: null, updatedAt: new Date() })
+      .where(and(eq(tasks.planId, planId), eq(tasks.repoId, repoId)))
+      .run();
+    tx.update(plans).set({ updatedAt: new Date() }).where(eq(plans.id, planId)).run();
+  });
+  return getPlan(planId)!;
 }
 
 export function deletePlan(id: string) {
@@ -338,10 +497,17 @@ export interface CreateTaskInput {
   dependencies?: string[];
   criteria?: string[];
   date?: string;
+  /**
+   * Repository this task acts on. Must be one of the plan's repos.
+   * If omitted: inherits the plan's only repo when there's exactly one,
+   * otherwise required.
+   */
+  repoId?: string | null;
 }
 
 export function createTask(input: CreateTaskInput): TaskFull {
-  if (!getPlan(input.planId)) {
+  const plan = getPlan(input.planId);
+  if (!plan) {
     throw new RepoError(`Plan ${input.planId} not found`, 404);
   }
   const date = input.date ?? today();
@@ -349,6 +515,30 @@ export function createTask(input: CreateTaskInput): TaskFull {
   if (db.select().from(tasks).where(eq(tasks.id, id)).get()) {
     throw new RepoError(`Task ${id} already exists`, 409);
   }
+
+  // Resolve the task's repo: explicit → must be one of the plan's repos.
+  // Implicit → only allowed if the plan has exactly one repo.
+  let resolvedRepoId: string | null = null;
+  if (input.repoId !== undefined && input.repoId !== null) {
+    const planRepoIds = plan.repos.map((r) => r.id);
+    if (!planRepoIds.includes(input.repoId)) {
+      throw new RepoError(
+        `Repository ${input.repoId} is not attached to plan ${plan.id}. Attach it first or pick from: ${planRepoIds.join(", ") || "(none)"}`,
+        400
+      );
+    }
+    resolvedRepoId = input.repoId;
+  } else if (plan.repos.length === 1) {
+    resolvedRepoId = plan.repos[0].id;
+  } else if (plan.repos.length > 1) {
+    throw new RepoError(
+      `Plan ${plan.id} has ${plan.repos.length} repositories; specify which one this task targets via repo_id`,
+      400
+    );
+  }
+  // plan.repos.length === 0 → resolvedRepoId stays null; the agent will
+  // refuse to start a session, surfacing a clear escalation.
+
   const deps = input.dependencies ?? [];
   if (deps.length > 0) {
     const existing = db
@@ -374,6 +564,7 @@ export function createTask(input: CreateTaskInput): TaskFull {
         body: input.body ?? "",
         estimate: input.estimate ?? null,
         tags: JSON.stringify(input.tags ?? []),
+        repoId: resolvedRepoId,
         createdAt: now,
         updatedAt: now,
       })
@@ -408,16 +599,28 @@ export function updateTask(
     estimate: string | null;
     tags: string[];
     dependencies: string[];
+    repoId: string | null;
   }>
 ): TaskFull {
   const existing = getTask(id);
   if (!existing) throw new RepoError(`Task ${id} not found`, 404);
+  if (patch.repoId !== undefined && patch.repoId !== null) {
+    const plan = getPlan(existing.planId);
+    const planRepoIds = plan?.repos.map((r) => r.id) ?? [];
+    if (!planRepoIds.includes(patch.repoId)) {
+      throw new RepoError(
+        `Repository ${patch.repoId} is not attached to plan ${existing.planId}. Attach it first or pick from: ${planRepoIds.join(", ") || "(none)"}`,
+        400
+      );
+    }
+  }
   const values: Record<string, unknown> = { updatedAt: new Date() };
   if (patch.title !== undefined) values.title = patch.title;
   if (patch.assignee !== undefined) values.assignee = patch.assignee;
   if (patch.body !== undefined) values.body = patch.body;
   if (patch.estimate !== undefined) values.estimate = patch.estimate;
   if (patch.tags !== undefined) values.tags = JSON.stringify(patch.tags);
+  if (patch.repoId !== undefined) values.repoId = patch.repoId;
   db.transaction((tx) => {
     tx.update(tasks).set(values).where(eq(tasks.id, id)).run();
     if (patch.dependencies !== undefined) {
@@ -563,4 +766,141 @@ function groupBy<T, K>(items: T[], key: (t: T) => K): Map<K, T[]> {
     else m.set(k, [item]);
   }
   return m;
+}
+
+// ──────────────────────────────────────────────────────────
+// Repositories
+// ──────────────────────────────────────────────────────────
+
+export const DEFAULT_REPO_ID = "R-default";
+
+export function repoIdFromName(name: string): string {
+  return `R-${slugify(name)}`;
+}
+
+export function listRepositories(): RepositoryRow[] {
+  return db
+    .select()
+    .from(repositories)
+    .orderBy(asc(repositories.id))
+    .all()
+    .map(hydrateRepository);
+}
+
+export function getRepository(id: string): RepositoryRow | null {
+  const row = db.select().from(repositories).where(eq(repositories.id, id)).get();
+  return row ? hydrateRepository(row) : null;
+}
+
+export interface CreateRepositoryInput {
+  id?: string;
+  name: string;
+  remote?: string | null;
+  localPath?: string | null;
+  defaultBranch?: string;
+  description?: string;
+}
+
+export function createRepository(input: CreateRepositoryInput): RepositoryRow {
+  if (!input.name.trim()) throw new RepoError("Repository name is required", 400);
+  const id = input.id?.trim() || repoIdFromName(input.name);
+  if (!id) throw new RepoError("Repository id could not be derived", 400);
+  if (db.select().from(repositories).where(eq(repositories.id, id)).get()) {
+    throw new RepoError(`Repository ${id} already exists`, 409);
+  }
+  const now = new Date();
+  db.insert(repositories)
+    .values({
+      id,
+      name: input.name.trim(),
+      remote: input.remote?.trim() || null,
+      localPath: input.localPath?.trim() || null,
+      defaultBranch: (input.defaultBranch ?? "main").trim() || "main",
+      description: input.description ?? "",
+      createdAt: now,
+      updatedAt: now,
+    })
+    .run();
+  return getRepository(id)!;
+}
+
+export interface UpdateRepositoryInput {
+  name?: string;
+  remote?: string | null;
+  localPath?: string | null;
+  defaultBranch?: string;
+  description?: string;
+}
+
+export function updateRepository(id: string, patch: UpdateRepositoryInput): RepositoryRow {
+  const existing = getRepository(id);
+  if (!existing) throw new RepoError(`Repository ${id} not found`, 404);
+  const values: Record<string, unknown> = { updatedAt: new Date() };
+  if (patch.name !== undefined) {
+    const v = patch.name.trim();
+    if (!v) throw new RepoError("Repository name cannot be empty", 400);
+    values.name = v;
+  }
+  if (patch.remote !== undefined) {
+    values.remote = patch.remote === null ? null : patch.remote.trim() || null;
+  }
+  if (patch.localPath !== undefined) {
+    values.localPath = patch.localPath === null ? null : patch.localPath.trim() || null;
+  }
+  if (patch.defaultBranch !== undefined) {
+    const v = patch.defaultBranch.trim() || "main";
+    values.defaultBranch = v;
+  }
+  if (patch.description !== undefined) values.description = patch.description;
+  db.update(repositories).set(values).where(eq(repositories.id, id)).run();
+  return getRepository(id)!;
+}
+
+export function deleteRepository(id: string) {
+  const existing = getRepository(id);
+  if (!existing) return;
+  // Block deletion if anything still references this repo — orphaning is
+  // worse than the friction of an explicit reassignment.
+  const planRefs = db
+    .select({ planId: planRepositories.planId })
+    .from(planRepositories)
+    .where(eq(planRepositories.repoId, id))
+    .all();
+  const chatRefs = db
+    .select({ id: chats.id })
+    .from(chats)
+    .where(eq(chats.repoId, id))
+    .all();
+  if (planRefs.length > 0 || chatRefs.length > 0) {
+    throw new RepoError(
+      `Cannot delete ${id}: ${planRefs.length} plan(s) and ${chatRefs.length} chat(s) still reference it. Reassign them first.`,
+      409
+    );
+  }
+  db.delete(repositories).where(eq(repositories.id, id)).run();
+}
+
+// Resolution helpers — single source of truth for "which repo does this run
+// in?". Used by lib/agent.ts (task.repoId pinned at creation) and lib/chat.ts
+// (chat.repoId). If a task has no repoId, the agent should escalate rather
+// than guess — see the comment on createTask for the resolution rule.
+export function resolveRepoForTask(taskId: string): RepositoryRow | null {
+  const task = getTask(taskId);
+  if (!task?.repoId) return null;
+  return getRepository(task.repoId);
+}
+
+export function defaultRepoId(): string | null {
+  // Default repo for newly-created plans/chats: prefer R-default if it's
+  // configured (has a local_path), otherwise the first repository with a
+  // local_path, otherwise null.
+  const seeded = getRepository(DEFAULT_REPO_ID);
+  if (seeded?.localPath) return seeded.id;
+  const first = listRepositories().find((r) => r.localPath) ?? listRepositories()[0];
+  return first?.id ?? null;
+}
+
+export function defaultRepo(): RepositoryRow | null {
+  const id = defaultRepoId();
+  return id ? getRepository(id) : null;
 }

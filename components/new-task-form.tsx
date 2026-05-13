@@ -5,13 +5,25 @@ import { useRouter } from "next/navigation";
 import { Loader2, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export function NewTaskForm({ planId }: { planId: string }) {
+interface RepoOption {
+  id: string;
+  name: string;
+}
+
+interface NewTaskFormProps {
+  planId: string;
+  /** Repos attached to the plan. When more than one, a selector appears. */
+  repoOptions?: RepoOption[];
+}
+
+export function NewTaskForm({ planId, repoOptions = [] }: NewTaskFormProps) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [criteria, setCriteria] = useState("");
   const [tags, setTags] = useState("");
   const [assignee, setAssignee] = useState("");
+  const [repoId, setRepoId] = useState(repoOptions[0]?.id ?? "");
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
 
@@ -20,12 +32,17 @@ export function NewTaskForm({ planId }: { planId: string }) {
     setCriteria("");
     setTags("");
     setAssignee("");
+    setRepoId(repoOptions[0]?.id ?? "");
     setError(null);
   };
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
+    if (repoOptions.length > 1 && !repoId) {
+      setError("Pick which repository this task targets.");
+      return;
+    }
     setError(null);
     startTransition(async () => {
       const res = await fetch("/api/tasks", {
@@ -35,6 +52,7 @@ export function NewTaskForm({ planId }: { planId: string }) {
           plan: planId,
           title: title.trim(),
           assignee: assignee.trim() || undefined,
+          repoId: repoId || undefined,
           criteria: criteria
             .split("\n")
             .map((s) => s.trim())
@@ -97,6 +115,18 @@ export function NewTaskForm({ planId }: { planId: string }) {
           placeholder="assignee"
           className="w-28 rounded-sm border border-border/60 bg-background px-2 py-1 text-xs font-mono outline-none focus:border-foreground/40"
         />
+        {repoOptions.length > 1 && (
+          <select
+            value={repoId}
+            onChange={(e) => setRepoId(e.target.value)}
+            className="rounded-sm border border-border/60 bg-background px-2 py-1 text-xs outline-none focus:border-foreground/40"
+          >
+            <option value="">repo…</option>
+            {repoOptions.map((r) => (
+              <option key={r.id} value={r.id}>{r.name}</option>
+            ))}
+          </select>
+        )}
         <input
           value={tags}
           onChange={(e) => setTags(e.target.value)}

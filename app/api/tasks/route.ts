@@ -41,6 +41,7 @@ export async function POST(req: NextRequest) {
       dependencies: input.dependencies,
       criteria: input.criteria,
       date: input.date,
+      repoId: input.repoId ?? undefined,
     });
     return NextResponse.json(task, { status: 201 });
   } catch (e) {
