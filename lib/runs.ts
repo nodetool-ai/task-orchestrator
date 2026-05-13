@@ -753,6 +753,60 @@ function buildImplementPrompt(task: NonNullable<ReturnType<typeof repo.getTask>>
     lines.push("## Depends on (already done)");
     for (const dep of task.dependencies) lines.push(`- ${dep}`);
   }
+
+  // Parent plan context: the broader goal this task belongs to, plus a
+  // snapshot of sibling tasks so the agent knows what's already shipped
+  // and what's still open. The agent can fetch more detail via
+  // mcp__task_orch__get_plan / get_task; this is proactive lookahead.
+  const plan = repo.getPlan(task.planId);
+  if (plan) {
+    lines.push("");
+    lines.push(`# Parent plan: ${plan.id} — ${plan.title}`);
+    lines.push(`(state: ${plan.state}${plan.owner ? `, owner: @${plan.owner}` : ""})`);
+    if (plan.body.trim()) {
+      lines.push("");
+      lines.push("## Plan description");
+      const body = plan.body.trim();
+      const capped =
+        body.length > 6000
+          ? body.slice(0, 6000) +
+            "\n\n…(truncated; call mcp__task_orch__get_plan for the full body)"
+          : body;
+      lines.push(capped);
+    }
+    const siblings = repo
+      .listTasks({ planId: plan.id })
+      .filter((t) => t.id !== task.id);
+    if (siblings.length > 0) {
+      lines.push("");
+      lines.push("## Other tasks in this plan");
+      const rank: Record<string, number> = {
+        in_progress: 0,
+        review: 1,
+        todo: 2,
+        blocked: 3,
+        done: 4,
+        cancelled: 5,
+      };
+      const sorted = [...siblings].sort(
+        (a, b) =>
+          (rank[a.state] ?? 9) - (rank[b.state] ?? 9) || a.id.localeCompare(b.id)
+      );
+      const MAX = 25;
+      for (const s of sorted.slice(0, MAX)) {
+        const meta = [s.state, s.assignee ? `@${s.assignee}` : null]
+          .filter(Boolean)
+          .join(", ");
+        lines.push(`- ${s.id} [${meta}] ${s.title}`);
+      }
+      if (sorted.length > MAX) {
+        lines.push(
+          `- … and ${sorted.length - MAX} more (use mcp__task_orch__list_tasks with plan_id=${plan.id} to see all)`
+        );
+      }
+    }
+  }
+
   lines.push("");
   lines.push("# Working environment");
   lines.push("- You are in an isolated git worktree on a fresh branch.");
