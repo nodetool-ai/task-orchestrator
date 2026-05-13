@@ -3,6 +3,8 @@ import {
   computeDepth,
   sumTreeCost,
   checkTreeBudget,
+  checkAppendableStatus,
+  extractLatestAssistantText,
   MAX_DEPTH,
   DEFAULT_TREE_BUDGET_MULT,
 } from "../lib/spawn-mcp";
@@ -186,5 +188,140 @@ describe("integration: depth + budget on a fake parent chain", () => {
         0
       )
     ).toEqual({ ok: false, reason: "depth" });
+  });
+});
+
+describe("checkAppendableStatus (append_message refusal predicate)", () => {
+  it("refuses closed runs with a closed-specific message", () => {
+    const msg = checkAppendableStatus("closed");
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/closed/i);
+  });
+
+  it("refuses other terminal statuses", () => {
+    for (const s of ["completed", "failed", "cancelled", "budget_exhausted"]) {
+      const msg = checkAppendableStatus(s);
+      expect(msg, `status=${s}`).not.toBeNull();
+      expect(msg, `status=${s}`).toMatch(new RegExp(s));
+    }
+  });
+
+  it("admits idle and pending runs", () => {
+    expect(checkAppendableStatus("idle")).toBeNull();
+    expect(checkAppendableStatus("pending")).toBeNull();
+  });
+
+  it("admits in-flight statuses (runs.append guards the race separately)", () => {
+    // append_message itself doesn't refuse these — runs.append() returns a
+    // clear error if the target is already running. Keeping the predicate
+    // narrow keeps refusal semantics ('this state is non-recoverable')
+    // distinct from race semantics ('come back later').
+    expect(checkAppendableStatus("running")).toBeNull();
+    expect(checkAppendableStatus("preparing")).toBeNull();
+    expect(checkAppendableStatus("pushing")).toBeNull();
+  });
+});
+
+describe("append_message + tree-budget interaction", () => {
+  // The append_message handler uses the same checkTreeBudget helper as
+  // spawn_agent, with the caller's tree as the budget reference. Reuse the
+  // existing pure-helper tests by composing them here in the shape the
+  // handler runs them in.
+  function decideAppend(
+    callerRoot: { budgetMaxUsd: number | null },
+    spent: number,
+    targetStatus: string
+  ): { ok: true } | { ok: false; reason: "budget" | "status" } {
+    const overBudget = checkTreeBudget(callerRoot, spent);
+    if (overBudget) return { ok: false, reason: "budget" };
+    const refusal = checkAppendableStatus(targetStatus);
+    if (refusal) return { ok: false, reason: "status" };
+    return { ok: true };
+  }
+
+  it("admits an append on idle target with under-budget caller tree", () => {
+    expect(decideAppend({ budgetMaxUsd: 10 }, 5, "idle")).toEqual({ ok: true });
+  });
+
+  it("admits append on idle target when caller has no budget cap", () => {
+    expect(decideAppend({ budgetMaxUsd: null }, 999, "idle")).toEqual({ ok: true });
+  });
+
+  it("budget check fires before status check (over-budget rejected even with idle target)", () => {
+    // cap = 10 * 3 = 30
+    expect(decideAppend({ budgetMaxUsd: 10 }, 30, "idle")).toEqual({
+      ok: false,
+      reason: "budget",
+    });
+  });
+
+  it("rejects closed target even when budget is fine", () => {
+    expect(decideAppend({ budgetMaxUsd: 10 }, 0, "closed")).toEqual({
+      ok: false,
+      reason: "status",
+    });
+  });
+});
+
+describe("extractLatestAssistantText", () => {
+  it("returns null for empty input", () => {
+    expect(extractLatestAssistantText([])).toBeNull();
+  });
+
+  it("returns null when no agent rows are present", () => {
+    expect(
+      extractLatestAssistantText([
+        { role: "user", content: JSON.stringify([{ type: "text", text: "hi" }]) },
+        { role: "tool", content: JSON.stringify([{ type: "tool_result" }]) },
+      ])
+    ).toBeNull();
+  });
+
+  it("picks the last agent row's joined text blocks", () => {
+    const rows = [
+      { role: "agent", content: JSON.stringify([{ type: "text", text: "first" }]) },
+      { role: "user", content: JSON.stringify([{ type: "text", text: "ignored" }]) },
+      {
+        role: "agent",
+        content: JSON.stringify([
+          { type: "text", text: "hello" },
+          { type: "tool_use", id: "x" },
+          { type: "text", text: "world" },
+        ]),
+      },
+    ];
+    expect(extractLatestAssistantText(rows)).toBe("hello\nworld");
+  });
+
+  it("skips agent rows with no text and falls back to an earlier one", () => {
+    const rows = [
+      { role: "agent", content: JSON.stringify([{ type: "text", text: "earlier" }]) },
+      { role: "agent", content: JSON.stringify([{ type: "tool_use", id: "x" }]) },
+    ];
+    expect(extractLatestAssistantText(rows)).toBe("earlier");
+  });
+
+  it("tolerates invalid JSON by skipping the row", () => {
+    const rows = [
+      { role: "agent", content: JSON.stringify([{ type: "text", text: "ok" }]) },
+      { role: "agent", content: "{not json" },
+    ];
+    expect(extractLatestAssistantText(rows)).toBe("ok");
+  });
+
+  it("ignores rows whose parsed content is not an array", () => {
+    const rows = [
+      { role: "agent", content: JSON.stringify({ type: "text", text: "object-not-array" }) },
+      { role: "agent", content: JSON.stringify([{ type: "text", text: "good" }]) },
+    ];
+    expect(extractLatestAssistantText(rows)).toBe("good");
+  });
+
+  it("trims whitespace-only text rows out", () => {
+    const rows = [
+      { role: "agent", content: JSON.stringify([{ type: "text", text: "real" }]) },
+      { role: "agent", content: JSON.stringify([{ type: "text", text: "   \n  " }]) },
+    ];
+    expect(extractLatestAssistantText(rows)).toBe("real");
   });
 });
