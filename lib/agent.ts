@@ -413,7 +413,11 @@ async function runSession(
   const bus = new EventEmitter();
   runners.set(sessionId, { abort, bus });
 
-  const branch = `claude/agent-${sessionId}`;
+  // Branch name includes the task id so it doesn't collide with stale
+  // `claude/agent-${N}` branches left on the remote by prior orchestrator
+  // installs (sqlite autoincrement restarts at 1 on DB reset, but the remote
+  // remembers). Task ids are date-prefixed and never recycle.
+  const branch = `claude/${taskId.toLowerCase()}-${sessionId}`;
   let task = repo.getTask(taskId);
   if (!task) {
     fail(sessionId, `Task ${taskId} disappeared before session could start`);
