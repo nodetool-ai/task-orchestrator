@@ -22,26 +22,29 @@ export default async function SessionsPage() {
       ) : (
         <div className="divide-y divide-border/60 rounded-lg border border-border/60 bg-card/40">
           {sessions.map((s) => (
-            <Link
+            <div
               key={s.id}
-              href={`/sessions/${s.id}`}
               className="block px-4 py-3 hover:bg-muted/40 transition-colors"
             >
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                <span className="font-mono text-xs text-muted-foreground tabular-nums">
-                  #{s.id}
-                </span>
-                <span className="text-sm font-medium">
-                  {taskTitles.get(s.taskId) ?? s.taskId}
-                </span>
-                <span className="font-mono text-[11px] text-muted-foreground">{s.taskId}</span>
-                <SessionStatusPill status={s.status} />
+                <Link
+                  href={`/sessions/${s.id}`}
+                  className="flex flex-wrap items-center gap-x-3 gap-y-1 flex-1 min-w-0"
+                >
+                  <span className="font-mono text-xs text-muted-foreground tabular-nums">
+                    #{s.id}
+                  </span>
+                  <span className="text-sm font-medium">
+                    {taskTitles.get(s.taskId) ?? s.taskId}
+                  </span>
+                  <span className="font-mono text-[11px] text-muted-foreground">{s.taskId}</span>
+                  <SessionStatusPill status={s.status} />
+                </Link>
                 {s.prUrl && (
                   <a
                     href={s.prUrl}
                     target="_blank"
                     rel="noreferrer"
-                    onClick={(e) => e.stopPropagation()}
                     className="text-[11px] text-muted-foreground hover:text-foreground underline decoration-dotted"
                   >
                     PR ↗
@@ -55,7 +58,7 @@ export default async function SessionsPage() {
                 {s.totalCostUsd !== null && <span>· ${s.totalCostUsd.toFixed(4)}</span>}
                 {s.error && <span className="text-state-blocked">{s.error}</span>}
               </div>
-            </Link>
+            </div>
           ))}
         </div>
       )}
