@@ -99,6 +99,13 @@ export const SESSION_STATUSES = [
   "completed",
   "failed",
   "cancelled",
+  // v2 (lib/runs.ts): chat-style runs sit `idle` between turns and resume
+  // back into `running` when a new message is appended. `budget_exhausted`
+  // is a soft stop when a configured budget is hit; `closed` is the user
+  // archiving an idle run.
+  "idle",
+  "budget_exhausted",
+  "closed",
 ] as const;
 export type SessionStatus = (typeof SESSION_STATUSES)[number];
 
@@ -130,7 +137,16 @@ export interface AgentEventRow {
 }
 
 export function isTerminalStatus(s: SessionStatus): boolean {
-  return s === "completed" || s === "failed" || s === "cancelled";
+  // 'idle' is intentionally NOT terminal: an idle run is waiting for the
+  // next user message and can be resumed. 'closed' / 'budget_exhausted' are
+  // terminal; the user must explicitly fork or extend the budget to revive.
+  return (
+    s === "completed" ||
+    s === "failed" ||
+    s === "cancelled" ||
+    s === "closed" ||
+    s === "budget_exhausted"
+  );
 }
 
 export type ChatRole = "user" | "assistant" | "tool_result";
