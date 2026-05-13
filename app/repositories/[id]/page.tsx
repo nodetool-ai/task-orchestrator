@@ -98,7 +98,7 @@ export default async function RepositoryPage({
             {allSessions.slice(0, 20).map((s) => (
               <Link
                 key={s.id}
-                href={`/sessions/${s.id}`}
+                href={`/runs/${s.id}`}
                 className="flex items-center gap-3 px-3 py-2 hover:bg-muted/40 transition-colors"
               >
                 <span className="font-mono text-xs text-muted-foreground tabular-nums">

@@ -23,7 +23,7 @@ export function ResumeSessionButton({ sessionId }: { sessionId: number }) {
         return;
       }
       const next = await res.json();
-      router.push(`/sessions/${next.id}`);
+      router.push(`/runs/${next.id}`);
     });
   };
 
