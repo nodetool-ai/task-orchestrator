@@ -47,19 +47,20 @@ acceptance_criteria      checkable items per task
   done        INTEGER  boolean (0/1)
   position    INTEGER  ordering within task
 
-agent_sessions           one row per Claude Agent SDK run on a task
+agent_sessions           one row per pi.dev SDK run on a task
   id              INTEGER  AUTOINC PK
   task_id         TEXT     FK → tasks.id ON DELETE CASCADE
+  persona_id      TEXT     FK → personas.id ON DELETE SET NULL  default 'implementor'
   status          TEXT     see session status machine
   model           TEXT     e.g. claude-sonnet-4-5
   branch          TEXT     e.g. claude/agent-42
   worktree_path   TEXT     absolute path to the git worktree
   pr_url          TEXT     filled in after gh pr create
   error           TEXT     populated on failure
-  total_cost_usd  REAL     captured from SDK result.total_cost_usd
+  total_cost_usd  REAL     captured from SDK result.total_cost_usd (populated only on legacy pre-pi rows; not enforced post-cutover).
   input_tokens    INTEGER  captured from SDK result.usage
   output_tokens   INTEGER  captured from SDK result.usage
-  sdk_session_id  TEXT     SDK's own session id; lets us resume later
+  sdk_session_id  TEXT     pi.dev: absolute path to the JSONL session file under `<cwd>/.pi/sessions/`. Used to resume.
   resume_of       INTEGER  prior agent_sessions.id this run continues
   started_at      INTEGER  ms epoch
   completed_at    INTEGER  ms epoch, nullable
@@ -71,6 +72,35 @@ agent_events             append-only log per session (replay + SSE source)
                        | prompt | worktree | pr | warning
   payload     TEXT     JSON
   created_at  INTEGER  ms epoch
+
+agent_messages           persisted assistant/tool/user message blocks
+  id          INTEGER  AUTOINC PK
+  run_id      INTEGER  FK → agent_sessions.id ON DELETE CASCADE
+  role        TEXT     'user' | 'agent' | 'tool' | 'system'
+  content     TEXT     JSON array of content blocks
+  created_at  INTEGER  ms epoch
+
+personas                 persona registry (seeded from lib/personas/*.ts)
+  id                  TEXT  PK              e.g. 'reviewer', 'implementor'
+  name                TEXT  NOT NULL        display name
+  description         TEXT
+  system_prompt       TEXT  NOT NULL
+  model_provider      TEXT  NOT NULL        e.g. 'anthropic'
+  model_id            TEXT  NOT NULL        e.g. 'claude-opus-4-5'
+  thinking_level      TEXT                  'low' | 'medium' | 'high' | NULL
+  tools_profile       TEXT  NOT NULL        composed profile keys
+  skill_paths         TEXT  NOT NULL        JSON array of repo-relative paths
+  budget_max_turns    INTEGER
+  budget_max_seconds  INTEGER
+  created_at, updated_at
+
+persona_memories         per-persona cross-session notes
+  id          INTEGER  AUTOINC PK
+  persona_id  TEXT     FK → personas.id  ON DELETE CASCADE
+  scope       TEXT     NOT NULL              'global' | <repo_id> | <task_id>
+  body        TEXT     NOT NULL DEFAULT ''   markdown bullets
+  updated_at  INTEGER  ms epoch
+  UNIQUE(persona_id, scope)
 ```
 
 ## ID format
