@@ -59,6 +59,11 @@ const PROFILES: Record<string, ProfileDef> = {
   },
 };
 
+/** Static list of known profile keys for UI pickers and validation. */
+export function listProfiles(): string[] {
+  return Object.keys(PROFILES);
+}
+
 export interface ResolvedProfile {
   factories: ExtensionFactory[];
   allowsRepoWrite: boolean;

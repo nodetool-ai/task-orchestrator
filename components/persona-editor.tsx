@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Loader2, Check, Save } from "lucide-react";
 import { ProviderModelPicker } from "@/components/pickers/provider-model-picker";
+import { ToolsPicker } from "@/components/pickers/tools-picker";
 
 export interface PersonaDto {
   id: string;
@@ -134,13 +135,10 @@ export function PersonaEditor({ persona }: Props) {
         </Field>
       </div>
 
-      <Field label="Tools profile">
-        <input
-          type="text"
+      <Field label="Tools">
+        <ToolsPicker
           value={draft.toolsProfile}
-          onChange={(e) => update("toolsProfile", e.target.value)}
-          className={`${inputClass} font-mono`}
-          placeholder="orchestrator,repo_write,gh_pr"
+          onChange={(next) => update("toolsProfile", next)}
         />
       </Field>
 
