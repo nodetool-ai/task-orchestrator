@@ -11,6 +11,5 @@ small tasks over one large one.`,
   model: { provider: "kimi-coding", id: "kimi-for-coding" },
   thinkingLevel: "medium",
   toolsProfile: "orchestrator,repo_read",
-  skillPaths: ["lib/personas/skills/planning"],
   budget: { maxTurns: 40 },
 };

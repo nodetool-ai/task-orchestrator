@@ -13,6 +13,5 @@ is correct, tested, and consistent with the codebase.`,
   model: { provider: "kimi-coding", id: "kimi-for-coding" },
   thinkingLevel: "high",
   toolsProfile: "repo_read,gh_pr,gh_ci",
-  skillPaths: ["lib/personas/skills/code-review"],
   budget: { maxTurns: 20 },
 };

@@ -6,6 +6,5 @@ export interface Persona {
   model: { provider: string; id: string };
   thinkingLevel?: "low" | "medium" | "high";
   toolsProfile: string;
-  skillPaths: string[];
   budget?: { maxTurns?: number; maxSeconds?: number };
 }

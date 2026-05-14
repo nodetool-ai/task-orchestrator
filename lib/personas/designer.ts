@@ -11,6 +11,5 @@ docs/specs/. Do not implement.`,
   model: { provider: "kimi-coding", id: "kimi-for-coding" },
   thinkingLevel: "medium",
   toolsProfile: "orchestrator,repo_write",
-  skillPaths: ["lib/personas/skills/design"],
   budget: { maxTurns: 30 },
 };

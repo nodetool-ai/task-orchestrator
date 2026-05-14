@@ -5,7 +5,7 @@ import type { Persona } from "../../lib/personas/types";
 const persona: Persona = {
   id: "x", name: "X", description: "", systemPrompt: "YOU ARE X.",
   model: { provider: "anthropic", id: "claude-opus-4-5" },
-  toolsProfile: "", skillPaths: [],
+  toolsProfile: ""
 };
 
 function makeStub() {

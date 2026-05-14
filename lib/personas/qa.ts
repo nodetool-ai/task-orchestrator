@@ -10,6 +10,5 @@ pass or fail with concrete evidence (commands run, outputs observed). Do not
 modify product code; you may write or fix tests.`,
   model: { provider: "kimi-coding", id: "kimi-for-coding" },
   toolsProfile: "orchestrator,repo_read,gh_pr,gh_ci",
-  skillPaths: ["lib/personas/skills/qa"],
   budget: { maxTurns: 30 },
 };

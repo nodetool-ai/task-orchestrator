@@ -12,7 +12,7 @@ const persona: Persona = {
   id: "reviewer", name: "Reviewer", description: "",
   systemPrompt: "review code",
   model: { provider: "anthropic", id: "claude-opus-4-5" },
-  toolsProfile: "repo_read", skillPaths: [],
+  toolsProfile: "repo_read"
 };
 
 function makeStub() {

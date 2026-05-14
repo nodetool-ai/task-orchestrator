@@ -904,7 +904,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     model: { provider: persona.modelProvider, id: persona.modelId },
     thinkingLevel: (persona.thinkingLevel ?? undefined) as "low" | "medium" | "high" | undefined,
     toolsProfile: persona.toolsProfile,
-    skillPaths: JSON.parse(persona.skillPaths) as string[],
+    skillPaths: [] as string[],
   };
 
   const factories = [
@@ -924,11 +924,13 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   const modelRegistry = ModelRegistry.create(authStorage);
 
   const agentDir = getAgentDir();
+  // Skills come from pi's default discovery: <cwd>/.pi/skills/, .agents/skills/
+  // (cwd + ancestors), ~/.pi/agent/skills/, ~/.agents/skills/. We don't add
+  // persona-specific paths anymore; skills belong to the project, not the role.
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir,
     extensionFactories: factories,
-    additionalSkillPaths: personaForExt.skillPaths.map((p) => path.resolve(cwd, p)),
   });
 
   const { session } = await createAgentSession({

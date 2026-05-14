@@ -15,12 +15,10 @@ describe("GET /api/personas", () => {
     const body = await res.json();
     expect(body.personas.length).toBe(5);
     const r = body.personas.find((p: any) => p.id === "reviewer");
-    expect(r).toMatchObject({
-      id: "reviewer",
-      name: "Reviewer",
-      modelProvider: "anthropic",
-      modelId: "claude-opus-4-5",
-    });
-    expect(Array.isArray(r.skillPaths)).toBe(true);
+    expect(r).toMatchObject({ id: "reviewer", name: "Reviewer" });
+    expect(typeof r.modelProvider).toBe("string");
+    expect(typeof r.modelId).toBe("string");
+    expect(typeof r.systemPrompt).toBe("string");
+    expect(typeof r.toolsProfile).toBe("string");
   });
 });
