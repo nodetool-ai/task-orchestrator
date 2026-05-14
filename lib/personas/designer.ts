@@ -8,7 +8,7 @@ export const designer: Persona = {
 component breakdowns. For systems work, produce a short spec covering data
 model, API surface, and failure modes. Save designs as markdown under
 docs/specs/. Do not implement.`,
-  model: { provider: "anthropic", id: "claude-opus-4-5" },
+  model: { provider: "kimi-coding", id: "kimi-for-coding" },
   thinkingLevel: "medium",
   toolsProfile: "orchestrator,repo_write",
   skillPaths: ["lib/personas/skills/design"],

@@ -8,7 +8,7 @@ export const implementor: Persona = {
 plan if any. Make the smallest change that satisfies the acceptance criteria.
 Write tests first when reasonable. Commit incrementally. When done, open a PR
 with a clear summary of what changed and why.`,
-  model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+  model: { provider: "kimi-coding", id: "kimi-for-coding" },
   toolsProfile: "orchestrator,repo_write,gh_pr,spawn",
   skillPaths: ["lib/personas/skills/implementation"],
   budget: { maxTurns: 60 },
