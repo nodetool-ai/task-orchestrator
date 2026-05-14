@@ -81,6 +81,7 @@ export interface CreateRunInput {
   budget?: Budget | null;
   userId?: number | null;
   title?: string | null;
+  personaId?: string | null;
   /** For implement-style runs: the base branch the worktree branches from. */
   baseBranch?: string;
   /** Optional initial agent prompt; if omitted the run waits for runs.append. */
@@ -121,6 +122,7 @@ export interface RunRow {
   budgetMaxSeconds: number | null;
   userId: number | null;
   title: string | null;
+  personaId: string | null;
   /** Pre-migration-0009 chats.id, for /chat/[id] redirect lookups. */
   legacyChatId: number | null;
   startedAt: Date;
@@ -358,6 +360,7 @@ export function create(input: CreateRunInput): RunRow {
       title: input.title ?? null,
       userId: input.userId ?? null,
       prUrl: input.prUrl ?? null,
+      personaId: input.personaId ?? "implementor",
       budgetMaxTurns: input.budget?.maxTurns ?? null,
       budgetMaxUsd: input.budget?.maxUsd ?? null,
       budgetMaxSeconds: input.budget?.maxSeconds ?? null,
@@ -1189,6 +1192,7 @@ function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     budgetMaxSeconds: row.budgetMaxSeconds,
     userId: row.userId,
     title: row.title,
+    personaId: row.personaId,
     legacyChatId: row.legacyChatId,
     startedAt: row.startedAt,
     completedAt: row.completedAt,
