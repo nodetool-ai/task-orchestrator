@@ -21,6 +21,7 @@ const createRunSchema = z.object({
   title: z.string().nullable().optional(),
   baseBranch: z.string().optional(),
   initialPrompt: z.string().nullable().optional(),
+  personaId: z.string().min(1).optional(),
   defer: z.boolean().optional(),
   budget: z
     .object({
@@ -55,6 +56,7 @@ export async function POST(req: NextRequest) {
       title: input.title ?? undefined,
       baseBranch: input.baseBranch,
       initialPrompt: input.initialPrompt ?? undefined,
+      personaId: input.personaId,
       defer: input.defer,
       budget: input.budget ?? undefined,
       userId: uid,

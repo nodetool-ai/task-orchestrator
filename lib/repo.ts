@@ -3,12 +3,15 @@ import { db } from "@/db";
 import {
   acceptanceCriteria,
   agentSessions,
+  personaMemories,
+  personas as personasTable,
   planRepositories,
   plans,
   repositories,
   taskDependencies,
   taskNotes,
   tasks,
+  type Persona,
   type Plan as PlanRow,
   type Repository as RepositoryDbRow,
   type Task as TaskRow,
@@ -907,4 +910,129 @@ export function defaultRepoId(): string | null {
 export function defaultRepo(): RepositoryRow | null {
   const id = defaultRepoId();
   return id ? getRepository(id) : null;
+}
+
+// ──────────────────────────────────────────────────────────
+// Personas
+// ──────────────────────────────────────────────────────────
+
+export interface PersonaUpsert {
+  id: string;
+  name: string;
+  description?: string | null;
+  systemPrompt: string;
+  modelProvider: string;
+  modelId: string;
+  thinkingLevel?: string | null;
+  toolsProfile: string;
+  skillPaths: string[];
+  budgetMaxTurns?: number | null;
+  budgetMaxSeconds?: number | null;
+}
+
+export function getPersona(id: string): Persona | null {
+  const row = db.select().from(personasTable).where(eq(personasTable.id, id)).get();
+  return row ?? null;
+}
+
+export function listPersonaIds(): string[] {
+  return db
+    .select({ id: personasTable.id })
+    .from(personasTable)
+    .orderBy(asc(personasTable.id))
+    .all()
+    .map((r) => r.id);
+}
+
+export function listPersonas(): Persona[] {
+  return db.select().from(personasTable).orderBy(asc(personasTable.id)).all();
+}
+
+export function upsertPersona(p: PersonaUpsert): void {
+  const now = new Date();
+  db.insert(personasTable)
+    .values({
+      id: p.id,
+      name: p.name,
+      description: p.description ?? null,
+      systemPrompt: p.systemPrompt,
+      modelProvider: p.modelProvider,
+      modelId: p.modelId,
+      thinkingLevel: p.thinkingLevel ?? null,
+      toolsProfile: p.toolsProfile,
+      skillPaths: JSON.stringify(p.skillPaths),
+      budgetMaxTurns: p.budgetMaxTurns ?? null,
+      budgetMaxSeconds: p.budgetMaxSeconds ?? null,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: personasTable.id,
+      set: {
+        name: p.name,
+        description: p.description ?? null,
+        systemPrompt: p.systemPrompt,
+        modelProvider: p.modelProvider,
+        modelId: p.modelId,
+        thinkingLevel: p.thinkingLevel ?? null,
+        toolsProfile: p.toolsProfile,
+        skillPaths: JSON.stringify(p.skillPaths),
+        budgetMaxTurns: p.budgetMaxTurns ?? null,
+        budgetMaxSeconds: p.budgetMaxSeconds ?? null,
+        updatedAt: now,
+      },
+    })
+    .run();
+}
+
+export function getPersonaMemory(personaId: string, scope: string): string | null {
+  const row = db
+    .select({ body: personaMemories.body })
+    .from(personaMemories)
+    .where(and(eq(personaMemories.personaId, personaId), eq(personaMemories.scope, scope)))
+    .get();
+  return row ? row.body : null;
+}
+
+export function appendPersonaMemory(personaId: string, scope: string, note: string): void {
+  const now = new Date();
+  const trimmed = note.trim();
+  if (!trimmed) return;
+  const firstBullet = `- ${trimmed}`;
+  const appendFragment = `\n- ${trimmed}`;
+  db.insert(personaMemories)
+    .values({ personaId, scope, body: firstBullet, updatedAt: now })
+    .onConflictDoUpdate({
+      target: [personaMemories.personaId, personaMemories.scope],
+      set: {
+        body: sql`${personaMemories.body} || ${appendFragment}`,
+        updatedAt: now,
+      },
+    })
+    .run();
+}
+
+export function removePersonaMemoryLine(
+  personaId: string,
+  scope: string,
+  match: string
+): number {
+  const body = getPersonaMemory(personaId, scope);
+  if (!body) return 0;
+  const lines = body.split("\n");
+  const kept = lines.filter((l) => !l.includes(match));
+  const removed = lines.length - kept.length;
+  if (removed === 0) return 0;
+  if (kept.length === 0) {
+    db.delete(personaMemories)
+      .where(and(eq(personaMemories.personaId, personaId), eq(personaMemories.scope, scope)))
+      .run();
+    return removed;
+  }
+  const now = new Date();
+  db.update(personaMemories)
+    .set({ body: kept.join("\n"), updatedAt: now })
+    .where(and(eq(personaMemories.personaId, personaId), eq(personaMemories.scope, scope)))
+    .run();
+  return removed;
 }

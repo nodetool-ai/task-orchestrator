@@ -14,7 +14,8 @@ import { db } from "@/db";
 import { agentMessages, agentSessions } from "@/db/schema";
 import * as repo from "./repo";
 import * as runs from "./runs";
-import type { SdkContentBlock, SdkMessageEnvelope } from "./sdk-message";
+import type { SdkContentBlock } from "./sdk-message";
+import type { RunEnvelope } from "./pi-event-mapper";
 import type { ChatMessageRow, ChatRole, ChatRow } from "./types";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -170,7 +171,7 @@ export interface RunChatArgs {
 export interface ChatStreamEvent {
   type: "user_message" | "sdk" | "done" | "error";
   message?: ChatMessageRow;
-  sdk?: SdkMessageEnvelope;
+  sdk?: RunEnvelope;
   error?: string;
 }
 

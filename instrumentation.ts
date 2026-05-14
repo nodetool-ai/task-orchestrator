@@ -17,4 +17,7 @@ export async function register(): Promise<void> {
     startWorktreeGc: () => void;
   };
   mod.startWorktreeGc();
+
+  const { seedPersonas } = await import("@/db/seed-personas");
+  seedPersonas();
 }

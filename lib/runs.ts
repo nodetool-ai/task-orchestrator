@@ -33,18 +33,26 @@ import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import path, { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, notInArray, or } from "drizzle-orm";
+import { createAgentSession, SessionManager, AuthStorage, ModelRegistry, DefaultResourceLoader, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getModel } from "@earendil-works/pi-ai";
 
 import { db } from "@/db";
 import { agentEvents, agentMessages, agentSessions } from "@/db/schema";
 import * as repo from "./repo";
 import { buildImplementPrompt, extractReviewOutcome } from "./run-templates";
 import { parsePrUrl } from "./gh-url";
-import type { SdkContentBlock, SdkMessageEnvelope } from "./sdk-message";
+import type { SdkContentBlock } from "./sdk-message";
 import type { AgentSessionFull, SessionStatus } from "./types";
 import { isTerminalStatus } from "./types";
+import { resolveProfiles, type ProfileContext } from "./profiles";
+import { mapPiEvent, type RunEnvelope } from "./pi-event-mapper";
+import { sandboxFactory } from "./extensions/sandbox";
+import { personaPromptFactory } from "./extensions/persona-prompt";
+import { personaMemoryFactory } from "./extensions/persona-memory";
+import { abortBridgeFactory } from "./extensions/abort-bridge";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
@@ -81,6 +89,7 @@ export interface CreateRunInput {
   budget?: Budget | null;
   userId?: number | null;
   title?: string | null;
+  personaId?: string | null;
   /** For implement-style runs: the base branch the worktree branches from. */
   baseBranch?: string;
   /** Optional initial agent prompt; if omitted the run waits for runs.append. */
@@ -121,6 +130,7 @@ export interface RunRow {
   budgetMaxSeconds: number | null;
   userId: number | null;
   title: string | null;
+  personaId: string | null;
   /** Pre-migration-0009 chats.id, for /chat/[id] redirect lookups. */
   legacyChatId: number | null;
   startedAt: Date;
@@ -159,7 +169,7 @@ export interface AppendInput {
 export interface AppendStreamEvent {
   type: "user_message" | "sdk" | "done" | "error";
   message?: MessageRow;
-  sdk?: SdkMessageEnvelope;
+  sdk?: RunEnvelope;
   error?: string;
 }
 
@@ -197,122 +207,6 @@ function getLock(runId: number): PerRunLock {
     locks.set(runId, l);
   }
   return l;
-}
-
-// ──────────────────────────────────────────────────────────
-// Tool profile registry
-// ──────────────────────────────────────────────────────────
-//
-// A profile is a string key that resolves to one or more named MCP servers.
-// `toolsProfile` on a run is a comma-separated list of profile keys; the
-// runner unions all servers from the listed profiles into the `mcpServers`
-// map handed to sdk.query().
-//
-// `orchestrator` mounts the task-orchestrator MCP surface (plans, tasks,
-// notes, criteria, sessions). `repo_write` and `repo_read` are markers for
-// what the SDK should be allowed to do in the cwd: there's no separate MCP
-// server today (the SDK's built-in Bash/Edit/Read tools handle this), but
-// the profile string drives sandbox + permission-mode wiring. `gh_pr` mounts
-// the GitHub PR helper server (open/list/comment).
-
-export type McpServerFactory = (ctx: ProfileContext) => unknown | Promise<unknown>;
-
-export interface ProfileContext {
-  runId: number;
-  run: RunRow;
-  /** Author label for any orchestrator-side mutations the agent makes. */
-  author: string;
-  /** Optional taskId scoping for the orchestrator MCP server. */
-  taskId: string | null;
-  /** Resolved cwd for the SDK turn — repos that shell out (gh, git) use this. */
-  cwd: string;
-}
-
-interface ProfileDef {
-  /** MCP servers this profile contributes; map key is the SDK mcpServers key. */
-  servers: Record<string, McpServerFactory>;
-  /** Permission posture this profile imposes on the SDK call. */
-  allowsRepoWrite?: boolean;
-}
-
-const PROFILES: Record<string, ProfileDef> = {
-  orchestrator: {
-    servers: {
-      task_orch: async (ctx) => {
-        const { createOrchestratorMcpServer } = await import("./agent-mcp");
-        return createOrchestratorMcpServer({
-          author: ctx.author,
-          defaultTaskId: ctx.taskId ?? undefined,
-        });
-      },
-    },
-  },
-  repo_write: {
-    // No MCP server: the SDK's built-in Bash/Edit/Write tools handle file
-    // writes. Profile presence flips allowsRepoWrite which is consumed by
-    // future permission gating.
-    servers: {},
-    allowsRepoWrite: true,
-  },
-  repo_read: {
-    // Same shape as repo_write minus mutation. Today both rely on
-    // permissionMode='bypassPermissions' inside the sandbox; the profile
-    // string is the source of truth so a future tightening can switch on it.
-    servers: {},
-    allowsRepoWrite: false,
-  },
-  gh_pr: {
-    servers: {
-      gh_pr: async (ctx) => {
-        const { createGhPrMcpServer } = await import("./gh-pr-mcp");
-        return createGhPrMcpServer({ cwd: ctx.cwd });
-      },
-    },
-  },
-  gh_ci: {
-    servers: {
-      gh_ci: async (ctx) => {
-        const { createGhCiMcpServer } = await import("./gh-ci-mcp");
-        return createGhCiMcpServer({ cwd: ctx.cwd });
-      },
-    },
-  },
-  spawn: {
-    servers: {
-      spawn: async (ctx) => {
-        const { createSpawnMcpServer } = await import("./spawn-mcp");
-        return createSpawnMcpServer({ runId: ctx.runId, runRow: ctx.run });
-      },
-    },
-  },
-};
-
-interface ResolvedProfile {
-  servers: Record<string, unknown>;
-  allowsRepoWrite: boolean;
-}
-
-async function resolveProfiles(profileString: string, ctx: ProfileContext): Promise<ResolvedProfile> {
-  const names = profileString
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  const servers: Record<string, unknown> = {};
-  let allowsRepoWrite = false;
-  for (const name of names) {
-    const def = PROFILES[name];
-    if (!def) {
-      // Unknown profile: log but don't crash. New profiles ship via code; an
-      // old DB row may reference one we no longer recognise.
-      console.warn(`[runs] unknown tool profile '${name}' on run #${ctx.runId}`);
-      continue;
-    }
-    if (def.allowsRepoWrite) allowsRepoWrite = true;
-    for (const [key, factory] of Object.entries(def.servers)) {
-      servers[key] = await factory(ctx);
-    }
-  }
-  return { servers, allowsRepoWrite };
 }
 
 // ──────────────────────────────────────────────────────────
@@ -358,6 +252,7 @@ export function create(input: CreateRunInput): RunRow {
       title: input.title ?? null,
       userId: input.userId ?? null,
       prUrl: input.prUrl ?? null,
+      personaId: input.personaId ?? "implementor",
       budgetMaxTurns: input.budget?.maxTurns ?? null,
       budgetMaxUsd: input.budget?.maxUsd ?? null,
       budgetMaxSeconds: input.budget?.maxSeconds ?? null,
@@ -954,11 +849,11 @@ interface RunOneTurnArgs {
   prompt: string;
   abort: AbortController;
   author: string;
-  onSdk?: (m: SdkMessageEnvelope) => void;
+  onSdk?: (m: RunEnvelope) => void;
 }
 
 interface TurnResult {
-  envelopes: SdkMessageEnvelope[];
+  envelopes: RunEnvelope[];
   summary: string | null;
   sdkSessionId: string | null;
   totalCostUsd: number | null;
@@ -970,103 +865,131 @@ interface TurnResult {
 async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   const { run, cwd, prompt, abort, author, onSdk } = args;
 
-  const sdk = (await import("@anthropic-ai/claude-agent-sdk")) as {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    query: (input: { prompt: string; options?: any }) => AsyncIterable<unknown>;
-  };
+  const persona = repo.getPersona(run.personaId ?? "implementor");
+  if (!persona) {
+    throw new Error(
+      `Persona '${run.personaId ?? "implementor"}' not found; ` +
+      `seed personas via db/seed-personas.ts.`
+    );
+  }
+
+  const modelId = run.model ?? persona.modelId;
+  const profileSpec = run.toolsProfile ?? persona.toolsProfile;
 
   const profileCtx: ProfileContext = {
-    runId: run.id,
-    run,
-    author,
-    taskId: run.taskId,
-    cwd,
+    runId: run.id, run, author, taskId: run.taskId, cwd,
   };
-  const { servers } = await resolveProfiles(run.toolsProfile, profileCtx);
+  const { factories: profileFactories } = await resolveProfiles(profileSpec, profileCtx);
 
   const sandboxDbPath = sandboxDbPathFor(run, cwd);
-  const env = sanitizeEnv(process.env, { sandboxDbPath });
+  const personaForExt = {
+    id: persona.id,
+    name: persona.name,
+    description: persona.description ?? "",
+    systemPrompt: persona.systemPrompt,
+    model: { provider: persona.modelProvider, id: persona.modelId },
+    thinkingLevel: (persona.thinkingLevel ?? undefined) as "low" | "medium" | "high" | undefined,
+    toolsProfile: persona.toolsProfile,
+    skillPaths: JSON.parse(persona.skillPaths) as string[],
+  };
 
-  const stream = sdk.query({
-    prompt,
-    options: {
-      cwd,
-      permissionMode: "bypassPermissions",
-      model: run.model ?? DEFAULT_MODEL,
-      env,
-      abortController: abort,
-      stderr: (data: string) => {
-        // Surface SDK stderr to console; consumers reading the bus get
-        // a stderr envelope too.
-        console.error(`[run ${run.id}] sdk stderr:`, data.trimEnd());
-      },
-      systemPrompt: { type: "preset", preset: "claude_code" },
-      mcpServers: servers,
-      resume: run.sdkSessionId ?? undefined,
-      sandbox: SANDBOX_OPTS,
-    },
+  const factories = [
+    personaPromptFactory(personaForExt),
+    personaMemoryFactory(personaForExt, run, repo, cwd),
+    sandboxFactory(cwd, sandboxDbPath),
+    abortBridgeFactory(abort),
+    ...profileFactories,
+  ];
+
+  const sessionDir = path.join(cwd, ".pi", "sessions");
+  const sessionManager = run.sdkSessionId
+    ? SessionManager.open(run.sdkSessionId, sessionDir)
+    : SessionManager.create(cwd, sessionDir);
+
+  const authStorage = AuthStorage.create();
+  const modelRegistry = ModelRegistry.create(authStorage);
+
+  const agentDir = getAgentDir();
+  const resourceLoader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    extensionFactories: factories,
+    additionalSkillPaths: personaForExt.skillPaths.map((p) => path.resolve(cwd, p)),
   });
 
-  const envelopes: SdkMessageEnvelope[] = [];
-  const assistantBlocks: SdkContentBlock[] = [];
+  const { session } = await createAgentSession({
+    cwd,
+    model: getModel(persona.modelProvider as any, modelId as any),
+    thinkingLevel: (persona.thinkingLevel ?? undefined) as any,
+    authStorage,
+    modelRegistry,
+    sessionManager,
+    resourceLoader,
+  });
+
+  const envelopes: RunEnvelope[] = [];
+  const assistantBlocks: any[] = [];
   let summary: string | null = null;
   let lastAssistantText: string | null = null;
   let sdkSessionId: string | null = null;
-  let totalCostUsd: number | null = null;
   let inputTokens: number | null = null;
   let outputTokens: number | null = null;
   let turns = 0;
 
-  for await (const raw of stream) {
-    if (abort.signal.aborted) break;
-    const m = raw as SdkMessageEnvelope;
-    envelopes.push(m);
-    onSdk?.(m);
+  const stop = session.subscribe((rawEv: any) => {
+    if (abort.signal.aborted) return;
 
-    if (m.type === "system" && m.subtype === "init" && m.session_id) {
-      sdkSessionId = m.session_id;
-      // Persist immediately so a crash mid-turn still leaves us a resume id.
-      db.update(agentSessions)
-        .set({ sdkSessionId })
-        .where(eq(agentSessions.id, run.id))
-        .run();
-    }
+    if (rawEv.type === "turn_end") turns += 1;
 
-    if (m.type === "assistant" && m.message?.content) {
-      for (const b of m.message.content) assistantBlocks.push(b);
-      const text = m.message.content
-        .filter((b) => b?.type === "text" && typeof b.text === "string")
-        .map((b) => b.text!)
-        .join("\n")
-        .trim();
-      if (text) lastAssistantText = text;
-      turns += 1;
-    }
+    for (const env of mapPiEvent(rawEv, session, sessionManager)) {
+      envelopes.push(env);
+      onSdk?.(env);
 
-    if (m.type === "user" && m.message?.content) {
-      const toolResults = m.message.content.filter((b) => b.type === "tool_result");
-      if (toolResults.length > 0) {
-        persistMessage(run.id, "tool", toolResults);
+      if (env.type === "system" && env.subtype === "init" && env.session_id) {
+        sdkSessionId = env.session_id;
+        db.update(agentSessions)
+          .set({ sdkSessionId })
+          .where(eq(agentSessions.id, run.id))
+          .run();
+      }
+
+      if (env.type === "assistant" && env.message?.content) {
+        for (const b of env.message.content) assistantBlocks.push(b);
+        const text = env.message.content
+          .filter((b: any) => b.type === "text" && typeof b.text === "string")
+          .map((b: any) => b.text)
+          .join("\n").trim();
+        if (text) lastAssistantText = text;
+      }
+
+      if (env.type === "user" && env.message?.content) {
+        const toolResults = env.message.content.filter((b: any) => b.type === "tool_result");
+        if (toolResults.length > 0) persistMessage(run.id, "tool", toolResults as any);
+      }
+
+      if (env.type === "result") {
+        if (!env.is_error && typeof env.result === "string") summary = env.result.trim() || null;
+        inputTokens = env.usage?.input_tokens ?? inputTokens;
+        outputTokens = env.usage?.output_tokens ?? outputTokens;
       }
     }
+  });
 
-    if (m.type === "result") {
-      if (!m.is_error && typeof m.result === "string") summary = m.result.trim() || null;
-      totalCostUsd = m.total_cost_usd ?? totalCostUsd;
-      inputTokens = m.usage?.input_tokens ?? inputTokens;
-      outputTokens = m.usage?.output_tokens ?? outputTokens;
-    }
+  try {
+    await session.prompt(prompt);  // resolves after agent_end settles
+  } finally {
+    stop();
   }
 
   if (assistantBlocks.length > 0) {
-    persistMessage(run.id, "agent", assistantBlocks);
+    persistMessage(run.id, "agent", assistantBlocks as any);
   }
 
   return {
-    envelopes,
+    envelopes: envelopes as any,
     summary: summary ?? lastAssistantText,
     sdkSessionId,
-    totalCostUsd,
+    totalCostUsd: null,
     inputTokens,
     outputTokens,
     turns,
@@ -1075,8 +998,8 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
 
 function checkBudget(run: RunRow, result: TurnResult): boolean {
   if (run.budgetMaxTurns != null && result.turns >= run.budgetMaxTurns) return true;
-  if (run.budgetMaxUsd != null && (result.totalCostUsd ?? 0) >= run.budgetMaxUsd) return true;
-  // maxSeconds is best enforced at turn-start vs an alarm; left for later.
+  // budgetMaxUsd not enforced under pi (no total_cost_usd surface);
+  // column kept for historical data (see SCHEMA.md).
   return false;
 }
 
@@ -1189,6 +1112,7 @@ function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     budgetMaxSeconds: row.budgetMaxSeconds,
     userId: row.userId,
     title: row.title,
+    personaId: row.personaId,
     legacyChatId: row.legacyChatId,
     startedAt: row.startedAt,
     completedAt: row.completedAt,

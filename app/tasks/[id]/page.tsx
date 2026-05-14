@@ -54,6 +54,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   const repository = task.repoId ? repo.getRepository(task.repoId) : null;
   const planRepoOptions = plan?.repos ?? [];
   const chatPromptPrefix = buildChatPromptPrefix(task, latestPr);
+  const personas = repo.listPersonas();
 
   return (
     <article className="mx-auto max-w-3xl">
@@ -78,6 +79,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
             hasActive={Boolean(activeSession)}
             initialPrompt={buildImplementPrompt(task)}
             budgetMaxUsd={IMPLEMENT_DEFAULT_BUDGET_USD}
+            personas={personas}
           />
           {latestPr && (
             <RunReviewButton
@@ -282,6 +284,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
           taskId={task.id}
           repoId={task.repoId ?? null}
           promptPrefix={chatPromptPrefix}
+          personas={personas}
         />
       </section>
     </article>

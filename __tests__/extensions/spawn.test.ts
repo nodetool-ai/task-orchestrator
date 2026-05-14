@@ -7,7 +7,8 @@ import {
   extractLatestAssistantText,
   MAX_DEPTH,
   DEFAULT_TREE_BUDGET_MULT,
-} from "../lib/spawn-mcp";
+  spawnExtension,
+} from "../../lib/extensions/spawn";
 
 describe("computeDepth", () => {
   it("root run (empty chain) is depth 0", () => {
@@ -224,9 +225,7 @@ describe("checkAppendableStatus (append_message refusal predicate)", () => {
 
 describe("append_message + tree-budget interaction", () => {
   // The append_message handler uses the same checkTreeBudget helper as
-  // spawn_agent, with the caller's tree as the budget reference. Reuse the
-  // existing pure-helper tests by composing them here in the shape the
-  // handler runs them in.
+  // spawn_agent, with the caller's tree as the budget reference.
   function decideAppend(
     callerRoot: { budgetMaxUsd: number | null },
     spent: number,
@@ -323,5 +322,35 @@ describe("extractLatestAssistantText", () => {
       { role: "agent", content: JSON.stringify([{ type: "text", text: "   \n  " }]) },
     ];
     expect(extractLatestAssistantText(rows)).toBe("real");
+  });
+});
+
+describe("spawnExtension", () => {
+  function makeStub() {
+    const calls: Array<{ name: string; def: any }> = [];
+    const pi: any = {
+      registerTool: (def: any) => {
+        calls.push({ name: def.name, def });
+      },
+      on: () => {},
+    };
+    return { calls, pi };
+  }
+
+  it("registers spawn_agent, get_run, append_message", () => {
+    const { calls, pi } = makeStub();
+    const fakeRow: any = {
+      id: 0,
+      parentRunId: null,
+      budgetMaxUsd: null,
+      repoId: null,
+      userId: null,
+    };
+    spawnExtension({ runId: 0, runRow: fakeRow })(pi);
+    expect(calls.map((c) => c.name).sort()).toEqual([
+      "spawn__append_message",
+      "spawn__get_run",
+      "spawn__spawn_agent",
+    ]);
   });
 });

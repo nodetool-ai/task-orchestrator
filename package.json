@@ -18,7 +18,8 @@
     "db:reset": "tsx scripts/reset.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
+    "@earendil-works/pi-ai": "^0.74.0",
+    "@earendil-works/pi-coding-agent": "^0.74.0",
     "@types/bcryptjs": "^2.4.6",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^11.5.0",
@@ -33,6 +34,7 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwind-merge": "^2.5.4",
+    "typebox": "^1.1.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

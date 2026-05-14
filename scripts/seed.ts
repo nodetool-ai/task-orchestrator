@@ -1,10 +1,15 @@
 // Seeds the DB with a demo plan + a few tasks so first-run isn't empty.
 // Safe to re-run — skips if seed plan already exists.
 import * as repo from "../lib/repo";
+import { seedPersonas } from "../db/seed-personas";
 
 const SEED_PLAN_ID = "P-2026-05-11-task-system";
 
 function main() {
+  // Personas are FK targets for agent_runs.persona_id; seed them every time so
+  // CLI flows (which never boot instrumentation.ts) still find them.
+  seedPersonas();
+
   if (repo.getPlan(SEED_PLAN_ID)) {
     console.log(`Seed plan ${SEED_PLAN_ID} already exists — skipping.`);
     return;

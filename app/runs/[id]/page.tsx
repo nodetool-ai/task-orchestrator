@@ -41,6 +41,9 @@ export default async function RunPage({
   // Task info used by the implement-run header (PR link, branch, task id).
   const task = run.taskId ? repo.getTask(run.taskId) : null;
 
+  // Persona for the header display.
+  const persona = run.personaId ? repo.getPersona(run.personaId) : null;
+
   return (
     <RunView
       run={run}
@@ -50,6 +53,7 @@ export default async function RunPage({
       repositories={repositories}
       parent={parent}
       task={task ? { id: task.id, title: task.title } : null}
+      personaName={persona?.name ?? null}
     />
   );
 }

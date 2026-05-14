@@ -5,6 +5,13 @@ import { useRouter } from "next/navigation";
 import { Loader2, Sparkles, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+interface PersonaOption {
+  id: string;
+  name: string;
+  modelProvider: string;
+  modelId: string;
+}
+
 interface Props {
   taskId: string;
   hasActive: boolean;
@@ -12,6 +19,8 @@ interface Props {
   initialPrompt: string;
   /** Budget cap (USD) shown next to the textarea. */
   budgetMaxUsd: number;
+  /** Available personas for the picker (fetched server-side). */
+  personas?: PersonaOption[];
   className?: string;
 }
 
@@ -27,11 +36,13 @@ export function RunAgentButton({
   hasActive,
   initialPrompt,
   budgetMaxUsd,
+  personas = [],
   className,
 }: Props) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [prompt, setPrompt] = useState(initialPrompt);
+  const [personaId, setPersonaId] = useState(personas[0]?.id ?? "implementor");
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -42,6 +53,7 @@ export function RunAgentButton({
   useEffect(() => {
     if (open) {
       setPrompt(initialPrompt);
+      setPersonaId(personas[0]?.id ?? "implementor");
       setError(null);
       // Focus the textarea on open; small delay to let the dialog mount.
       const id = window.setTimeout(() => textareaRef.current?.focus(), 30);
@@ -76,6 +88,7 @@ export function RunAgentButton({
           cwdStrategy: "worktree",
           taskId,
           initialPrompt: text,
+          personaId,
           budget: { maxUsd: budgetMaxUsd },
         }),
       });
@@ -154,6 +167,21 @@ export function RunAgentButton({
                 <Field label="Goal">
                   <code className="font-mono">&lt;implement&gt;</code>
                 </Field>
+                {personas.length > 0 && (
+                  <Field label="Persona">
+                    <select
+                      value={personaId}
+                      onChange={(e) => setPersonaId(e.target.value)}
+                      className="rounded border border-border/60 bg-background px-2 py-0.5 font-mono text-[11px] outline-none focus:border-foreground/40"
+                    >
+                      {personas.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} — {p.modelProvider}/{p.modelId}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                )}
               </div>
 
               <div>
