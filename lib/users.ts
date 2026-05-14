@@ -52,6 +52,10 @@ export function findUser(email: string): User | undefined {
   return db.select().from(users).where(eq(users.email, normalize(email))).get();
 }
 
+export function getUserById(id: number): User | undefined {
+  return db.select().from(users).where(eq(users.id, id)).get();
+}
+
 export async function verifyCredentials(
   email: string,
   password: string

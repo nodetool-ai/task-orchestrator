@@ -20,6 +20,11 @@ export default auth((req) => {
   if (path === "/login" || path.startsWith("/api/auth/")) {
     return NextResponse.next();
   }
+  // /api/mcp has its own Bearer-token auth (lib/api-tokens). Bypass the
+  // session gate so MCP clients without a browser session can reach it.
+  if (path === "/api/mcp") {
+    return NextResponse.next();
+  }
 
   if (req.auth) return NextResponse.next();
 

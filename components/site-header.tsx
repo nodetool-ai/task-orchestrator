@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { LayoutDashboard, ListTodo, Target, Activity, FolderGit2, MessageCircle, Users } from "lucide-react";
+import { LayoutDashboard, ListTodo, Target, Activity, FolderGit2, MessageCircle, Users, KeyRound } from "lucide-react";
 import { auth } from "@/auth";
 import { SignOutButton } from "./sign-out-button";
 
@@ -11,6 +11,7 @@ const nav = [
   { href: "/runs", label: "Runs", icon: Activity },
   { href: "/chat", label: "Chat", icon: MessageCircle },
   { href: "/personas", label: "Personas", icon: Users },
+  { href: "/tokens", label: "Tokens", icon: KeyRound },
 ];
 
 export async function SiteHeader() {

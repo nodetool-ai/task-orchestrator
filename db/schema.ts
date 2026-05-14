@@ -259,6 +259,28 @@ export const personaMemories = sqliteTable(
   })
 );
 
+export const apiTokens = sqliteTable(
+  "api_tokens",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    prefix: text("prefix").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+    lastUsedAt: integer("last_used_at", { mode: "timestamp_ms" }),
+    revokedAt: integer("revoked_at", { mode: "timestamp_ms" }),
+  },
+  (t) => ({
+    userIdx: index("api_tokens_user_idx").on(t.userId),
+    prefixIdx: index("api_tokens_prefix_idx").on(t.prefix),
+  })
+);
+
+export type ApiToken = typeof apiTokens.$inferSelect;
+
 export type User = typeof users.$inferSelect;
 export type Plan = typeof plans.$inferSelect;
 export type Task = typeof tasks.$inferSelect;
