@@ -239,6 +239,15 @@ export function create(input: CreateRunInput): RunRow {
     throw new repo.RepoError(`Task ${input.taskId} not found`, 404);
   }
 
+  // Resolve the effective model. Priority: explicit input.model > persona's
+  // configured model > TASK_ORCH_AGENT_MODEL env default. We persist the
+  // resolved value so the UI and downstream consumers see what was actually
+  // used, not a placeholder env value.
+  const personaId = input.personaId ?? "implementor";
+  const personaRow = repo.getPersona(personaId);
+  const effectiveModel =
+    input.model ?? personaRow?.modelId ?? DEFAULT_MODEL;
+
   const inserted = db
     .insert(agentSessions)
     .values({
@@ -248,11 +257,11 @@ export function create(input: CreateRunInput): RunRow {
       parentRunId: input.parentRunId ?? null,
       toolsProfile,
       cwdStrategy,
-      model: input.model ?? DEFAULT_MODEL,
+      model: effectiveModel,
       title: input.title ?? null,
       userId: input.userId ?? null,
       prUrl: input.prUrl ?? null,
-      personaId: input.personaId ?? "implementor",
+      personaId,
       budgetMaxTurns: input.budget?.maxTurns ?? null,
       budgetMaxUsd: input.budget?.maxUsd ?? null,
       budgetMaxSeconds: input.budget?.maxSeconds ?? null,
