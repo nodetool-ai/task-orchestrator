@@ -27,6 +27,31 @@ describe("mapPiEvent", () => {
     }]);
   });
 
+  it("message_end normalizes pi `toolCall` blocks to SDK `tool_use` shape", () => {
+    const got = mapPiEvent(
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: "let me look" },
+            { type: "toolCall", id: "tc-1", name: "Read", arguments: { path: "x.ts" } },
+          ],
+        },
+      },
+      {}, sm("/x")
+    );
+    expect(got).toEqual([{
+      type: "assistant",
+      message: {
+        content: [
+          { type: "text", text: "let me look" },
+          { type: "tool_use", id: "tc-1", name: "Read", input: { path: "x.ts" } },
+        ],
+      },
+    }]);
+  });
+
   it("message_end with user role emits nothing (already persisted upstream)", () => {
     expect(mapPiEvent(
       { type: "message_end", message: { role: "user", content: [{ type: "text", text: "hi" }] } },

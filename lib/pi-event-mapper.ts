@@ -55,7 +55,8 @@ export function mapPiEvent(
       // user message before invoking the SDK, and tool_result blocks come
       // back via tool_execution_end. So only forward true assistant turns.
       if (ev.message?.role !== "assistant") return [];
-      const content = (ev.message?.content as RunEnvelopeContentBlock[] | undefined) ?? [];
+      const raw = (ev.message?.content as RunEnvelopeContentBlock[] | undefined) ?? [];
+      const content = raw.map(normalizeAssistantBlock);
       if (content.length === 0) return [];
       return [{ type: "assistant", message: { content } }];
     }
@@ -93,6 +94,19 @@ export function mapPiEvent(
     default:
       return [];
   }
+}
+
+// Pi's assistant content uses `toolCall` blocks with `arguments`, while the
+// rest of the system (UI, persisted history, session log) is built around the
+// Claude-SDK shape: `tool_use` blocks with `input`. Normalize here so callers
+// downstream don't have to care which SDK produced the event.
+function normalizeAssistantBlock(block: RunEnvelopeContentBlock): RunEnvelopeContentBlock {
+  if (block?.type === "toolCall") {
+    const { type: _t, arguments: args, ...rest } = block as Record<string, unknown>;
+    void _t;
+    return { ...(rest as RunEnvelopeContentBlock), type: "tool_use", input: args };
+  }
+  return block;
 }
 
 function extractLastText(
