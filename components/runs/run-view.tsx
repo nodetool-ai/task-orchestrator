@@ -581,24 +581,22 @@ export function RunView({
 
 function ThinkingIndicator() {
   return (
-    <div className="flex gap-3 px-4 py-4">
-      <div className="rounded-2xl rounded-bl-sm bg-secondary/60 px-4 py-2.5">
-        <span className="inline-flex gap-1 items-center">
-          <span className="size-1.5 rounded-full bg-foreground/60 animate-pulse" />
-          <span
-            className={cn(
-              "size-1.5 rounded-full bg-foreground/60 animate-pulse",
-              "[animation-delay:120ms]"
-            )}
-          />
-          <span
-            className={cn(
-              "size-1.5 rounded-full bg-foreground/60 animate-pulse",
-              "[animation-delay:240ms]"
-            )}
-          />
-        </span>
-      </div>
+    <div className="px-4 py-3">
+      <span className="inline-flex gap-1 items-center">
+        <span className="size-1.5 rounded-full bg-foreground/60 animate-pulse" />
+        <span
+          className={cn(
+            "size-1.5 rounded-full bg-foreground/60 animate-pulse",
+            "[animation-delay:120ms]"
+          )}
+        />
+        <span
+          className={cn(
+            "size-1.5 rounded-full bg-foreground/60 animate-pulse",
+            "[animation-delay:240ms]"
+          )}
+        />
+      </span>
     </div>
   );
 }

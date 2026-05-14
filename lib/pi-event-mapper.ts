@@ -50,6 +50,11 @@ export function mapPiEvent(
       return [{ type: "system", subtype: "init", session_id: file }];
     }
     case "message_end": {
+      // Pi emits message_end for every message in the conversation —
+      // including user messages and tool results. The runner persists the
+      // user message before invoking the SDK, and tool_result blocks come
+      // back via tool_execution_end. So only forward true assistant turns.
+      if (ev.message?.role !== "assistant") return [];
       const content = (ev.message?.content as RunEnvelopeContentBlock[] | undefined) ?? [];
       if (content.length === 0) return [];
       return [{ type: "assistant", message: { content } }];

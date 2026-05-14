@@ -16,9 +16,9 @@ describe("mapPiEvent", () => {
     expect(mapPiEvent({ type: "agent_start" }, {}, sm(undefined))).toEqual([]);
   });
 
-  it("message_end with content emits an assistant envelope", () => {
+  it("message_end with assistant role emits an assistant envelope", () => {
     const got = mapPiEvent(
-      { type: "message_end", message: { content: [{ type: "text", text: "hi" }] } },
+      { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "hi" }] } },
       {}, sm("/x")
     );
     expect(got).toEqual([{
@@ -27,9 +27,16 @@ describe("mapPiEvent", () => {
     }]);
   });
 
-  it("message_end with empty content emits nothing", () => {
+  it("message_end with user role emits nothing (already persisted upstream)", () => {
     expect(mapPiEvent(
-      { type: "message_end", message: { content: [] } }, {}, sm("/x")
+      { type: "message_end", message: { role: "user", content: [{ type: "text", text: "hi" }] } },
+      {}, sm("/x")
+    )).toEqual([]);
+  });
+
+  it("message_end with empty assistant content emits nothing", () => {
+    expect(mapPiEvent(
+      { type: "message_end", message: { role: "assistant", content: [] } }, {}, sm("/x")
     )).toEqual([]);
   });
 
