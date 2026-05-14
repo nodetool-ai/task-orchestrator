@@ -1,13 +1,48 @@
 import { describe, expect, it } from "vitest";
-import { trimLog, MAX_LOG_LINES, MAX_LOG_BYTES } from "../lib/gh-ci-mcp";
-import { validatePrUrl } from "../lib/gh-url";
+import { trimLog, MAX_LOG_LINES, MAX_LOG_BYTES } from "../../lib/extensions/gh-ci";
+import { validatePrUrl } from "../../lib/gh-url";
+import { ghCiExtension } from "../../lib/extensions/gh-ci";
+
+// ──────────────────────────────────────────────────────────
+// Registration test
+// ──────────────────────────────────────────────────────────
+
+function makeStub() {
+  const calls: Array<{ name: string; def: any }> = [];
+  const pi: any = {
+    registerTool: (def: any) => { calls.push({ name: def.name, def }); },
+    on: () => {},
+  };
+  return { calls, pi };
+}
+
+describe("ghCiExtension", () => {
+  it("registers expected gh_ci tools", () => {
+    const { calls, pi } = makeStub();
+    ghCiExtension({ cwd: "/tmp" })(pi);
+    const names = calls.map((c) => c.name).sort();
+    expect(names).toEqual([
+      "gh_ci__ci_logs",
+      "gh_ci__ci_rerun",
+      "gh_ci__ci_runs",
+    ]);
+  });
+
+  it("each tool has a label", () => {
+    const { calls, pi } = makeStub();
+    ghCiExtension({ cwd: "/tmp" })(pi);
+    for (const { def } of calls) {
+      expect(typeof def.label).toBe("string");
+      expect(def.label.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// URL validation gate
+// ──────────────────────────────────────────────────────────
 
 describe("gh_ci: URL validation gate", () => {
-  // Mirrors the gate inside ci_runs/ci_logs/ci_rerun — we exercise the shared
-  // validatePrUrl helper with a fixed repo list to confirm the rejection path
-  // matches gh_pr's behaviour. The MCP tool handlers themselves are thin
-  // wrappers over this check + a `gh` subprocess; we don't shell out from
-  // tests.
   const repos = [
     {
       id: "R-known",
@@ -51,6 +86,10 @@ describe("gh_ci: URL validation gate", () => {
     expect("error" in v).toBe(true);
   });
 });
+
+// ──────────────────────────────────────────────────────────
+// trimLog
+// ──────────────────────────────────────────────────────────
 
 describe("trimLog", () => {
   it("returns the input unchanged when under both caps", () => {
