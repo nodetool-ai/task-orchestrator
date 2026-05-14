@@ -131,20 +131,31 @@ export function ApiTokensManager() {
             </button>
           </div>
 
-          <div className="grid gap-3 md:grid-cols-2 pt-1">
+          <div className="grid gap-3 md:grid-cols-3 pt-1">
             <SnippetBlock
-              label="Claude Code (one-line CLI):"
+              label="Claude Code (CLI):"
               text={`claude mcp add --transport http \\
   task-orchestrator \\
   ${origin()}/api/mcp \\
   --header "Authorization: Bearer ${created.token}"`}
             />
             <SnippetBlock
-              label="Claude Desktop / config file:"
+              label="Claude Desktop:"
               text={`{
   "mcpServers": {
     "task-orchestrator": {
       "type": "http",
+      "url": "${origin()}/api/mcp",
+      "headers": { "Authorization": "Bearer ${created.token}" }
+    }
+  }
+}`}
+            />
+            <SnippetBlock
+              label="Cursor (~/.cursor/mcp.json):"
+              text={`{
+  "mcpServers": {
+    "task-orchestrator": {
       "url": "${origin()}/api/mcp",
       "headers": { "Authorization": "Bearer ${created.token}" }
     }
