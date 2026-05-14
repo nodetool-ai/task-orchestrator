@@ -1,16 +1,18 @@
 "use client";
 
 import { useState } from "react";
-import { Bot, ChevronDown, ChevronRight, Wrench } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { ChevronDown, ChevronRight, Wrench } from "lucide-react";
 import { renderMarkdown } from "@/lib/markdown";
 import type { SdkContentBlock } from "@/lib/sdk-message";
 import type { MessageRow } from "@/lib/runs";
 
 // Render a persisted run message. Supports the run role set
 // ('user' | 'agent' | 'tool') in the unified /runs/[id] view; 'system' is
-// rendered by `<SystemEventRow>` separately so its layout/grouping can
-// differ from chat-style bubbles.
+// rendered by `<SystemEventRow>` separately.
+//
+// User messages live in a high-contrast pill on the right. Agent
+// messages are bare prose on the canvas — no avatar, no bubble — so
+// markdown reads like a document.
 interface Props {
   role: Exclude<MessageRow["role"], "system">;
   content: SdkContentBlock[];
@@ -20,26 +22,18 @@ export function RunMessage({ role, content }: Props) {
   if (role === "tool") {
     return <ToolResultBlocks blocks={content} />;
   }
+  if (role === "agent") {
+    return (
+      <div className="px-4 py-3 text-sm text-foreground space-y-2">
+        {content.map((block, i) => (
+          <ContentBlock key={i} block={block} role={role} />
+        ))}
+      </div>
+    );
+  }
   return (
-    <div
-      className={cn(
-        "flex gap-3 px-4 py-2",
-        role === "user" ? "justify-end" : "justify-start"
-      )}
-    >
-      {role === "agent" && (
-        <div className="mt-1 flex size-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-secondary to-secondary/40 text-foreground/80 ring-1 ring-border/60">
-          <Bot className="size-4" />
-        </div>
-      )}
-      <div
-        className={cn(
-          "max-w-[80%] min-w-0 space-y-2 rounded-2xl px-4 py-2.5 text-sm",
-          role === "user"
-            ? "bg-foreground text-background rounded-br-md shadow-md shadow-foreground/5"
-            : "bg-card/80 text-foreground rounded-bl-md border border-border/60"
-        )}
-      >
+    <div className="flex justify-end px-4 py-2">
+      <div className="max-w-[80%] min-w-0 space-y-2 rounded-2xl rounded-br-md bg-foreground text-background px-4 py-2.5 text-sm shadow-md shadow-foreground/5">
         {content.map((block, i) => (
           <ContentBlock key={i} block={block} role={role} />
         ))}
