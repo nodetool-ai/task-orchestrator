@@ -9,7 +9,16 @@ const nextConfig = {
   reactStrictMode: true,
   typescript: { ignoreBuildErrors: false },
   eslint: { ignoreDuringBuilds: true },
-  serverExternalPackages: ["better-sqlite3"],
+  serverExternalPackages: [
+    "better-sqlite3",
+    // Pi packages ship a bundled jiti for runtime TS loading; if Next webpack
+    // tries to bundle them, it stubs node:os/node:path as MODULE_NOT_FOUND
+    // throws and the prod server hard-crashes at first import.
+    "@earendil-works/pi-coding-agent",
+    "@earendil-works/pi-ai",
+    "@earendil-works/pi-agent-core",
+    "@earendil-works/pi-tui",
+  ],
 };
 
 export default nextConfig;
