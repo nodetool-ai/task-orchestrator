@@ -4,6 +4,7 @@ import * as repo from "@/lib/repo";
 import { STATE_LABEL, TASK_STATES, type TaskState } from "@/lib/types";
 import { TaskRow } from "@/components/task-row";
 import { StateIcon } from "@/components/state-icon";
+import { PlanFilter } from "@/components/pickers/plan-filter";
 
 export const dynamic = "force-dynamic";
 
@@ -50,9 +51,15 @@ export default async function TasksIndexPage({
   return (
     <div className="space-y-6">
       <header className="space-y-3">
-        <div>
-          <h1 className="text-xl font-semibold tracking-tight">Tasks</h1>
-          <p className="text-sm text-muted-foreground">{tasks.length} total · grouped by state.</p>
+        <div className="flex items-end justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight">Tasks</h1>
+            <p className="text-sm text-muted-foreground">{tasks.length} total · grouped by state.</p>
+          </div>
+          <PlanFilter
+            plans={plans.map((p) => ({ id: p.id, title: p.title }))}
+            value={filterPlan}
+          />
         </div>
         {hasFilter && (
           <div className="flex flex-wrap items-center gap-1.5">
