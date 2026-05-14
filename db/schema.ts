@@ -156,6 +156,7 @@ export const agentSessions = sqliteTable(
     outcome: text("outcome"),
     title: text("title"),
     userId: integer("user_id").references(() => users.id, { onDelete: "set null" }),
+    personaId: text("persona_id").references(() => personas.id, { onDelete: "set null" }),
     // Old chats.id for rows backfilled from chats by 0009. Lets the
     // future /chat/[id] redirect resolve the new run.
     legacyChatId: integer("legacy_chat_id"),
@@ -169,6 +170,7 @@ export const agentSessions = sqliteTable(
     parentIdx: index("agent_runs_parent_idx").on(t.parentRunId),
     userIdx: index("agent_runs_user_idx").on(t.userId),
     legacyChatIdx: index("agent_runs_legacy_chat_idx").on(t.legacyChatId),
+    personaIdx: index("agent_runs_persona_idx").on(t.personaId),
   })
 );
 
@@ -223,6 +225,39 @@ export const users = sqliteTable(
   })
 );
 
+export const personas = sqliteTable("personas", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  description: text("description"),
+  systemPrompt: text("system_prompt").notNull(),
+  modelProvider: text("model_provider").notNull(),
+  modelId: text("model_id").notNull(),
+  thinkingLevel: text("thinking_level"),
+  toolsProfile: text("tools_profile").notNull(),
+  skillPaths: text("skill_paths").notNull().default("[]"),
+  budgetMaxTurns: integer("budget_max_turns"),
+  budgetMaxSeconds: integer("budget_max_seconds"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+});
+
+export const personaMemories = sqliteTable(
+  "persona_memories",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    personaId: text("persona_id")
+      .notNull()
+      .references(() => personas.id, { onDelete: "cascade" }),
+    scope: text("scope").notNull(),
+    body: text("body").notNull().default(""),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+  },
+  (t) => ({
+    personaIdx: index("persona_memories_persona_idx").on(t.personaId),
+    uniq: index("persona_memories_persona_scope_uniq").on(t.personaId, t.scope),
+  })
+);
+
 export type User = typeof users.$inferSelect;
 export type Plan = typeof plans.$inferSelect;
 export type Task = typeof tasks.$inferSelect;
@@ -232,3 +267,5 @@ export type AgentSession = typeof agentSessions.$inferSelect;
 export type AgentEvent = typeof agentEvents.$inferSelect;
 export type AgentMessage = typeof agentMessages.$inferSelect;
 export type Repository = typeof repositories.$inferSelect;
+export type Persona = typeof personas.$inferSelect;
+export type PersonaMemory = typeof personaMemories.$inferSelect;
