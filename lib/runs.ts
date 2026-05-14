@@ -45,6 +45,7 @@ import { parsePrUrl } from "./gh-url";
 import type { SdkContentBlock, SdkMessageEnvelope } from "./sdk-message";
 import type { AgentSessionFull, SessionStatus } from "./types";
 import { isTerminalStatus } from "./types";
+import { resolveProfiles, type ProfileContext } from "./profiles";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
@@ -199,122 +200,6 @@ function getLock(runId: number): PerRunLock {
     locks.set(runId, l);
   }
   return l;
-}
-
-// ──────────────────────────────────────────────────────────
-// Tool profile registry
-// ──────────────────────────────────────────────────────────
-//
-// A profile is a string key that resolves to one or more named MCP servers.
-// `toolsProfile` on a run is a comma-separated list of profile keys; the
-// runner unions all servers from the listed profiles into the `mcpServers`
-// map handed to sdk.query().
-//
-// `orchestrator` mounts the task-orchestrator MCP surface (plans, tasks,
-// notes, criteria, sessions). `repo_write` and `repo_read` are markers for
-// what the SDK should be allowed to do in the cwd: there's no separate MCP
-// server today (the SDK's built-in Bash/Edit/Read tools handle this), but
-// the profile string drives sandbox + permission-mode wiring. `gh_pr` mounts
-// the GitHub PR helper server (open/list/comment).
-
-export type McpServerFactory = (ctx: ProfileContext) => unknown | Promise<unknown>;
-
-export interface ProfileContext {
-  runId: number;
-  run: RunRow;
-  /** Author label for any orchestrator-side mutations the agent makes. */
-  author: string;
-  /** Optional taskId scoping for the orchestrator MCP server. */
-  taskId: string | null;
-  /** Resolved cwd for the SDK turn — repos that shell out (gh, git) use this. */
-  cwd: string;
-}
-
-interface ProfileDef {
-  /** MCP servers this profile contributes; map key is the SDK mcpServers key. */
-  servers: Record<string, McpServerFactory>;
-  /** Permission posture this profile imposes on the SDK call. */
-  allowsRepoWrite?: boolean;
-}
-
-const PROFILES: Record<string, ProfileDef> = {
-  orchestrator: {
-    servers: {
-      task_orch: async (ctx) => {
-        const { createOrchestratorMcpServer } = await import("./agent-mcp");
-        return createOrchestratorMcpServer({
-          author: ctx.author,
-          defaultTaskId: ctx.taskId ?? undefined,
-        });
-      },
-    },
-  },
-  repo_write: {
-    // No MCP server: the SDK's built-in Bash/Edit/Write tools handle file
-    // writes. Profile presence flips allowsRepoWrite which is consumed by
-    // future permission gating.
-    servers: {},
-    allowsRepoWrite: true,
-  },
-  repo_read: {
-    // Same shape as repo_write minus mutation. Today both rely on
-    // permissionMode='bypassPermissions' inside the sandbox; the profile
-    // string is the source of truth so a future tightening can switch on it.
-    servers: {},
-    allowsRepoWrite: false,
-  },
-  gh_pr: {
-    servers: {
-      gh_pr: async (ctx) => {
-        const { createGhPrMcpServer } = await import("./gh-pr-mcp");
-        return createGhPrMcpServer({ cwd: ctx.cwd });
-      },
-    },
-  },
-  gh_ci: {
-    servers: {
-      gh_ci: async (ctx) => {
-        const { createGhCiMcpServer } = await import("./gh-ci-mcp");
-        return createGhCiMcpServer({ cwd: ctx.cwd });
-      },
-    },
-  },
-  spawn: {
-    servers: {
-      spawn: async (ctx) => {
-        const { createSpawnMcpServer } = await import("./spawn-mcp");
-        return createSpawnMcpServer({ runId: ctx.runId, runRow: ctx.run });
-      },
-    },
-  },
-};
-
-interface ResolvedProfile {
-  servers: Record<string, unknown>;
-  allowsRepoWrite: boolean;
-}
-
-async function resolveProfiles(profileString: string, ctx: ProfileContext): Promise<ResolvedProfile> {
-  const names = profileString
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  const servers: Record<string, unknown> = {};
-  let allowsRepoWrite = false;
-  for (const name of names) {
-    const def = PROFILES[name];
-    if (!def) {
-      // Unknown profile: log but don't crash. New profiles ship via code; an
-      // old DB row may reference one we no longer recognise.
-      console.warn(`[runs] unknown tool profile '${name}' on run #${ctx.runId}`);
-      continue;
-    }
-    if (def.allowsRepoWrite) allowsRepoWrite = true;
-    for (const [key, factory] of Object.entries(def.servers)) {
-      servers[key] = await factory(ctx);
-    }
-  }
-  return { servers, allowsRepoWrite };
 }
 
 // ──────────────────────────────────────────────────────────
