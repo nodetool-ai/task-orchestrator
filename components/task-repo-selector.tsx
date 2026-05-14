@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FolderGit2 } from "lucide-react";
 import type { RepositoryRow } from "@/lib/types";
+import { RepositoryPicker } from "@/components/pickers/repository-picker";
 
 interface Props {
   taskId: string;
@@ -62,19 +63,14 @@ export function TaskRepoSelector({
   return (
     <div className="inline-flex items-center gap-2">
       <FolderGit2 className="size-3 text-muted-foreground" />
-      <select
+      <RepositoryPicker
+        repositories={options}
         value={currentRepoId ?? ""}
+        onChange={set}
         disabled={pending}
-        onChange={(e) => set(e.target.value)}
-        className="rounded-md border border-border/60 bg-background/60 px-2 py-0.5 text-xs"
-      >
-        <option value="">— unset —</option>
-        {options.map((r) => (
-          <option key={r.id} value={r.id}>
-            {r.name}
-          </option>
-        ))}
-      </select>
+        emptyLabel="— unset —"
+        size="compact"
+      />
       {error && <span className="text-[11px] text-state-blocked">{error}</span>}
     </div>
   );

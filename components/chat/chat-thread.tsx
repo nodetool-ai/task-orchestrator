@@ -6,6 +6,7 @@ import { ArrowUp, Bot, Square, Sparkles } from "lucide-react";
 import { ChatMessage } from "@/components/chat/chat-message";
 import type { ChatMessageRow, ChatRole, ChatRow } from "@/lib/types";
 import type { SdkContentBlock, SdkMessageEnvelope } from "@/lib/sdk-message";
+import { RepositoryPicker } from "@/components/pickers/repository-picker";
 
 interface SidebarRepo {
   id: string;
@@ -209,20 +210,16 @@ export function ChatThread({
           <span className="font-medium truncate">{chat.title}</span>
           <div className="ml-auto flex items-center gap-2">
             <label className="sr-only" htmlFor={`repo-${chat.id}`}>Repository</label>
-            <select
+            <RepositoryPicker
               id={`repo-${chat.id}`}
+              repositories={repositories}
               value={repoId ?? ""}
-              onChange={(e) => changeRepo(e.target.value)}
+              onChange={changeRepo}
               disabled={savingRepo || repositories.length === 0}
+              emptyLabel={repositories.length === 0 ? "no repos" : null}
+              showId
               className="rounded-md border border-border/60 bg-background/60 px-2 py-1 text-[11px] font-mono text-foreground hover:bg-muted/40 focus:outline-none focus:border-foreground/30 disabled:opacity-50"
-            >
-              {repositories.length === 0 && <option value="">no repos</option>}
-              {repositories.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.name} ({r.id})
-                </option>
-              ))}
-            </select>
+            />
             <label className="sr-only" htmlFor={`model-${chat.id}`}>Model</label>
             <select
               id={`model-${chat.id}`}

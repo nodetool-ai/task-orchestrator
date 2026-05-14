@@ -8,11 +8,14 @@ import {
   PersonaPicker,
   type PersonaOption,
 } from "@/components/pickers/persona-picker";
+import {
+  RepositoryPicker,
+  type RepositoryOption,
+} from "@/components/pickers/repository-picker";
+import { TagsInput } from "@/components/pickers/tags-input";
+import { AssigneePicker } from "@/components/pickers/assignee-picker";
 
-interface RepoOption {
-  id: string;
-  name: string;
-}
+type RepoOption = RepositoryOption;
 
 interface NewTaskFormProps {
   planId: string;
@@ -25,7 +28,7 @@ export function NewTaskForm({ planId, repoOptions = [] }: NewTaskFormProps) {
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [criteria, setCriteria] = useState("");
-  const [tags, setTags] = useState("");
+  const [tags, setTags] = useState<string[]>([]);
   const [assignee, setAssignee] = useState("");
   const [repoId, setRepoId] = useState(repoOptions[0]?.id ?? "");
   const [personaId, setPersonaId] = useState("implementor");
@@ -43,7 +46,7 @@ export function NewTaskForm({ planId, repoOptions = [] }: NewTaskFormProps) {
   const reset = () => {
     setTitle("");
     setCriteria("");
-    setTags("");
+    setTags([]);
     setAssignee("");
     setRepoId(repoOptions[0]?.id ?? "");
     setPersonaId("implementor");
@@ -72,10 +75,7 @@ export function NewTaskForm({ planId, repoOptions = [] }: NewTaskFormProps) {
             .split("\n")
             .map((s) => s.trim())
             .filter(Boolean),
-          tags: tags
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean),
+          tags,
         }),
       });
       if (!res.ok) {
@@ -124,12 +124,7 @@ export function NewTaskForm({ planId, repoOptions = [] }: NewTaskFormProps) {
         className="w-full resize-none rounded-sm border border-border/60 bg-background px-2 py-1.5 text-xs outline-none focus:border-foreground/40"
       />
       <div className="flex items-center gap-2">
-        <input
-          value={assignee}
-          onChange={(e) => setAssignee(e.target.value)}
-          placeholder="assignee"
-          className="w-28 rounded-sm border border-border/60 bg-background px-2 py-1 text-xs font-mono outline-none focus:border-foreground/40"
-        />
+        <AssigneePicker value={assignee} onChange={setAssignee} size="compact" />
         <PersonaPicker
           personas={personas}
           value={personaId}
@@ -137,23 +132,22 @@ export function NewTaskForm({ planId, repoOptions = [] }: NewTaskFormProps) {
           size="compact"
         />
         {repoOptions.length > 1 && (
-          <select
+          <RepositoryPicker
+            repositories={repoOptions}
             value={repoId}
-            onChange={(e) => setRepoId(e.target.value)}
-            className="rounded-sm border border-border/60 bg-background px-2 py-1 text-xs outline-none focus:border-foreground/40"
-          >
-            <option value="">repo…</option>
-            {repoOptions.map((r) => (
-              <option key={r.id} value={r.id}>{r.name}</option>
-            ))}
-          </select>
+            onChange={setRepoId}
+            emptyLabel="repo…"
+            size="compact"
+          />
         )}
-        <input
-          value={tags}
-          onChange={(e) => setTags(e.target.value)}
-          placeholder="tags (comma separated)"
-          className="flex-1 rounded-sm border border-border/60 bg-background px-2 py-1 text-xs outline-none focus:border-foreground/40"
-        />
+        <div className="flex-1 min-w-[8rem]">
+          <TagsInput
+            value={tags}
+            onChange={setTags}
+            placeholder="tags…"
+            size="compact"
+          />
+        </div>
         <button
           type="submit"
           disabled={pending || !title.trim()}

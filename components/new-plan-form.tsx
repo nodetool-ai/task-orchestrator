@@ -4,13 +4,14 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { TagsInput } from "@/components/pickers/tags-input";
 
 export function NewPlanForm() {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
-  const [tags, setTags] = useState("");
+  const [tags, setTags] = useState<string[]>([]);
   const [owner, setOwner] = useState("");
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
@@ -18,7 +19,7 @@ export function NewPlanForm() {
   const reset = () => {
     setTitle("");
     setBody("");
-    setTags("");
+    setTags([]);
     setOwner("");
     setError(null);
   };
@@ -35,10 +36,7 @@ export function NewPlanForm() {
           title: title.trim(),
           body: body.trim() || undefined,
           owner: owner.trim() || undefined,
-          tags: tags
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean),
+          tags,
         }),
       });
       if (!res.ok) {
@@ -94,12 +92,14 @@ export function NewPlanForm() {
           placeholder="owner"
           className="w-28 rounded-sm border border-border/60 bg-background px-2 py-1 text-xs font-mono outline-none focus:border-foreground/40"
         />
-        <input
-          value={tags}
-          onChange={(e) => setTags(e.target.value)}
-          placeholder="tags (comma separated)"
-          className="flex-1 rounded-sm border border-border/60 bg-background px-2 py-1 text-xs outline-none focus:border-foreground/40"
-        />
+        <div className="flex-1 min-w-[8rem]">
+          <TagsInput
+            value={tags}
+            onChange={setTags}
+            placeholder="tags…"
+            size="compact"
+          />
+        </div>
         <button
           type="submit"
           disabled={pending || !title.trim()}

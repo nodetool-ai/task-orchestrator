@@ -4,7 +4,7 @@ import { ArrowLeft } from "lucide-react";
 import { PlanRepositories } from "@/components/plan-repositories";
 import * as repo from "@/lib/repo";
 import { STATE_LABEL, TASK_BOARD_STATES, type TaskState } from "@/lib/types";
-import { StateBadge } from "@/components/state-badge";
+import { StateChanger } from "@/components/state-changer";
 import { StateIcon } from "@/components/state-icon";
 import { MarkdownBody } from "@/components/markdown-body";
 import { Progress } from "@/components/ui/progress";
@@ -40,7 +40,7 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
       <h1 className="mt-2 text-2xl font-semibold tracking-tight leading-tight">{plan.title}</h1>
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
-        <StateBadge state={plan.state} />
+        <StateChanger kind="plan" planId={plan.id} current={plan.state} />
         {plan.owner && <span className="text-xs text-muted-foreground">@{plan.owner}</span>}
         <span className="text-xs text-muted-foreground">Created {formatDate(plan.createdAt)}</span>
       </div>

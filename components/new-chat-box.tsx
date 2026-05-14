@@ -8,15 +8,16 @@ import {
   PersonaPicker,
   type PersonaOption,
 } from "@/components/pickers/persona-picker";
+import {
+  RepositoryPicker,
+  type RepositoryOption,
+} from "@/components/pickers/repository-picker";
 
 // Re-export so existing server-component callers can keep importing the
 // PersonaOption type from this module.
 export type { PersonaOption };
 
-interface RepoOption {
-  id: string;
-  name: string;
-}
+type RepoOption = RepositoryOption;
 
 interface Props {
   personas: PersonaOption[];
@@ -103,19 +104,12 @@ export function NewChatBox({ personas, repositories }: Props) {
           size="compact"
         />
         {repositories.length > 0 && (
-          <select
+          <RepositoryPicker
+            repositories={repositories}
             value={repoId}
-            onChange={(e) => setRepoId(e.target.value)}
-            className="rounded-sm border border-border/60 bg-background px-2 py-0.5 outline-none focus:border-foreground/40"
-            title="Repository"
-          >
-            <option value="">No repo</option>
-            {repositories.map((r) => (
-              <option key={r.id} value={r.id}>
-                {r.name}
-              </option>
-            ))}
-          </select>
+            onChange={setRepoId}
+            size="compact"
+          />
         )}
       </div>
       <div className="flex items-end gap-2 rounded-2xl border border-border/60 bg-card/40 px-3 py-2 focus-within:border-foreground/30 transition-colors">

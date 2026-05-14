@@ -4,6 +4,10 @@ import { useState } from "react";
 import { Loader2, Check, Save } from "lucide-react";
 import { ProviderModelPicker } from "@/components/pickers/provider-model-picker";
 import { ToolsPicker } from "@/components/pickers/tools-picker";
+import {
+  ThinkingLevelPicker,
+  type ThinkingLevel,
+} from "@/components/pickers/thinking-level-picker";
 
 export interface PersonaDto {
   id: string;
@@ -117,21 +121,10 @@ export function PersonaEditor({ persona }: Props) {
           />
         </div>
         <Field label="Thinking">
-          <select
-            value={draft.thinkingLevel ?? ""}
-            onChange={(e) =>
-              update(
-                "thinkingLevel",
-                (e.target.value || null) as PersonaDto["thinkingLevel"]
-              )
-            }
-            className={inputClass}
-          >
-            <option value="">—</option>
-            <option value="low">low</option>
-            <option value="medium">medium</option>
-            <option value="high">high</option>
-          </select>
+          <ThinkingLevelPicker
+            value={draft.thinkingLevel as ThinkingLevel | null}
+            onChange={(v) => update("thinkingLevel", v)}
+          />
         </Field>
       </div>
 

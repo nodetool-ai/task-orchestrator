@@ -323,6 +323,17 @@ export function getTask(id: string): TaskFull | null {
   return hydrateTask(row, deps, notes, criteria);
 }
 
+/** Distinct non-null assignees observed across all tasks, alphabetical. */
+export function listAssignees(): string[] {
+  const rows = db
+    .selectDistinct({ assignee: tasks.assignee })
+    .from(tasks)
+    .where(sql`${tasks.assignee} IS NOT NULL AND ${tasks.assignee} != ''`)
+    .orderBy(asc(tasks.assignee))
+    .all();
+  return rows.map((r) => r.assignee!).filter(Boolean);
+}
+
 export function taskCountsByState(): Record<TaskState, number> {
   const rows = db
     .select({ state: tasks.state, n: count() })
