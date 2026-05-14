@@ -6,6 +6,7 @@ import {
   real,
   primaryKey,
   index,
+  uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
 const NOW = sql`(unixepoch('subsec') * 1000)`;
@@ -254,7 +255,7 @@ export const personaMemories = sqliteTable(
   },
   (t) => ({
     personaIdx: index("persona_memories_persona_idx").on(t.personaId),
-    uniq: index("persona_memories_persona_scope_uniq").on(t.personaId, t.scope),
+    uniq: uniqueIndex("persona_memories_persona_scope_uniq").on(t.personaId, t.scope),
   })
 );
 
