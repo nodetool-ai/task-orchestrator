@@ -92,6 +92,23 @@ describe("persona repo", () => {
     expect(repo.getPersonaMemory("reviewer", "task-1")).toBe("- t");
   });
 
+  it("removePersonaMemoryLine deletes the row when all lines match", () => {
+    seedReviewer();
+    repo.appendPersonaMemory("reviewer", "global", "alpha");
+    repo.appendPersonaMemory("reviewer", "global", "alphabet");  // both match 'alpha'
+    const removed = repo.removePersonaMemoryLine("reviewer", "global", "alpha");
+    expect(removed).toBe(2);
+    expect(repo.getPersonaMemory("reviewer", "global")).toBeNull();
+  });
+
+  it("appendPersonaMemory after a clearing remove starts fresh (no leading newline)", () => {
+    seedReviewer();
+    repo.appendPersonaMemory("reviewer", "global", "alpha");
+    repo.removePersonaMemoryLine("reviewer", "global", "alpha");
+    repo.appendPersonaMemory("reviewer", "global", "beta");
+    expect(repo.getPersonaMemory("reviewer", "global")).toBe("- beta");
+  });
+
   it("upsertPersona inserts then updates by id", () => {
     repo.upsertPersona({
       id: "qa", name: "QA", systemPrompt: "test things",

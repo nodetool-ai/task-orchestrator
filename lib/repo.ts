@@ -998,13 +998,16 @@ export function appendPersonaMemory(personaId: string, scope: string, note: stri
   const now = new Date();
   const trimmed = note.trim();
   if (!trimmed) return;
-  const existing = getPersonaMemory(personaId, scope);
-  const next = existing ? `${existing}\n- ${trimmed}` : `- ${trimmed}`;
+  const firstBullet = `- ${trimmed}`;
+  const appendFragment = `\n- ${trimmed}`;
   db.insert(personaMemories)
-    .values({ personaId, scope, body: next, updatedAt: now })
+    .values({ personaId, scope, body: firstBullet, updatedAt: now })
     .onConflictDoUpdate({
       target: [personaMemories.personaId, personaMemories.scope],
-      set: { body: next, updatedAt: now },
+      set: {
+        body: sql`${personaMemories.body} || ${appendFragment}`,
+        updatedAt: now,
+      },
     })
     .run();
 }
@@ -1020,6 +1023,12 @@ export function removePersonaMemoryLine(
   const kept = lines.filter((l) => !l.includes(match));
   const removed = lines.length - kept.length;
   if (removed === 0) return 0;
+  if (kept.length === 0) {
+    db.delete(personaMemories)
+      .where(and(eq(personaMemories.personaId, personaId), eq(personaMemories.scope, scope)))
+      .run();
+    return removed;
+  }
   const now = new Date();
   db.update(personaMemories)
     .set({ body: kept.join("\n"), updatedAt: now })
