@@ -4,12 +4,14 @@ import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowUp, Loader2 } from "lucide-react";
 
-interface PersonaOption {
-  id: string;
-  name: string;
-  modelProvider: string;
-  modelId: string;
-}
+import {
+  PersonaPicker,
+  type PersonaOption,
+} from "@/components/pickers/persona-picker";
+
+// Re-export so existing server-component callers can keep importing the
+// PersonaOption type from this module.
+export type { PersonaOption };
 
 interface RepoOption {
   id: string;
@@ -94,20 +96,12 @@ export function NewChatBox({ personas, repositories }: Props) {
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2 text-xs">
-        {personas.length > 0 && (
-          <select
-            value={personaId}
-            onChange={(e) => setPersonaId(e.target.value)}
-            className="rounded-sm border border-border/60 bg-background px-2 py-0.5 outline-none focus:border-foreground/40"
-            title="Persona"
-          >
-            {personas.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name} — {p.modelProvider}/{p.modelId}
-              </option>
-            ))}
-          </select>
-        )}
+        <PersonaPicker
+          personas={personas}
+          value={personaId}
+          onChange={setPersonaId}
+          size="compact"
+        />
         {repositories.length > 0 && (
           <select
             value={repoId}

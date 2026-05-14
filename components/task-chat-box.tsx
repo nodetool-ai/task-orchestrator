@@ -3,13 +3,12 @@
 import { useRef, useState } from "react";
 import { ArrowUp, Loader2, MessageCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  PersonaPicker,
+  type PersonaOption,
+} from "@/components/pickers/persona-picker";
 
-interface PersonaOption {
-  id: string;
-  name: string;
-  modelProvider: string;
-  modelId: string;
-}
+export type { PersonaOption };
 
 interface Props {
   taskId: string;
@@ -118,19 +117,12 @@ export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], class
           <MessageCircle className="size-3.5" />
           <span>Ask the agent about this task — opens a new chat run.</span>
         </div>
-        {personas.length > 0 && (
-          <select
-            value={personaId}
-            onChange={(e) => setPersonaId(e.target.value)}
-            className="rounded-sm border border-border/60 bg-background px-2 py-0.5 text-xs outline-none focus:border-foreground/40"
-          >
-            {personas.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name} — {p.modelProvider}/{p.modelId}
-              </option>
-            ))}
-          </select>
-        )}
+        <PersonaPicker
+          personas={personas}
+          value={personaId}
+          onChange={setPersonaId}
+          size="compact"
+        />
       </div>
       <div className="flex items-end gap-2 rounded-2xl border border-border/60 bg-card/40 px-3 py-2 focus-within:border-foreground/30 transition-colors">
         <textarea

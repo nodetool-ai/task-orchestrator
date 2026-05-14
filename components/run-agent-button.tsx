@@ -4,13 +4,10 @@ import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Sparkles, X } from "lucide-react";
 import { cn } from "@/lib/utils";
-
-interface PersonaOption {
-  id: string;
-  name: string;
-  modelProvider: string;
-  modelId: string;
-}
+import {
+  PersonaPicker,
+  type PersonaOption,
+} from "@/components/pickers/persona-picker";
 
 interface Props {
   taskId: string;
@@ -169,17 +166,12 @@ export function RunAgentButton({
                 </Field>
                 {personas.length > 0 && (
                   <Field label="Persona">
-                    <select
+                    <PersonaPicker
+                      personas={personas}
                       value={personaId}
-                      onChange={(e) => setPersonaId(e.target.value)}
+                      onChange={setPersonaId}
                       className="rounded border border-border/60 bg-background px-2 py-0.5 font-mono text-[11px] outline-none focus:border-foreground/40"
-                    >
-                      {personas.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name} — {p.modelProvider}/{p.modelId}
-                        </option>
-                      ))}
-                    </select>
+                    />
                   </Field>
                 )}
               </div>
