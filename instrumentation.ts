@@ -18,6 +18,11 @@ export async function register(): Promise<void> {
   };
   mod.startWorktreeGc();
 
-  const { seedPersonas } = await import("@/db/seed-personas");
-  seedPersonas();
+  // Same webpackIgnore trick as above — hides better-sqlite3 (pulled in via
+  // db/seed-personas → lib/repo → db/index) from the edge bundle tracer.
+  const seedPath = "./db/seed-personas";
+  const seedMod = (await import(/* webpackIgnore: true */ seedPath)) as {
+    seedPersonas: () => void;
+  };
+  seedMod.seedPersonas();
 }
