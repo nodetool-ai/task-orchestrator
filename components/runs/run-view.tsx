@@ -363,25 +363,27 @@ export function RunView({
   return (
     <div className="flex h-full flex-col overflow-hidden">
       {/* Header */}
-      <header className="border-b border-border/60 px-5 py-3 space-y-2">
-        <div className="flex items-center gap-2 text-[11px] font-mono text-muted-foreground">
+      <header className="border-b border-border/60 bg-gradient-to-b from-background to-background/60 px-6 py-4 space-y-2.5">
+        <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.08em] text-muted-foreground/70">
           {parent && (
             <Link
               href={`/runs/${parent.id}`}
               className="inline-flex items-center gap-1 hover:text-foreground"
             >
               <ChevronLeft className="size-3" />
-              <span className="truncate max-w-[180px]">parent: {parent.title}</span>
+              <span className="truncate max-w-[180px] normal-case tracking-normal">
+                parent: {parent.title}
+              </span>
             </Link>
           )}
           <span className="tabular-nums">run #{run.id}</span>
           {run.goal && run.goal !== "<implement>" && run.goal !== "<chat>" && (
-            <span className="truncate">· {run.goal}</span>
+            <span className="truncate normal-case tracking-normal">· {run.goal}</span>
           )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <h1 className="text-base font-semibold tracking-tight truncate flex-1 min-w-0">
+          <h1 className="text-lg font-semibold tracking-tight truncate flex-1 min-w-0">
             {title}
           </h1>
           <SessionStatusPill status={status} />
@@ -416,7 +418,7 @@ export function RunView({
             <button
               type="button"
               onClick={cancel}
-              className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-background/60 px-2 py-0.5 text-[11px] hover:bg-muted/40"
+              className="inline-flex items-center gap-1 rounded-md border border-state-blocked/30 bg-state-blocked/10 px-2 py-0.5 text-[11px] text-state-blocked hover:bg-state-blocked/15 transition-colors"
             >
               <Square className="size-3" /> Cancel
             </button>
@@ -456,7 +458,7 @@ export function RunView({
       </header>
 
       {/* Message stream */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto bg-gradient-to-b from-background via-background to-muted/10">
         {empty ? (
           <div className="mx-auto max-w-2xl px-6 py-16">
             <h2 className="text-2xl font-semibold tracking-tight">
@@ -465,7 +467,7 @@ export function RunView({
             <p className="mt-2 text-muted-foreground">{greeting.subtitle}</p>
           </div>
         ) : (
-          <div className="mx-auto max-w-3xl">
+          <div className="mx-auto max-w-3xl py-4">
             {visibleMessages.map((m) =>
               m.role === "system" ? (
                 <SystemEventRow
@@ -497,7 +499,7 @@ export function RunView({
 
       {/* Composer — present for every status except `closed` */}
       {!closed && (
-        <div className="border-t border-border/60 bg-background/80 backdrop-blur px-4 py-3">
+        <div className="border-t border-border/60 bg-background/95 backdrop-blur px-4 py-4">
           <div className="mx-auto max-w-3xl">
             {status === "running" && (
               <div className="mb-2 inline-flex items-center gap-1.5 rounded-full border border-state-progress/30 bg-state-progress/10 px-2 py-0.5 text-[10px] text-state-progress">

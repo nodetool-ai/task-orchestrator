@@ -23,21 +23,21 @@ export function RunMessage({ role, content }: Props) {
   return (
     <div
       className={cn(
-        "flex gap-2.5 px-4 py-2",
+        "flex gap-3 px-4 py-2",
         role === "user" ? "justify-end" : "justify-start"
       )}
     >
       {role === "agent" && (
-        <div className="mt-1 flex size-7 shrink-0 items-center justify-center rounded-full border border-border/60 bg-card text-muted-foreground">
-          <Bot className="size-3.5" />
+        <div className="mt-1 flex size-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-secondary to-secondary/40 text-foreground/80 ring-1 ring-border/60">
+          <Bot className="size-4" />
         </div>
       )}
       <div
         className={cn(
-          "max-w-[80%] min-w-0 space-y-2 rounded-2xl px-4 py-2.5 text-sm shadow-sm",
+          "max-w-[80%] min-w-0 space-y-2 rounded-2xl px-4 py-2.5 text-sm",
           role === "user"
-            ? "bg-foreground text-background rounded-br-sm"
-            : "bg-secondary/40 text-foreground rounded-bl-sm border border-border/40"
+            ? "bg-foreground text-background rounded-br-md shadow-md shadow-foreground/5"
+            : "bg-card/80 text-foreground rounded-bl-md border border-border/60"
         )}
       >
         {content.map((block, i) => (
