@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useState, useTransition, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -8,6 +8,13 @@ import { cn } from "@/lib/utils";
 interface RepoOption {
   id: string;
   name: string;
+}
+
+interface PersonaOption {
+  id: string;
+  name: string;
+  modelProvider: string;
+  modelId: string;
 }
 
 interface NewTaskFormProps {
@@ -24,8 +31,17 @@ export function NewTaskForm({ planId, repoOptions = [] }: NewTaskFormProps) {
   const [tags, setTags] = useState("");
   const [assignee, setAssignee] = useState("");
   const [repoId, setRepoId] = useState(repoOptions[0]?.id ?? "");
+  const [personaId, setPersonaId] = useState("implementor");
+  const [personas, setPersonas] = useState<PersonaOption[]>([]);
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/personas")
+      .then((r) => r.json())
+      .then((d: { personas: PersonaOption[] }) => setPersonas(d.personas))
+      .catch(() => {});
+  }, []);
 
   const reset = () => {
     setTitle("");
@@ -33,6 +49,7 @@ export function NewTaskForm({ planId, repoOptions = [] }: NewTaskFormProps) {
     setTags("");
     setAssignee("");
     setRepoId(repoOptions[0]?.id ?? "");
+    setPersonaId("implementor");
     setError(null);
   };
 
@@ -53,6 +70,7 @@ export function NewTaskForm({ planId, repoOptions = [] }: NewTaskFormProps) {
           title: title.trim(),
           assignee: assignee.trim() || undefined,
           repoId: repoId || undefined,
+          personaId: personaId || undefined,
           criteria: criteria
             .split("\n")
             .map((s) => s.trim())
@@ -115,6 +133,19 @@ export function NewTaskForm({ planId, repoOptions = [] }: NewTaskFormProps) {
           placeholder="assignee"
           className="w-28 rounded-sm border border-border/60 bg-background px-2 py-1 text-xs font-mono outline-none focus:border-foreground/40"
         />
+        {personas.length > 0 && (
+          <select
+            value={personaId}
+            onChange={(e) => setPersonaId(e.target.value)}
+            className="rounded-sm border border-border/60 bg-background px-2 py-1 text-xs outline-none focus:border-foreground/40"
+          >
+            {personas.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name} — {p.modelProvider}/{p.modelId}
+              </option>
+            ))}
+          </select>
+        )}
         {repoOptions.length > 1 && (
           <select
             value={repoId}

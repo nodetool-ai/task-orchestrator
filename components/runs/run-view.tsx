@@ -32,6 +32,7 @@ interface Props {
   repositories: SidebarRepo[];
   parent: { id: number; title: string } | null;
   task: { id: string; title: string } | null;
+  personaName: string | null;
 }
 
 // In-flight optimistic messages get a temporary negative id so they don't
@@ -86,6 +87,7 @@ export function RunView({
   repositories,
   parent,
   task,
+  personaName,
 }: Props) {
   const router = useRouter();
   const [run, setRun] = useState<RunRow>(initialRun);
@@ -412,7 +414,7 @@ export function RunView({
           className="text-[11px] text-muted-foreground font-mono truncate"
           title={cwdHint}
         >
-          {run.model ? `${run.model} · ` : ""}cwd: {cwdHint}
+          {personaName ? `${personaName} · ` : ""}{run.model ? `${run.model} · ` : ""}cwd: {cwdHint}
         </div>
       </header>
 
