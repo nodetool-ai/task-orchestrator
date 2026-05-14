@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Bot, ChevronDown, ChevronRight, User, Wrench } from "lucide-react";
+import { Bot, ChevronDown, ChevronRight, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { renderMarkdown } from "@/lib/markdown";
 import type { SdkContentBlock } from "@/lib/sdk-message";
@@ -23,32 +23,27 @@ export function RunMessage({ role, content }: Props) {
   return (
     <div
       className={cn(
-        "flex gap-3 px-4 py-4",
+        "flex gap-2.5 px-4 py-2",
         role === "user" ? "justify-end" : "justify-start"
       )}
     >
       {role === "agent" && (
-        <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full border border-border/60 bg-card text-foreground">
+        <div className="mt-1 flex size-7 shrink-0 items-center justify-center rounded-full border border-border/60 bg-card text-muted-foreground">
           <Bot className="size-3.5" />
         </div>
       )}
       <div
         className={cn(
-          "max-w-[80%] min-w-0 space-y-2 rounded-2xl px-4 py-2.5 text-sm",
+          "max-w-[80%] min-w-0 space-y-2 rounded-2xl px-4 py-2.5 text-sm shadow-sm",
           role === "user"
             ? "bg-foreground text-background rounded-br-sm"
-            : "bg-secondary/60 text-foreground rounded-bl-sm"
+            : "bg-secondary/40 text-foreground rounded-bl-sm border border-border/40"
         )}
       >
         {content.map((block, i) => (
           <ContentBlock key={i} block={block} role={role} />
         ))}
       </div>
-      {role === "user" && (
-        <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-secondary text-foreground">
-          <User className="size-3.5" />
-        </div>
-      )}
     </div>
   );
 }

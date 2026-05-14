@@ -6,8 +6,11 @@ import { useRouter } from "next/navigation";
 import {
   ArrowUp,
   ChevronLeft,
+  Cpu,
+  FolderClosed,
   GitBranch,
   Square,
+  UserRound,
   X,
 } from "lucide-react";
 import { cn, formatDateTime } from "@/lib/utils";
@@ -338,6 +341,25 @@ export function RunView({
   const empty = messages.length === 0;
   const greeting = useMemo(() => greetingFor(new Date(), userEmail), [userEmail]);
 
+  // Drop consecutive duplicate `status` events. The runner emits both a live
+  // bus event and a persisted row for each transition, so reloading often
+  // shows the same `status → running` twice in a row.
+  const visibleMessages = useMemo(() => {
+    const out: UiMessage[] = [];
+    let lastStatus: string | null = null;
+    for (const m of messages) {
+      if (m.role === "system" && m.systemKind === "status") {
+        const s = String((m.systemPayload as { status?: unknown })?.status ?? "");
+        if (s === lastStatus) continue;
+        lastStatus = s;
+      } else {
+        lastStatus = null;
+      }
+      out.push(m);
+    }
+    return out;
+  }, [messages]);
+
   return (
     <div className="flex h-full flex-col overflow-hidden">
       {/* Header */}
@@ -410,11 +432,26 @@ export function RunView({
           )}
         </div>
 
-        <div
-          className="text-[11px] text-muted-foreground font-mono truncate"
-          title={cwdHint}
-        >
-          {personaName ? `${personaName} · ` : ""}{run.model ? `${run.model} · ` : ""}cwd: {cwdHint}
+        <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+          {personaName && (
+            <span className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-secondary/30 px-1.5 py-0.5 text-muted-foreground">
+              <UserRound className="size-3" />
+              <span className="text-foreground/90">{personaName}</span>
+            </span>
+          )}
+          {run.model && (
+            <span className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-secondary/30 px-1.5 py-0.5 text-muted-foreground">
+              <Cpu className="size-3" />
+              <code className="font-mono text-foreground/90">{run.model}</code>
+            </span>
+          )}
+          <span
+            className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-secondary/30 px-1.5 py-0.5 text-muted-foreground min-w-0"
+            title={cwdHint}
+          >
+            <FolderClosed className="size-3 shrink-0" />
+            <code className="font-mono text-foreground/90 truncate max-w-[280px]">{cwdHint}</code>
+          </span>
         </div>
       </header>
 
@@ -429,7 +466,7 @@ export function RunView({
           </div>
         ) : (
           <div className="mx-auto max-w-3xl">
-            {messages.map((m) =>
+            {visibleMessages.map((m) =>
               m.role === "system" ? (
                 <SystemEventRow
                   key={m.id}
@@ -463,12 +500,15 @@ export function RunView({
         <div className="border-t border-border/60 bg-background/80 backdrop-blur px-4 py-3">
           <div className="mx-auto max-w-3xl">
             {status === "running" && (
-              <p className="mb-1.5 text-[10px] text-muted-foreground">
-                Agent is running — your next message will queue until the
-                current turn finishes.
-              </p>
+              <div className="mb-2 inline-flex items-center gap-1.5 rounded-full border border-state-progress/30 bg-state-progress/10 px-2 py-0.5 text-[10px] text-state-progress">
+                <span className="relative flex size-1.5">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-state-progress opacity-75" />
+                  <span className="relative inline-flex rounded-full size-1.5 bg-state-progress" />
+                </span>
+                Agent is running — next message will queue.
+              </div>
             )}
-            <div className="flex items-end gap-2 rounded-2xl border border-border/60 bg-card/60 px-3 py-2 focus-within:border-foreground/30 transition-colors">
+            <div className="flex items-end gap-2 rounded-2xl border border-border/60 bg-card/60 px-3 py-2 focus-within:border-foreground/40 focus-within:ring-2 focus-within:ring-foreground/10 transition-all">
               <textarea
                 ref={textareaRef}
                 value={input}
