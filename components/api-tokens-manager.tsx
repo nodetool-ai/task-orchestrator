@@ -103,7 +103,8 @@ export function ApiTokensManager() {
             New token <code className="font-mono">{created.name}</code>
           </div>
           <p className="text-xs text-muted-foreground">
-            This is the only time the secret is shown. Copy it now.
+            This is the only time the secret is shown. Copy it now or paste
+            one of the ready-made snippets below.
           </p>
           <div className="flex items-center gap-2">
             <code className="flex-1 select-all rounded-md border border-border/60 bg-background px-3 py-2 font-mono text-xs break-all">
@@ -128,6 +129,28 @@ export function ApiTokensManager() {
             >
               Dismiss
             </button>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2 pt-1">
+            <SnippetBlock
+              label="Claude Code (one-line CLI):"
+              text={`claude mcp add --transport http \\
+  task-orchestrator \\
+  ${origin()}/api/mcp \\
+  --header "Authorization: Bearer ${created.token}"`}
+            />
+            <SnippetBlock
+              label="Claude Desktop / config file:"
+              text={`{
+  "mcpServers": {
+    "task-orchestrator": {
+      "type": "http",
+      "url": "${origin()}/api/mcp",
+      "headers": { "Authorization": "Bearer ${created.token}" }
+    }
+  }
+}`}
+            />
           </div>
         </div>
       )}
@@ -215,6 +238,48 @@ export function ApiTokensManager() {
           </ul>
         )}
       </div>
+    </div>
+  );
+}
+
+function origin(): string {
+  if (typeof window !== "undefined" && window.location?.origin) {
+    return window.location.origin;
+  }
+  return "https://tasks.nodetool.ai";
+}
+
+function SnippetBlock({ label, text }: { label: string; text: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // older browsers — fall back silently
+    }
+  }
+  return (
+    <div className="rounded-md border border-border/60 bg-background/60 p-3 text-xs space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-medium">{label}</span>
+        <button
+          type="button"
+          onClick={copy}
+          className="inline-flex items-center gap-1 rounded border border-border/60 bg-background px-1.5 py-0.5 text-[10px] hover:bg-muted/40"
+        >
+          {copied ? (
+            <Check className="size-3 text-state-done" />
+          ) : (
+            <Copy className="size-3" />
+          )}
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <pre className="whitespace-pre-wrap font-mono text-[11px] leading-5 text-muted-foreground select-all">
+        {text}
+      </pre>
     </div>
   );
 }
