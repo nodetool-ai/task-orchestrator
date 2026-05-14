@@ -12,9 +12,19 @@ export default function TokensPage() {
           <code>Authorization: Bearer tot_…</code>. Each token inherits its owner&apos;s
           permissions; revoke any time.
         </p>
-        <div className="rounded-md border border-border/60 bg-card/40 p-3 text-xs space-y-1.5">
-          <div className="font-medium">Connect from Claude Desktop / Code:</div>
-          <pre className="whitespace-pre-wrap font-mono text-[11px] leading-5 text-muted-foreground">{`{
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="rounded-md border border-border/60 bg-card/40 p-3 text-xs space-y-1.5">
+            <div className="font-medium">Claude Code (one-line CLI):</div>
+            <pre className="whitespace-pre-wrap font-mono text-[11px] leading-5 text-muted-foreground">{`claude mcp add --transport http \\
+  task-orchestrator \\
+  https://tasks.nodetool.ai/api/mcp \\
+  --header "Authorization: Bearer tot_…"`}</pre>
+          </div>
+
+          <div className="rounded-md border border-border/60 bg-card/40 p-3 text-xs space-y-1.5">
+            <div className="font-medium">Claude Desktop / config file:</div>
+            <pre className="whitespace-pre-wrap font-mono text-[11px] leading-5 text-muted-foreground">{`{
   "mcpServers": {
     "task-orchestrator": {
       "type": "http",
@@ -23,6 +33,7 @@ export default function TokensPage() {
     }
   }
 }`}</pre>
+          </div>
         </div>
       </header>
       <ApiTokensManager />
