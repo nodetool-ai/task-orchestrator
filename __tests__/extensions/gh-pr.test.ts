@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   filterDiffByFile,
+  ghPrExtension,
   ownerRepoFromRemote,
   parsePrUrl,
   validatePrUrl,
-} from "../lib/gh-pr-mcp";
+} from "../../lib/extensions/gh-pr";
 
 describe("parsePrUrl", () => {
   it("parses an https github PR url", () => {
@@ -168,5 +169,29 @@ describe("filterDiffByFile", () => {
 
   it("returns empty string when no hunks match", () => {
     expect(filterDiffByFile(sample, "nonexistent.ts")).toBe("");
+  });
+});
+
+describe("ghPrExtension", () => {
+  function makeStub() {
+    const calls: Array<{ name: string; def: any }> = [];
+    const pi: any = {
+      registerTool: (def: any) => { calls.push({ name: def.name, def }); },
+      on: () => {},
+    };
+    return { calls, pi };
+  }
+
+  it("registers the five gh_pr tools", () => {
+    const { calls, pi } = makeStub();
+    ghPrExtension({ cwd: "/tmp" })(pi);
+    const names = calls.map((c) => c.name).sort();
+    expect(names).toEqual([
+      "gh_pr__pr_comment",
+      "gh_pr__pr_diff",
+      "gh_pr__pr_merge",
+      "gh_pr__pr_review",
+      "gh_pr__pr_view",
+    ]);
   });
 });
