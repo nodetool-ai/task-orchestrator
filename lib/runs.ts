@@ -490,6 +490,11 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       })
       .where(eq(agentSessions.id, run.id))
       .run();
+    // Tell live SSE subscribers (the run-view in the browser) that the turn
+    // ended. Without this, the client's React state stays at "running" even
+    // though the DB row is idle, and the composer renders the queue hint
+    // forever.
+    emitStatus(run.id, nextStatus);
 
     yield { type: "done" };
   } finally {
