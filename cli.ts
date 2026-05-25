@@ -5,6 +5,7 @@
 import * as repo from "./lib/repo";
 import * as agent from "./lib/agent";
 import * as users from "./lib/users";
+import { createMagicToken } from "./lib/magic-link";
 import { db } from "./db";
 import { TASK_STATES, isTerminalStatus, type TaskState } from "./lib/types";
 import { assistantText, toolUses, type SdkMessageEnvelope } from "./lib/sdk-message";
@@ -432,6 +433,17 @@ async function cmdUser(args: Args): Promise<number> {
       console.log(`updated ${email}`);
       return 0;
     }
+    case "link": {
+      const email = args._.shift();
+      if (!email) throw new Error("Usage: user link <email> [--origin=https://...]");
+      const user = users.findUser(email);
+      if (!user) throw new Error(`No user with email ${email}`);
+      const token = await createMagicToken(user.email);
+      const origin = asString(args.origin) || "https://tasks.nodetool.ai";
+      const url = `${origin}/login-link?token=${encodeURIComponent(token)}`;
+      console.log(url);
+      return 0;
+    }
     case "rm": {
       const email = args._.shift();
       if (!email) throw new Error("Usage: user rm <email>");
@@ -458,7 +470,7 @@ async function cmdUser(args: Args): Promise<number> {
       return 0;
     }
     default:
-      throw new Error("Usage: user <add|passwd|rm|list> ...");
+      throw new Error("Usage: user <add|passwd|link|rm|list> ...");
   }
 }
 
@@ -494,6 +506,7 @@ Commands:
   user add <email> [--password=...] Create a user. Prompts for password if omitted.
   user passwd <email> [--password=...]
                                     Update a user's password.
+  user link <email> [--origin=...]  Generate a one-time magic login link.
   user rm <email>                   Delete a user.
 
 States:

@@ -17,7 +17,7 @@ const { auth } = NextAuth(authConfig);
 export default auth((req) => {
   const path = req.nextUrl.pathname;
 
-  if (path === "/login" || path.startsWith("/api/auth/")) {
+  if (path === "/login" || path === "/login-link" || path.startsWith("/api/auth/")) {
     return NextResponse.next();
   }
   // /api/mcp has its own Bearer-token auth (lib/api-tokens). Bypass the

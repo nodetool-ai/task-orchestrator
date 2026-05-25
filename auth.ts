@@ -1,6 +1,7 @@
 import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
-import { verifyCredentials } from "@/lib/users";
+import { verifyCredentials, findUser } from "@/lib/users";
+import { verifyMagicToken } from "@/lib/magic-link";
 import { authConfig } from "./auth.config";
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
@@ -17,6 +18,24 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         const password = typeof creds?.password === "string" ? creds.password : "";
         if (!email || !password) return null;
         const user = await verifyCredentials(email, password);
+        if (!user) return null;
+        return { id: String(user.id), email: user.email };
+      },
+    }),
+    Credentials({
+      id: "magic-link",
+      name: "Magic Link",
+      credentials: {
+        email: { label: "Email", type: "email" },
+        token: { label: "Token", type: "text" },
+      },
+      async authorize(creds) {
+        const email = typeof creds?.email === "string" ? creds.email : "";
+        const token = typeof creds?.token === "string" ? creds.token : "";
+        if (!email || !token) return null;
+        const verifiedEmail = await verifyMagicToken(token);
+        if (!verifiedEmail || verifiedEmail.toLowerCase() !== email.toLowerCase()) return null;
+        const user = findUser(email);
         if (!user) return null;
         return { id: String(user.id), email: user.email };
       },
