@@ -50,7 +50,7 @@ export async function SiteHeader() {
             </>
           )}
           {/* Mobile: hamburger */}
-          <MobileNav nav={nav} email={email ?? undefined} />
+          <MobileNav email={email ?? undefined} />
         </div>
       </div>
     </header>

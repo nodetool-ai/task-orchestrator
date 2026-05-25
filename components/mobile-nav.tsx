@@ -2,16 +2,20 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { Menu, X } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { Menu, X, LayoutDashboard, ListTodo, Target, Activity, FolderGit2, MessageCircle, Users, KeyRound } from "lucide-react";
 
-interface NavItem {
-  href: string;
-  label: string;
-  icon: LucideIcon;
-}
+const nav = [
+  { href: "/", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/tasks", label: "Tasks", icon: ListTodo },
+  { href: "/plans", label: "Plans", icon: Target },
+  { href: "/repositories", label: "Repos", icon: FolderGit2 },
+  { href: "/runs", label: "Runs", icon: Activity },
+  { href: "/chat", label: "Chat", icon: MessageCircle },
+  { href: "/personas", label: "Personas", icon: Users },
+  { href: "/tokens", label: "Tokens", icon: KeyRound },
+];
 
-export function MobileNav({ nav, email }: { nav: NavItem[]; email?: string }) {
+export function MobileNav({ email }: { email?: string }) {
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
