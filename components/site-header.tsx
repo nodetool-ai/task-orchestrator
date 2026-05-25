@@ -2,6 +2,7 @@ import Link from "next/link";
 import { LayoutDashboard, ListTodo, Target, Activity, FolderGit2, MessageCircle, Users, KeyRound } from "lucide-react";
 import { auth } from "@/auth";
 import { SignOutButton } from "./sign-out-button";
+import { MobileNav } from "./mobile-nav";
 
 const nav = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -21,11 +22,13 @@ export async function SiteHeader() {
   return (
     <header className="sticky top-0 z-40 border-b border-border/60 bg-background/80 backdrop-blur">
       <div className="container flex h-12 items-center gap-1">
-        <Link href="/" className="mr-4 flex items-center gap-2">
+        <Link href="/" className="mr-2 flex items-center gap-2 shrink-0">
           <span className="size-4 rounded-sm bg-foreground" />
           <span className="text-sm font-semibold tracking-tight">Task Orchestrator</span>
         </Link>
-        <nav className="flex items-center gap-1">
+
+        {/* Desktop nav */}
+        <nav className="hidden md:flex items-center gap-1">
           {nav.map((item) => (
             <Link
               key={item.href}
@@ -37,13 +40,17 @@ export async function SiteHeader() {
             </Link>
           ))}
         </nav>
+
         <div className="ml-auto flex items-center gap-3 text-xs text-muted-foreground">
+          {/* Desktop: show email + sign-out */}
           {email && (
             <>
-              <span className="font-mono">{email}</span>
+              <span className="hidden sm:inline font-mono">{email}</span>
               <SignOutButton />
             </>
           )}
+          {/* Mobile: hamburger */}
+          <MobileNav nav={nav} email={email ?? undefined} />
         </div>
       </div>
     </header>

@@ -11,7 +11,7 @@ export default async function PlansIndexPage() {
   const progressByPlan = repo.planProgressBatch(plans.map((p) => p.id));
   return (
     <div className="space-y-8">
-      <header className="flex items-start justify-between gap-4">
+      <header className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Plans</h1>
           <p className="text-sm text-muted-foreground">{plans.length} total.</p>
@@ -43,8 +43,8 @@ export default async function PlansIndexPage() {
                   {p.owner && <span className="text-xs text-muted-foreground">@{p.owner}</span>}
                 </div>
                 {total > 0 && (
-                  <div className="mt-3 flex items-center gap-3">
-                    <Progress value={pct} className="w-40" />
+                  <div className="mt-3 space-y-1">
+                    <Progress value={pct} className="w-full sm:w-40" />
                     <span className="text-[11px] text-muted-foreground tabular-nums">
                       {done} / {total} done · {open} open
                     </span>

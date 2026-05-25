@@ -65,7 +65,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         <ArrowLeft className="size-3.5" /> Tasks
       </Link>
 
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground">
             <StateIcon state={task.state} className="size-4" />
@@ -73,7 +73,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
           </div>
           <h1 className="mt-2 text-2xl font-semibold tracking-tight leading-tight">{task.title}</h1>
         </div>
-        <div className="flex flex-col items-end gap-1.5">
+        <div className="flex flex-row sm:flex-col items-start sm:items-end gap-2 sm:gap-1.5 flex-wrap">
           <RunAgentButton
             taskId={task.id}
             hasActive={Boolean(activeSession)}
@@ -235,17 +235,17 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
             {inbox.map((r) => (
               <div
                 key={r.id}
-                className="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/40 transition-colors group"
+                className="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-3 px-3 py-2.5 hover:bg-muted/40 transition-colors group"
               >
                 <Link
                   href={`/runs/${r.id}`}
-                  className="flex items-center gap-3 flex-1 min-w-0"
+                  className="flex items-center gap-2 sm:gap-3 flex-1 min-w-0"
                 >
-                  <span className="font-mono text-xs text-muted-foreground tabular-nums">
+                  <span className="font-mono text-xs text-muted-foreground tabular-nums shrink-0">
                     #{r.id}
                   </span>
                   <span
-                    className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground/80"
+                    className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground/80 shrink-0"
                     title={`goal: ${r.goal}`}
                   >
                     {goalLabel(r.goal)}
@@ -257,21 +257,23 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
                     </code>
                   )}
                 </Link>
-                {r.prUrl && (
-                  <a
-                    href={r.prUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline decoration-dotted"
-                  >
-                    <GitPullRequest className="size-3" />
-                    {prShortLabel(r.prUrl)}
-                    <span>↗</span>
-                  </a>
-                )}
-                <span className="text-[11px] text-muted-foreground tabular-nums">
-                  {relativeDate(r.startedAt)}
-                </span>
+                <div className="flex items-center gap-3 pl-0 sm:pl-0">
+                  {r.prUrl && (
+                    <a
+                      href={r.prUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline decoration-dotted"
+                    >
+                      <GitPullRequest className="size-3" />
+                      {prShortLabel(r.prUrl)}
+                      <span>↗</span>
+                    </a>
+                  )}
+                  <span className="text-[11px] text-muted-foreground tabular-nums">
+                    {relativeDate(r.startedAt)}
+                  </span>
+                </div>
               </div>
             ))}
           </div>

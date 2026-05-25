@@ -71,21 +71,21 @@ export default async function DashboardPage() {
                 <Link
                   key={p.id}
                   href={`/plans/${p.id}`}
-                  className="flex items-center gap-4 px-4 py-3 hover:bg-muted/40 transition-colors"
+                  className="block px-4 py-3 hover:bg-muted/40 transition-colors"
                 >
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium truncate">{p.title}</span>
-                      <StateBadge state={p.state} />
-                    </div>
-                    <div className="mt-1 text-xs text-muted-foreground font-mono">{p.id}</div>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-sm font-medium truncate">{p.title}</span>
+                    <StateBadge state={p.state} />
                   </div>
-                  <div className="hidden sm:flex flex-col items-end gap-1 w-48">
-                    <Progress value={pct} className="w-full" />
-                    <div className="text-[11px] text-muted-foreground tabular-nums">
-                      {done} / {total} done · {open} open
+                  <div className="mt-1 text-xs text-muted-foreground font-mono">{p.id}</div>
+                  {total > 0 && (
+                    <div className="mt-2 flex flex-col gap-1">
+                      <Progress value={pct} className="w-full sm:w-48" />
+                      <div className="text-[11px] text-muted-foreground tabular-nums">
+                        {done} / {total} done · {open} open
+                      </div>
                     </div>
-                  </div>
+                  )}
                 </Link>
               );
             })}
@@ -98,7 +98,7 @@ export default async function DashboardPage() {
 
 function EmptyState() {
   return (
-    <section className="rounded-lg border border-dashed border-border/60 bg-secondary/20 p-12 text-center">
+    <section className="rounded-lg border border-dashed border-border/60 bg-secondary/20 p-8 sm:p-12 text-center">
       <h2 className="text-base font-semibold">No tasks yet</h2>
       <p className="mt-2 text-sm text-muted-foreground">
         Create your first plan and task with the CLI:

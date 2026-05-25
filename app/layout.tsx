@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import { SiteHeader } from "@/components/site-header";
 import "./globals.css";
@@ -11,14 +11,20 @@ export const metadata: Metadata = {
   description: "Plans and tasks for software projects — markdown-native, conflict-free.",
 };
 
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
+};
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={`${inter.variable} ${mono.variable} dark`} suppressHydrationWarning>
       <body className="min-h-screen bg-background font-sans antialiased">
         <SiteHeader />
-        <main className="container py-8">{children}</main>
-        <footer className="border-t border-border/60 mt-16">
-          <div className="container py-6 flex items-center justify-between text-xs text-muted-foreground">
+        <main className="container py-4 sm:py-8">{children}</main>
+        <footer className="border-t border-border/60 mt-10 sm:mt-16">
+          <div className="container py-4 sm:py-6 flex items-center justify-between gap-4 text-xs text-muted-foreground">
             <span>Source of truth lives in <code className="font-mono text-foreground/80">data.db</code>.</span>
             <span>Built with Next.js</span>
           </div>
