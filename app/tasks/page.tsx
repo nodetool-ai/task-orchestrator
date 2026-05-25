@@ -51,7 +51,7 @@ export default async function TasksIndexPage({
   return (
     <div className="space-y-6">
       <header className="space-y-3">
-        <div className="flex items-end justify-between gap-3">
+        <div className="flex flex-wrap items-end justify-between gap-2">
           <div>
             <h1 className="text-xl font-semibold tracking-tight">Tasks</h1>
             <p className="text-sm text-muted-foreground">{tasks.length} total · grouped by state.</p>

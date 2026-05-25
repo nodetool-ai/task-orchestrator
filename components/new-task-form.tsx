@@ -123,7 +123,7 @@ export function NewTaskForm({ planId, repoOptions = [] }: NewTaskFormProps) {
         placeholder={"Acceptance criteria, one per line"}
         className="w-full resize-none rounded-sm border border-border/60 bg-background px-2 py-1.5 text-xs outline-none focus:border-foreground/40"
       />
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <AssigneePicker value={assignee} onChange={setAssignee} size="compact" />
         <PersonaPicker
           personas={personas}
@@ -148,11 +148,13 @@ export function NewTaskForm({ planId, repoOptions = [] }: NewTaskFormProps) {
             size="compact"
           />
         </div>
+      </div>
+      <div className="flex items-center gap-2">
         <button
           type="submit"
           disabled={pending || !title.trim()}
           className={cn(
-            "inline-flex items-center gap-1 rounded-md bg-foreground text-background px-3 py-1 text-xs font-medium",
+            "inline-flex items-center gap-1 rounded-md bg-foreground text-background px-3 py-2 text-xs font-medium",
             "hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
           )}
         >
@@ -165,7 +167,7 @@ export function NewTaskForm({ planId, repoOptions = [] }: NewTaskFormProps) {
             reset();
             setOpen(false);
           }}
-          className="text-xs text-muted-foreground hover:text-foreground"
+          className="text-xs text-muted-foreground hover:text-foreground py-2"
         >
           Cancel
         </button>
