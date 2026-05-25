@@ -2,6 +2,8 @@
 // CLI for the SQLite-backed tasks system.
 // Imports repo functions directly — no HTTP server needed.
 
+import { config } from "dotenv";
+config({ path: ".env.local" });
 import * as repo from "./lib/repo";
 import * as agent from "./lib/agent";
 import * as users from "./lib/users";

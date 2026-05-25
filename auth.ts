@@ -12,32 +12,31 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       credentials: {
         email: { label: "Email", type: "email" },
         password: { label: "Password", type: "password" },
-      },
-      async authorize(creds) {
-        const email = typeof creds?.email === "string" ? creds.email : "";
-        const password = typeof creds?.password === "string" ? creds.password : "";
-        if (!email || !password) return null;
-        const user = await verifyCredentials(email, password);
-        if (!user) return null;
-        return { id: String(user.id), email: user.email };
-      },
-    }),
-    Credentials({
-      id: "magic-link",
-      name: "Magic Link",
-      credentials: {
-        email: { label: "Email", type: "email" },
         token: { label: "Token", type: "text" },
       },
       async authorize(creds) {
         const email = typeof creds?.email === "string" ? creds.email : "";
+        const password = typeof creds?.password === "string" ? creds.password : "";
         const token = typeof creds?.token === "string" ? creds.token : "";
-        if (!email || !token) return null;
-        const verifiedEmail = await verifyMagicToken(token);
-        if (!verifiedEmail || verifiedEmail.toLowerCase() !== email.toLowerCase()) return null;
-        const user = findUser(email);
-        if (!user) return null;
-        return { id: String(user.id), email: user.email };
+        if (!email) return null;
+
+        // Magic link login
+        if (token) {
+          const verifiedEmail = await verifyMagicToken(token);
+          if (!verifiedEmail || verifiedEmail.toLowerCase() !== email.toLowerCase()) return null;
+          const user = findUser(email);
+          if (!user) return null;
+          return { id: String(user.id), email: user.email };
+        }
+
+        // Password login
+        if (password) {
+          const user = await verifyCredentials(email, password);
+          if (!user) return null;
+          return { id: String(user.id), email: user.email };
+        }
+
+        return null;
       },
     }),
   ],

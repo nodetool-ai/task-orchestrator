@@ -49,7 +49,7 @@ function LoginLinkHandler() {
       return;
     }
 
-    signIn("magic-link", { email, token, redirect: false })
+    signIn("credentials", { email, token, redirect: false })
       .then((res) => {
         if (!res || res.error) {
           setError("This login link has expired or is invalid.");
