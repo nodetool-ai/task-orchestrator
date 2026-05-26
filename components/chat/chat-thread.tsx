@@ -1,9 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowUp, Bot, Square, Sparkles } from "lucide-react";
+import { Bot, Sparkles } from "lucide-react";
 import { ChatMessage } from "@/components/chat/chat-message";
+import { ChatComposer, type ChatComposerHandle } from "@/components/chat/chat-composer";
+import { ThreadErrorBanner } from "@/components/chat/thread-error-banner";
+import { ModelPicker } from "@/components/chat/model-picker";
 import type { ChatMessageRow, ChatRole, ChatRow } from "@/lib/types";
 import type { SdkContentBlock, SdkMessageEnvelope } from "@/lib/sdk-message";
 import { RepositoryPicker } from "@/components/pickers/repository-picker";
@@ -30,8 +33,6 @@ const MODEL_OPTIONS = [
   "claude-haiku-4-5-20251001",
 ];
 
-// In-flight optimistic messages get a temporary negative id so they don't
-// collide with persisted rows on the next refresh.
 interface UiMessage {
   id: number;
   role: ChatRole;
@@ -65,7 +66,7 @@ export function ChatThread({
   const [savingRepo, setSavingRepo] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const composerRef = useRef<ChatComposerHandle>(null);
 
   async function patchChat(patch: Record<string, unknown>, onError: () => void) {
     try {
@@ -117,12 +118,23 @@ export function ChatThread({
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, sending]);
 
-  useEffect(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = Math.min(el.scrollHeight, 200) + "px";
-  }, [input]);
+  // Pair tool_use blocks with their matching tool_result by id so the result
+  // renders inline under the call instead of as a floating row.
+  const { resultByToolId, visibleMessages } = useMemo(() => {
+    const map = new Map<string, SdkContentBlock>();
+    for (const m of messages) {
+      if (m.role !== "tool_result") continue;
+      for (const b of m.content) {
+        if (b.tool_use_id) map.set(b.tool_use_id, b);
+      }
+    }
+    const visible = messages.filter((m) => {
+      if (m.role !== "tool_result") return true;
+      // Drop tool_result rows whose every block was paired with a known call.
+      return m.content.some((b) => !b.tool_use_id || !map.has(b.tool_use_id));
+    });
+    return { resultByToolId: map, visibleMessages: visible };
+  }, [messages]);
 
   async function send() {
     const text = input.trim();
@@ -192,24 +204,19 @@ export function ChatThread({
     abortRef.current?.abort();
   }
 
-  function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      send();
-    }
-  }
-
   const empty = messages.length === 0;
   const greeting = greetingFor(new Date(), userEmail);
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      <header className="border-b border-border/60 px-5 py-3 space-y-1">
+      <header className="border-b border-border/60 bg-background/60 px-5 py-3 backdrop-blur">
         <div className="flex items-center gap-2 text-sm">
           <Sparkles className="size-3.5 text-state-review" />
-          <span className="font-medium truncate">{chat.title}</span>
+          <span className="truncate font-medium">{chat.title}</span>
           <div className="ml-auto flex items-center gap-2">
-            <label className="sr-only" htmlFor={`repo-${chat.id}`}>Repository</label>
+            <label className="sr-only" htmlFor={`repo-${chat.id}`}>
+              Repository
+            </label>
             <RepositoryPicker
               id={`repo-${chat.id}`}
               repositories={repositories}
@@ -218,29 +225,21 @@ export function ChatThread({
               disabled={savingRepo || repositories.length === 0}
               emptyLabel={repositories.length === 0 ? "no repos" : null}
               showId
-              className="rounded-md border border-border/60 bg-background/60 px-2 py-1 text-[11px] font-mono text-foreground hover:bg-muted/40 focus:outline-none focus:border-foreground/30 disabled:opacity-50"
+              className="rounded-md border border-border/60 bg-background/60 px-2 py-1 text-[11px] font-mono text-foreground transition-colors hover:bg-muted/40 focus:border-foreground/30 focus:outline-none disabled:opacity-50"
             />
-            <label className="sr-only" htmlFor={`model-${chat.id}`}>Model</label>
-            <select
+            <ModelPicker
               id={`model-${chat.id}`}
-              value={MODEL_OPTIONS.includes(model) ? model : "__custom"}
-              onChange={(e) => {
-                if (e.target.value === "__custom") return;
-                changeModel(e.target.value);
-              }}
+              value={model}
+              options={MODEL_OPTIONS}
+              onChange={changeModel}
               disabled={savingModel}
-              className="rounded-md border border-border/60 bg-background/60 px-2 py-1 text-[11px] font-mono text-foreground hover:bg-muted/40 focus:outline-none focus:border-foreground/30 disabled:opacity-50"
-            >
-              {MODEL_OPTIONS.map((m) => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-              {!MODEL_OPTIONS.includes(model) && (
-                <option value="__custom">{model}</option>
-              )}
-            </select>
+            />
           </div>
         </div>
-        <div className="text-[11px] text-muted-foreground font-mono truncate" title={repoCwdHint}>
+        <div
+          className="mt-1 truncate font-mono text-[11px] text-muted-foreground"
+          title={repoCwdHint}
+        >
           cwd: {repoCwdHint}
         </div>
       </header>
@@ -250,16 +249,13 @@ export function ChatThread({
           <div className="mx-auto max-w-2xl px-6 py-16">
             <h1 className="text-3xl font-semibold tracking-tight">{greeting.title}</h1>
             <p className="mt-2 text-muted-foreground">{greeting.subtitle}</p>
-            <div className="mt-8 grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div className="mt-8 grid grid-cols-1 gap-2 sm:grid-cols-2">
               {SUGGESTIONS.map((s) => (
                 <button
                   key={s}
                   type="button"
-                  onClick={() => {
-                    setInput(s);
-                    textareaRef.current?.focus();
-                  }}
-                  className="text-left rounded-lg border border-border/60 bg-card/40 px-3 py-2.5 text-sm text-foreground/90 hover:bg-muted/50 transition-colors"
+                  onClick={() => composerRef.current?.setValue(s)}
+                  className="rounded-lg border border-border/60 bg-card/40 px-3 py-2.5 text-left text-sm text-foreground/90 transition-colors hover:border-foreground/20 hover:bg-muted/50"
                 >
                   {s}
                 </button>
@@ -267,59 +263,39 @@ export function ChatThread({
             </div>
           </div>
         ) : (
-          <div className="mx-auto max-w-3xl">
-            {messages.map((m) => (
-              <ChatMessage key={m.id} role={m.role} content={m.content} />
+          <div className="mx-auto max-w-3xl pb-2">
+            {visibleMessages.map((m) => (
+              <ChatMessage
+                key={m.id}
+                role={m.role}
+                content={m.content}
+                resultByToolId={resultByToolId}
+              />
             ))}
             {sending && <ThinkingIndicator />}
-            {errorMsg && (
-              <pre className="mx-4 my-2 rounded-md border border-state-blocked/40 bg-state-blocked/10 px-3 py-2 text-[11px] leading-5 font-mono whitespace-pre-wrap text-state-blocked overflow-x-auto">
-                {errorMsg}
-              </pre>
-            )}
             <div ref={endRef} />
           </div>
         )}
       </div>
 
-      <div className="border-t border-border/60 bg-background/80 backdrop-blur px-4 py-3">
-        <div className="mx-auto max-w-3xl">
-          <div className="flex items-end gap-2 rounded-2xl border border-border/60 bg-card/60 px-3 py-2 focus-within:border-foreground/30 transition-colors">
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={onKeyDown}
-              placeholder="Ask anything…"
-              rows={1}
-              className="flex-1 resize-none bg-transparent text-sm placeholder:text-muted-foreground focus:outline-none py-1.5 max-h-48"
-            />
-            {sending ? (
-              <button
-                type="button"
-                onClick={stop}
-                className="inline-flex size-8 items-center justify-center rounded-full bg-state-blocked/80 text-background hover:bg-state-blocked transition-colors"
-                aria-label="Stop"
-              >
-                <Square className="size-3.5 fill-current" />
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={send}
-                disabled={!input.trim()}
-                className="inline-flex size-8 items-center justify-center rounded-full bg-foreground text-background hover:bg-foreground/90 disabled:opacity-40 disabled:hover:bg-foreground transition-colors"
-                aria-label="Send"
-              >
-                <ArrowUp className="size-4" />
-              </button>
-            )}
-          </div>
-          <p className="mt-1.5 text-[10px] text-muted-foreground text-center">
+      <ChatComposer
+        ref={composerRef}
+        value={input}
+        onChange={setInput}
+        onSubmit={send}
+        onStop={stop}
+        sending={sending}
+        header={
+          errorMsg ? (
+            <ThreadErrorBanner error={errorMsg} onDismiss={() => setErrorMsg(null)} />
+          ) : null
+        }
+        hint={
+          <>
             Claude Agent SDK · runs against this repo with bash + edit tools.
-          </p>
-        </div>
-      </div>
+          </>
+        }
+      />
     </div>
   );
 }
@@ -331,10 +307,10 @@ function ThinkingIndicator() {
         <Bot className="size-3.5" />
       </div>
       <div className="rounded-2xl rounded-bl-sm bg-secondary/60 px-4 py-2.5">
-        <span className="inline-flex gap-1 items-center">
-          <span className="size-1.5 rounded-full bg-foreground/60 animate-pulse" />
-          <span className="size-1.5 rounded-full bg-foreground/60 animate-pulse [animation-delay:120ms]" />
-          <span className="size-1.5 rounded-full bg-foreground/60 animate-pulse [animation-delay:240ms]" />
+        <span className="inline-flex items-center gap-1">
+          <span className="size-1.5 animate-pulse rounded-full bg-foreground/60" />
+          <span className="size-1.5 animate-pulse rounded-full bg-foreground/60 [animation-delay:120ms]" />
+          <span className="size-1.5 animate-pulse rounded-full bg-foreground/60 [animation-delay:240ms]" />
         </span>
       </div>
     </div>
@@ -383,7 +359,14 @@ const SUGGESTIONS = [
 
 function greetingFor(now: Date, email: string | null): { title: string; subtitle: string } {
   const hour = now.getHours();
-  const part = hour < 5 ? "Working late" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  const part =
+    hour < 5
+      ? "Working late"
+      : hour < 12
+      ? "Good morning"
+      : hour < 18
+      ? "Good afternoon"
+      : "Good evening";
   const name = email ? email.split("@")[0].replace(/[._]/g, " ") : null;
   return {
     title: name ? `${part}, ${name}.` : `${part}.`,
