@@ -1,0 +1,290 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-05-26T00:00:00Z",
+  "title": "Design System: Task Orchestrator",
+  "extensions": {
+    "colorMeta": {
+      "bg-dark": {
+        "role": "neutral",
+        "displayName": "Console Black",
+        "canonical": "hsl(240 6% 6%)",
+        "tonalRamp": [
+          "oklch(13% 0.005 256)",
+          "oklch(18% 0.005 256)",
+          "oklch(24% 0.006 256)",
+          "oklch(33% 0.006 256)",
+          "oklch(46% 0.006 256)",
+          "oklch(60% 0.006 256)",
+          "oklch(78% 0.006 256)",
+          "oklch(94% 0.005 256)"
+        ]
+      },
+      "surface-dark": {
+        "role": "neutral",
+        "displayName": "Console Surface",
+        "canonical": "hsl(240 6% 8%)",
+        "tonalRamp": [
+          "oklch(15% 0.005 256)",
+          "oklch(20% 0.005 256)",
+          "oklch(26% 0.006 256)",
+          "oklch(35% 0.006 256)",
+          "oklch(48% 0.006 256)",
+          "oklch(62% 0.006 256)",
+          "oklch(80% 0.006 256)",
+          "oklch(94% 0.005 256)"
+        ]
+      },
+      "surface-raised-dark": {
+        "role": "neutral",
+        "displayName": "Console Raised",
+        "canonical": "hsl(240 4% 14%)",
+        "tonalRamp": [
+          "oklch(18% 0.004 256)",
+          "oklch(24% 0.004 256)",
+          "oklch(32% 0.005 256)",
+          "oklch(42% 0.005 256)",
+          "oklch(55% 0.005 256)",
+          "oklch(68% 0.005 256)",
+          "oklch(82% 0.005 256)",
+          "oklch(94% 0.004 256)"
+        ]
+      },
+      "muted-fg-dark": {
+        "role": "neutral",
+        "displayName": "Muted Voice",
+        "canonical": "hsl(240 5% 64%)",
+        "tonalRamp": [
+          "oklch(20% 0.006 256)",
+          "oklch(30% 0.007 256)",
+          "oklch(42% 0.008 256)",
+          "oklch(55% 0.008 256)",
+          "oklch(68% 0.008 256)",
+          "oklch(78% 0.007 256)",
+          "oklch(88% 0.006 256)",
+          "oklch(96% 0.005 256)"
+        ]
+      },
+      "border-dark": {
+        "role": "neutral",
+        "displayName": "Console Hairline",
+        "canonical": "hsl(240 4% 16%)",
+        "tonalRamp": [
+          "oklch(18% 0.004 256)",
+          "oklch(25% 0.004 256)",
+          "oklch(34% 0.005 256)",
+          "oklch(45% 0.005 256)",
+          "oklch(58% 0.005 256)",
+          "oklch(72% 0.005 256)",
+          "oklch(84% 0.005 256)",
+          "oklch(94% 0.004 256)"
+        ]
+      },
+      "state-todo": {
+        "role": "secondary",
+        "displayName": "Idle Gray",
+        "canonical": "hsl(240 4% 60%)",
+        "tonalRamp": [
+          "oklch(22% 0.005 256)",
+          "oklch(32% 0.006 256)",
+          "oklch(44% 0.007 256)",
+          "oklch(56% 0.008 256)",
+          "oklch(66% 0.008 256)",
+          "oklch(76% 0.007 256)",
+          "oklch(86% 0.006 256)",
+          "oklch(95% 0.005 256)"
+        ]
+      },
+      "state-progress": {
+        "role": "secondary",
+        "displayName": "Live Amber",
+        "canonical": "hsl(38 92% 50%)",
+        "tonalRamp": [
+          "oklch(28% 0.05 70)",
+          "oklch(40% 0.09 72)",
+          "oklch(52% 0.13 72)",
+          "oklch(63% 0.16 70)",
+          "oklch(72% 0.17 68)",
+          "oklch(82% 0.14 75)",
+          "oklch(90% 0.08 80)",
+          "oklch(96% 0.04 85)"
+        ]
+      },
+      "state-review": {
+        "role": "secondary",
+        "displayName": "Pending Iris",
+        "canonical": "hsl(270 76% 65%)",
+        "tonalRamp": [
+          "oklch(25% 0.10 295)",
+          "oklch(36% 0.14 295)",
+          "oklch(48% 0.18 295)",
+          "oklch(58% 0.21 295)",
+          "oklch(70% 0.20 295)",
+          "oklch(80% 0.15 295)",
+          "oklch(89% 0.09 295)",
+          "oklch(96% 0.04 295)"
+        ]
+      },
+      "state-blocked": {
+        "role": "secondary",
+        "displayName": "Blocked Coral",
+        "canonical": "hsl(0 72% 60%)",
+        "tonalRamp": [
+          "oklch(28% 0.10 25)",
+          "oklch(38% 0.14 25)",
+          "oklch(50% 0.18 25)",
+          "oklch(60% 0.20 25)",
+          "oklch(70% 0.18 25)",
+          "oklch(80% 0.13 25)",
+          "oklch(89% 0.07 25)",
+          "oklch(96% 0.03 25)"
+        ]
+      },
+      "state-done": {
+        "role": "secondary",
+        "displayName": "Resolved Green",
+        "canonical": "hsl(152 60% 45%)",
+        "tonalRamp": [
+          "oklch(25% 0.07 160)",
+          "oklch(35% 0.10 160)",
+          "oklch(46% 0.13 160)",
+          "oklch(56% 0.15 160)",
+          "oklch(68% 0.14 160)",
+          "oklch(79% 0.11 160)",
+          "oklch(89% 0.06 160)",
+          "oklch(96% 0.03 160)"
+        ]
+      },
+      "state-cancelled": {
+        "role": "secondary",
+        "displayName": "Cancelled Slate",
+        "canonical": "hsl(240 4% 50%)",
+        "tonalRamp": [
+          "oklch(20% 0.005 256)",
+          "oklch(28% 0.006 256)",
+          "oklch(38% 0.007 256)",
+          "oklch(48% 0.008 256)",
+          "oklch(60% 0.008 256)",
+          "oklch(72% 0.007 256)",
+          "oklch(84% 0.006 256)",
+          "oklch(94% 0.005 256)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "brand":  { "displayName": "Brand / Title", "purpose": "Site-header brand, card titles, modal titles. The single weight contrast moment." },
+      "title":  { "displayName": "Title",         "purpose": "Card and section headers, 14px semibold tracking-tight." },
+      "body":   { "displayName": "Body",          "purpose": "Markdown body content inside .prose-tasks; capped 65-75ch in narrative regions." },
+      "meta":   { "displayName": "Meta",          "purpose": "Badges, state pills, nav links, button labels. The default UI text size." },
+      "mono":   { "displayName": "Mono Tag",      "purpose": "JetBrains Mono at 11px tabular-nums for IDs, branch names, costs, timestamps, paths." }
+    },
+    "shadows": [
+      { "name": "modal", "value": "0 25px 50px -12px rgba(0, 0, 0, 0.6)", "purpose": "The only sanctioned shadow. Applied only to the run-agent modal sitting above a backdrop-blur veil." }
+    ],
+    "motion": [
+      { "name": "fade-in",     "value": "fade-in 0.2s ease-out", "purpose": "Existing keyframe. Opacity 0 to 1 over 200ms. The default entrance for new content." },
+      { "name": "spin-live",   "value": "spin 1s linear infinite", "purpose": "Loader2 icon spin for live session state (running, pushing, opening_pr). The only continuous animation in the app." },
+      { "name": "ease-state",  "value": "200ms ease-out", "purpose": "Default transition for hover/focus state changes on colors and opacity. Never applied to layout properties." }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "640px",  "purpose": "Kanban switches from horizontal scroller to 2-column grid; site nav surfaces." },
+      { "name": "md", "value": "768px",  "purpose": "Desktop nav replaces mobile hamburger." },
+      { "name": "lg", "value": "1024px", "purpose": "Kanban switches to full 5-column grid." },
+      { "name": "2xl", "value": "1400px", "purpose": "Container max-width." }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button (Run Agent)",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The single agentic CTA. Inverts foreground on background; sparkles icon marks the action as agentic.",
+      "html": "<button class=\"ds-btn-primary\"><svg class=\"ds-btn-primary__icon\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z\"/><path d=\"M20 3v4\"/><path d=\"M22 5h-4\"/><path d=\"M4 17v2\"/><path d=\"M5 18H3\"/></svg>Run agent: Implement</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; gap: 6px; background: #fafafa; color: #0e0e10; border: 1px solid #27272a; border-radius: 6px; padding: 6px 12px; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 12px; font-weight: 500; line-height: 1rem; cursor: pointer; transition: opacity 200ms ease-out; } .ds-btn-primary:hover { opacity: 0.9; } .ds-btn-primary:focus-visible { outline: 1px solid rgba(250, 250, 250, 0.4); outline-offset: 2px; } .ds-btn-primary:disabled { opacity: 0.4; cursor: not-allowed; } .ds-btn-primary__icon { width: 14px; height: 14px; }"
+    },
+    {
+      "name": "Ghost Button (Nav Link)",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Site-header navigation voice. Muted at rest, foreground on hover; the resting state of every secondary action.",
+      "html": "<a href=\"#\" class=\"ds-btn-ghost\"><svg class=\"ds-btn-ghost__icon\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><rect width=\"7\" height=\"9\" x=\"3\" y=\"3\" rx=\"1\"/><rect width=\"7\" height=\"5\" x=\"14\" y=\"3\" rx=\"1\"/><rect width=\"7\" height=\"9\" x=\"14\" y=\"12\" rx=\"1\"/><rect width=\"7\" height=\"5\" x=\"3\" y=\"16\" rx=\"1\"/></svg>Dashboard</a>",
+      "css": ".ds-btn-ghost { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 6px; color: #9f9fa8; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 12px; font-weight: 500; line-height: 1rem; text-decoration: none; transition: color 200ms ease-out, background-color 200ms ease-out; } .ds-btn-ghost:hover { color: #fafafa; background-color: rgba(34, 34, 37, 0.6); } .ds-btn-ghost:focus-visible { outline: 1px solid rgba(250, 250, 250, 0.4); outline-offset: 2px; } .ds-btn-ghost__icon { width: 14px; height: 14px; }"
+    },
+    {
+      "name": "State Badge (In Progress)",
+      "kind": "chip",
+      "refersTo": "state-badge",
+      "description": "The canonical state communication pattern. Linear-style status glyph (14px) prefixes the label; the glyph carries the hue, the text stays foreground.",
+      "html": "<span class=\"ds-state-badge\"><svg class=\"ds-state-badge__glyph\" viewBox=\"0 0 16 16\" fill=\"none\" aria-hidden=\"true\"><circle cx=\"8\" cy=\"8\" r=\"6.25\" stroke=\"currentColor\" stroke-width=\"1.75\"/><path d=\"M8 2.5a5.5 5.5 0 015.5 5.5h-5.5z\" fill=\"currentColor\"/></svg>In Progress</span>",
+      "css": ".ds-state-badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border: 1px solid rgba(39, 39, 42, 0.6); background: rgba(34, 34, 37, 0.6); border-radius: 6px; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 12px; font-weight: 500; line-height: 1rem; color: #fafafa; } .ds-state-badge__glyph { width: 14px; height: 14px; color: #f59f0a; flex-shrink: 0; }"
+    },
+    {
+      "name": "Task Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "The dense list row used in kanban columns and task lists. Three lines: mono meta, title, optional tags. Hover swaps card opacity and border.",
+      "html": "<a href=\"#\" class=\"ds-task-card\"><div class=\"ds-task-card__meta\"><svg class=\"ds-task-card__glyph\" viewBox=\"0 0 16 16\" fill=\"none\" aria-hidden=\"true\"><circle cx=\"8\" cy=\"8\" r=\"6.25\" stroke=\"currentColor\" stroke-width=\"1.75\"/><path d=\"M8 2.5a5.5 5.5 0 015.5 5.5h-5.5z\" fill=\"currentColor\"/></svg><span class=\"ds-task-card__id\">T-20260511-0001</span><span class=\"ds-task-card__count\">2/5</span></div><div class=\"ds-task-card__title\">Wire SSE resume support into the session event stream.</div><div class=\"ds-task-card__tags\"><span class=\"ds-task-card__assignee\">@claude</span><span class=\"ds-task-card__tag\">backend</span><span class=\"ds-task-card__tag\">ssr</span></div></a>",
+      "css": ".ds-task-card { display: block; padding: 12px; border: 1px solid rgba(39, 39, 42, 0.7); background: rgba(19, 19, 22, 0.4); border-radius: 6px; text-decoration: none; transition: background-color 200ms ease-out, border-color 200ms ease-out; } .ds-task-card:hover { background: #131316; border-color: #27272a; } .ds-task-card__meta { display: flex; align-items: center; gap: 8px; font-family: \"JetBrains Mono\", ui-monospace, monospace; font-size: 11px; line-height: 1rem; color: #9f9fa8; font-variant-numeric: tabular-nums; } .ds-task-card__glyph { width: 14px; height: 14px; color: #f59f0a; flex-shrink: 0; } .ds-task-card__id { font-variant-numeric: tabular-nums; } .ds-task-card__count { margin-left: auto; font-variant-numeric: tabular-nums; } .ds-task-card__title { margin-top: 6px; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 14px; font-weight: 500; line-height: 1.375; color: #fafafa; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; } .ds-task-card__tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 11px; color: #9f9fa8; } .ds-task-card__tag { border: 1px solid rgba(39, 39, 42, 0.7); border-radius: 3px; padding: 0 6px; }"
+    },
+    {
+      "name": "Kanban Column",
+      "kind": "custom",
+      "refersTo": "kanban-column",
+      "description": "The signature board surface. Header carries StateIcon + label + count; body holds task cards at 6px vertical rhythm.",
+      "html": "<div class=\"ds-kanban-column\"><div class=\"ds-kanban-column__head\"><svg class=\"ds-kanban-column__glyph\" viewBox=\"0 0 16 16\" fill=\"none\" aria-hidden=\"true\"><circle cx=\"8\" cy=\"8\" r=\"6.25\" stroke=\"currentColor\" stroke-width=\"1.75\"/><path d=\"M8 2.5a5.5 5.5 0 015.5 5.5h-5.5z\" fill=\"currentColor\"/></svg><span class=\"ds-kanban-column__label\">In Progress</span><span class=\"ds-kanban-column__count\">3</span></div><div class=\"ds-kanban-column__body\"><div class=\"ds-kanban-column__empty\">No tasks</div></div></div>",
+      "css": ".ds-kanban-column { width: 256px; min-height: 200px; border: 1px solid rgba(39, 39, 42, 0.6); background: rgba(34, 34, 37, 0.3); border-radius: 8px; } .ds-kanban-column__head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid rgba(39, 39, 42, 0.6); } .ds-kanban-column__glyph { width: 14px; height: 14px; color: #f59f0a; flex-shrink: 0; } .ds-kanban-column__label { font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 12px; font-weight: 500; color: #fafafa; } .ds-kanban-column__count { margin-left: auto; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 12px; color: #9f9fa8; font-variant-numeric: tabular-nums; } .ds-kanban-column__body { padding: 8px; } .ds-kanban-column__empty { padding: 24px 8px; text-align: center; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 12px; color: #9f9fa8; }"
+    },
+    {
+      "name": "Input Field",
+      "kind": "input",
+      "refersTo": "input-field",
+      "description": "Standard text input. Hairline border, mono not applied (mono is reserved for textareas that hold literal prompt text).",
+      "html": "<input class=\"ds-input\" type=\"text\" placeholder=\"Branch name\" value=\"claude/agent-1042\" />",
+      "css": ".ds-input { width: 100%; padding: 8px 12px; border: 1px solid #27272a; background: #0e0e10; color: #fafafa; border-radius: 6px; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 14px; line-height: 1.25rem; outline: none; transition: box-shadow 200ms ease-out; } .ds-input:focus-visible { box-shadow: 0 0 0 1px rgba(250, 250, 250, 0.4); } .ds-input::placeholder { color: #9f9fa8; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Operator's Console",
+    "overview": "The interface reads as instrumentation, not as marketing. The dark surface is the default canvas because operators work alongside a terminal at irregular hours; status is the language; chrome stays out of the way. Density is unapologetic, but earned through hierarchy, scale, weight, and the six semantic state colors, rather than by compressing whitespace into nothing. The brand is the absence of decoration: tinted graphite carries the surface, the state palette carries the meaning, and nothing else asks for attention. This is a control plane, not a planner. It rejects the cheerful primary-blue of Jira and Asana, the purple-to-pink gradients of AI-startup marketing, the sidebar-breadcrumb-card-grid template that turns every admin into the same page, and the cozy gray-on-white pillows of Notion.",
+    "keyCharacteristics": [
+      "Status is the spine: the task state machine and session lifecycle are the first thing the eye finds on any page.",
+      "Tinted Cool Graphite carries 90% of the surface; the six state hues are the entire accent vocabulary.",
+      "Hairline borders with alpha (border/60, border/70) define edges; shadows are reserved for modal layering only.",
+      "Mono numerals (JetBrains Mono, 11px) tag IDs, timestamps, branch names, and costs everywhere.",
+      "Type is restrained: 11px mono to 12px meta to 14px title to 15px body, no display sizes outside markdown bodies.",
+      "Linear-style status glyphs are the canonical state vocabulary; they appear inline with text and at any size."
+    ],
+    "rules": [
+      { "name": "The Six-State Rule", "body": "No color outside the six semantic state hues earns a place on the surface. Charts, illustrations, decorative accents: prohibited. If a new role appears, it gets folded into an existing state hue or it is rendered in muted graphite. Never invent a seventh.", "section": "colors" },
+      { "name": "The Tinted Neutral Rule", "body": "Pure #000 and #fff are prohibited going forward. Every neutral leans toward the 240 hue family (chroma at least 0.005). The light-mode --background: 0 0% 100% is a legacy value that should be migrated to a faintly tinted equivalent in any future token pass.", "section": "colors" },
+      { "name": "The State-Is-Accent Rule", "body": "Where other systems use a brand primary on CTAs, this system uses neutral foreground-on-background. Color enters only when the surface communicates state. A button that runs an agent is white-on-black, not Resolved Green: the act of running isn't a state, the result will be.", "section": "colors" },
+      { "name": "The Mono-As-Tag Rule", "body": "Monospace is never used for body copy. It marks values that are canonical strings the operator might copy: task IDs, branch names, costs, timestamps, paths. If a value is descriptive prose, it is in Inter; if it is a literal, it is in JetBrains Mono.", "section": "typography" },
+      { "name": "The No-Display Rule", "body": "The app shell has no display-size type. Anything larger than 16px lives only inside markdown body content. The shell stays calm; documents are where typography earns scale.", "section": "typography" },
+      { "name": "The cv11 Rule", "body": "Inter must ship with cv11 enabled. The single-storey lowercase L reads correctly in small mono-adjacent contexts. Removing the feature flag is a regression.", "section": "typography" },
+      { "name": "The Flat-By-Default Rule", "body": "No box-shadow on cards, badges, buttons, list rows, kanban columns, or hover states. Hover communicates through opacity and border-color transitions only. Lifting a card on hover is prohibited.", "section": "elevation" },
+      { "name": "The Tonal-Depth Rule", "body": "Depth is conveyed by stepping through the graphite ramp (Console Black, Console Surface, Console Raised), not by adding shadow. A raised badge becomes raised because it is Console Raised, not because it casts.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do lead every state-communicating element with a StateIcon (14px) before the label. The glyph carries the meaning; the text is a confirmation.",
+      "Do use mono (font-mono, 11px, tabular-nums) for any value the operator might copy: IDs, branch names, costs, timestamps, paths, hashes.",
+      "Do stack hierarchy with size and weight contrast (at least 1.25 ratio between steps). 11 to 12 to 14 to 15 is the working scale; anything outside this scale lives only inside markdown bodies.",
+      "Do use hairline borders with alpha (border/60, border/70) for resting states; promote to full opacity on hover.",
+      "Do vary padding to create rhythm. Cards p-5, list rows p-3, column bodies p-2, meta gaps gap-1.5. Same padding everywhere is the failure mode.",
+      "Do keep dark mode the default. Operators open this alongside a terminal at unsociable hours; light mode is the alternate, not the bedrock.",
+      "Do honor prefers-reduced-motion and keep the motion vocabulary to the existing fade-in keyframe and the Loader2 spin used for live agent state. Nothing else."
+    ],
+    "donts": [
+      "Don't ship pure #000 or #fff going forward; every neutral leans toward the 240 hue family. Migrate the legacy --background: 0 0% 100% toward a tinted equivalent in the next token pass.",
+      "Don't introduce a brand primary accent color. The six state hues are the entire accent vocabulary, and they communicate state, not identity.",
+      "Don't use border-left or border-right thicker than 1px as a colored accent. Side-stripe cards are prohibited; if a row needs state emphasis, lead with the StateIcon and tint the meta text, not the border.",
+      "Don't use gradient text (background-clip text combined with a gradient). Emphasis is weight and size, never gradient fills.",
+      "Don't apply box-shadow to cards, buttons, badges, list rows, or kanban columns. Depth comes from tonal layering. The single permitted shadow is shadow-xl on the run-agent modal.",
+      "Don't wrap glassmorphism around decorative surfaces. Backdrop-blur is permitted only on the sticky header and the modal veil, both of which serve a structural purpose.",
+      "Don't build hero-metric blocks (big number, small label, supporting stats, gradient accent). This is the SaaS cliche the product rejects; the operator already sees the numbers in mono next to the thing they describe.",
+      "Don't ship identical-card grids. Cards are list rows; if a page needs a card grid, the cards must differ in content density, not just in repeated icon plus heading plus text.",
+      "Don't default to a modal. Inline progressive disclosure first; the run-agent modal is the only sanctioned modal because the payload (prompt plus budget plus persona) genuinely doesn't fit inline.",
+      "Don't use em dashes or double-hyphens in UI copy. Commas, colons, periods, parentheses.",
+      "Don't add cheerful empty-state illustrations. Empty kanban columns get a 12px muted No tasks, nothing else. The product is for operators; encouragement is condescension.",
+      "Don't invent a seventh state color. New states fold into the existing six or stay in graphite."
+    ]
+  }
+}
