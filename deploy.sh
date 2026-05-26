@@ -69,13 +69,8 @@ if [[ ! -f "$SCRIPT_DIR/.env.local" ]]; then
   exit 1
 fi
 
-# Use nvm if available, otherwise assume node is on PATH
-export NVM_DIR="$HOME/.nvm"
-# shellcheck source=/dev/null
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-if command -v nvm >/dev/null 2>&1; then
-  nvm use --silent 2>/dev/null || nvm use default --silent 2>/dev/null || nvm use node --silent 2>/dev/null || true
-fi
+# nvm is not available in non-interactive shells; rely on node already on PATH
+# (the systemd unit sources nvm.sh itself, so the deployed app works fine)
 
 echo "node: $(command -v node || echo missing) | npm: $(command -v npm || echo missing)"
 echo ""
