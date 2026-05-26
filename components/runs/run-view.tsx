@@ -341,72 +341,39 @@ export function RunView({
   const empty = messages.length === 0;
   const greeting = useMemo(() => greetingFor(new Date(), userEmail), [userEmail]);
 
-  // Drop consecutive duplicate `status` events. The runner emits both a live
-  // bus event and a persisted row for each transition, so reloading often
-  // shows the same `status → running` twice in a row.
-  const visibleMessages = useMemo(() => {
-    const out: UiMessage[] = [];
-    let lastStatus: string | null = null;
-    for (const m of messages) {
-      if (m.role === "system" && m.systemKind === "status") {
-        const s = String((m.systemPayload as { status?: unknown })?.status ?? "");
-        if (s === lastStatus) continue;
-        lastStatus = s;
-      } else {
-        lastStatus = null;
-      }
-      out.push(m);
-    }
-    return out;
-  }, [messages]);
+  // `status` transitions are conveyed by the header pill — suppress them
+  // from the timeline so users don't see `status → running` repeated next
+  // to a "Running" badge that says the same thing.
+  const visibleMessages = useMemo(
+    () => messages.filter((m) => !(m.role === "system" && m.systemKind === "status")),
+    [messages]
+  );
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
       {/* Header */}
-      <header className="border-b border-border/60 bg-gradient-to-b from-background to-background/60 px-6 py-4 space-y-2.5">
-        <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.08em] text-muted-foreground/70">
+      <header className="border-b border-border/60 bg-background px-6 py-3">
+        <div className="flex items-center gap-3 min-w-0">
           {parent && (
             <Link
               href={`/runs/${parent.id}`}
-              className="inline-flex items-center gap-1 hover:text-foreground"
+              className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground shrink-0"
+              title={`parent: ${parent.title}`}
             >
-              <ChevronLeft className="size-3" />
-              <span className="truncate max-w-[180px] normal-case tracking-normal">
-                parent: {parent.title}
-              </span>
+              <ChevronLeft className="size-3.5" />
             </Link>
           )}
-          <span className="tabular-nums">run #{run.id}</span>
-          {run.goal && run.goal !== "<implement>" && run.goal !== "<chat>" && (
-            <span className="truncate normal-case tracking-normal">· {run.goal}</span>
-          )}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <h1 className="text-lg font-semibold tracking-tight truncate flex-1 min-w-0">
+          <h1 className="text-base font-semibold tracking-tight truncate min-w-0">
             {title}
           </h1>
+          <span className="text-[11px] font-mono text-muted-foreground/70 tabular-nums shrink-0">
+            #{run.id}
+          </span>
+          <div className="flex-1" />
           <SessionStatusPill status={status} />
-          {task && (
-            <Link
-              href={`/tasks/${task.id}`}
-              className="inline-flex items-center gap-1.5 rounded-md border border-border/60 bg-secondary/40 px-2 py-0.5 text-xs hover:bg-secondary"
-            >
-              <span className="font-mono text-muted-foreground">{task.id}</span>
-            </Link>
-          )}
-          {run.branch && (
-            <span
-              className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-background/60 px-2 py-0.5 text-[11px] font-mono text-muted-foreground"
-              title={run.branch}
-            >
-              <GitBranch className="size-3" />
-              <span className="truncate max-w-[160px]">{run.branch}</span>
-            </span>
-          )}
           {run.prUrl && (
             <a
-              className="text-xs text-foreground underline decoration-muted-foreground hover:decoration-foreground"
+              className="text-xs text-muted-foreground underline decoration-muted-foreground/40 hover:text-foreground hover:decoration-foreground shrink-0"
               href={run.prUrl}
               target="_blank"
               rel="noreferrer"
@@ -418,7 +385,7 @@ export function RunView({
             <button
               type="button"
               onClick={cancel}
-              className="inline-flex items-center gap-1 rounded-md border border-state-blocked/30 bg-state-blocked/10 px-2 py-0.5 text-[11px] text-state-blocked hover:bg-state-blocked/15 transition-colors"
+              className="inline-flex items-center gap-1 rounded-md border border-state-blocked/30 bg-state-blocked/10 px-2 py-0.5 text-[11px] text-state-blocked hover:bg-state-blocked/15 transition-colors shrink-0"
             >
               <Square className="size-3" /> Cancel
             </button>
@@ -427,47 +394,61 @@ export function RunView({
             <button
               type="button"
               onClick={close}
-              className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-background/60 px-2 py-0.5 text-[11px] hover:bg-muted/40"
+              className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-background/60 px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted/40 shrink-0"
             >
               <X className="size-3" /> Close
             </button>
           )}
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground/80">
           {personaName && (
-            <span className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-secondary/30 px-1.5 py-0.5 text-muted-foreground">
+            <span className="inline-flex items-center gap-1">
               <UserRound className="size-3" />
-              <span className="text-foreground/90">{personaName}</span>
+              <span>{personaName}</span>
             </span>
           )}
           {run.model && (
-            <span className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-secondary/30 px-1.5 py-0.5 text-muted-foreground">
+            <span className="inline-flex items-center gap-1">
               <Cpu className="size-3" />
-              <code className="font-mono text-foreground/90">{run.model}</code>
+              <code className="font-mono">{run.model}</code>
             </span>
           )}
-          <span
-            className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-secondary/30 px-1.5 py-0.5 text-muted-foreground min-w-0"
-            title={cwdHint}
-          >
+          <span className="inline-flex items-center gap-1 min-w-0" title={cwdHint}>
             <FolderClosed className="size-3 shrink-0" />
-            <code className="font-mono text-foreground/90 truncate max-w-[280px]">{cwdHint}</code>
+            <code className="font-mono truncate max-w-[280px]">{cwdHint}</code>
           </span>
+          {run.branch && (
+            <span className="inline-flex items-center gap-1 min-w-0" title={run.branch}>
+              <GitBranch className="size-3 shrink-0" />
+              <code className="font-mono truncate max-w-[180px]">{run.branch}</code>
+            </span>
+          )}
+          {task && (
+            <Link
+              href={`/tasks/${task.id}`}
+              className="inline-flex items-center gap-1 hover:text-foreground"
+            >
+              <code className="font-mono">{task.id}</code>
+            </Link>
+          )}
+          {run.goal && run.goal !== "<implement>" && run.goal !== "<chat>" && (
+            <span className="truncate">{run.goal}</span>
+          )}
         </div>
       </header>
 
       {/* Message stream */}
-      <div className="flex-1 overflow-y-auto bg-gradient-to-b from-background via-background to-muted/10">
+      <div className="flex-1 overflow-y-auto bg-background">
         {empty ? (
-          <div className="mx-auto max-w-2xl px-6 py-16">
+          <div className="mx-auto flex h-full max-w-2xl flex-col items-center justify-center px-6 text-center">
             <h2 className="text-2xl font-semibold tracking-tight">
               {greeting.title}
             </h2>
             <p className="mt-2 text-muted-foreground">{greeting.subtitle}</p>
           </div>
         ) : (
-          <div className="mx-auto max-w-3xl py-4">
+          <div className="mx-auto max-w-3xl py-6">
             {visibleMessages.map((m) =>
               m.role === "system" ? (
                 <SystemEventRow
@@ -499,17 +480,8 @@ export function RunView({
 
       {/* Composer — present for every status except `closed` */}
       {!closed && (
-        <div className="border-t border-border/60 bg-background/95 backdrop-blur px-4 py-4">
+        <div className="border-t border-border/60 bg-background px-4 py-3">
           <div className="mx-auto max-w-3xl">
-            {status === "running" && (
-              <div className="mb-2 inline-flex items-center gap-1.5 rounded-full border border-state-progress/30 bg-state-progress/10 px-2 py-0.5 text-[10px] text-state-progress">
-                <span className="relative flex size-1.5">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-state-progress opacity-75" />
-                  <span className="relative inline-flex rounded-full size-1.5 bg-state-progress" />
-                </span>
-                Agent is running — next message will queue.
-              </div>
-            )}
             <div className="flex items-end gap-2 rounded-2xl border border-border/60 bg-card/60 px-3 py-2 focus-within:border-foreground/40 focus-within:ring-2 focus-within:ring-foreground/10 transition-all">
               <textarea
                 ref={textareaRef}
@@ -542,12 +514,14 @@ export function RunView({
                 </button>
               )}
             </div>
-            <p className="mt-1.5 text-[10px] text-muted-foreground text-center">
-              {run.startedAt ? `Started ${formatDateTime(run.startedAt)}` : ""}
-              {run.totalCostUsd != null && (
-                <> · ${run.totalCostUsd.toFixed(4)}</>
-              )}
-            </p>
+            {(run.startedAt || run.totalCostUsd != null) && (
+              <p className="mt-1.5 text-[10px] text-muted-foreground/70 text-center tabular-nums">
+                {run.startedAt && `Started ${formatDateTime(run.startedAt)}`}
+                {run.totalCostUsd != null && (
+                  <> · ${run.totalCostUsd.toFixed(4)}</>
+                )}
+              </p>
+            )}
           </div>
         </div>
       )}
