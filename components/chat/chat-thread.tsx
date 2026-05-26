@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Bot, Sparkles } from "lucide-react";
 import { ChatMessage } from "@/components/chat/chat-message";
@@ -117,6 +117,24 @@ export function ChatThread({
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, sending]);
+
+  // Pair tool_use blocks with their matching tool_result by id so the result
+  // renders inline under the call instead of as a floating row.
+  const { resultByToolId, visibleMessages } = useMemo(() => {
+    const map = new Map<string, SdkContentBlock>();
+    for (const m of messages) {
+      if (m.role !== "tool_result") continue;
+      for (const b of m.content) {
+        if (b.tool_use_id) map.set(b.tool_use_id, b);
+      }
+    }
+    const visible = messages.filter((m) => {
+      if (m.role !== "tool_result") return true;
+      // Drop tool_result rows whose every block was paired with a known call.
+      return m.content.some((b) => !b.tool_use_id || !map.has(b.tool_use_id));
+    });
+    return { resultByToolId: map, visibleMessages: visible };
+  }, [messages]);
 
   async function send() {
     const text = input.trim();
@@ -246,8 +264,13 @@ export function ChatThread({
           </div>
         ) : (
           <div className="mx-auto max-w-3xl pb-2">
-            {messages.map((m) => (
-              <ChatMessage key={m.id} role={m.role} content={m.content} />
+            {visibleMessages.map((m) => (
+              <ChatMessage
+                key={m.id}
+                role={m.role}
+                content={m.content}
+                resultByToolId={resultByToolId}
+              />
             ))}
             {sending && <ThinkingIndicator />}
             <div ref={endRef} />
