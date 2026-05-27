@@ -4,14 +4,6 @@ import { verifyMagicToken } from "@/lib/magic-link";
 
 export const dynamic = "force-dynamic";
 
-async function getCsrfToken(): Promise<string> {
-  const res = await fetch("http://localhost:3000/api/auth/csrf", {
-    cache: "no-store",
-  });
-  const data = await res.json();
-  return data.csrfToken || "";
-}
-
 export default async function LoginLinkPage({
   searchParams,
 }: {
@@ -42,8 +34,6 @@ export default async function LoginLinkPage({
     );
   }
 
-  const csrfToken = await getCsrfToken();
-
   return (
     <Suspense
       fallback={
@@ -52,7 +42,7 @@ export default async function LoginLinkPage({
         </div>
       }
     >
-      <LoginLinkForm token={token} email={email} csrfToken={csrfToken} />
+      <LoginLinkForm token={token} email={email} />
     </Suspense>
   );
 }

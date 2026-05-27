@@ -1,21 +1,47 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export default function LoginLinkForm({
   token,
   email,
-  csrfToken,
 }: {
   token: string;
   email: string;
-  csrfToken: string;
 }) {
   const formRef = useRef<HTMLFormElement>(null);
+  const [csrfToken, setCsrfToken] = useState<string>("");
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    formRef.current?.submit();
+    fetch("/api/auth/csrf", { credentials: "include" })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.csrfToken) {
+          setCsrfToken(data.csrfToken);
+        } else {
+          setError("Failed to get CSRF token.");
+        }
+      })
+      .catch(() => setError("Failed to get CSRF token."));
   }, []);
+
+  useEffect(() => {
+    if (csrfToken && formRef.current) {
+      formRef.current.submit();
+    }
+  }, [csrfToken]);
+
+  if (error) {
+    return (
+      <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4">
+        <p className="text-sm text-red-400">{error}</p>
+        <a href="/login" className="text-sm text-primary hover:underline">
+          Go to login
+        </a>
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4">
