@@ -7,7 +7,7 @@
 // The implement template is the one wired up to the task page button:
 // kick off a worktree, run the agent against the task, open a PR.
 
-import type { TaskFull } from "./types";
+import type { PlanFull, TaskFull } from "./types";
 import * as repo from "./repo";
 
 export const IMPLEMENT_DEFAULT_BUDGET_USD = 20;
@@ -291,6 +291,86 @@ export function buildChatPromptPrefix(
     lines.push(`## Latest PR`);
     lines.push(latestPrUrl);
   }
+  return lines.join("\n");
+}
+
+/**
+ * Build a context block for a plan-scoped chat run. The user is on the
+ * plan page, so the prefix opens with the plan's title, body, attached
+ * repositories, and the current task roster grouped by state. A short
+ * "operating instructions" footer tells the agent that it should use
+ * the orchestrator MCP tools to act on the plan (create/transition
+ * tasks, update the plan body, etc.) rather than answering in prose.
+ *
+ * Mirrors buildChatPromptPrefix in shape and tone — compact, not the
+ * full implement-prompt boilerplate.
+ */
+export function buildPlanChatPromptPrefix(
+  plan: PlanFull,
+  tasks: TaskFull[]
+): string {
+  const lines: string[] = [];
+  lines.push(`Context: plan ${plan.id} — "${plan.title}" (state: ${plan.state})`);
+  if (plan.owner) lines.push(`Owner: @${plan.owner}`);
+  if (plan.repos.length > 0) {
+    lines.push(
+      `Repositories: ${plan.repos.map((r) => `${r.id} (${r.name})`).join(", ")}`
+    );
+  }
+
+  if (plan.body.trim()) {
+    lines.push("");
+    lines.push("## Plan description");
+    const body = plan.body.trim();
+    const capped =
+      body.length > 6000
+        ? body.slice(0, 6000) +
+          "\n\n…(truncated; call mcp__task_orch__get_plan for the full body)"
+        : body;
+    lines.push(capped);
+  }
+
+  if (tasks.length > 0) {
+    const rank: Record<string, number> = {
+      in_progress: 0,
+      review: 1,
+      blocked: 2,
+      todo: 3,
+      done: 4,
+      cancelled: 5,
+    };
+    const sorted = [...tasks].sort(
+      (a, b) =>
+        (rank[a.state] ?? 9) - (rank[b.state] ?? 9) || a.id.localeCompare(b.id)
+    );
+    lines.push("");
+    lines.push(`## Tasks (${tasks.length})`);
+    const MAX = 40;
+    for (const t of sorted.slice(0, MAX)) {
+      const meta = [t.state, t.assignee ? `@${t.assignee}` : null]
+        .filter(Boolean)
+        .join(", ");
+      lines.push(`- ${t.id} [${meta}] ${t.title}`);
+    }
+    if (sorted.length > MAX) {
+      lines.push(
+        `- … and ${sorted.length - MAX} more (call mcp__task_orch__list_tasks to see all)`
+      );
+    }
+  } else {
+    lines.push("");
+    lines.push("## Tasks");
+    lines.push("(none yet)");
+  }
+
+  lines.push("");
+  lines.push("## How to act on this plan");
+  lines.push(
+    "You are scoped to this plan. The orchestrator MCP tools default their plan_id to it, so calls like `list_tasks`, `create_task`, `update_plan`, `transition_plan` need no plan_id argument. Make changes by calling the tools — do not just describe what should be done."
+  );
+  lines.push(
+    "Common edits: `create_task` to add a task, `update_task` to edit one, `transition_task` to move it on the board, `update_plan` to rewrite the plan body, `add_criterion`/`check_criterion` to manage acceptance criteria."
+  );
   return lines.join("\n");
 }
 

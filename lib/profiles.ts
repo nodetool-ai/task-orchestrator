@@ -19,6 +19,7 @@ export interface ProfileContext {
   run: RunRow;
   author: string;
   taskId: string | null;
+  planId: string | null;
   cwd: string;
 }
 
@@ -34,6 +35,7 @@ const PROFILES: Record<string, ProfileDef> = {
       return [orchestratorExtension({
         author: ctx.author,
         defaultTaskId: ctx.taskId ?? undefined,
+        defaultPlanId: ctx.planId ?? undefined,
       })];
     },
   },

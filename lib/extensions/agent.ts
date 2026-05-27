@@ -12,6 +12,7 @@ import { ORCHESTRATOR_TOOLS } from "@/lib/orchestrator-tools";
 export interface OrchestratorExtensionOptions {
   author: string;
   defaultTaskId?: string;
+  defaultPlanId?: string;
 }
 
 export const orchestratorExtension =
@@ -27,6 +28,7 @@ export const orchestratorExtension =
           const r = await tool.execute(params, {
             author: opts.author,
             defaultTaskId: opts.defaultTaskId,
+            defaultPlanId: opts.defaultPlanId,
           });
           return {
             content: r.content,
