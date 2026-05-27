@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   REVIEW_DEFAULT_BUDGET_USD,
   buildChatPromptPrefix,
+  buildPlanChatPromptPrefix,
   buildReviewPrompt,
   extractReviewOutcome,
 } from "../lib/run-templates";
-import type { TaskFull } from "../lib/types";
+import type { PlanFull, TaskFull } from "../lib/types";
 
 function fakeTask(overrides: Partial<TaskFull> = {}): TaskFull {
   return {
@@ -108,6 +109,80 @@ describe("buildChatPromptPrefix", () => {
   it("omits the criteria section when the task has no criteria", () => {
     const prefix = buildChatPromptPrefix(fakeTask({ criteria: [] }));
     expect(prefix).not.toContain("Acceptance criteria");
+  });
+});
+
+function fakePlan(overrides: Partial<PlanFull> = {}): PlanFull {
+  return {
+    id: "P-2026-01-01-test-plan",
+    title: "Test plan",
+    state: "draft",
+    owner: null,
+    body: "Plan body text",
+    tags: [],
+    repos: [],
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...overrides,
+  };
+}
+
+describe("buildPlanChatPromptPrefix", () => {
+  it("includes plan id, title, state and body", () => {
+    const prefix = buildPlanChatPromptPrefix(fakePlan(), []);
+    expect(prefix).toContain("P-2026-01-01-test-plan");
+    expect(prefix).toContain('"Test plan"');
+    expect(prefix).toContain("state: draft");
+    expect(prefix).toContain("Plan body text");
+  });
+
+  it("lists tasks grouped sensibly when present", () => {
+    const prefix = buildPlanChatPromptPrefix(fakePlan(), [
+      fakeTask({ id: "T-1", state: "in_progress", title: "Working" }),
+      fakeTask({ id: "T-2", state: "todo", title: "Up next" }),
+    ]);
+    expect(prefix).toContain("## Tasks (2)");
+    expect(prefix).toContain("T-1");
+    expect(prefix).toContain("Working");
+    expect(prefix).toContain("T-2");
+    // in_progress sorts before todo
+    expect(prefix.indexOf("T-1")).toBeLessThan(prefix.indexOf("T-2"));
+  });
+
+  it("renders '(none yet)' when the plan has no tasks", () => {
+    const prefix = buildPlanChatPromptPrefix(fakePlan(), []);
+    expect(prefix).toContain("## Tasks");
+    expect(prefix).toContain("(none yet)");
+  });
+
+  it("instructs the agent to act through the orchestrator MCP tools", () => {
+    const prefix = buildPlanChatPromptPrefix(fakePlan(), []);
+    expect(prefix).toContain("How to act on this plan");
+    expect(prefix).toContain("create_task");
+    expect(prefix).toContain("update_plan");
+    expect(prefix).toContain("plan_id");
+  });
+
+  it("includes attached repositories", () => {
+    const prefix = buildPlanChatPromptPrefix(
+      fakePlan({
+        repos: [
+          {
+            id: "R-one",
+            name: "one",
+            remote: null,
+            localPath: null,
+            defaultBranch: "main",
+            description: "",
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+        ],
+      }),
+      []
+    );
+    expect(prefix).toContain("Repositories:");
+    expect(prefix).toContain("R-one");
   });
 });
 

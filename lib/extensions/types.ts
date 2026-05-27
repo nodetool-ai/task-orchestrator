@@ -21,6 +21,8 @@ export interface ProfileContext {
   author: string;
   /** Optional task scoping for the orchestrator extension. */
   taskId: string | null;
+  /** Optional plan scoping for chat-with-a-plan runs. */
+  planId: string | null;
   /** Resolved cwd for the SDK turn — extensions that shell out use this. */
   cwd: string;
 }

@@ -17,6 +17,7 @@ import type { TaskFull, PlanFull, AgentSessionFull } from "./types";
 export interface OrchestratorToolContext {
   author: string;
   defaultTaskId?: string;
+  defaultPlanId?: string;
 }
 
 export interface OrchestratorToolResult {
@@ -56,6 +57,12 @@ const jsonResult = (value: unknown): OrchestratorToolResult => ({
 const resolveTaskId = (provided: string | undefined, ctx: OrchestratorToolContext): string | null => {
   if (provided && provided.trim()) return provided.trim();
   return ctx.defaultTaskId ?? null;
+};
+
+// Resolve plan_id from arg or default; null means caller must specify.
+const resolvePlanId = (provided: string | undefined, ctx: OrchestratorToolContext): string | null => {
+  if (provided && provided.trim()) return provided.trim();
+  return ctx.defaultPlanId ?? null;
 };
 
 const findCriterion = (taskId: string, needle: string) => {
@@ -263,17 +270,20 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
   {
     name: "get_plan",
     label: "Get Plan",
-    description: "Get full details for a plan including its tasks (summarized).",
-    parameters: Type.Object({ id: Type.String({ minLength: 1 }) }),
-    execute: async ({ id }, _ctx) => {
-      const plan = repo.getPlan(id);
-      if (!plan) return errResult(`Error: Plan ${id} not found`);
-      const tasksInPlan = repo.listTasks({ planId: id }).map(summariseTask);
+    description:
+      "Get full details for a plan including its tasks (summarized). Defaults to the chat's plan when no id is given.",
+    parameters: Type.Object({ id: Type.Optional(Type.String()) }),
+    execute: async ({ id }, ctx) => {
+      const planId = resolvePlanId(id, ctx);
+      if (!planId) return errResult("Error: plan id required (no default plan in this session)");
+      const plan = repo.getPlan(planId);
+      if (!plan) return errResult(`Error: Plan ${planId} not found`);
+      const tasksInPlan = repo.listTasks({ planId }).map(summariseTask);
       return jsonResult({
         ...plan,
         createdAt: plan.createdAt.toISOString(),
         updatedAt: plan.updatedAt.toISOString(),
-        progress: repo.planProgress(id),
+        progress: repo.planProgress(planId),
         tasks: tasksInPlan,
       });
     },
@@ -316,18 +326,20 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "update_plan",
     label: "Update Plan",
     description:
-      "Patch a plan's title, body, owner, tags, or entire repository set (repo_ids replaces all). Use add_plan_repository/remove_plan_repository for granular changes. Use transition_plan to change state.",
+      "Patch a plan's title, body, owner, tags, or entire repository set (repo_ids replaces all). Defaults to the chat's plan when no id is given. Use add_plan_repository/remove_plan_repository for granular changes. Use transition_plan to change state.",
     parameters: Type.Object({
-      id: Type.String({ minLength: 1 }),
+      id: Type.Optional(Type.String()),
       title: Type.Optional(Type.String()),
       body: Type.Optional(Type.String()),
       owner: Type.Optional(Type.String()),
       tags: Type.Optional(Type.Array(Type.String())),
       repo_ids: Type.Optional(Type.Array(Type.String())),
     }),
-    execute: async ({ id, ...patch }, _ctx) => {
+    execute: async ({ id, ...patch }, ctx) => {
+      const planId = resolvePlanId(id, ctx);
+      if (!planId) return errResult("Error: plan id required");
       const result = safe(() =>
-        repo.updatePlan(id, {
+        repo.updatePlan(planId, {
           title: patch.title,
           body: patch.body,
           owner: patch.owner ?? undefined,
@@ -346,13 +358,15 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "add_plan_repository",
     label: "Add Plan Repository",
     description:
-      "Attach an additional repository to a plan. The new repo becomes the last in the plan's repo list. No-op if already attached.",
+      "Attach an additional repository to a plan. plan_id defaults to the chat's plan when scoped to one. The new repo becomes the last in the plan's repo list. No-op if already attached.",
     parameters: Type.Object({
-      plan_id: Type.String({ minLength: 1 }),
+      plan_id: Type.Optional(Type.String()),
       repo_id: Type.String({ minLength: 1 }),
     }),
-    execute: async ({ plan_id, repo_id }, _ctx) => {
-      const result = safe(() => repo.addPlanRepository(plan_id, repo_id));
+    execute: async ({ plan_id, repo_id }, ctx) => {
+      const planId = resolvePlanId(plan_id, ctx);
+      if (!planId) return errResult("Error: plan_id required");
+      const result = safe(() => repo.addPlanRepository(planId, repo_id));
       if ("_error" in result) return errResult(`Error: ${result._error}`);
       return ok(`Plan ${result.id} now spans ${result.repos.map((r) => r.id).join(", ")}.`);
     },
@@ -362,13 +376,15 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "remove_plan_repository",
     label: "Remove Plan Repository",
     description:
-      "Detach a repository from a plan. Any tasks pinned to it are unset and will refuse to start until reassigned.",
+      "Detach a repository from a plan. plan_id defaults to the chat's plan when scoped to one. Any tasks pinned to it are unset and will refuse to start until reassigned.",
     parameters: Type.Object({
-      plan_id: Type.String({ minLength: 1 }),
+      plan_id: Type.Optional(Type.String()),
       repo_id: Type.String({ minLength: 1 }),
     }),
-    execute: async ({ plan_id, repo_id }, _ctx) => {
-      const result = safe(() => repo.removePlanRepository(plan_id, repo_id));
+    execute: async ({ plan_id, repo_id }, ctx) => {
+      const planId = resolvePlanId(plan_id, ctx);
+      if (!planId) return errResult("Error: plan_id required");
+      const result = safe(() => repo.removePlanRepository(planId, repo_id));
       if ("_error" in result) return errResult(`Error: ${result._error}`);
       return ok(
         `Plan ${result.id} now spans ${result.repos.map((r) => r.id).join(", ") || "(no repos)"}.`
@@ -380,13 +396,15 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "transition_plan",
     label: "Transition Plan",
     description:
-      "Change a plan's state. Allowed transitions: draft→proposed/accepted/cancelled, proposed→accepted/cancelled, accepted→done/cancelled.",
+      "Change a plan's state. Defaults to the chat's plan when no id is given. Allowed transitions: draft→proposed/accepted/cancelled, proposed→accepted/cancelled, accepted→done/cancelled.",
     parameters: Type.Object({
-      id: Type.String({ minLength: 1 }),
+      id: Type.Optional(Type.String()),
       state: Type.Union(PLAN_STATES.map((s) => Type.Literal(s)) as [ReturnType<typeof Type.Literal>, ...ReturnType<typeof Type.Literal>[]]),
     }),
-    execute: async ({ id, state }, _ctx) => {
-      const result = safe(() => repo.updatePlan(id, { state: state as PlanState }));
+    execute: async ({ id, state }, ctx) => {
+      const planId = resolvePlanId(id, ctx);
+      if (!planId) return errResult("Error: plan id required");
+      const result = safe(() => repo.updatePlan(planId, { state: state as PlanState }));
       if ("_error" in result) return errResult(`Error: ${result._error}`);
       return ok(`Plan ${result.id} → ${result.state}.`);
     },
@@ -396,7 +414,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "delete_plan",
     label: "Delete Plan",
     description:
-      "Delete a plan. CASCADES — destroys all tasks, criteria, notes, and sessions under it.",
+      "Delete a plan. CASCADES — destroys all tasks, criteria, notes, and sessions under it. Requires an explicit id (never defaulted) to avoid accidental destruction.",
     parameters: Type.Object({ id: Type.String({ minLength: 1 }) }),
     execute: async ({ id }, _ctx) => {
       const existing = repo.getPlan(id);
@@ -411,7 +429,8 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
   {
     name: "list_tasks",
     label: "List Tasks",
-    description: "List tasks. Filter by state, plan_id, and/or assignee.",
+    description:
+      "List tasks. Filter by state, plan_id, and/or assignee. plan_id defaults to the chat's plan when scoped to one.",
     parameters: Type.Object({
       state: Type.Optional(
         Type.Union(TASK_STATES.map((s) => Type.Literal(s)) as [ReturnType<typeof Type.Literal>, ...ReturnType<typeof Type.Literal>[]])
@@ -419,8 +438,9 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       plan_id: Type.Optional(Type.String()),
       assignee: Type.Optional(Type.String()),
     }),
-    execute: async ({ state, plan_id, assignee }, _ctx) => {
-      const tasks = repo.listTasks({ state: state as TaskState | undefined, planId: plan_id, assignee });
+    execute: async ({ state, plan_id, assignee }, ctx) => {
+      const planId = plan_id ?? ctx.defaultPlanId ?? undefined;
+      const tasks = repo.listTasks({ state: state as TaskState | undefined, planId, assignee });
       return jsonResult(tasks.map(summariseTask));
     },
   },
@@ -449,9 +469,9 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "create_task",
     label: "Create Task",
     description:
-      "Create a new task under a plan. The task targets one of the plan's repositories: if the plan has exactly one repo it's inherited, otherwise repo_id is required and must be in the plan's set.",
+      "Create a new task under a plan. plan_id defaults to the chat's plan when scoped to one. The task targets one of the plan's repositories: if the plan has exactly one repo it's inherited, otherwise repo_id is required and must be in the plan's set.",
     parameters: Type.Object({
-      plan_id: Type.String({ minLength: 1 }),
+      plan_id: Type.Optional(Type.String()),
       title: Type.String({ minLength: 1 }),
       body: Type.Optional(Type.String()),
       assignee: Type.Optional(Type.String()),
@@ -461,10 +481,12 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       criteria: Type.Optional(Type.Array(Type.String())),
       repo_id: Type.Optional(Type.String()),
     }),
-    execute: async (input, _ctx) => {
+    execute: async (input, ctx) => {
+      const planId = resolvePlanId(input.plan_id, ctx);
+      if (!planId) return errResult("Error: plan_id required (no default plan in this session)");
       const result = safe(() =>
         repo.createTask({
-          planId: input.plan_id,
+          planId,
           title: input.title,
           body: input.body,
           assignee: input.assignee ?? undefined,

@@ -135,6 +135,9 @@ export const agentSessions = sqliteTable(
     id: integer("id").primaryKey({ autoIncrement: true }),
     // Nullable since 0009: chat-derived runs have no task.
     taskId: text("task_id").references(() => tasks.id, { onDelete: "cascade" }),
+    // Nullable, since 0012: chat-derived runs that target a plan as a
+    // whole carry the plan_id here so the agent can scope task CRUD to it.
+    planId: text("plan_id").references(() => plans.id, { onDelete: "set null" }),
     status: text("status").notNull().default("pending"),
     model: text("model"),
     branch: text("branch"),
@@ -166,6 +169,7 @@ export const agentSessions = sqliteTable(
   },
   (t) => ({
     taskIdx: index("agent_runs_task_idx").on(t.taskId),
+    planIdx: index("agent_runs_plan_idx").on(t.planId),
     statusIdx: index("agent_runs_status_idx").on(t.status),
     repoIdx: index("agent_runs_repo_idx").on(t.repoId),
     parentIdx: index("agent_runs_parent_idx").on(t.parentRunId),

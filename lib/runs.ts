@@ -83,6 +83,8 @@ export interface CreateRunInput {
   cwdStrategy?: CwdStrategy;
   repoId?: string | null;
   taskId?: string | null;
+  /** Plan a chat is scoped to (no effect on implement/review runs). */
+  planId?: string | null;
   prUrl?: string | null;
   parentRunId?: number | null;
   model?: string | null;
@@ -111,6 +113,8 @@ export interface RunRow {
   /** Derived: 'task' if taskId is set, else 'chat'. Used by the /runs UI. */
   origin: RunOrigin;
   taskId: string | null;
+  /** Plan this run is scoped to (chat-with-a-plan). */
+  planId: string | null;
   repoId: string | null;
   parentRunId: number | null;
   toolsProfile: string;
@@ -149,6 +153,7 @@ export interface ListFilter {
   goal?: Goal;
   status?: SessionStatus | SessionStatus[];
   taskId?: string | null;
+  planId?: string | null;
   userId?: number | null;
   repoId?: string;
   parentRunId?: number;
@@ -220,13 +225,17 @@ export function create(input: CreateRunInput): RunRow {
     input.toolsProfile ?? (goal === "<chat>" ? "orchestrator,repo_write" : "orchestrator,repo_write");
   const initialStatus: SessionStatus = input.defer || goal === "<chat>" ? "idle" : "pending";
 
-  // Resolve repo: explicit > task's repo > defaultRepo. We don't error on
-  // missing repo at create time for chat-style runs; the cwd resolver falls
-  // back to the orchestrator checkout.
+  // Resolve repo: explicit > task's repo > plan's first repo > defaultRepo.
+  // We don't error on missing repo at create time for chat-style runs; the
+  // cwd resolver falls back to the orchestrator checkout.
   let repoId: string | null = input.repoId ?? null;
   if (!repoId && input.taskId) {
     const t = repo.getTask(input.taskId);
     if (t?.repoId) repoId = t.repoId;
+  }
+  if (!repoId && input.planId) {
+    const p = repo.getPlan(input.planId);
+    if (p?.repos.length) repoId = p.repos[0].id;
   }
   if (!repoId && goal === "<chat>") {
     repoId = repo.defaultRepoId();
@@ -237,6 +246,9 @@ export function create(input: CreateRunInput): RunRow {
   }
   if (input.taskId && !repo.getTask(input.taskId)) {
     throw new repo.RepoError(`Task ${input.taskId} not found`, 404);
+  }
+  if (input.planId && !repo.getPlan(input.planId)) {
+    throw new repo.RepoError(`Plan ${input.planId} not found`, 404);
   }
 
   // Resolve the effective model. Priority: explicit input.model > persona's
@@ -253,6 +265,7 @@ export function create(input: CreateRunInput): RunRow {
     .values({
       goal,
       taskId: input.taskId ?? null,
+      planId: input.planId ?? null,
       repoId,
       parentRunId: input.parentRunId ?? null,
       toolsProfile,
@@ -319,6 +332,11 @@ export function list(filter: ListFilter = {}): RunRow[] {
     conditions.push(isNull(agentSessions.taskId));
   } else if (filter.taskId !== undefined) {
     conditions.push(eq(agentSessions.taskId, filter.taskId));
+  }
+  if (filter.planId === null) {
+    conditions.push(isNull(agentSessions.planId));
+  } else if (filter.planId !== undefined) {
+    conditions.push(eq(agentSessions.planId, filter.planId));
   }
   if (filter.userId === null) {
     conditions.push(isNull(agentSessions.userId));
@@ -891,7 +909,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   const profileSpec = run.toolsProfile ?? persona.toolsProfile;
 
   const profileCtx: ProfileContext = {
-    runId: run.id, run, author, taskId: run.taskId, cwd,
+    runId: run.id, run, author, taskId: run.taskId, planId: run.planId, cwd,
   };
   const { factories: profileFactories } = await resolveProfiles(profileSpec, profileCtx);
 
@@ -1109,6 +1127,7 @@ function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     status: row.status as SessionStatus,
     origin: row.taskId !== null ? "task" : "chat",
     taskId: row.taskId,
+    planId: row.planId,
     repoId: row.repoId,
     parentRunId: row.parentRunId,
     toolsProfile: row.toolsProfile,
@@ -1199,12 +1218,14 @@ export function implementRunPredicate() {
 export interface RunFilters {
   repoId?: string;
   taskId?: string;
+  planId?: string;
 }
 
 export function listRuns(filters: RunFilters = {}): RunRow[] {
   const wheres = [];
   if (filters.repoId) wheres.push(eq(agentSessions.repoId, filters.repoId));
   if (filters.taskId) wheres.push(eq(agentSessions.taskId, filters.taskId));
+  if (filters.planId) wheres.push(eq(agentSessions.planId, filters.planId));
   const where = wheres.length === 0 ? undefined : wheres.length === 1 ? wheres[0] : and(...wheres);
   const rows = db
     .select()

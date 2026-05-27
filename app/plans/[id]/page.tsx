@@ -1,9 +1,10 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, MessagesSquare } from "lucide-react";
 import { PlanRepositories } from "@/components/plan-repositories";
 import { DeleteButton } from "@/components/delete-button";
 import * as repo from "@/lib/repo";
+import { listRuns } from "@/lib/runs";
 import { STATE_LABEL, TASK_BOARD_STATES, type TaskState } from "@/lib/types";
 import { StateChanger } from "@/components/state-changer";
 import { StateIcon } from "@/components/state-icon";
@@ -11,7 +12,10 @@ import { MarkdownBody } from "@/components/markdown-body";
 import { Progress } from "@/components/ui/progress";
 import { TaskRow } from "@/components/task-row";
 import { NewTaskForm } from "@/components/new-task-form";
-import { formatDate } from "@/lib/utils";
+import { PlanChatBox } from "@/components/plan-chat-box";
+import { SessionStatusPill } from "@/components/session-status-pill";
+import { buildPlanChatPromptPrefix } from "@/lib/run-templates";
+import { formatDate, relativeDate } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +27,9 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
   const tasks = repo.listTasks({ planId: plan.id });
   const { done, total, pct } = repo.planProgress(plan.id);
   const allRepositories = repo.listRepositories();
+  const personas = repo.listPersonas();
+  const planChats = listRuns({ planId: plan.id }).slice(0, 8);
+  const chatPromptPrefix = buildPlanChatPromptPrefix(plan, tasks);
 
   const groupOrder: TaskState[] = [...TASK_BOARD_STATES, "cancelled"];
 
@@ -115,6 +122,48 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
           </div>
         )}
       </section>
+
+      <section className="mt-10 space-y-3">
+        <div className="flex items-baseline justify-between">
+          <h2 className="text-sm font-semibold tracking-tight">Chat about this plan</h2>
+          <span className="text-[11px] text-muted-foreground">
+            agent can create tasks, edit the plan, change state
+          </span>
+        </div>
+        <PlanChatBox
+          planId={plan.id}
+          repoOptions={plan.repos.map((r) => ({ id: r.id, name: r.name }))}
+          promptPrefix={chatPromptPrefix}
+          personas={personas}
+        />
+      </section>
+
+      {planChats.length > 0 && (
+        <section className="mt-8 space-y-3">
+          <h2 className="text-sm font-semibold tracking-tight">Recent chats on this plan</h2>
+          <div className="rounded-lg border border-border/60 bg-card/30 divide-y divide-border/60 overflow-hidden">
+            {planChats.map((r) => (
+              <Link
+                key={r.id}
+                href={`/runs/${r.id}`}
+                className="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/40 transition-colors"
+              >
+                <MessagesSquare className="size-3.5 text-muted-foreground shrink-0" />
+                <span className="font-mono text-xs text-muted-foreground tabular-nums shrink-0">
+                  #{r.id}
+                </span>
+                <SessionStatusPill status={r.status} />
+                <span className="text-sm flex-1 truncate text-foreground/90">
+                  {r.title ?? `Chat about ${plan.id}`}
+                </span>
+                <span className="text-[11px] text-muted-foreground tabular-nums shrink-0">
+                  {relativeDate(r.startedAt)}
+                </span>
+              </Link>
+            ))}
+          </div>
+        </section>
+      )}
     </article>
   );
 }
