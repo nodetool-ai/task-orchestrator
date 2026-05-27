@@ -688,6 +688,7 @@ function ReviewRow({ run }: { run: FloorRun }) {
   return (
     <Link
       href={runHref(run)}
+      className="pi-attention"
       style={{
         background: "var(--pi-surface)",
         border: "1px solid var(--pi-hairline)",
@@ -697,9 +698,8 @@ function ReviewRow({ run }: { run: FloorRun }) {
         color: "var(--pi-fg)",
         display: "block",
         transition: "border-color 120ms",
-      }}
-      onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--pi-hairline-strong)")}
-      onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--pi-hairline)")}
+        ["--s-attn" as string]: "var(--s-review)",
+      } as React.CSSProperties}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <StatePill state="review" label={run.pr ? "PR open" : "Review"} size="xs" />
@@ -757,6 +757,7 @@ function BlockedRow({ run }: { run: FloorRun }) {
   return (
     <Link
       href={runHref(run)}
+      className="pi-attention"
       style={{
         background: "var(--pi-surface)",
         border: "1px solid var(--pi-hairline)",
@@ -766,9 +767,8 @@ function BlockedRow({ run }: { run: FloorRun }) {
         color: "var(--pi-fg)",
         display: "block",
         transition: "border-color 120ms",
-      }}
-      onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--pi-hairline-strong)")}
-      onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--pi-hairline)")}
+        ["--s-attn" as string]: "var(--s-blocked)",
+      } as React.CSSProperties}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <StatePill state="blocked" label={run.sub === "budget" ? "Budget" : "Criteria"} size="xs" />

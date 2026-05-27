@@ -3,6 +3,7 @@ import { Inter, JetBrains_Mono } from "next/font/google";
 import { auth } from "@/auth";
 import { TopNav } from "@/components/pi/top-nav";
 import { PiOverlays } from "@/components/pi/overlays";
+import { LiveSidebar } from "@/components/pi/live-sidebar";
 import { loadPaletteItems } from "@/lib/pi-floor-data";
 import * as repo from "@/lib/repo";
 import "./globals.css";
@@ -43,7 +44,10 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         style={{ background: "var(--pi-bg)", color: "var(--pi-fg)" }}
       >
         <TopNav email={email} />
-        <main>{children}</main>
+        <div style={{ display: "flex", alignItems: "stretch", minHeight: "calc(100vh - 48px)" }}>
+          <LiveSidebar enabled={Boolean(email)} />
+          <main style={{ flex: 1, minWidth: 0 }}>{children}</main>
+        </div>
         <PiOverlays items={paletteItems} personaIds={personaIds} />
       </body>
     </html>
