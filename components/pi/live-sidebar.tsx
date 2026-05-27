@@ -140,6 +140,8 @@ export function LiveSidebar({ enabled }: { enabled: boolean }) {
   }, [items, pathname, isMobile, enabled]);
 
   if (isMobile || !enabled) return null;
+  // Hide on the Factory floor — the floor already surfaces review/stuck items.
+  if (pathname === "/") return null;
 
   const width = collapsed ? SIDEBAR_WIDTH_COLLAPSED : SIDEBAR_WIDTH_EXPANDED;
   const attentionCount = items.filter((i) => ATTENTION_BUCKETS.has(i.bucket)).length;
