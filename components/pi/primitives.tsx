@@ -697,3 +697,9 @@ export const piWrap: React.CSSProperties = {
   maxWidth: 1480,
   margin: "0 auto",
 };
+
+export const piWrapMobile: React.CSSProperties = {
+  padding: "14px 12px 96px",
+  maxWidth: "100%",
+  margin: 0,
+};

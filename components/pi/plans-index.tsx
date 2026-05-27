@@ -14,9 +14,11 @@ import {
   StatePill,
   piButtons,
   piWrap,
+  piWrapMobile,
   type PiState,
 } from "./primitives";
 import { openSpawn } from "./overlay-store";
+import { useIsMobile } from "./use-is-mobile";
 
 export type PlanCardData = {
   id: string;
@@ -66,19 +68,22 @@ export function PlansIndex({ plans }: { plans: PlanCardData[] }) {
     done: plans.filter((p) => p.state === "done").length,
   };
 
+  const isMobile = useIsMobile();
+
   return (
-    <div style={piWrap}>
+    <div style={isMobile ? piWrapMobile : piWrap}>
       <div
         style={{
           display: "flex",
-          alignItems: "baseline",
+          flexDirection: isMobile ? "column" : "row",
+          alignItems: isMobile ? "stretch" : "baseline",
           justifyContent: "space-between",
-          gap: 24,
-          marginBottom: 18,
+          gap: isMobile ? 12 : 24,
+          marginBottom: isMobile ? 12 : 18,
         }}
       >
         <div>
-          <h1 style={{ margin: 0, fontSize: 20, fontWeight: 600, letterSpacing: "-0.01em", color: "var(--pi-fg)" }}>
+          <h1 style={{ margin: 0, fontSize: isMobile ? 18 : 20, fontWeight: 600, letterSpacing: "-0.01em", color: "var(--pi-fg)" }}>
             Plans
           </h1>
           <div style={{ marginTop: 4, color: "var(--pi-muted-2)", fontSize: 12 }}>
@@ -86,11 +91,14 @@ export function PlansIndex({ plans }: { plans: PlanCardData[] }) {
           </div>
         </div>
         <div style={{ display: "inline-flex", gap: 8 }}>
-          <button style={piButtons.ghostSm()}>
+          <button style={{ ...piButtons.ghostSm(), flex: isMobile ? 1 : undefined, justifyContent: "center" }}>
             <Icon name="plus" size={12} />
             New plan
           </button>
-          <button onClick={openSpawn} style={piButtons.primaryInline()}>
+          <button
+            onClick={openSpawn}
+            style={{ ...piButtons.primaryInline(), flex: isMobile ? 1 : undefined, justifyContent: "center" }}
+          >
             <Icon name="spark" size={12} />
             Spawn agent
           </button>
@@ -100,7 +108,8 @@ export function PlansIndex({ plans }: { plans: PlanCardData[] }) {
       <div
         style={{
           display: "flex",
-          alignItems: "center",
+          alignItems: isMobile ? "stretch" : "center",
+          flexDirection: isMobile ? "column" : "row",
           gap: 10,
           marginBottom: 14,
           padding: "8px 10px",
@@ -109,22 +118,25 @@ export function PlansIndex({ plans }: { plans: PlanCardData[] }) {
           border: "1px solid var(--pi-hairline)",
         }}
       >
-        <Icon name="search" size={13} />
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Search plans by name or id…"
-          style={{
-            flex: 1,
-            background: "transparent",
-            border: "none",
-            outline: "none",
-            color: "var(--pi-fg)",
-            fontSize: 13,
-            fontFamily: "inherit",
-          }}
-        />
-        <Hairline vertical style={{ height: 16 }} />
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
+          <Icon name="search" size={13} />
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search plans…"
+            style={{
+              flex: 1,
+              minWidth: 0,
+              background: "transparent",
+              border: "none",
+              outline: "none",
+              color: "var(--pi-fg)",
+              fontSize: 13,
+              fontFamily: "inherit",
+            }}
+          />
+        </div>
+        {!isMobile && <Hairline vertical style={{ height: 16 }} />}
         <SegBar
           value={filter}
           onChange={setFilter}
@@ -138,7 +150,7 @@ export function PlansIndex({ plans }: { plans: PlanCardData[] }) {
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {filtered.map((p) => (
-          <PlanCard key={p.id} plan={p} />
+          <PlanCard key={p.id} plan={p} isMobile={isMobile} />
         ))}
         {filtered.length === 0 && <Empty>No plans match.</Empty>}
       </div>
@@ -146,7 +158,7 @@ export function PlansIndex({ plans }: { plans: PlanCardData[] }) {
   );
 }
 
-function PlanCard({ plan }: { plan: PlanCardData }) {
+function PlanCard({ plan, isMobile }: { plan: PlanCardData; isMobile: boolean }) {
   const pct = plan.total > 0 ? plan.done / plan.total : 0;
   return (
     <Link
@@ -155,7 +167,7 @@ function PlanCard({ plan }: { plan: PlanCardData }) {
         background: "var(--pi-surface)",
         border: "1px solid var(--pi-hairline)",
         borderRadius: 8,
-        padding: "16px 18px",
+        padding: isMobile ? "14px 14px" : "16px 18px",
         textDecoration: "none",
         color: "var(--pi-fg)",
         display: "block",
@@ -170,7 +182,15 @@ function PlanCard({ plan }: { plan: PlanCardData }) {
         e.currentTarget.style.background = "var(--pi-surface)";
       }}
     >
-      <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 16, alignItems: "flex-start" }}>
+      <div
+        style={{
+          display: isMobile ? "flex" : "grid",
+          gridTemplateColumns: isMobile ? undefined : "1fr auto",
+          flexDirection: isMobile ? "column" : undefined,
+          gap: isMobile ? 12 : 16,
+          alignItems: isMobile ? "stretch" : "flex-start",
+        }}
+      >
         <div style={{ minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <MonoTag>{plan.id}</MonoTag>
@@ -180,7 +200,7 @@ function PlanCard({ plan }: { plan: PlanCardData }) {
           <h3
             style={{
               margin: "8px 0 6px",
-              fontSize: 16,
+              fontSize: isMobile ? 15 : 16,
               fontWeight: 600,
               letterSpacing: "-0.01em",
               color: "var(--pi-fg)",
@@ -190,7 +210,21 @@ function PlanCard({ plan }: { plan: PlanCardData }) {
             {plan.title}
           </h3>
           {plan.goal && (
-            <p style={{ margin: 0, fontSize: 12, color: "var(--pi-muted)", lineHeight: 1.5, maxWidth: 760 }}>
+            <p
+              style={{
+                margin: 0,
+                fontSize: 12,
+                color: "var(--pi-muted)",
+                lineHeight: 1.5,
+                maxWidth: isMobile ? "100%" : 760,
+                ...(isMobile && {
+                  display: "-webkit-box",
+                  WebkitLineClamp: 3,
+                  WebkitBoxOrient: "vertical" as const,
+                  overflow: "hidden",
+                }),
+              }}
+            >
               {plan.goal}
             </p>
           )}
@@ -199,16 +233,16 @@ function PlanCard({ plan }: { plan: PlanCardData }) {
         <div
           style={{
             display: "flex",
-            flexDirection: "column",
-            alignItems: "flex-end",
-            gap: 8,
-            minWidth: 160,
+            flexDirection: isMobile ? "row" : "column",
+            alignItems: isMobile ? "center" : "flex-end",
+            gap: isMobile ? 10 : 8,
+            minWidth: isMobile ? 0 : 160,
           }}
         >
           <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
             <span
               className="pi-mono"
-              style={{ fontSize: 18, fontWeight: 500, color: "var(--pi-fg)", letterSpacing: "-0.02em" }}
+              style={{ fontSize: isMobile ? 16 : 18, fontWeight: 500, color: "var(--pi-fg)", letterSpacing: "-0.02em" }}
             >
               {plan.done}
             </span>
@@ -217,7 +251,7 @@ function PlanCard({ plan }: { plan: PlanCardData }) {
             </span>
             <span style={{ color: "var(--pi-muted-2)", marginLeft: 2, fontSize: 12 }}>done</span>
           </div>
-          <div style={{ width: 160 }}>
+          <div style={{ flex: isMobile ? 1 : undefined, width: isMobile ? undefined : 160 }}>
             <ProgressBar
               value={plan.done}
               max={plan.total || 1}

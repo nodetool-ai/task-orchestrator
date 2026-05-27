@@ -20,8 +20,10 @@ import {
   Badge,
   piButtons,
   piWrap,
+  piWrapMobile,
   type PiState,
 } from "./primitives";
+import { useIsMobile } from "./use-is-mobile";
 
 export type FloorRun = {
   id: string;
@@ -90,8 +92,16 @@ export function FactoryFloor({
     [...running, ...review, ...blocked].map((r) => r.persona).filter(Boolean) as string[]
   );
 
+  const isMobile = useIsMobile();
+  const pairGrid: React.CSSProperties = isMobile
+    ? { display: "flex", flexDirection: "column", gap: 24 }
+    : { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 };
+  const queueGrid: React.CSSProperties = isMobile
+    ? { display: "flex", flexDirection: "column", gap: 24 }
+    : { display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 24 };
+
   return (
-    <div style={piWrap}>
+    <div style={isMobile ? piWrapMobile : piWrap}>
       <FloorHeader
         running={running.length}
         review={review.length}
@@ -102,9 +112,10 @@ export function FactoryFloor({
         tokIn={tokIn}
         tokOut={tokOut}
         personasActive={personasActive.size}
+        isMobile={isMobile}
       />
 
-      <div style={{ height: 24 }} />
+      <div style={{ height: isMobile ? 18 : 24 }} />
 
       <Section
         glyph={<Icon name="live-dot" size={12} />}
@@ -120,14 +131,14 @@ export function FactoryFloor({
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {running.length === 0 && <Empty>No live agents. Spawn one to start the line.</Empty>}
           {running.map((r) => (
-            <RunRow key={r.id} run={r} />
+            <RunRow key={r.id} run={r} isMobile={isMobile} />
           ))}
         </div>
       </Section>
 
-      <div style={{ height: 28 }} />
+      <div style={{ height: isMobile ? 22 : 28 }} />
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
+      <div style={pairGrid}>
         <Section
           glyph={<StateIcon state="review" size={13} />}
           title="Needs your review"
@@ -155,9 +166,9 @@ export function FactoryFloor({
         </Section>
       </div>
 
-      <div style={{ height: 28 }} />
+      <div style={{ height: isMobile ? 22 : 28 }} />
 
-      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 24 }}>
+      <div style={queueGrid}>
         <Section
           glyph={<StateIcon state="todo" size={13} />}
           title="Queue"
@@ -169,7 +180,7 @@ export function FactoryFloor({
             </Link>
           }
         >
-          <QueueTable queue={queue} />
+          <QueueTable queue={queue} isMobile={isMobile} />
         </Section>
 
         <Section
@@ -180,7 +191,7 @@ export function FactoryFloor({
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {shipped.length === 0 && <Empty>Nothing shipped yet.</Empty>}
             {shipped.map((s) => (
-              <ShippedRowView key={s.id} run={s} />
+              <ShippedRowView key={s.id} run={s} isMobile={isMobile} />
             ))}
           </div>
         </Section>
@@ -199,6 +210,7 @@ function FloorHeader({
   tokIn,
   tokOut,
   personasActive,
+  isMobile,
 }: {
   running: number;
   review: number;
@@ -209,6 +221,7 @@ function FloorHeader({
   tokIn: number;
   tokOut: number;
   personasActive: number;
+  isMobile: boolean;
 }) {
   const cells: { state: PiState; label: string; n: number; live?: boolean }[] = [
     { state: "in_progress", label: "Running", n: running, live: running > 0 },
@@ -223,14 +236,15 @@ function FloorHeader({
       <div
         style={{
           display: "flex",
-          alignItems: "baseline",
+          flexDirection: isMobile ? "column" : "row",
+          alignItems: isMobile ? "stretch" : "baseline",
           justifyContent: "space-between",
-          gap: 24,
+          gap: isMobile ? 10 : 24,
           marginBottom: 12,
         }}
       >
         <div>
-          <h1 style={{ margin: 0, fontSize: 20, fontWeight: 600, letterSpacing: "-0.01em", color: "var(--pi-fg)" }}>
+          <h1 style={{ margin: 0, fontSize: isMobile ? 18 : 20, fontWeight: 600, letterSpacing: "-0.01em", color: "var(--pi-fg)" }}>
             Factory floor
           </h1>
           <div
@@ -258,64 +272,77 @@ function FloorHeader({
             <span>{personasActive} personas active</span>
           </div>
         </div>
-        <div style={{ display: "inline-flex", alignItems: "center", gap: 14 }}>
-          <KPI label="Cost today" value={`$${cost.toFixed(2)}`} />
-          <Hairline vertical style={{ height: 24 }} />
-          <KPI label="Tokens in" value={fmtTok(tokIn)} />
-          <KPI label="Tokens out" value={fmtTok(tokOut)} />
+        <div
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: isMobile ? 10 : 14,
+            justifyContent: isMobile ? "space-between" : "flex-end",
+            flexWrap: "wrap",
+          }}
+        >
+          <KPI label="Cost today" value={`$${cost.toFixed(2)}`} alignEnd={!isMobile} />
+          {!isMobile && <Hairline vertical style={{ height: 24 }} />}
+          <KPI label="Tokens in" value={fmtTok(tokIn)} alignEnd={!isMobile} />
+          <KPI label="Tokens out" value={fmtTok(tokOut)} alignEnd={!isMobile} />
         </div>
       </div>
 
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: `repeat(${cells.length}, 1fr)`,
+          gridTemplateColumns: isMobile ? "repeat(3, 1fr)" : `repeat(${cells.length}, 1fr)`,
           background: "var(--pi-surface)",
           border: "1px solid var(--pi-hairline)",
           borderRadius: 8,
           overflow: "hidden",
         }}
       >
-        {cells.map((c, i) => (
-          <div
-            key={c.state}
-            style={{
-              padding: "12px 16px",
-              borderLeft: i > 0 ? "1px solid var(--pi-hairline)" : "none",
-              display: "flex",
-              flexDirection: "column",
-              gap: 6,
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <StateIcon state={c.state} size={12} spin={c.live} />
-              <span style={{ fontSize: 12, fontWeight: 500, color: "var(--pi-muted)" }}>{c.label}</span>
-            </div>
-            <span
-              className="pi-mono"
+        {cells.map((c, i) => {
+          const col = isMobile ? i % 3 : i;
+          const row = isMobile ? Math.floor(i / 3) : 0;
+          return (
+            <div
+              key={c.state}
               style={{
-                fontSize: 22,
-                fontWeight: 500,
-                color: "var(--pi-fg)",
-                letterSpacing: "-0.02em",
+                padding: isMobile ? "10px 12px" : "12px 16px",
+                borderLeft: col > 0 ? "1px solid var(--pi-hairline)" : "none",
+                borderTop: row > 0 ? "1px solid var(--pi-hairline)" : "none",
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
               }}
             >
-              {String(c.n).padStart(2, "0")}
-            </span>
-          </div>
-        ))}
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <StateIcon state={c.state} size={12} spin={c.live} />
+                <span style={{ fontSize: 11, fontWeight: 500, color: "var(--pi-muted)" }}>{c.label}</span>
+              </div>
+              <span
+                className="pi-mono"
+                style={{
+                  fontSize: isMobile ? 18 : 22,
+                  fontWeight: 500,
+                  color: "var(--pi-fg)",
+                  letterSpacing: "-0.02em",
+                }}
+              >
+                {String(c.n).padStart(2, "0")}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
 }
 
-function KPI({ label, value }: { label: string; value: string }) {
+function KPI({ label, value, alignEnd = true }: { label: string; value: string; alignEnd?: boolean }) {
   return (
     <div
       style={{
         display: "flex",
         flexDirection: "column",
-        alignItems: "flex-end",
+        alignItems: alignEnd ? "flex-end" : "flex-start",
         gap: 1,
         whiteSpace: "nowrap",
       }}
@@ -342,11 +369,151 @@ function runHref(r: FloorRun): string {
   return r.runDbId != null ? `/runs/${r.runDbId}` : "#";
 }
 
-function RunRow({ run }: { run: FloorRun }) {
+function RunRow({ run, isMobile }: { run: FloorRun; isMobile: boolean }) {
   const subLabel =
     ({ editing: "Editing", tool: "Tool", thinking: "Thinking", starting: "Starting" } as Record<string, string>)[
       run.sub || ""
     ] || "Active";
+
+  if (isMobile) {
+    return (
+      <Link
+        href={runHref(run)}
+        style={{
+          position: "relative",
+          background: "var(--pi-surface)",
+          border: "1px solid var(--pi-hairline)",
+          borderRadius: 8,
+          padding: "12px 14px",
+          textDecoration: "none",
+          color: "var(--pi-fg)",
+          display: "block",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <StateIcon state="in_progress" size={13} spin />
+          <span
+            style={{
+              fontSize: 10,
+              fontWeight: 600,
+              color: "var(--s-progress)",
+              letterSpacing: "0.04em",
+              textTransform: "uppercase",
+            }}
+          >
+            {subLabel}
+          </span>
+          <MonoTag>{run.id}</MonoTag>
+          <span style={{ flex: 1 }} />
+          <span
+            className="pi-mono"
+            style={{
+              fontSize: 11,
+              color: "var(--pi-muted)",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+            }}
+          >
+            <Icon name="clock" size={11} />
+            <ElapsedTimer startMs={run.startedAt} />
+          </span>
+        </div>
+
+        <div
+          style={{
+            marginTop: 8,
+            fontSize: 14,
+            fontWeight: 500,
+            color: "var(--pi-fg)",
+            lineHeight: 1.35,
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical",
+            overflow: "hidden",
+          }}
+        >
+          {run.task.title}
+        </div>
+
+        <div
+          style={{
+            marginTop: 8,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            color: "var(--pi-muted)",
+            fontSize: 12,
+            overflow: "hidden",
+          }}
+        >
+          <Icon
+            name={
+              run.sub === "editing"
+                ? "edit"
+                : run.sub === "tool"
+                ? "term"
+                : run.sub === "thinking"
+                ? "spark"
+                : "circle"
+            }
+            size={12}
+          />
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+            <CyclingText items={run.activity.length ? run.activity : ["Working…"]} intervalMs={3000} />
+          </span>
+        </div>
+
+        <div
+          style={{
+            marginTop: 10,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+          }}
+        >
+          <PersonaChip id={run.persona} />
+          <div style={{ minWidth: 96 }}>
+            <TokenMeter used={run.cost} budget={run.budget || 25} />
+          </div>
+        </div>
+
+        <div
+          style={{
+            marginTop: 8,
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            color: "var(--pi-muted-2)",
+            flexWrap: "wrap",
+          }}
+        >
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, minWidth: 0 }}>
+            <Icon name="branch" size={11} />
+            <span
+              className="pi-mono"
+              style={{
+                fontSize: 11,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                maxWidth: 180,
+              }}
+            >
+              {run.branch || "—"}
+            </span>
+          </span>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <span className="pi-mono" style={{ fontSize: 11, color: "var(--pi-fg)" }}>
+              {run.progress.done}/{run.progress.total || "—"}
+            </span>
+            <span style={{ fontSize: 11 }}>criteria</span>
+          </span>
+        </div>
+      </Link>
+    );
+  }
 
   return (
     <Link
@@ -656,9 +823,89 @@ function BlockedRow({ run }: { run: FloorRun }) {
   );
 }
 
-function QueueTable({ queue }: { queue: QueueRow[] }) {
+function QueueTable({ queue, isMobile }: { queue: QueueRow[]; isMobile: boolean }) {
   if (queue.length === 0) {
     return <Empty>Queue empty.</Empty>;
+  }
+  if (isMobile) {
+    return (
+      <div
+        style={{
+          background: "var(--pi-surface)",
+          border: "1px solid var(--pi-hairline)",
+          borderRadius: 8,
+          overflow: "hidden",
+        }}
+      >
+        {queue.map((t, i) => (
+          <Link
+            key={t.id}
+            href={`/tasks/${t.id}`}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+              padding: "10px 12px",
+              borderTop: i === 0 ? "none" : "1px solid var(--pi-hairline)",
+              textDecoration: "none",
+              color: "var(--pi-fg)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+              <StateIcon state="todo" size={12} />
+              <MonoTag>{t.id}</MonoTag>
+              <span style={{ flex: 1 }} />
+              <span
+                onClick={(e) => e.preventDefault()}
+                style={{ ...piButtons.runInline(), padding: "4px 8px" }}
+              >
+                <Icon name="spark" size={11} />
+                Run
+              </span>
+            </div>
+            <span
+              style={{
+                fontSize: 13,
+                fontWeight: 500,
+                color: "var(--pi-fg)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                display: "-webkit-box",
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: "vertical",
+                lineHeight: 1.35,
+              }}
+            >
+              {t.title}
+            </span>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                flexWrap: "wrap",
+                color: "var(--pi-muted-2)",
+              }}
+            >
+              <span className="pi-mono" style={{ fontSize: 11, color: "var(--pi-muted)" }}>
+                {t.criteria} criteria
+              </span>
+              {t.tags.slice(0, 2).map((tg) => (
+                <Badge key={tg} tone="muted">
+                  {tg}
+                </Badge>
+              ))}
+              <span style={{ flex: 1 }} />
+              {t.persona ? (
+                <PersonaChip id={t.persona} />
+              ) : (
+                <span style={{ fontSize: 11 }}>unassigned</span>
+              )}
+            </div>
+          </Link>
+        ))}
+      </div>
+    );
   }
   return (
     <div
@@ -726,12 +973,12 @@ function QueueTable({ queue }: { queue: QueueRow[] }) {
   );
 }
 
-function ShippedRowView({ run }: { run: ShippedRow }) {
+function ShippedRowView({ run, isMobile }: { run: ShippedRow; isMobile: boolean }) {
   return (
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "auto 1fr auto auto",
+        gridTemplateColumns: isMobile ? "auto 1fr auto" : "auto 1fr auto auto",
         gap: 12,
         alignItems: "center",
         padding: "8px 12px",
@@ -760,6 +1007,7 @@ function ShippedRowView({ run }: { run: ShippedRow }) {
             gap: 8,
             marginTop: 2,
             color: "var(--pi-muted-2)",
+            flexWrap: "wrap",
           }}
         >
           {run.pr != null && (
@@ -773,12 +1021,21 @@ function ShippedRowView({ run }: { run: ShippedRow }) {
           <span className="pi-mono" style={{ fontSize: 10, color: "var(--s-blocked)" }}>
             −{run.diff.deletions}
           </span>
+          {isMobile && (
+            <span className="pi-mono" style={{ fontSize: 10, color: "var(--pi-muted)" }}>
+              ${run.cost.toFixed(2)}
+            </span>
+          )}
         </div>
       </div>
-      <PersonaChip id={run.persona} />
-      <span className="pi-mono" style={{ fontSize: 11, color: "var(--pi-muted)" }}>
-        ${run.cost.toFixed(2)}
-      </span>
+      {!isMobile && <PersonaChip id={run.persona} />}
+      {isMobile ? (
+        <PersonaChip id={run.persona} />
+      ) : (
+        <span className="pi-mono" style={{ fontSize: 11, color: "var(--pi-muted)" }}>
+          ${run.cost.toFixed(2)}
+        </span>
+      )}
     </div>
   );
 }
