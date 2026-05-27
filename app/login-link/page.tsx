@@ -1,10 +1,15 @@
 import { Suspense } from "react";
 import LoginLinkForm from "./login-link-form";
+import { verifyMagicToken } from "@/lib/magic-link";
 
 export const dynamic = "force-dynamic";
 
-function FormWrapper({ token }: { token: string }) {
-  return <LoginLinkForm token={token} />;
+async function getCsrfToken(): Promise<string> {
+  const res = await fetch("http://localhost:3000/api/auth/csrf", {
+    cache: "no-store",
+  });
+  const data = await res.json();
+  return data.csrfToken || "";
 }
 
 export default async function LoginLinkPage({
@@ -25,6 +30,20 @@ export default async function LoginLinkPage({
     );
   }
 
+  const email = await verifyMagicToken(token);
+  if (!email) {
+    return (
+      <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4">
+        <p className="text-sm text-red-400">This login link has expired or is invalid.</p>
+        <a href="/login" className="text-sm text-primary hover:underline">
+          Go to login
+        </a>
+      </div>
+    );
+  }
+
+  const csrfToken = await getCsrfToken();
+
   return (
     <Suspense
       fallback={
@@ -33,7 +52,7 @@ export default async function LoginLinkPage({
         </div>
       }
     >
-      <FormWrapper token={token} />
+      <LoginLinkForm token={token} email={email} csrfToken={csrfToken} />
     </Suspense>
   );
 }

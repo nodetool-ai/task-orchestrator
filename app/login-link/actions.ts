@@ -16,7 +16,11 @@ export async function doMagicSignIn(token: string) {
       redirectTo: "/",
     });
     return { ok: true };
-  } catch {
+  } catch (err: any) {
+    // NextAuth throws on redirect — that's success
+    if (err?.message?.includes("NEXT_REDIRECT") || err?.message?.includes("redirect")) {
+      return { ok: true };
+    }
     return { error: "Sign in failed." };
   }
 }
