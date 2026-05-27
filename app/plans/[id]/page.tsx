@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { PlanRepositories } from "@/components/plan-repositories";
+import { DeleteButton } from "@/components/delete-button";
 import * as repo from "@/lib/repo";
 import { STATE_LABEL, TASK_BOARD_STATES, type TaskState } from "@/lib/types";
 import { StateChanger } from "@/components/state-changer";
@@ -43,6 +44,14 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
         <StateChanger kind="plan" planId={plan.id} current={plan.state} />
         {plan.owner && <span className="text-xs text-muted-foreground">@{plan.owner}</span>}
         <span className="text-xs text-muted-foreground">Created {formatDate(plan.createdAt)}</span>
+        <div className="ml-auto">
+          <DeleteButton
+            endpoint={`/api/plans/${plan.id}`}
+            redirectTo="/plans"
+            confirmMessage={`Delete plan "${plan.title}"? This removes all ${total} task${total === 1 ? "" : "s"} under it. This cannot be undone.`}
+            label="Delete plan"
+          />
+        </div>
       </div>
 
       <div className="mt-3">
