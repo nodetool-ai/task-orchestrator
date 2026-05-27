@@ -59,6 +59,34 @@
   * { @apply border-border; }
   html { font-feature-settings: "rlig" 1, "calt" 1, "cv11" 1; -webkit-font-smoothing: antialiased; }
   body { @apply bg-background text-foreground; font-synthesis-weight: none; text-rendering: optimizeLegibility; }
+
+  /* Pi Factory tokens — surfaces, hairlines, state colors */
+  :root {
+    --pi-bg: hsl(240 6% 6%);
+    --pi-surface: hsl(240 6% 8%);
+    --pi-surface-2: hsl(240 5% 10%);
+    --pi-raised: hsl(240 4% 14%);
+    --pi-raised-2: hsl(240 4% 18%);
+    --pi-hairline: hsla(240 4% 30% / 0.5);
+    --pi-hairline-strong: hsla(240 4% 38% / 0.7);
+    --pi-fg: hsl(0 0% 98%);
+    --pi-muted: hsl(240 5% 64%);
+    --pi-muted-2: hsl(240 4% 46%);
+    --s-todo: hsl(240 4% 60%);
+    --s-progress: hsl(38 92% 50%);
+    --s-review: hsl(270 76% 65%);
+    --s-blocked: hsl(0 72% 60%);
+    --s-done: hsl(152 60% 45%);
+    --s-cancelled: hsl(240 4% 50%);
+  }
+}
+
+@layer utilities {
+  .pi-mono { font-family: var(--font-mono), ui-monospace, SFMono-Regular, monospace; font-variant-numeric: tabular-nums; font-weight: 400; }
+  @keyframes pi-spin { to { transform: rotate(360deg); } }
+  @keyframes pi-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  @keyframes pi-fade-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: translateY(0); } }
+  .pi-fade-in { animation: pi-fade-in 220ms cubic-bezier(0.2,0,0,1); }
 }
 
 /* Prose tweaks to feel Linear-like, not blog-like. */
