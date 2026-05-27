@@ -1,14 +1,18 @@
 import type { Metadata, Viewport } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
-import { SiteHeader } from "@/components/site-header";
+import { auth } from "@/auth";
+import { TopNav } from "@/components/pi/top-nav";
+import { PiOverlays } from "@/components/pi/overlays";
+import { loadPaletteItems } from "@/lib/pi-floor-data";
+import * as repo from "@/lib/repo";
 import "./globals.css";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-sans", display: "swap" });
 const mono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono", display: "swap" });
 
 export const metadata: Metadata = {
-  title: "Task Orchestrator",
-  description: "Plans and tasks for software projects — markdown-native, conflict-free.",
+  title: "Pi Factory",
+  description: "Agent-first cockpit for autonomous coding agents.",
 };
 
 export const viewport: Viewport = {
@@ -17,18 +21,30 @@ export const viewport: Viewport = {
   maximumScale: 1,
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const session = await auth();
+  const email = session?.user?.email ?? undefined;
+
+  let paletteItems: ReturnType<typeof loadPaletteItems> = [];
+  let personaIds: string[] = [];
+  if (email) {
+    try {
+      paletteItems = loadPaletteItems();
+      personaIds = repo.listPersonaIds();
+    } catch {
+      // DB may be uninitialized on first boot — palette/spawn will be empty.
+    }
+  }
+
   return (
     <html lang="en" className={`${inter.variable} ${mono.variable} dark`} suppressHydrationWarning>
-      <body className="min-h-screen bg-background font-sans antialiased">
-        <SiteHeader />
-        <main className="container py-4 sm:py-8">{children}</main>
-        <footer className="border-t border-border/60 mt-10 sm:mt-16">
-          <div className="container py-4 sm:py-6 flex items-center justify-between gap-4 text-xs text-muted-foreground">
-            <span>Source of truth lives in <code className="font-mono text-foreground/80">data.db</code>.</span>
-            <span>Built with Next.js</span>
-          </div>
-        </footer>
+      <body
+        className="min-h-screen font-sans antialiased"
+        style={{ background: "var(--pi-bg)", color: "var(--pi-fg)" }}
+      >
+        <TopNav email={email} />
+        <main>{children}</main>
+        <PiOverlays items={paletteItems} personaIds={personaIds} />
       </body>
     </html>
   );
