@@ -4,6 +4,7 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { Icon, MonoTag, StateIcon, type PiState, STATE_COLOR } from "./primitives";
 import { closePalette, closeSpawn, useOverlay } from "./overlay-store";
+import { useIsMobile } from "./use-is-mobile";
 
 type CmdItem = {
   kind: "Run" | "Task" | "Plan" | "Action";
@@ -38,6 +39,7 @@ export function PiOverlays({ items, personaIds }: { items: CmdItem[]; personaIds
 
 function CommandPalette({ items }: { items: CmdItem[] }) {
   const router = useRouter();
+  const isMobile = useIsMobile();
   const [q, setQ] = React.useState("");
   const inputRef = React.useRef<HTMLInputElement | null>(null);
   React.useEffect(() => {
@@ -73,7 +75,8 @@ function CommandPalette({ items }: { items: CmdItem[] }) {
         display: "flex",
         alignItems: "flex-start",
         justifyContent: "center",
-        paddingTop: "10vh",
+        paddingTop: isMobile ? "6vh" : "10vh",
+        padding: isMobile ? "6vh 8px 8px" : undefined,
       }}
       onClick={closePalette}
     >
@@ -81,7 +84,7 @@ function CommandPalette({ items }: { items: CmdItem[] }) {
         onClick={(e) => e.stopPropagation()}
         style={{
           width: 640,
-          maxWidth: "calc(100vw - 40px)",
+          maxWidth: isMobile ? "100%" : "calc(100vw - 40px)",
           background: "var(--pi-surface)",
           border: "1px solid var(--pi-hairline-strong)",
           borderRadius: 10,
@@ -239,6 +242,7 @@ const kbdSt: React.CSSProperties = {
 };
 
 function SpawnModal({ personaIds }: { personaIds: string[] }) {
+  const isMobile = useIsMobile();
   const [persona, setPersona] = React.useState(personaIds[0] || "claude-opus-4.7");
   const [budget, setBudget] = React.useState(25);
   const [autoPR, setAutoPR] = React.useState(true);
@@ -252,8 +256,9 @@ function SpawnModal({ personaIds }: { personaIds: string[] }) {
         background: "hsla(240 6% 4% / 0.75)",
         backdropFilter: "blur(6px)",
         display: "flex",
-        alignItems: "center",
+        alignItems: isMobile ? "flex-start" : "center",
         justifyContent: "center",
+        padding: isMobile ? "8px" : 0,
       }}
       onClick={closeSpawn}
     >
@@ -261,8 +266,8 @@ function SpawnModal({ personaIds }: { personaIds: string[] }) {
         onClick={(e) => e.stopPropagation()}
         style={{
           width: 720,
-          maxWidth: "calc(100vw - 40px)",
-          maxHeight: "calc(100vh - 80px)",
+          maxWidth: isMobile ? "100%" : "calc(100vw - 40px)",
+          maxHeight: isMobile ? "calc(100vh - 16px)" : "calc(100vh - 80px)",
           overflow: "auto",
           background: "var(--pi-surface)",
           border: "1px solid var(--pi-hairline-strong)",
@@ -297,7 +302,7 @@ function SpawnModal({ personaIds }: { personaIds: string[] }) {
           </button>
         </div>
 
-        <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 18 }}>
+        <div style={{ padding: isMobile ? 14 : 20, display: "flex", flexDirection: "column", gap: 18 }}>
           <Field label="Task">
             <button
               style={{
@@ -323,7 +328,7 @@ function SpawnModal({ personaIds }: { personaIds: string[] }) {
           </Field>
 
           <Field label="Persona">
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
+            <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(3, 1fr)", gap: 6 }}>
               {personaIds.slice(0, 9).map((p) => (
                 <button
                   key={p}
@@ -375,7 +380,7 @@ function SpawnModal({ personaIds }: { personaIds: string[] }) {
             />
           </Field>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+          <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16 }}>
             <Field label="Budget cap">
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span className="pi-mono" style={{ fontSize: 13, color: "var(--pi-muted-2)" }}>
@@ -442,8 +447,10 @@ function SpawnModal({ personaIds }: { personaIds: string[] }) {
           <div
             style={{
               display: "flex",
-              alignItems: "center",
+              alignItems: isMobile ? "stretch" : "center",
+              flexDirection: isMobile ? "column" : "row",
               justifyContent: "space-between",
+              gap: isMobile ? 12 : 8,
               paddingTop: 8,
               borderTop: "1px solid var(--pi-hairline)",
             }}
@@ -458,7 +465,7 @@ function SpawnModal({ personaIds }: { personaIds: string[] }) {
                 main
               </span>
             </div>
-            <div style={{ display: "inline-flex", gap: 8 }}>
+            <div style={{ display: "inline-flex", gap: 8, justifyContent: isMobile ? "flex-end" : "flex-start" }}>
               <button
                 onClick={closeSpawn}
                 style={{

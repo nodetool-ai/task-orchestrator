@@ -14,9 +14,11 @@ import {
   STATE_LABEL,
   piButtons,
   piWrap,
+  piWrapMobile,
   type PiState,
 } from "./primitives";
 import { openSpawn } from "./overlay-store";
+import { useIsMobile } from "./use-is-mobile";
 
 export type TaskRowData = {
   id: string;
@@ -93,19 +95,22 @@ export function TasksIndex({
     return out;
   }, [filtered, groupBy]);
 
+  const isMobile = useIsMobile();
+
   return (
-    <div style={piWrap}>
+    <div style={isMobile ? piWrapMobile : piWrap}>
       <div
         style={{
           display: "flex",
-          alignItems: "baseline",
+          flexDirection: isMobile ? "column" : "row",
+          alignItems: isMobile ? "stretch" : "baseline",
           justifyContent: "space-between",
-          gap: 24,
-          marginBottom: 18,
+          gap: isMobile ? 12 : 24,
+          marginBottom: isMobile ? 12 : 18,
         }}
       >
         <div>
-          <h1 style={{ margin: 0, fontSize: 20, fontWeight: 600, letterSpacing: "-0.01em", color: "var(--pi-fg)" }}>
+          <h1 style={{ margin: 0, fontSize: isMobile ? 18 : 20, fontWeight: 600, letterSpacing: "-0.01em", color: "var(--pi-fg)" }}>
             Tasks
           </h1>
           <div style={{ marginTop: 4, color: "var(--pi-muted-2)", fontSize: 12 }}>
@@ -113,11 +118,14 @@ export function TasksIndex({
           </div>
         </div>
         <div style={{ display: "inline-flex", gap: 8 }}>
-          <button style={piButtons.ghostSm()}>
+          <button style={{ ...piButtons.ghostSm(), flex: isMobile ? 1 : undefined, justifyContent: "center" }}>
             <Icon name="plus" size={12} />
             New task
           </button>
-          <button onClick={openSpawn} style={piButtons.primaryInline()}>
+          <button
+            onClick={openSpawn}
+            style={{ ...piButtons.primaryInline(), flex: isMobile ? 1 : undefined, justifyContent: "center" }}
+          >
             <Icon name="spark" size={12} />
             Spawn agent
           </button>
@@ -127,82 +135,113 @@ export function TasksIndex({
       <div
         style={{
           display: "flex",
-          alignItems: "center",
+          alignItems: isMobile ? "stretch" : "center",
+          flexDirection: isMobile ? "column" : "row",
           gap: 10,
           marginBottom: 14,
-          padding: "8px 10px",
+          padding: isMobile ? "10px 10px" : "8px 10px",
           borderRadius: 8,
           background: "var(--pi-surface)",
           border: "1px solid var(--pi-hairline)",
           flexWrap: "wrap",
         }}
       >
-        <Icon name="search" size={13} />
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Search tasks by title, id, plan…"
+        <div
           style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
             flex: 1,
-            minWidth: 200,
-            background: "transparent",
-            border: "none",
-            outline: "none",
-            color: "var(--pi-fg)",
-            fontSize: 13,
-            fontFamily: "inherit",
-          }}
-        />
-
-        <Hairline vertical style={{ height: 16 }} />
-        <span style={{ color: "var(--pi-muted-2)", fontSize: 11 }}>State</span>
-        <SegBar
-          value={stateFilter}
-          onChange={setStateFilter}
-          options={[
-            { value: "open", label: "Open" },
-            { value: "in_progress", label: "Running" },
-            { value: "review", label: "Review" },
-            { value: "blocked", label: "Stuck" },
-            { value: "todo", label: "Queue" },
-            { value: "all", label: "All" },
-          ]}
-        />
-
-        <Hairline vertical style={{ height: 16 }} />
-        <span style={{ color: "var(--pi-muted-2)", fontSize: 11 }}>Group</span>
-        <SegBar
-          value={groupBy}
-          onChange={setGroupBy}
-          options={[
-            { value: "state", label: "State" },
-            { value: "plan", label: "Plan" },
-            { value: "none", label: "None" },
-          ]}
-        />
-
-        <Hairline vertical style={{ height: 16 }} />
-        <select
-          value={planFilter}
-          onChange={(e) => setPlanFilter(e.target.value)}
-          style={{
-            background: "var(--pi-bg)",
-            border: "1px solid var(--pi-hairline)",
-            color: planFilter ? "var(--pi-fg)" : "var(--pi-muted)",
-            borderRadius: 5,
-            padding: "4px 8px",
-            fontSize: 11,
-            fontFamily: "inherit",
-            outline: "none",
+            minWidth: 0,
           }}
         >
-          <option value="">All plans</option>
-          {plans.map((p) => (
-            <option key={p.id} value={p.title}>
-              {p.title}
-            </option>
-          ))}
-        </select>
+          <Icon name="search" size={13} />
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search tasks…"
+            style={{
+              flex: 1,
+              minWidth: 0,
+              background: "transparent",
+              border: "none",
+              outline: "none",
+              color: "var(--pi-fg)",
+              fontSize: 13,
+              fontFamily: "inherit",
+            }}
+          />
+        </div>
+
+        {!isMobile && <Hairline vertical style={{ height: 16 }} />}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            flexWrap: "wrap",
+            overflowX: isMobile ? "auto" : "visible",
+            WebkitOverflowScrolling: "touch",
+          }}
+        >
+          <span style={{ color: "var(--pi-muted-2)", fontSize: 11 }}>State</span>
+          <SegBar
+            value={stateFilter}
+            onChange={setStateFilter}
+            options={[
+              { value: "open", label: "Open" },
+              { value: "in_progress", label: "Running" },
+              { value: "review", label: "Review" },
+              { value: "blocked", label: "Stuck" },
+              { value: "todo", label: "Queue" },
+              { value: "all", label: "All" },
+            ]}
+          />
+        </div>
+
+        {!isMobile && <Hairline vertical style={{ height: 16 }} />}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            flexWrap: "wrap",
+          }}
+        >
+          <span style={{ color: "var(--pi-muted-2)", fontSize: 11 }}>Group</span>
+          <SegBar
+            value={groupBy}
+            onChange={setGroupBy}
+            options={[
+              { value: "state", label: "State" },
+              { value: "plan", label: "Plan" },
+              { value: "none", label: "None" },
+            ]}
+          />
+          {!isMobile && <Hairline vertical style={{ height: 16 }} />}
+          <select
+            value={planFilter}
+            onChange={(e) => setPlanFilter(e.target.value)}
+            style={{
+              background: "var(--pi-bg)",
+              border: "1px solid var(--pi-hairline)",
+              color: planFilter ? "var(--pi-fg)" : "var(--pi-muted)",
+              borderRadius: 5,
+              padding: "4px 8px",
+              fontSize: 11,
+              fontFamily: "inherit",
+              outline: "none",
+              maxWidth: isMobile ? 160 : undefined,
+            }}
+          >
+            <option value="">All plans</option>
+            {plans.map((p) => (
+              <option key={p.id} value={p.title}>
+                {p.title}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
 
       <div
@@ -258,7 +297,7 @@ export function TasksIndex({
               </div>
             )}
             {list.map((row) => (
-              <TaskRow key={row.id} row={row} />
+              <TaskRow key={row.id} row={row} isMobile={isMobile} />
             ))}
           </React.Fragment>
         ))}
@@ -272,9 +311,109 @@ export function TasksIndex({
   );
 }
 
-function TaskRow({ row }: { row: TaskRowData }) {
+function TaskRow({ row, isMobile }: { row: TaskRowData; isMobile: boolean }) {
   const href = row.runDbId != null ? `/runs/${row.runDbId}` : `/tasks/${row.id}`;
   const isLive = row.state === "in_progress";
+
+  if (isMobile) {
+    return (
+      <Link
+        href={href}
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: 6,
+          padding: "12px 12px",
+          borderTop: "1px solid var(--pi-hairline)",
+          textDecoration: "none",
+          color: "var(--pi-fg)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+          <StateIcon state={row.state} size={13} spin={isLive} />
+          <MonoTag>{row.id}</MonoTag>
+          <span style={{ flex: 1 }} />
+          {row.state === "todo" && (
+            <span
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                openSpawn();
+              }}
+              style={{ ...piButtons.runInline(), padding: "4px 8px" }}
+            >
+              <Icon name="spark" size={11} />
+              Run
+            </span>
+          )}
+        </div>
+        <span
+          style={{
+            fontSize: 14,
+            color: "var(--pi-fg)",
+            fontWeight: 500,
+            lineHeight: 1.35,
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical",
+            overflow: "hidden",
+          }}
+        >
+          {row.title}
+        </span>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            flexWrap: "wrap",
+            color: "var(--pi-muted-2)",
+            fontSize: 11,
+          }}
+        >
+          {row.criteria && (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <span className="pi-mono" style={{ fontSize: 11, color: "var(--pi-fg)" }}>
+                {row.criteria.done}/{row.criteria.total}
+              </span>
+              <div style={{ width: 40 }}>
+                <ProgressBar
+                  value={row.criteria.done}
+                  max={row.criteria.total || 1}
+                  color={row.state === "done" ? "var(--s-done)" : "var(--s-progress)"}
+                  height={2}
+                />
+              </div>
+            </span>
+          )}
+          {row.planId && row.plan ? (
+            <Link
+              href={`/plans/${row.planId}`}
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                color: "var(--pi-muted)",
+                fontSize: 11,
+                textDecoration: "none",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                maxWidth: 180,
+              }}
+            >
+              {row.plan}
+            </Link>
+          ) : null}
+          <span style={{ flex: 1 }} />
+          {row.persona ? (
+            <PersonaChip id={row.persona} />
+          ) : (
+            <span style={{ fontSize: 11 }}>unassigned</span>
+          )}
+        </div>
+      </Link>
+    );
+  }
+
   return (
     <Link
       href={href}
