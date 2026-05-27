@@ -11,6 +11,7 @@ import { MarkdownBody } from "@/components/markdown-body";
 import { CriterionCheckbox } from "@/components/criterion-checkbox";
 import { RunAgentButton } from "@/components/run-agent-button";
 import { RunReviewButton } from "@/components/run-review-button";
+import { DeleteButton } from "@/components/delete-button";
 import { TaskChatBox } from "@/components/task-chat-box";
 import {
   IMPLEMENT_DEFAULT_BUDGET_USD,
@@ -89,6 +90,12 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
               budgetMaxUsd={REVIEW_DEFAULT_BUDGET_USD}
             />
           )}
+          <DeleteButton
+            endpoint={`/api/tasks/${task.id}`}
+            redirectTo={plan ? `/plans/${plan.id}` : "/tasks"}
+            confirmMessage={`Delete task "${task.title}"? This cannot be undone.`}
+            label="Delete task"
+          />
         </div>
       </div>
 
