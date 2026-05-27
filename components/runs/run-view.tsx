@@ -113,6 +113,7 @@ export function RunView({
   const abortRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const didInitialScrollRef = useRef(false);
 
   const status = run.status;
   const terminal = isTerminalStatus(status);
@@ -132,9 +133,11 @@ export function RunView({
   const cwdHint =
     run.worktreePath ?? selectedRepo?.localPath ?? "(orchestrator checkout)";
 
-  // Auto-scroll on new content.
+  // Auto-scroll on new content. First load jumps instantly; later updates animate.
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    const behavior: ScrollBehavior = didInitialScrollRef.current ? "smooth" : "auto";
+    endRef.current?.scrollIntoView({ behavior, block: "end" });
+    didInitialScrollRef.current = true;
   }, [messages, sending]);
 
   // Auto-grow the textarea.
