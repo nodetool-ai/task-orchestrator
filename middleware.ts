@@ -25,6 +25,12 @@ export default auth((req) => {
   if (path === "/api/mcp") {
     return NextResponse.next();
   }
+  // /api/github/webhook authenticates via the X-Hub-Signature-256 HMAC
+  // (GITHUB_WEBHOOK_SECRET), not a browser session. Bypass the gate so GitHub
+  // can deliver events.
+  if (path === "/api/github/webhook") {
+    return NextResponse.next();
+  }
 
   if (req.auth) return NextResponse.next();
 

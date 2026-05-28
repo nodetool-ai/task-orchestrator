@@ -559,6 +559,102 @@ export function close(id: number): RunRow {
   return get(id)!;
 }
 
+/**
+ * Resume a completed/idle worktree run for an unattended follow-up turn —
+ * e.g. the GitHub webhook handler reacting to a CI failure on the run's PR.
+ *
+ * Re-materializes the worktree on the run's branch, runs one agent turn with
+ * the given prompt, then pushes the branch (to update the PR and re-trigger
+ * CI) and returns the run to `completed`. A fresh SDK session is started
+ * rather than resuming `sdkSessionId`, because the original session files live
+ * inside the (since-cleaned-up) worktree; the prompt + the checked-out code +
+ * the gh tools give the agent everything it needs.
+ *
+ * No-ops (resolves quietly) when the run is missing, already in flight, or has
+ * no worktree branch to push to.
+ */
+export async function followUp(
+  runId: number,
+  prompt: string,
+  opts: { author?: string; addProfiles?: string[]; push?: boolean } = {}
+): Promise<void> {
+  const run = get(runId);
+  if (!run) return;
+  if (isLive(runId)) return;
+  if (run.cwdStrategy !== "worktree" || !run.branch || !run.worktreePath) return;
+
+  const lock = getLock(runId);
+  while (lock.busy) {
+    try {
+      await lock.busy;
+    } catch {
+      // prior turn errored; take the slot anyway
+    }
+  }
+  // Re-check liveness after acquiring the slot (another follow-up may have run
+  // while we waited).
+  if (isLive(runId)) return;
+  let release!: () => void;
+  lock.busy = new Promise<void>((res) => (release = res));
+
+  const abort = new AbortController();
+  const bus = new EventEmitter();
+  runners.set(runId, { abort, bus });
+
+  try {
+    persistMessage(runId, "system", [{ type: "text", text: prompt }]);
+    setStatus(runId, "running");
+
+    const cwd = await prepareCwd(run);
+    const effectiveProfile = opts.addProfiles?.length
+      ? mergeProfiles(run.toolsProfile, opts.addProfiles)
+      : run.toolsProfile;
+    const turnRun: RunRow = { ...run, toolsProfile: effectiveProfile, sdkSessionId: null };
+    const author = opts.author ?? "github-webhook";
+
+    const result = await runOneTurn({
+      run: turnRun,
+      cwd,
+      prompt,
+      abort,
+      author,
+      onSdk: (m) => bus.emit("event", { type: "sdk", sdk: m }),
+    });
+
+    if (abort.signal.aborted) return;
+
+    if (opts.push !== false) {
+      try {
+        await sh(["git", "push", "origin", run.branch], cwd);
+      } catch (err) {
+        persistMessage(runId, "system", [
+          { type: "text", text: `Follow-up: git push failed: ${describe(err)}` },
+        ]);
+      }
+    }
+
+    db.update(agentSessions)
+      .set({
+        status: "completed",
+        completedAt: new Date(),
+        sdkSessionId: result.sdkSessionId ?? run.sdkSessionId,
+        inputTokens: result.inputTokens ?? run.inputTokens,
+        outputTokens: result.outputTokens ?? run.outputTokens,
+      })
+      .where(eq(agentSessions.id, runId))
+      .run();
+    emitStatus(runId, "completed");
+  } catch (err) {
+    if (!abort.signal.aborted) setError(runId, describe(err));
+  } finally {
+    closeBus(runId);
+    runners.delete(runId);
+    cleanupWorktree(run.worktreePath, repoRoot(run)).catch(() => {});
+    release();
+    lock.busy = null;
+  }
+}
+
 // ──────────────────────────────────────────────────────────
 // Worktree management & cwd resolution
 // ──────────────────────────────────────────────────────────
@@ -1116,6 +1212,17 @@ export function isLive(runId: number): boolean {
   return runners.has(runId);
 }
 
+/**
+ * Best-effort push of an arbitrary event onto a run's live bus. No-op when the
+ * run isn't currently in flight (the bus only exists during a turn) — durable
+ * delivery is the caller's responsibility (e.g. an agent_events row). Used by
+ * the GitHub webhook handler to surface CI/PR feedback to a connected SSE
+ * client in real time.
+ */
+export function emitRunEvent(runId: number, type: string, payload: unknown): void {
+  runners.get(runId)?.bus.emit("event", { type, payload });
+}
+
 // ──────────────────────────────────────────────────────────
 // Hydration
 // ──────────────────────────────────────────────────────────
@@ -1298,6 +1405,21 @@ export const RUN_GROUP_LABEL: Record<RunGroup, string> = {
 function authorFor(run: RunRow): string {
   if (run.goal === "<chat>") return "chat";
   return "claude-agent";
+}
+
+/** Union a comma-separated profile string with extra profile keys, preserving order. */
+function mergeProfiles(base: string, add: string[]): string {
+  const set = new Set(
+    base
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+  );
+  for (const a of add) {
+    const t = a.trim();
+    if (t) set.add(t);
+  }
+  return [...set].join(",");
 }
 
 function sandboxDbPathFor(run: RunRow, cwd: string): string {
