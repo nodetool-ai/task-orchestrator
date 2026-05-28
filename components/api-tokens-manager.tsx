@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Loader2, Plus, Trash2, Copy, Check, KeyRound } from "lucide-react";
 import { relativeDate } from "@/lib/utils";
+import { useConfirm } from "@/components/ui/dialog-provider";
 
 interface TokenSummary {
   id: number;
@@ -21,6 +22,7 @@ interface CreatedToken {
 }
 
 export function ApiTokensManager() {
+  const confirm = useConfirm();
   const [tokens, setTokens] = useState<TokenSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [newName, setNewName] = useState("");
@@ -73,7 +75,14 @@ export function ApiTokensManager() {
   }
 
   async function revoke(id: number) {
-    if (!confirm("Revoke this token? Clients using it will start failing.")) return;
+    if (
+      !(await confirm({
+        message: "Revoke this token? Clients using it will start failing.",
+        confirmLabel: "Revoke",
+        tone: "danger",
+      }))
+    )
+      return;
     const res = await fetch(`/api/tokens/${id}`, { method: "DELETE" });
     if (!res.ok) {
       setError(`HTTP ${res.status}`);

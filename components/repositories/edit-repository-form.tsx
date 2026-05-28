@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Loader2, Pencil, Save, Trash2 } from "lucide-react";
 import type { RepositoryRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { useConfirm } from "@/components/ui/dialog-provider";
 
 interface Props {
   repository: RepositoryRow;
@@ -12,6 +13,7 @@ interface Props {
 
 export function EditRepositoryForm({ repository }: Props) {
   const router = useRouter();
+  const confirm = useConfirm();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState(repository.name);
   const [remote, setRemote] = useState(repository.remote ?? "");
@@ -46,8 +48,15 @@ export function EditRepositoryForm({ repository }: Props) {
     });
   };
 
-  const remove = () => {
-    if (!confirm(`Delete repository ${repository.id}? This is irreversible.`)) return;
+  const remove = async () => {
+    if (
+      !(await confirm({
+        message: `Delete repository ${repository.id}? This is irreversible.`,
+        confirmLabel: "Delete",
+        tone: "danger",
+      }))
+    )
+      return;
     startTransition(async () => {
       const res = await fetch(`/api/repositories/${repository.id}`, { method: "DELETE" });
       if (!res.ok) {

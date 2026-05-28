@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FolderGit2, Plus, X } from "lucide-react";
 import type { RepositoryRow } from "@/lib/types";
+import { useConfirm } from "@/components/ui/dialog-provider";
 
 interface Props {
   planId: string;
@@ -14,6 +15,7 @@ interface Props {
 
 export function PlanRepositories({ planId, repos, allRepositories }: Props) {
   const router = useRouter();
+  const confirm = useConfirm();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -39,8 +41,15 @@ export function PlanRepositories({ planId, repos, allRepositories }: Props) {
     });
   };
 
-  const detach = (repoId: string) => {
-    if (!confirm(`Remove ${repoId} from this plan? Tasks pinned to it will lose their repo.`)) return;
+  const detach = async (repoId: string) => {
+    if (
+      !(await confirm({
+        message: `Remove ${repoId} from this plan? Tasks pinned to it will lose their repo.`,
+        confirmLabel: "Remove",
+        tone: "danger",
+      }))
+    )
+      return;
     setError(null);
     startTransition(async () => {
       const res = await fetch(`/api/plans/${planId}/repositories/${repoId}`, {
