@@ -20,6 +20,7 @@ import type { SdkContentBlock, SdkMessageEnvelope } from "@/lib/sdk-message";
 import { SessionStatusPill } from "@/components/session-status-pill";
 import { RunMessage } from "@/components/runs/run-message";
 import { SystemEventRow } from "@/components/runs/system-event-row";
+import { useConfirm } from "@/components/ui/dialog-provider";
 
 interface SidebarRepo {
   id: string;
@@ -93,6 +94,7 @@ export function RunView({
   personaName,
 }: Props) {
   const router = useRouter();
+  const confirm = useConfirm();
   const [run, setRun] = useState<RunRow>(initialRun);
   const [messages, setMessages] = useState<UiMessage[]>(() =>
     initialMessages.map((m) => ({
@@ -282,7 +284,14 @@ export function RunView({
 
   async function close() {
     if (!canClose) return;
-    if (!confirm("Close this run? Any in-flight turn is cancelled.")) return;
+    if (
+      !(await confirm({
+        message: "Close this run? Any in-flight turn is cancelled.",
+        confirmLabel: "Close run",
+        tone: "danger",
+      }))
+    )
+      return;
     try {
       const res = await fetch(`/api/runs/${run.id}`, {
         method: "PATCH",
@@ -304,7 +313,15 @@ export function RunView({
 
   async function cancel() {
     if (!canCancel) return;
-    if (!confirm("Cancel the in-flight turn?")) return;
+    if (
+      !(await confirm({
+        message: "Cancel the in-flight turn?",
+        confirmLabel: "Cancel turn",
+        cancelLabel: "Keep running",
+        tone: "danger",
+      }))
+    )
+      return;
     try {
       const res = await fetch(`/api/runs/${run.id}`, {
         method: "PATCH",

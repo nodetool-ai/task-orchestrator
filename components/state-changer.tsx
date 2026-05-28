@@ -12,6 +12,7 @@ import {
   type TaskState,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { usePrompt } from "@/components/ui/dialog-provider";
 
 type Kind = "task" | "plan";
 
@@ -40,6 +41,7 @@ type Props = TaskProps | PlanProps;
 export function StateChanger(props: Props) {
   const isTask = (props.kind ?? "task") === "task";
   const router = useRouter();
+  const prompt = usePrompt();
   const [open, setOpen] = useState(false);
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
@@ -58,7 +60,7 @@ export function StateChanger(props: Props) {
     return () => document.removeEventListener("mousedown", onClick);
   }, [open]);
 
-  const transition = (next: string) => {
+  const transition = async (next: string) => {
     setOpen(false);
     setError(null);
 
@@ -69,7 +71,8 @@ export function StateChanger(props: Props) {
       const tp = props as TaskProps;
       let assigneeOverride = tp.assignee ?? undefined;
       if (next === "in_progress" && !assigneeOverride) {
-        assigneeOverride = window.prompt("Assignee:", "")?.trim() || undefined;
+        const entered = await prompt({ title: "Assignee", placeholder: "username" });
+        assigneeOverride = entered?.trim() || undefined;
         if (!assigneeOverride) return;
       }
       url = `/api/tasks/${tp.taskId}/transition`;

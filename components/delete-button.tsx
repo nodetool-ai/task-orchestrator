@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Trash2 } from "lucide-react";
+import { useConfirm } from "@/components/ui/dialog-provider";
 
 interface Props {
   endpoint: string;
@@ -22,13 +23,14 @@ export function DeleteButton({
   ariaLabel,
 }: Props) {
   const router = useRouter();
+  const confirm = useConfirm();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
 
-  const onClick = (e: React.MouseEvent) => {
+  const onClick = async (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!confirm(confirmMessage)) return;
+    if (!(await confirm({ message: confirmMessage, confirmLabel: label, tone: "danger" }))) return;
     setError(null);
     startTransition(async () => {
       const res = await fetch(endpoint, { method: "DELETE" });

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Plus, MessageSquare, Search, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useConfirm } from "@/components/ui/dialog-provider";
 
 export interface SidebarChat {
   id: number;
@@ -45,6 +46,7 @@ function bucketize(chats: SidebarChat[]): Array<{ label: string; items: SidebarC
 export function ChatSidebar({ chats }: Props) {
   const pathname = usePathname();
   const router = useRouter();
+  const confirm = useConfirm();
   const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
   const [, startTransition] = useTransition();
@@ -76,7 +78,8 @@ export function ChatSidebar({ chats }: Props) {
   }
 
   async function deleteChat(id: number) {
-    if (!confirm("Delete this chat?")) return;
+    if (!(await confirm({ message: "Delete this chat?", confirmLabel: "Delete", tone: "danger" })))
+      return;
     const res = await fetch(`/api/chats/${id}`, { method: "DELETE" });
     if (!res.ok) return;
     if (activeId === id) {

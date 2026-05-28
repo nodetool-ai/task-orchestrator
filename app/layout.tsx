@@ -4,6 +4,7 @@ import { auth } from "@/auth";
 import { TopNav } from "@/components/pi/top-nav";
 import { PiOverlays } from "@/components/pi/overlays";
 import { LiveSidebar } from "@/components/pi/live-sidebar";
+import { DialogProvider } from "@/components/ui/dialog-provider";
 import { loadPaletteItems } from "@/lib/pi-floor-data";
 import * as repo from "@/lib/repo";
 import "./globals.css";
@@ -43,12 +44,14 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         className="min-h-screen font-sans antialiased"
         style={{ background: "var(--pi-bg)", color: "var(--pi-fg)" }}
       >
-        <TopNav email={email} />
-        <div style={{ display: "flex", alignItems: "stretch", minHeight: "calc(100vh - 48px)" }}>
-          <LiveSidebar enabled={Boolean(email)} />
-          <main style={{ flex: 1, minWidth: 0 }}>{children}</main>
-        </div>
-        <PiOverlays items={paletteItems} personaIds={personaIds} />
+        <DialogProvider>
+          <TopNav email={email} />
+          <div style={{ display: "flex", alignItems: "stretch", minHeight: "calc(100vh - 48px)" }}>
+            <LiveSidebar enabled={Boolean(email)} />
+            <main style={{ flex: 1, minWidth: 0 }}>{children}</main>
+          </div>
+          <PiOverlays items={paletteItems} personaIds={personaIds} />
+        </DialogProvider>
       </body>
     </html>
   );
