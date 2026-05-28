@@ -176,6 +176,37 @@ Requires:
 - `gh` CLI installed and authenticated for PR creation
 - A `main` branch on `origin` (override per-session via `baseBranch`)
 
+Agents can also inspect their own PR and fetch CI results on demand via the
+`gh_pr` / `gh_ci` tools (`ci_runs`, `ci_logs`, `ci_rerun`, `pr_view`, …).
+
+## GitHub webhooks (PR & CI feedback)
+
+Beyond the 60s merge poller, the orchestrator accepts push-based GitHub events
+so PR and CI feedback reaches the relevant session in real time.
+
+Configure a **repo (or org) webhook** in GitHub settings:
+
+- **Payload URL**: `<NEXTAUTH_URL>/api/github/webhook`
+- **Content type**: `application/json`
+- **Secret**: a random string, also set as `GITHUB_WEBHOOK_SECRET` in the
+  server env (deliveries are authenticated via the `X-Hub-Signature-256` HMAC;
+  the endpoint returns 503 until this is set)
+- **Events**: Pull requests, Pull request reviews, Issue comments, Check runs,
+  Check suites, Workflow runs (and/or Statuses)
+
+Each delivery is matched to runs by PR url or by head branch + repository, then:
+
+- **recorded** on the session event log — visible live on `/sessions/[id]`
+  (SSE) and to the agent;
+- a **merged PR** transitions its task to `done` instantly (the poller is the
+  fallback);
+- a **CI failure** or **"changes requested"** review adds a note to the task,
+  and — when `TASK_ORCH_CI_AUTOFIX=1` — resumes the agent on the same branch to
+  fix it and re-push (re-triggering CI). Auto-fix is capped
+  (`TASK_ORCH_CI_AUTOFIX_MAX`, default 3) and debounced
+  (`TASK_ORCH_CI_AUTOFIX_DEBOUNCE_MS`, default 120s) per run; it is off by
+  default since it spends model budget unattended.
+
 ## Tests
 
 `npm test` runs the Vitest suite against an in-memory SQLite DB. Coverage focuses on `lib/repo.ts`: state

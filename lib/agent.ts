@@ -226,7 +226,9 @@ export function startSession(input: StartSessionInput): AgentSessionFull {
   const created = runs.create({
     goal: "<implement>",
     cwdStrategy: "worktree",
-    toolsProfile: "orchestrator,repo_write",
+    // gh_pr/gh_ci let the agent inspect its own PR and fetch CI results
+    // (e.g. when reacting to webhook-driven CI failures).
+    toolsProfile: "orchestrator,repo_write,gh_pr,gh_ci",
     taskId: input.taskId,
     repoId: task.repoId ?? null,
     model: input.model ?? DEFAULT_MODEL,
@@ -308,12 +310,22 @@ export function subscribe(
   // existing SSE consumers expect. We synthesise an id/createdAt; live
   // consumers only key off `type` + `payload`.
   return runs.subscribe(sessionId, (raw) => {
-    const obj = raw as { type?: string; status?: string; sdk?: unknown; error?: string };
+    const obj = raw as {
+      type?: string;
+      status?: string;
+      sdk?: unknown;
+      error?: string;
+      payload?: unknown;
+    };
     let payload: unknown;
     if (obj.type === "status") {
       payload = { status: obj.status, ...(obj.error ? { error: obj.error } : {}) };
     } else if (obj.type === "sdk") {
       payload = obj.sdk;
+    } else if ("payload" in obj) {
+      // Events emitted via runs.emitRunEvent carry an explicit payload (e.g.
+      // the GitHub webhook handler's `github` events).
+      payload = obj.payload;
     } else {
       payload = obj;
     }
