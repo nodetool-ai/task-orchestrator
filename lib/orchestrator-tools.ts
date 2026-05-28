@@ -1,14 +1,14 @@
 // lib/orchestrator-tools.ts
 //
-// Shared registry of the 31 orchestrator tool definitions.
+// Shared registry of the 35 orchestrator tool definitions.
 // The pi extension consumes this and registers each with the task_orch__ prefix.
-// The upcoming MCP server consumes this directly (bare names).
+// The MCP server consumes this directly (bare names).
 
 import { Type, type TSchema } from "typebox";
 import * as repo from "./repo";
 import * as agentLib from "./agent";
 import { PLAN_STATES, TASK_STATES, type PlanState, type TaskState } from "./types";
-import type { TaskFull, PlanFull, AgentSessionFull } from "./types";
+import type { TaskFull, PlanFull, AgentSessionFull, AttachmentMeta } from "./types";
 
 // ──────────────────────────────────────────────────────
 // Context and result types
@@ -20,8 +20,15 @@ export interface OrchestratorToolContext {
   defaultPlanId?: string;
 }
 
+// Content blocks an orchestrator tool may return. Both the MCP server and the
+// pi runtime accept `image` blocks (base64 + mime), so get_attachment can hand
+// an actual image back to the model rather than a link it can't open.
+export type OrchestratorContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
 export interface OrchestratorToolResult {
-  content: Array<{ type: "text"; text: string }>;
+  content: OrchestratorContentBlock[];
   isError?: boolean;
 }
 
@@ -63,6 +70,25 @@ const resolveTaskId = (provided: string | undefined, ctx: OrchestratorToolContex
 const resolvePlanId = (provided: string | undefined, ctx: OrchestratorToolContext): string | null => {
   if (provided && provided.trim()) return provided.trim();
   return ctx.defaultPlanId ?? null;
+};
+
+// Max bytes we inline an image for the model; bigger images are referenced by
+// download URL instead. Text artifacts inline up to a char cap, then truncate.
+const IMAGE_INLINE_MAX = 5 * 1024 * 1024;
+const TEXT_INLINE_MAX_CHARS = 100_000;
+
+// Resolve which owner an attachment op targets. Explicit task_id/plan_id wins;
+// otherwise fall back to the session's scoped task, then its scoped plan.
+const resolveAttachmentOwner = (
+  taskId: string | undefined,
+  planId: string | undefined,
+  ctx: OrchestratorToolContext
+): { taskId?: string; planId?: string } | null => {
+  if (taskId && taskId.trim()) return { taskId: taskId.trim() };
+  if (planId && planId.trim()) return { planId: planId.trim() };
+  if (ctx.defaultTaskId) return { taskId: ctx.defaultTaskId };
+  if (ctx.defaultPlanId) return { planId: ctx.defaultPlanId };
+  return null;
 };
 
 const findCriterion = (taskId: string, needle: string) => {
@@ -120,6 +146,37 @@ function summariseTask(t: TaskFull) {
     total_criteria: t.criteria.length,
     updated_at: t.updatedAt.toISOString(),
   };
+}
+
+function summariseAttachment(a: AttachmentMeta) {
+  return {
+    id: a.id,
+    filename: a.filename,
+    kind: a.kind,
+    mime_type: a.mimeType,
+    size_bytes: a.sizeBytes,
+    plan_id: a.planId,
+    task_id: a.taskId,
+    author: a.author,
+    created_at: a.createdAt.toISOString(),
+  };
+}
+
+// Mime types we hand back to the model as decoded UTF-8 text rather than
+// base64. Covers the common artifact shapes (logs, source, json, csv, svg).
+function isTextualMime(mime: string): boolean {
+  const m = mime.toLowerCase();
+  if (m.startsWith("text/")) return true;
+  return (
+    m === "application/json" ||
+    m === "application/xml" ||
+    m === "image/svg+xml" ||
+    m.endsWith("+json") ||
+    m.endsWith("+xml") ||
+    m === "application/javascript" ||
+    m === "application/x-yaml" ||
+    m === "application/yaml"
+  );
 }
 
 function summariseSession(s: AgentSessionFull) {
@@ -711,6 +768,117 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     execute: async ({ criterion_id }, _ctx) => {
       repo.deleteCriterion(criterion_id);
       return ok(`Criterion ${criterion_id} deleted.`);
+    },
+  },
+
+  // ── Attachments (images & artifacts) ──────────────────
+
+  {
+    name: "list_attachments",
+    label: "List Attachments",
+    description:
+      "List images and artifacts attached to a task or plan. Defaults to your current task, then the scoped plan, when neither task_id nor plan_id is given. Returns metadata only — call get_attachment to read the bytes.",
+    parameters: Type.Object({
+      task_id: Type.Optional(Type.String()),
+      plan_id: Type.Optional(Type.String()),
+    }),
+    execute: async ({ task_id, plan_id }, ctx) => {
+      const owner = resolveAttachmentOwner(task_id, plan_id, ctx);
+      if (!owner) return errResult("Error: task_id or plan_id required");
+      const list = repo.listAttachments(owner);
+      return jsonResult(list.map(summariseAttachment));
+    },
+  },
+
+  {
+    name: "get_attachment",
+    label: "Get Attachment",
+    description:
+      "Fetch an attachment's content by numeric id. Images come back as a viewable image block; text-like artifacts (logs, json, source, svg) as decoded text; other binaries as metadata with a note to download them. Large blobs are truncated or summarised.",
+    parameters: Type.Object({ id: Type.Integer() }),
+    execute: async ({ id }, _ctx) => {
+      const att = repo.getAttachment(id);
+      if (!att) return errResult(`Error: Attachment ${id} not found`);
+      const header = `${att.filename} (${att.mimeType}, ${att.sizeBytes} bytes, attachment #${att.id})`;
+      if (att.kind === "image") {
+        if (att.sizeBytes > IMAGE_INLINE_MAX) {
+          return ok(
+            `${header}\n\nImage too large to inline (${att.sizeBytes} bytes > ${IMAGE_INLINE_MAX}). Download it from /api/attachments/${att.id}.`
+          );
+        }
+        return {
+          content: [
+            { type: "text", text: header },
+            { type: "image", data: att.content.toString("base64"), mimeType: att.mimeType },
+          ],
+        };
+      }
+      if (isTextualMime(att.mimeType)) {
+        let text = att.content.toString("utf8");
+        let suffix = "";
+        if (text.length > TEXT_INLINE_MAX_CHARS) {
+          text = text.slice(0, TEXT_INLINE_MAX_CHARS);
+          suffix = `\n\n…(truncated at ${TEXT_INLINE_MAX_CHARS} chars; download the full file from /api/attachments/${att.id})`;
+        }
+        return ok(`${header}\n\n${text}${suffix}`);
+      }
+      return ok(
+        `${header}\n\nBinary artifact — not inlined. Download it from /api/attachments/${att.id}.`
+      );
+    },
+  },
+
+  {
+    name: "add_attachment",
+    label: "Add Attachment",
+    description:
+      "Attach an artifact to a task or plan. Provide either `text` (UTF-8, e.g. a generated report) or `content_base64` (any bytes). Defaults to your current task, then the scoped plan, when neither task_id nor plan_id is given. mime_type defaults to text/plain for text and application/octet-stream for base64.",
+    parameters: Type.Object({
+      filename: Type.String({ minLength: 1 }),
+      text: Type.Optional(Type.String()),
+      content_base64: Type.Optional(Type.String()),
+      mime_type: Type.Optional(Type.String()),
+      task_id: Type.Optional(Type.String()),
+      plan_id: Type.Optional(Type.String()),
+    }),
+    execute: async ({ filename, text, content_base64, mime_type, task_id, plan_id }, ctx) => {
+      const owner = resolveAttachmentOwner(task_id, plan_id, ctx);
+      if (!owner) return errResult("Error: task_id or plan_id required");
+      if ((text == null) === (content_base64 == null)) {
+        return errResult("Error: provide exactly one of `text` or `content_base64`");
+      }
+      const content =
+        text != null ? Buffer.from(text, "utf8") : Buffer.from(content_base64!, "base64");
+      const mimeType =
+        mime_type?.trim() ||
+        (text != null ? "text/plain" : "application/octet-stream");
+      const result = safe(() =>
+        repo.addAttachment({
+          planId: owner.planId ?? null,
+          taskId: owner.taskId ?? null,
+          filename,
+          mimeType,
+          content,
+          author: ctx.author,
+        })
+      );
+      if ("_error" in result) return errResult(`Error: ${result._error}`);
+      return ok(
+        `Attached #${result.id} ${result.filename} (${result.kind}, ${result.sizeBytes} bytes) to ${result.taskId ?? result.planId}.`
+      );
+    },
+  },
+
+  {
+    name: "delete_attachment",
+    label: "Delete Attachment",
+    description: "Delete an attachment by numeric id.",
+    parameters: Type.Object({ id: Type.Integer() }),
+    execute: async ({ id }, _ctx) => {
+      const existing = repo.getAttachmentMeta(id);
+      if (!existing) return errResult(`Error: Attachment ${id} not found`);
+      repo.deleteAttachment(id);
+      return ok(`Deleted attachment ${id}.`);
     },
   },
 

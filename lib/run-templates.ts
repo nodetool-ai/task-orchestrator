@@ -7,8 +7,26 @@
 // The implement template is the one wired up to the task page button:
 // kick off a worktree, run the agent against the task, open a PR.
 
-import type { PlanFull, TaskFull } from "./types";
+import type { AttachmentMeta, PlanFull, TaskFull } from "./types";
 import * as repo from "./repo";
+
+/**
+ * Render an "Attachments" section listing images/artifacts on a task or plan.
+ * Returns [] (no header) when there are none. The agent reads the bytes via
+ * the get_attachment MCP tool — images come back viewable, text artifacts as
+ * decoded text.
+ */
+function attachmentSection(attachments: AttachmentMeta[]): string[] {
+  if (attachments.length === 0) return [];
+  const lines = ["", "## Attachments"];
+  for (const a of attachments) {
+    lines.push(`- #${a.id} ${a.filename} (${a.kind}, ${a.mimeType}, ${a.sizeBytes} bytes)`);
+  }
+  lines.push(
+    "Call mcp__task_orch__get_attachment(id) to view an image or read an artifact."
+  );
+  return lines;
+}
 
 export const IMPLEMENT_DEFAULT_BUDGET_USD = 20;
 export const REVIEW_DEFAULT_BUDGET_USD = 5;
@@ -52,6 +70,8 @@ export function buildImplementPrompt(task: TaskFull): string {
       lines.push(`- @${n.author}: ${n.body.trim().replace(/\n+/g, " ")}`);
     }
   }
+
+  lines.push(...attachmentSection(task.attachments));
 
   // Parent plan context: the broader goal this task belongs to, plus a
   // snapshot of sibling tasks so the agent knows what's already shipped
@@ -120,6 +140,9 @@ export function buildImplementPrompt(task: TaskFull): string {
   lines.push("- mcp__task_orch__uncheck_criterion(criterion): undo if you check the wrong one.");
   lines.push("- mcp__task_orch__add_criterion(text): add a criterion you discovered along the way.");
   lines.push("- mcp__task_orch__list_criteria(): see the current state of criteria.");
+  lines.push("- mcp__task_orch__list_attachments(): list images/artifacts on this task.");
+  lines.push("- mcp__task_orch__get_attachment(id): view an attached image or read an artifact.");
+  lines.push("- mcp__task_orch__add_attachment(filename, text|content_base64): attach an artifact you produce.");
   lines.push("Use these as you work — don't batch them until the end. Match criteria by substring.");
   lines.push("");
   lines.push("# Finishing");
@@ -202,6 +225,8 @@ export function buildReviewPrompt(task: TaskFull, prUrl: string): string {
       lines.push(`- @${n.author}: ${n.body.trim().replace(/\n+/g, " ")}`);
     }
   }
+
+  lines.push(...attachmentSection(task.attachments));
 
   lines.push("");
   lines.push("# Working environment");
@@ -286,6 +311,7 @@ export function buildChatPromptPrefix(
       lines.push(`- @${n.author}: ${n.body.trim().replace(/\n+/g, " ")}`);
     }
   }
+  lines.push(...attachmentSection(task.attachments));
   if (latestPrUrl) {
     lines.push("");
     lines.push(`## Latest PR`);
@@ -329,6 +355,8 @@ export function buildPlanChatPromptPrefix(
         : body;
     lines.push(capped);
   }
+
+  lines.push(...attachmentSection(plan.attachments));
 
   if (tasks.length > 0) {
     const rank: Record<string, number> = {

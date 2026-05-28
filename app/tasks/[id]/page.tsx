@@ -23,6 +23,7 @@ import {
 import { SessionStatusPill } from "@/components/session-status-pill";
 import { AddNoteForm } from "@/components/add-note-form";
 import { AddCriterionForm } from "@/components/add-criterion-form";
+import { Attachments, AttachmentsHeading } from "@/components/attachments";
 import { Meta } from "@/components/meta";
 import { formatDate, formatDateTime, relativeDate } from "@/lib/utils";
 import { isTerminalStatus } from "@/lib/types";
@@ -229,6 +230,11 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
             ))}
           </ol>
         )}
+      </section>
+
+      <section className="mt-10 space-y-3">
+        <AttachmentsHeading count={task.attachments.length} />
+        <Attachments scope="task" ownerId={task.id} attachments={task.attachments} />
       </section>
 
       <section className="mt-10 space-y-3">

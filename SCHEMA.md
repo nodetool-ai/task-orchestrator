@@ -47,6 +47,19 @@ acceptance_criteria      checkable items per task
   done        INTEGER  boolean (0/1)
   position    INTEGER  ordering within task
 
+attachments              images & artifacts on a plan or task
+  id          INTEGER  AUTOINC PK
+  plan_id     TEXT     FK → plans.id  ON DELETE CASCADE  (nullable)
+  task_id     TEXT     FK → tasks.id  ON DELETE CASCADE  (nullable)
+  filename    TEXT     NOT NULL
+  mime_type   TEXT     NOT NULL
+  kind        TEXT     NOT NULL   'image' (mime image/*) | 'artifact'
+  size_bytes  INTEGER  NOT NULL   capped at 25 MiB (repo.MAX_ATTACHMENT_BYTES)
+  content     BLOB     NOT NULL   the raw bytes, inline
+  author      TEXT     NOT NULL
+  created_at  INTEGER  ms epoch
+  CHECK ((plan_id IS NOT NULL) <> (task_id IS NOT NULL))  -- exactly one owner
+
 agent_sessions           one row per pi.dev SDK run on a task
   id              INTEGER  AUTOINC PK
   task_id         TEXT     FK → tasks.id ON DELETE CASCADE

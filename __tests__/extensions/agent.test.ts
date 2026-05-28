@@ -23,10 +23,10 @@ function makeStub() {
 }
 
 describe("orchestratorExtension", () => {
-  it("registers 31 task_orch tools", () => {
+  it("registers 35 task_orch tools", () => {
     const { calls, pi } = makeStub();
     orchestratorExtension({ author: "test" })(pi);
-    expect(calls.length).toBe(31);
+    expect(calls.length).toBe(35);
     for (const c of calls) {
       expect(c.name).toMatch(/^task_orch__/);
       expect(c.def.label).toBeDefined();

@@ -4,6 +4,7 @@ import {
   text,
   integer,
   real,
+  blob,
   primaryKey,
   index,
   uniqueIndex,
@@ -126,6 +127,29 @@ export const acceptanceCriteria = sqliteTable(
   },
   (t) => ({
     taskIdx: index("ac_task_idx").on(t.taskId),
+  })
+);
+
+export const attachments = sqliteTable(
+  "attachments",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    // Exactly one of planId / taskId is set (XOR enforced by the migration's
+    // CHECK constraint). Both FKs cascade on owner delete.
+    planId: text("plan_id").references(() => plans.id, { onDelete: "cascade" }),
+    taskId: text("task_id").references(() => tasks.id, { onDelete: "cascade" }),
+    filename: text("filename").notNull(),
+    mimeType: text("mime_type").notNull(),
+    // 'image' for image/* mime types, 'artifact' otherwise. Derived at insert.
+    kind: text("kind").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    content: blob("content", { mode: "buffer" }).notNull(),
+    author: text("author").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+  },
+  (t) => ({
+    planIdx: index("attachments_plan_idx").on(t.planId),
+    taskIdx: index("attachments_task_idx").on(t.taskId),
   })
 );
 
@@ -290,6 +314,7 @@ export type Plan = typeof plans.$inferSelect;
 export type Task = typeof tasks.$inferSelect;
 export type TaskNote = typeof taskNotes.$inferSelect;
 export type AcceptanceCriterion = typeof acceptanceCriteria.$inferSelect;
+export type Attachment = typeof attachments.$inferSelect;
 export type AgentSession = typeof agentSessions.$inferSelect;
 export type AgentEvent = typeof agentEvents.$inferSelect;
 export type AgentMessage = typeof agentMessages.$inferSelect;

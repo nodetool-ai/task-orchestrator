@@ -13,6 +13,7 @@ import { Progress } from "@/components/ui/progress";
 import { TaskRow } from "@/components/task-row";
 import { NewTaskForm } from "@/components/new-task-form";
 import { PlanChatBox } from "@/components/plan-chat-box";
+import { Attachments, AttachmentsHeading } from "@/components/attachments";
 import { SessionStatusPill } from "@/components/session-status-pill";
 import { buildPlanChatPromptPrefix } from "@/lib/run-templates";
 import { formatDate, relativeDate } from "@/lib/utils";
@@ -84,6 +85,11 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
       <div className="my-8 h-px bg-border/60" />
 
       <MarkdownBody source={plan.body} />
+
+      <section className="mt-10 space-y-3">
+        <AttachmentsHeading count={plan.attachments.length} />
+        <Attachments scope="plan" ownerId={plan.id} attachments={plan.attachments} />
+      </section>
 
       <section className="mt-12">
         <div className="flex items-baseline justify-between mb-3">

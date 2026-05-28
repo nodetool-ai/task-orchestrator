@@ -70,11 +70,15 @@ describe("POST /api/mcp", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(Array.isArray(body.result.tools)).toBe(true);
-    expect(body.result.tools.length).toBe(31);
+    expect(body.result.tools.length).toBe(35);
     const names = body.result.tools.map((t: { name: string }) => t.name);
     expect(names).toContain("list_plans");
     expect(names).toContain("create_task");
     expect(names).toContain("transition_task");
+    expect(names).toContain("list_attachments");
+    expect(names).toContain("get_attachment");
+    expect(names).toContain("add_attachment");
+    expect(names).toContain("delete_attachment");
     // Bare names — no task_orch__ prefix.
     expect(names.some((n: string) => n.startsWith("task_orch__"))).toBe(false);
   });

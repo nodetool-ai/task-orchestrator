@@ -84,9 +84,11 @@ resume <id>`): the new session passes the prior SDK session id to
 
 Requires `ANTHROPIC_API_KEY` and an authed `gh` CLI.
 
-While running, the agent can call back into the task system via
-five MCP tools — see [README.md](README.md) for the list. Use them
-as you work; don't batch.
+While running, the agent can call back into the task system via the
+orchestrator MCP tools — see [README.md](README.md) for the list. Use
+them as you work; don't batch. Plans and tasks can carry image and
+artifact attachments; the prompt lists them, and `get_attachment(id)`
+returns an image as a viewable block or a text artifact decoded inline.
 
 ### Security note
 
