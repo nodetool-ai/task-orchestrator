@@ -1,7 +1,10 @@
 import { type NextRequest } from "next/server";
 import { verifyToken } from "@/lib/api-tokens";
 import { getUserById } from "@/lib/users";
-import { ORCHESTRATOR_TOOLS } from "@/lib/orchestrator-tools";
+import {
+  ORCHESTRATOR_TOOLS,
+  type OrchestratorContentBlock,
+} from "@/lib/orchestrator-tools";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -15,7 +18,7 @@ export const runtime = "nodejs";
 //   initialize                 → protocolVersion + capabilities
 //   notifications/initialized  → no response (notification)
 //   ping                       → {}
-//   tools/list                 → all 31 task_orch tools (bare names — no
+//   tools/list                 → all task_orch tools (bare names — no
 //                                pi-side prefix) sourced from
 //                                lib/orchestrator-tools.ts
 //   tools/call                 → dispatches to the same registry the pi
@@ -108,7 +111,7 @@ function handleToolsList() {
 async function handleToolsCall(
   params: unknown,
   ctx: { author: string }
-): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
+): Promise<{ content: OrchestratorContentBlock[]; isError?: boolean }> {
   if (typeof params !== "object" || params === null) {
     throw rpcThrow(InvalidParams, "tools/call requires { name, arguments }");
   }

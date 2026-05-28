@@ -27,6 +27,7 @@ function fakeTask(overrides: Partial<TaskFull> = {}): TaskFull {
       { id: 1, text: "first criterion", done: true, position: 0 },
       { id: 2, text: "second criterion", done: false, position: 1 },
     ],
+    attachments: [],
     ...overrides,
   };
 }
@@ -123,6 +124,7 @@ function fakePlan(overrides: Partial<PlanFull> = {}): PlanFull {
     repos: [],
     createdAt: new Date(),
     updatedAt: new Date(),
+    attachments: [],
     ...overrides,
   };
 }

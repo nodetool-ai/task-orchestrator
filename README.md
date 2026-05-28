@@ -93,6 +93,11 @@ npm run task -- transition T-... done                         # gated by open cr
 npm run task -- note T-... --body="implementation choice X" --author=alice
 npm run task -- crit add T-... --text="latency p95 < 50ms"
 npm run task -- crit done <criterion-id>
+
+npm run task -- attach add T-... ./mockup.png   # attach to a task (or P-... for a plan)
+npm run task -- attach list T-...
+npm run task -- attach get <attachment-id> --out=./out.png
+npm run task -- attach rm <attachment-id>
 ```
 
 The CLI imports `lib/repo.ts` directly — no HTTP server required.
@@ -118,6 +123,13 @@ POST   /api/tasks/:id/notes        # { author, body }
 POST   /api/tasks/:id/criteria     # { text }
 PATCH  /api/tasks/:id/criteria/:cid  # { done?, text? }
 DELETE /api/tasks/:id/criteria/:cid
+
+GET    /api/plans/:id/attachments        # list image/artifact metadata
+POST   /api/plans/:id/attachments        # multipart `file`, or JSON {filename,mimeType,dataBase64}
+GET    /api/tasks/:id/attachments        # list image/artifact metadata
+POST   /api/tasks/:id/attachments        # multipart `file`, or JSON {filename,mimeType,dataBase64}
+GET    /api/attachments/:id              # raw bytes (add ?download=1 to force save)
+DELETE /api/attachments/:id
 
 POST   /api/tasks/:id/sessions     # { model?, baseBranch? } — start agent
 GET    /api/sessions[?active=true]
@@ -164,7 +176,19 @@ mcp__task_orch__check_criterion(criterion)     # match by id or text substring
 mcp__task_orch__uncheck_criterion(criterion)
 mcp__task_orch__add_criterion(text)
 mcp__task_orch__list_criteria()
+mcp__task_orch__list_attachments()             # images/artifacts on the task or plan
+mcp__task_orch__get_attachment(id)             # image → viewable block; text → decoded
+mcp__task_orch__add_attachment(filename, text|content_base64)
+mcp__task_orch__delete_attachment(id)
 ```
+
+Images and other files can be attached to any plan or task — from the
+dashboard (upload control on the plan/task page), via REST, or by an
+agent. The agent sees the attachment roster in its prompt and fetches
+the bytes with `get_attachment`: image attachments come back as a
+viewable image block, text-like artifacts (logs, JSON, source, SVG) as
+decoded text. Bytes live inline in the SQLite BLOB store, capped at 25 MiB
+per file.
 
 Each tool call goes straight to the same `lib/repo.ts` the web UI
 uses, so progress is visible live. The orchestrator also captures

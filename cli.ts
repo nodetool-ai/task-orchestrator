@@ -4,6 +4,8 @@
 
 import { config } from "dotenv";
 config({ path: ".env.local" });
+import { readFileSync, writeFileSync } from "node:fs";
+import { basename } from "node:path";
 import * as repo from "./lib/repo";
 import * as agent from "./lib/agent";
 import * as users from "./lib/users";
@@ -236,6 +238,80 @@ function cmdCrit(args: Args) {
     return 0;
   }
   throw new Error("Usage: crit <add|done|undone|rm>");
+}
+
+function cmdAttach(args: Args) {
+  const sub = args._.shift();
+  if (sub === "add") {
+    const ownerId = args._.shift();
+    const path = asString(args.file) ?? args._.shift();
+    if (!ownerId || !path) {
+      throw new Error("Usage: attach add <P-...|T-...> <file> [--name=...] [--mime=...]");
+    }
+    const content = readFileSync(path);
+    const filename = asString(args.name) ?? basename(path);
+    const mimeType = asString(args.mime) ?? mimeFromName(filename);
+    const author = asString(args.author) ?? process.env.USER ?? "you";
+    const owner = ownerId.startsWith("P-") ? { planId: ownerId } : { taskId: ownerId };
+    const meta = repo.addAttachment({ ...owner, filename, mimeType, content, author });
+    console.log(`Attached #${meta.id} ${meta.filename} (${meta.kind}, ${meta.sizeBytes} bytes) to ${ownerId}`);
+    return 0;
+  }
+  if (sub === "list") {
+    const ownerId = args._.shift();
+    if (!ownerId) throw new Error("Usage: attach list <P-...|T-...>");
+    const owner = ownerId.startsWith("P-") ? { planId: ownerId } : { taskId: ownerId };
+    const list = repo.listAttachments(owner);
+    if (args.json) {
+      console.log(JSON.stringify(list, null, 2));
+      return 0;
+    }
+    if (list.length === 0) {
+      console.log("(no attachments)");
+      return 0;
+    }
+    for (const a of list) {
+      console.log(`  ${pad("#" + a.id, 6)} ${pad(a.kind, 9)} ${pad(String(a.sizeBytes), 9)} ${a.filename} (${a.mimeType})`);
+    }
+    return 0;
+  }
+  if (sub === "get") {
+    const idArg = args._.shift();
+    const out = asString(args.out);
+    if (!idArg || !out) throw new Error("Usage: attach get <attachment-id> --out=<path>");
+    const att = repo.getAttachment(parseInt(idArg, 10));
+    if (!att) throw new Error(`Attachment not found: ${idArg}`);
+    writeFileSync(out, att.content);
+    console.log(`Wrote ${att.sizeBytes} bytes to ${out}`);
+    return 0;
+  }
+  if (sub === "rm") {
+    const idArg = args._.shift();
+    if (!idArg) throw new Error("Usage: attach rm <attachment-id>");
+    repo.deleteAttachment(parseInt(idArg, 10));
+    console.log(`Removed attachment ${idArg}`);
+    return 0;
+  }
+  throw new Error("Usage: attach <add|list|get|rm> ...");
+}
+
+function mimeFromName(name: string): string {
+  const ext = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
+  const map: Record<string, string> = {
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    gif: "image/gif",
+    webp: "image/webp",
+    svg: "image/svg+xml",
+    pdf: "application/pdf",
+    json: "application/json",
+    txt: "text/plain",
+    md: "text/markdown",
+    csv: "text/csv",
+    log: "text/plain",
+  };
+  return map[ext] ?? "application/octet-stream";
 }
 
 function cmdPlanTransition(args: Args) {
@@ -497,6 +573,11 @@ Commands:
   crit undone <criterion-id>        Mark criterion undone.
   crit rm <criterion-id>            Remove criterion.
 
+  attach add <P-...|T-...> <file>   Attach an image/artifact. --name=... --mime=...
+  attach list <P-...|T-...> [--json]  List attachments on a plan or task.
+  attach get <attachment-id> --out=<path>  Write an attachment's bytes to a file.
+  attach rm <attachment-id>         Delete an attachment.
+
   agent <T-...> [--model=...]       Start an agent session for a task and tail
                                     events. Use --no-follow to detach.
   agent list [--json]               List all agent sessions.
@@ -555,6 +636,9 @@ async function main() {
         break;
       case "crit":
         code = cmdCrit(args);
+        break;
+      case "attach":
+        code = cmdAttach(args);
         break;
       case "agent":
         code = await cmdAgent(args);

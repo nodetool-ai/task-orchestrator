@@ -1,8 +1,9 @@
-import { and, asc, count, eq, inArray, like, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, like, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
   acceptanceCriteria,
   agentSessions,
+  attachments,
   personaMemories,
   personas as personasTable,
   planRepositories,
@@ -11,6 +12,7 @@ import {
   taskDependencies,
   taskNotes,
   tasks,
+  type Attachment as AttachmentRow,
   type Persona,
   type Plan as PlanRow,
   type Repository as RepositoryDbRow,
@@ -19,6 +21,8 @@ import {
 import {
   TASK_TRANSITIONS,
   PLAN_TRANSITIONS,
+  type AttachmentKind,
+  type AttachmentMeta,
   type PlanFull,
   type PlanProgress,
   type PlanState,
@@ -67,7 +71,11 @@ function nextTaskId(date: string): string {
 // Hydration helpers
 // ──────────────────────────────────────────────────────────
 
-function hydratePlan(row: PlanRow, repos: RepositoryRow[]): PlanFull {
+function hydratePlan(
+  row: PlanRow,
+  repos: RepositoryRow[],
+  attachmentMetas: AttachmentMeta[]
+): PlanFull {
   return {
     id: row.id,
     title: row.title,
@@ -78,6 +86,7 @@ function hydratePlan(row: PlanRow, repos: RepositoryRow[]): PlanFull {
     repos,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    attachments: attachmentMetas,
   };
 }
 
@@ -150,7 +159,8 @@ function hydrateTask(
   row: TaskRow,
   deps: string[],
   notes: TaskFull["notes"],
-  criteria: TaskFull["criteria"]
+  criteria: TaskFull["criteria"],
+  attachmentMetas: AttachmentMeta[]
 ): TaskFull {
   return {
     id: row.id,
@@ -167,7 +177,105 @@ function hydrateTask(
     dependencies: deps,
     notes,
     criteria,
+    attachments: attachmentMetas,
   };
+}
+
+// ──────────────────────────────────────────────────────────
+// Attachment hydration helpers
+// ──────────────────────────────────────────────────────────
+
+// Column set excluding the `content` BLOB — list/hydrate paths never need the
+// bytes, and pulling megabytes of image data into every task/plan query would
+// be wasteful. The download route and getAttachment() select content explicitly.
+const ATTACHMENT_META_COLUMNS = {
+  id: attachments.id,
+  planId: attachments.planId,
+  taskId: attachments.taskId,
+  filename: attachments.filename,
+  mimeType: attachments.mimeType,
+  kind: attachments.kind,
+  sizeBytes: attachments.sizeBytes,
+  author: attachments.author,
+  createdAt: attachments.createdAt,
+} as const;
+
+function toAttachmentMeta(row: {
+  id: number;
+  planId: string | null;
+  taskId: string | null;
+  filename: string;
+  mimeType: string;
+  kind: string;
+  sizeBytes: number;
+  author: string;
+  createdAt: Date;
+}): AttachmentMeta {
+  return {
+    id: row.id,
+    planId: row.planId,
+    taskId: row.taskId,
+    filename: row.filename,
+    mimeType: row.mimeType,
+    kind: row.kind as AttachmentKind,
+    sizeBytes: row.sizeBytes,
+    author: row.author,
+    createdAt: row.createdAt,
+  };
+}
+
+function attachmentsForTask(taskId: string): AttachmentMeta[] {
+  return db
+    .select(ATTACHMENT_META_COLUMNS)
+    .from(attachments)
+    .where(eq(attachments.taskId, taskId))
+    .orderBy(asc(attachments.id))
+    .all()
+    .map(toAttachmentMeta);
+}
+
+function attachmentsForPlan(planId: string): AttachmentMeta[] {
+  return db
+    .select(ATTACHMENT_META_COLUMNS)
+    .from(attachments)
+    .where(eq(attachments.planId, planId))
+    .orderBy(asc(attachments.id))
+    .all()
+    .map(toAttachmentMeta);
+}
+
+function attachmentsForTasks(taskIds: string[]): Map<string, AttachmentMeta[]> {
+  const out = new Map<string, AttachmentMeta[]>();
+  for (const id of taskIds) out.set(id, []);
+  if (taskIds.length === 0) return out;
+  const rows = db
+    .select(ATTACHMENT_META_COLUMNS)
+    .from(attachments)
+    .where(inArray(attachments.taskId, taskIds))
+    .orderBy(asc(attachments.id))
+    .all();
+  for (const r of rows) {
+    if (!r.taskId) continue;
+    out.get(r.taskId)?.push(toAttachmentMeta(r));
+  }
+  return out;
+}
+
+function attachmentsForPlans(planIds: string[]): Map<string, AttachmentMeta[]> {
+  const out = new Map<string, AttachmentMeta[]>();
+  for (const id of planIds) out.set(id, []);
+  if (planIds.length === 0) return out;
+  const rows = db
+    .select(ATTACHMENT_META_COLUMNS)
+    .from(attachments)
+    .where(inArray(attachments.planId, planIds))
+    .orderBy(asc(attachments.id))
+    .all();
+  for (const r of rows) {
+    if (!r.planId) continue;
+    out.get(r.planId)?.push(toAttachmentMeta(r));
+  }
+  return out;
 }
 
 function safeJsonArray(s: string): string[] {
@@ -186,13 +294,17 @@ function safeJsonArray(s: string): string[] {
 export function listPlans(): PlanFull[] {
   const rows = db.select().from(plans).orderBy(asc(plans.id)).all();
   if (rows.length === 0) return [];
-  const byPlan = reposForPlans(rows.map((r) => r.id));
-  return rows.map((r) => hydratePlan(r, byPlan.get(r.id) ?? []));
+  const ids = rows.map((r) => r.id);
+  const byPlan = reposForPlans(ids);
+  const attByPlan = attachmentsForPlans(ids);
+  return rows.map((r) =>
+    hydratePlan(r, byPlan.get(r.id) ?? [], attByPlan.get(r.id) ?? [])
+  );
 }
 
 export function getPlan(id: string): PlanFull | null {
   const row = db.select().from(plans).where(eq(plans.id, id)).get();
-  return row ? hydratePlan(row, reposForPlan(id)) : null;
+  return row ? hydratePlan(row, reposForPlan(id), attachmentsForPlan(id)) : null;
 }
 
 export function planProgress(planId: string): PlanProgress {
@@ -277,6 +389,7 @@ export function listTasks(filters: TaskFilters = {}): TaskFull[] {
   const depsByTask = groupBy(depRows, (r) => r.taskId);
   const notesByTask = groupBy(noteRows, (r) => r.taskId);
   const critsByTask = groupBy(critRows, (r) => r.taskId);
+  const attByTask = attachmentsForTasks(ids);
   return rows.map((r) =>
     hydrateTask(
       r,
@@ -292,7 +405,8 @@ export function listTasks(filters: TaskFilters = {}): TaskFull[] {
         text: c.text,
         done: c.done,
         position: c.position,
-      }))
+      })),
+      attByTask.get(r.id) ?? []
     )
   );
 }
@@ -320,7 +434,7 @@ export function getTask(id: string): TaskFull | null {
     .orderBy(asc(acceptanceCriteria.position))
     .all()
     .map((c) => ({ id: c.id, text: c.text, done: c.done, position: c.position }));
-  return hydrateTask(row, deps, notes, criteria);
+  return hydrateTask(row, deps, notes, criteria, attachmentsForTask(id));
 }
 
 /** Distinct non-null assignees observed across all tasks, alphabetical. */
@@ -758,6 +872,146 @@ export function deleteCriterion(criterionId: number) {
   if (!row) return;
   db.delete(acceptanceCriteria).where(eq(acceptanceCriteria.id, criterionId)).run();
   db.update(tasks).set({ updatedAt: new Date() }).where(eq(tasks.id, row.taskId)).run();
+}
+
+// ──────────────────────────────────────────────────────────
+// Attachments (images & artifacts on plans/tasks)
+// ──────────────────────────────────────────────────────────
+
+// Cap per-attachment size. Bytes live inline in the SQLite BLOB, so this is a
+// guard against a single upload bloating the DB file. 25 MiB comfortably fits
+// screenshots, logs, and small artifacts; larger blobs belong in object
+// storage, which this orchestrator deliberately avoids.
+export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+export function attachmentKindForMime(mimeType: string): AttachmentKind {
+  return mimeType.toLowerCase().startsWith("image/") ? "image" : "artifact";
+}
+
+export interface AddAttachmentInput {
+  /** Exactly one of planId / taskId must be set. */
+  planId?: string | null;
+  taskId?: string | null;
+  filename: string;
+  mimeType: string;
+  content: Buffer;
+  author: string;
+}
+
+export function addAttachment(input: AddAttachmentInput): AttachmentMeta {
+  const planId = input.planId ?? null;
+  const taskId = input.taskId ?? null;
+  if ((planId === null) === (taskId === null)) {
+    throw new RepoError(
+      "An attachment must belong to exactly one of plan_id or task_id",
+      400
+    );
+  }
+  if (planId !== null && !getPlan(planId)) {
+    throw new RepoError(`Plan ${planId} not found`, 404);
+  }
+  if (taskId !== null && !getTask(taskId)) {
+    throw new RepoError(`Task ${taskId} not found`, 404);
+  }
+  const filename = input.filename.trim() || "attachment";
+  const mimeType = input.mimeType.trim() || "application/octet-stream";
+  if (!input.content || input.content.length === 0) {
+    throw new RepoError("Attachment content is empty", 400);
+  }
+  if (input.content.length > MAX_ATTACHMENT_BYTES) {
+    throw new RepoError(
+      `Attachment too large: ${input.content.length} bytes (max ${MAX_ATTACHMENT_BYTES})`,
+      413
+    );
+  }
+  const now = new Date();
+  const inserted = db
+    .insert(attachments)
+    .values({
+      planId,
+      taskId,
+      filename,
+      mimeType,
+      kind: attachmentKindForMime(mimeType),
+      sizeBytes: input.content.length,
+      content: input.content,
+      author: input.author,
+      createdAt: now,
+    })
+    .returning({
+      id: attachments.id,
+      planId: attachments.planId,
+      taskId: attachments.taskId,
+      filename: attachments.filename,
+      mimeType: attachments.mimeType,
+      kind: attachments.kind,
+      sizeBytes: attachments.sizeBytes,
+      author: attachments.author,
+      createdAt: attachments.createdAt,
+    })
+    .all();
+  // Touch the owner's updated_at so list views re-sort and SSR re-renders.
+  if (planId !== null) {
+    db.update(plans).set({ updatedAt: now }).where(eq(plans.id, planId)).run();
+  } else if (taskId !== null) {
+    db.update(tasks).set({ updatedAt: now }).where(eq(tasks.id, taskId)).run();
+  }
+  return toAttachmentMeta(inserted[0]);
+}
+
+export interface ListAttachmentsFilter {
+  planId?: string;
+  taskId?: string;
+}
+
+export function listAttachments(filter: ListAttachmentsFilter): AttachmentMeta[] {
+  if (filter.taskId) return attachmentsForTask(filter.taskId);
+  if (filter.planId) return attachmentsForPlan(filter.planId);
+  return db
+    .select(ATTACHMENT_META_COLUMNS)
+    .from(attachments)
+    .orderBy(desc(attachments.id))
+    .all()
+    .map(toAttachmentMeta);
+}
+
+export function getAttachmentMeta(id: number): AttachmentMeta | null {
+  const row = db
+    .select(ATTACHMENT_META_COLUMNS)
+    .from(attachments)
+    .where(eq(attachments.id, id))
+    .get();
+  return row ? toAttachmentMeta(row) : null;
+}
+
+export interface AttachmentWithContent extends AttachmentMeta {
+  content: Buffer;
+}
+
+/** Full attachment including the BLOB bytes — for downloads and the agent. */
+export function getAttachment(id: number): AttachmentWithContent | null {
+  const row = db.select().from(attachments).where(eq(attachments.id, id)).get();
+  if (!row) return null;
+  return {
+    ...toAttachmentMeta(row as AttachmentRow),
+    content: row.content as Buffer,
+  };
+}
+
+export function deleteAttachment(id: number) {
+  const row = db
+    .select({ id: attachments.id, planId: attachments.planId, taskId: attachments.taskId })
+    .from(attachments)
+    .where(eq(attachments.id, id))
+    .get();
+  if (!row) return;
+  const now = new Date();
+  db.delete(attachments).where(eq(attachments.id, id)).run();
+  if (row.planId) {
+    db.update(plans).set({ updatedAt: now }).where(eq(plans.id, row.planId)).run();
+  } else if (row.taskId) {
+    db.update(tasks).set({ updatedAt: now }).where(eq(tasks.id, row.taskId)).run();
+  }
 }
 
 // ──────────────────────────────────────────────────────────

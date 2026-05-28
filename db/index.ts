@@ -61,8 +61,13 @@ function applyMigrations(sqlite: Database.Database) {
           throw err;
         }
       }
+      // INSERT OR IGNORE: a fresh DB opened concurrently by multiple processes
+      // (e.g. `next build` page-data workers) can have two of them apply the
+      // same migration before either records it. The DDL above already
+      // tolerates "already exists"; this keeps the bookkeeping write from
+      // throwing a UNIQUE constraint when another process won the race.
       sqlite
-        .prepare("INSERT INTO _migrations (version, name, applied_at) VALUES (?, ?, ?)")
+        .prepare("INSERT OR IGNORE INTO _migrations (version, name, applied_at) VALUES (?, ?, ?)")
         .run(version, m[2], Date.now());
     };
     if (noTx) {

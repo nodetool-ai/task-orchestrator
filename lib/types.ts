@@ -42,6 +42,26 @@ export const PLAN_TRANSITIONS: Record<PlanState, PlanState[]> = {
   cancelled: [],
 };
 
+export type AttachmentKind = "image" | "artifact";
+
+/**
+ * Attachment metadata — the bytes (the `content` BLOB) are never included
+ * here. Fetch them via the download route or the get_attachment tool. Carried
+ * on TaskFull/PlanFull so the dashboard, agent prompts, and MCP callers all
+ * see the same attachment roster.
+ */
+export interface AttachmentMeta {
+  id: number;
+  planId: string | null;
+  taskId: string | null;
+  filename: string;
+  mimeType: string;
+  kind: AttachmentKind;
+  sizeBytes: number;
+  author: string;
+  createdAt: Date;
+}
+
 export interface TaskFull {
   id: string;
   title: string;
@@ -57,6 +77,7 @@ export interface TaskFull {
   dependencies: string[];
   notes: Array<{ id: number; author: string; body: string; createdAt: Date }>;
   criteria: Array<{ id: number; text: string; done: boolean; position: number }>;
+  attachments: AttachmentMeta[];
 }
 
 export interface PlanFull {
@@ -70,6 +91,7 @@ export interface PlanFull {
   repos: RepositoryRow[];
   createdAt: Date;
   updatedAt: Date;
+  attachments: AttachmentMeta[];
 }
 
 export interface RepositoryRow {
