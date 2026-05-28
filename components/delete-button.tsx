@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Trash2 } from "lucide-react";
 
@@ -24,11 +24,31 @@ export function DeleteButton({
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
 
-  const onClick = (e: React.MouseEvent) => {
+  useEffect(() => {
+    if (!confirming) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !pending) setConfirming(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [confirming, pending]);
+
+  const openConfirm = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!confirm(confirmMessage)) return;
+    setError(null);
+    setConfirming(true);
+  };
+
+  const cancel = () => {
+    if (pending) return;
+    setError(null);
+    setConfirming(false);
+  };
+
+  const confirmDelete = () => {
     setError(null);
     startTransition(async () => {
       const res = await fetch(endpoint, { method: "DELETE" });
@@ -37,6 +57,7 @@ export function DeleteButton({
         setError(body.error ?? `HTTP ${res.status}`);
         return;
       }
+      setConfirming(false);
       router.push(redirectTo);
       router.refresh();
     });
@@ -46,7 +67,7 @@ export function DeleteButton({
     <>
       <button
         type="button"
-        onClick={onClick}
+        onClick={openConfirm}
         disabled={pending}
         aria-label={ariaLabel ?? label}
         title={ariaLabel ?? label}
@@ -59,7 +80,43 @@ export function DeleteButton({
         <Trash2 className="size-3.5" />
         {!iconOnly && <span>{pending ? "Deleting…" : label}</span>}
       </button>
-      {error && <span className="text-[11px] text-state-blocked">{error}</span>}
+
+      {confirming && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={cancel}
+          className="fixed inset-0 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm animate-fade-in"
+          style={{ zIndex: 100 }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm rounded-lg border border-border bg-card p-5 shadow-xl"
+          >
+            <p className="text-sm text-foreground">{confirmMessage}</p>
+            {error && <p className="mt-2 text-[11px] text-state-blocked">{error}</p>}
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={cancel}
+                disabled={pending}
+                className="rounded-md border border-border/60 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmDelete}
+                disabled={pending}
+                className="inline-flex items-center gap-1.5 rounded-md bg-state-blocked px-3 py-1.5 text-xs font-medium text-white hover:bg-state-blocked/90 disabled:opacity-50"
+              >
+                <Trash2 className="size-3.5" />
+                {pending ? "Deleting…" : label}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
