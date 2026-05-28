@@ -9,7 +9,7 @@
 import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, asc, desc, eq, gt, isNotNull } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull } from "drizzle-orm";
 
 import { db } from "@/db";
 import { agentEvents, agentSessions, tasks } from "@/db/schema";
@@ -109,7 +109,10 @@ async function pollMergedPrs(): Promise<void> {
     })
     .from(agentSessions)
     .innerJoin(tasks, eq(tasks.id, agentSessions.taskId))
-    .where(and(isNotNull(agentSessions.prUrl), eq(tasks.state, "review")))
+    // `review` is the happy path; `in_progress` catches tasks whose
+    // review-transition failed or whose PR a human merged early. Both states
+    // can transition directly to `done`.
+    .where(and(isNotNull(agentSessions.prUrl), inArray(tasks.state, ["in_progress", "review"])))
     .all();
 
   const latestByTask = new Map<string, (typeof rows)[number]>();
@@ -128,6 +131,9 @@ async function pollMergedPrs(): Promise<void> {
       repo.transitionTask(r.taskId, {
         state: "done",
         note: `PR merged: ${r.prUrl}`,
+        // A merged PR is authoritative — close the task even if acceptance
+        // criteria were never checked off, rather than stranding it open.
+        bypassCriteria: true,
       });
       db.insert(agentEvents)
         .values({

@@ -653,6 +653,10 @@ export interface TransitionInput {
   state: TaskState;
   assignee?: string;
   note?: string;
+  // Skip the acceptance-criteria gate when moving to `done`. Used by the
+  // PR-merge poller: a merged PR is authoritative that the work shipped, so
+  // unchecked criteria should not strand the task in `review`.
+  bypassCriteria?: boolean;
 }
 
 export function transitionTask(id: string, input: TransitionInput): TaskFull {
@@ -672,7 +676,7 @@ export function transitionTask(id: string, input: TransitionInput): TaskFull {
   if (input.state === "in_progress" && !assignee) {
     throw new RepoError("Going to in_progress requires an assignee", 400);
   }
-  if (input.state === "done") {
+  if (input.state === "done" && !input.bypassCriteria) {
     const openCriteria = existing.criteria.filter((c) => !c.done).length;
     if (openCriteria > 0) {
       throw new RepoError(

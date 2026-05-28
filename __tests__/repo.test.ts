@@ -130,6 +130,13 @@ describe("transitionTask", () => {
     expect(() => repo.transitionTask(id, { state: "done" })).toThrow(/criteria/);
   });
 
+  it("bypassCriteria forces done past open criteria", () => {
+    repo.addCriterion(id, "ship it");
+    repo.transitionTask(id, { state: "in_progress", assignee: "alice" });
+    const after = repo.transitionTask(id, { state: "done", bypassCriteria: true });
+    expect(after.state).toBe("done");
+  });
+
   it("permits done when every criterion is checked", () => {
     repo.addCriterion(id, "ship it");
     repo.addCriterion(id, "tests pass");
