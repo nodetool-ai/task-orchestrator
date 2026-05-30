@@ -61,6 +61,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (status !== "signedIn") {
       setLoading(false);
+      setSessions([]);
+      setTasks([]);
+      setPlans([]);
+      setError(null);
+      setLastUpdated(null);
       return;
     }
     setLoading(true);

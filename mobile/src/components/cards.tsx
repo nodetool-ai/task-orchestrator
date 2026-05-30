@@ -74,7 +74,7 @@ export function RunCard({
           <View style={{ flex: 1 }} />
           <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
             <Icon name="clock" size={11} color={c.muted} />
-            <Elapsed startMs={run.startedAt} style={{ fontSize: 11, color: c.muted, fontFamily: "monospace" }} />
+            <Elapsed startMs={run.startedAt} style={{ fontSize: 11, color: c.muted }} />
           </View>
         </View>
 

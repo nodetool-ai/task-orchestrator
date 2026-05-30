@@ -7,6 +7,7 @@ import {
   Pressable,
   ScrollView,
   Text,
+  useWindowDimensions,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -27,6 +28,7 @@ interface Props {
 export function BottomSheet({ open, onClose, title, subtitle, children, maxHeightPct = 0.9 }: Props) {
   const { c } = useTheme();
   const insets = useSafeAreaInsets();
+  const { height: winH } = useWindowDimensions();
   const slide = useRef(new Animated.Value(0)).current;
   const [mounted, setMounted] = React.useState(open);
 
@@ -54,7 +56,7 @@ export function BottomSheet({ open, onClose, title, subtitle, children, maxHeigh
           <Animated.View
             style={{
               transform: [{ translateY }],
-              maxHeight: `${Math.round(maxHeightPct * 100)}%`,
+              maxHeight: Math.round(winH * maxHeightPct),
               backgroundColor: c.surface,
               borderTopLeftRadius: 22,
               borderTopRightRadius: 22,
@@ -92,6 +94,7 @@ export function BottomSheet({ open, onClose, title, subtitle, children, maxHeigh
               </View>
             ) : null}
             <ScrollView
+              style={{ flexShrink: 1 }}
               keyboardShouldPersistTaps="handled"
               contentContainerStyle={{ padding: 18, paddingBottom: insets.bottom + 24 }}
             >

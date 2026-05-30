@@ -25,7 +25,7 @@ export default function FloorScreen() {
 
   const floor = useMemo(() => buildFloor(sessions, tasks, plans), [sessions, tasks, plans]);
   const repoCount = useMemo(
-    () => new Set(plans.flatMap((p) => p.repos.map((r) => r.id))).size,
+    () => new Set(plans.flatMap((p) => (p.repos ?? []).map((r) => r.id))).size,
     [plans]
   );
 

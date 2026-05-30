@@ -33,6 +33,14 @@ export function SwipeRow({ children, actions = [], onTap, margin }: Props) {
     Animated.spring(tx, { toValue: to, useNativeDriver: true, bounciness: 0, speed: 18 }).start();
   };
 
+  const handleTap = () => {
+    // A tap closes the row if it's open, otherwise opens the item. The
+    // PanResponder below only claims horizontal drags, so taps fall through
+    // to this Pressable and vertical drags fall through to the ScrollView.
+    if (offset.current !== 0) snap(0);
+    else onTap?.();
+  };
+
   const responder = useRef(
     PanResponder.create({
       onMoveShouldSetPanResponder: (_e, g) => Math.abs(g.dx) > 8 && Math.abs(g.dx) > Math.abs(g.dy),
@@ -44,12 +52,6 @@ export function SwipeRow({ children, actions = [], onTap, margin }: Props) {
       },
       onPanResponderRelease: (_e, g) => {
         const nx = offset.current + g.dx;
-        if (Math.abs(g.dx) < 6 && Math.abs(g.dy) < 6) {
-          // treat as tap (after closing if open)
-          if (offset.current !== 0) snap(0);
-          else onTap?.();
-          return;
-        }
         snap(nx < -W / 2 ? -W : 0);
       },
     })
@@ -90,7 +92,7 @@ export function SwipeRow({ children, actions = [], onTap, margin }: Props) {
         </View>
       )}
       <Animated.View {...responder.panHandlers} style={{ transform: [{ translateX: tx }], backgroundColor: c.surface }}>
-        {children}
+        <Pressable onPress={handleTap}>{children}</Pressable>
       </Animated.View>
     </View>
   );

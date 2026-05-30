@@ -354,7 +354,11 @@ export function Elapsed({
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [paused]);
-  return <Text style={style}>{format === "hms" ? elapsedHms(startMs, now) : fmtElapsed(startMs, now)}</Text>;
+  return (
+    <Text style={[{ fontFamily: mono, fontVariant: ["tabular-nums"] }, style]}>
+      {format === "hms" ? elapsedHms(startMs, now) : fmtElapsed(startMs, now)}
+    </Text>
+  );
 }
 
 // ---- CyclingText ----------------------------------------------------------

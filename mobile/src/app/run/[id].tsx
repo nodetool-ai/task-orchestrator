@@ -24,16 +24,20 @@ import { useToast } from "@/components/Toast";
 import { api } from "@/lib/api";
 import type { RunDetail, MessageRow } from "@/lib/types";
 import { fmtTok, money, prNumber, shortRunId, fauxSparkline } from "@/lib/format";
-import { useTheme, type RunState } from "@/theme";
+import { useTheme, mono, type RunState } from "@/theme";
 
 const ACTIVE = new Set(["pending", "preparing", "running", "pushing"]);
 const BLOCKED = new Set(["failed", "budget_exhausted"]);
 
-function uiState(run: RunDetail): RunState {
+// Derive the UI state from the run status, preferring the task's board state
+// when known: once a PR is opened the session is `completed` while the task
+// sits in `review`, so the task is the source of truth for the action bar.
+function uiState(run: RunDetail, taskState?: string): RunState {
   if (ACTIVE.has(run.status)) return "in_progress";
-  if (BLOCKED.has(run.status)) return "blocked";
-  if (run.status === "opening_pr" || run.prUrl) return "review";
-  if (run.status === "completed") return "done";
+  if (taskState === "review" || run.status === "opening_pr") return "review";
+  if (taskState === "blocked" || BLOCKED.has(run.status)) return "blocked";
+  if (taskState === "done" || run.status === "completed") return "done";
+  if (run.prUrl) return "review";
   return "todo";
 }
 
@@ -87,7 +91,7 @@ export default function RunDetailScreen() {
     );
   }
 
-  const st = uiState(run);
+  const st = uiState(run, task?.state);
   const live = st === "in_progress";
   const startedMs = new Date(run.startedAt).getTime();
   const budget = run.budgetMaxUsd ?? 25;
@@ -345,7 +349,7 @@ function RunBody({
           <View style={{ flex: 1 }} />
           <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
             <Icon name="clock" size={11} color={c.muted} />
-            <Elapsed startMs={startedMs} paused={!live} format="hms" style={{ fontSize: 11, color: c.muted, fontFamily: "monospace" }} />
+            <Elapsed startMs={startedMs} paused={!live} format="hms" style={{ fontSize: 11, color: c.muted }} />
           </View>
         </View>
         <View style={{ height: 9 }} />
@@ -455,7 +459,7 @@ function EventStream({ messages }: { messages: MessageRow[] }) {
                   fontSize: 12,
                   lineHeight: 18,
                   color: m.role === "agent" ? c.fg : c.muted,
-                  fontFamily: m.role === "agent" ? undefined : "monospace",
+                  fontFamily: m.role === "agent" ? undefined : mono,
                 }}
               >
                 {body}
