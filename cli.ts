@@ -373,14 +373,23 @@ async function cmdAgent(args: Args) {
     return 0;
   }
 
-  // Default: agent <task-id> [--model=...] [--no-follow]
+  // Default: agent <task-id> [--model=...] [--harness=pi|claude_cli] [--no-follow]
   const taskId = args._.shift();
-  if (!taskId) throw new Error("Usage: agent <task-id> [--model=...] [--no-follow]");
+  if (!taskId)
+    throw new Error("Usage: agent <task-id> [--model=...] [--harness=pi|claude_cli] [--no-follow]");
+  const harness = asString(args.harness);
+  if (harness && harness !== "pi" && harness !== "claude_cli") {
+    throw new Error(`Unknown harness '${harness}' (expected pi or claude_cli)`);
+  }
   const session = agent.startSession({
     taskId,
     model: asString(args.model),
+    harness: harness as "pi" | "claude_cli" | undefined,
   });
   console.log(`Started session #${session.id} for ${taskId}`);
+  if (harness === "claude_cli") {
+    console.log(`Claude Code runs in tmux — attach with: tmux attach -t torch-run-${session.id}`);
+  }
   if (args["no-follow"]) return 0;
   await tailSession(session.id);
   return 0;

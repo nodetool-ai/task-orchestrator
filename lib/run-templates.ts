@@ -12,18 +12,25 @@ import * as repo from "./repo";
 
 /**
  * Render an "Attachments" section listing images/artifacts on a task or plan.
- * Returns [] (no header) when there are none. The agent reads the bytes via
- * the get_attachment MCP tool — images come back viewable, text artifacts as
- * decoded text.
+ * Returns [] (no header) when there are none. With `mcp: true` (default) the
+ * agent reads the bytes via the get_attachment MCP tool — images come back
+ * viewable, text artifacts as decoded text. CLI-harness runs have no MCP
+ * server, so the footer instead warns that contents aren't reachable.
  */
-function attachmentSection(attachments: AttachmentMeta[]): string[] {
+function attachmentSection(
+  attachments: AttachmentMeta[],
+  opts: { mcp?: boolean } = {}
+): string[] {
   if (attachments.length === 0) return [];
+  const mcp = opts.mcp ?? true;
   const lines = ["", "## Attachments"];
   for (const a of attachments) {
     lines.push(`- #${a.id} ${a.filename} (${a.kind}, ${a.mimeType}, ${a.sizeBytes} bytes)`);
   }
   lines.push(
-    "Call mcp__task_orch__get_attachment(id) to view an image or read an artifact."
+    mcp
+      ? "Call mcp__task_orch__get_attachment(id) to view an image or read an artifact."
+      : "Attachment contents are NOT accessible in this run. If one is essential, say so in the PR description instead of guessing."
   );
   return lines;
 }
@@ -32,16 +39,17 @@ export const IMPLEMENT_DEFAULT_BUDGET_USD = 20;
 export const REVIEW_DEFAULT_BUDGET_USD = 5;
 
 /**
- * Build the implement-style agent prompt for a task: title, body,
- * acceptance criteria, parent-plan context, and operating instructions.
- *
- * This is the single source of truth — both the UI preview (modal) and
- * the runner (lib/runs.ts) call into here so what the user sees in the
- * modal is exactly what the agent receives.
+ * Shared context block for implement-style prompts: title, body, acceptance
+ * criteria, dependencies, recent notes, attachments, and parent-plan context.
+ * `mcpHints: false` strips every mcp__task_orch__* reference for runs where
+ * no orchestrator MCP server is connected (the Claude Code CLI harness).
  */
-export function buildImplementPrompt(task: TaskFull): string {
+function buildTaskContextLines(
+  task: TaskFull,
+  opts: { mcpHints: boolean }
+): string[] {
+  const { mcpHints } = opts;
   const lines: string[] = [];
-  lines.push(`You are an autonomous coding agent working on task ${task.id}.`);
   lines.push("");
   lines.push(`# ${task.title}`);
   if (task.body.trim()) {
@@ -71,7 +79,7 @@ export function buildImplementPrompt(task: TaskFull): string {
     }
   }
 
-  lines.push(...attachmentSection(task.attachments));
+  lines.push(...attachmentSection(task.attachments, { mcp: mcpHints }));
 
   // Parent plan context: the broader goal this task belongs to, plus a
   // snapshot of sibling tasks so the agent knows what's already shipped
@@ -89,7 +97,9 @@ export function buildImplementPrompt(task: TaskFull): string {
       const capped =
         body.length > 6000
           ? body.slice(0, 6000) +
-            "\n\n…(truncated; call mcp__task_orch__get_plan for the full body)"
+            (mcpHints
+              ? "\n\n…(truncated; call mcp__task_orch__get_plan for the full body)"
+              : "\n\n…(truncated)")
           : body;
       lines.push(capped);
     }
@@ -120,12 +130,28 @@ export function buildImplementPrompt(task: TaskFull): string {
       }
       if (sorted.length > MAX) {
         lines.push(
-          `- … and ${sorted.length - MAX} more (use mcp__task_orch__list_tasks with plan_id=${plan.id} to see all)`
+          mcpHints
+            ? `- … and ${sorted.length - MAX} more (use mcp__task_orch__list_tasks with plan_id=${plan.id} to see all)`
+            : `- … and ${sorted.length - MAX} more`
         );
       }
     }
   }
+  return lines;
+}
 
+/**
+ * Build the implement-style agent prompt for a task: title, body,
+ * acceptance criteria, parent-plan context, and operating instructions.
+ *
+ * This is the single source of truth — both the UI preview (modal) and
+ * the runner (lib/runs.ts) call into here so what the user sees in the
+ * modal is exactly what the agent receives.
+ */
+export function buildImplementPrompt(task: TaskFull): string {
+  const lines: string[] = [];
+  lines.push(`You are an autonomous coding agent working on task ${task.id}.`);
+  lines.push(...buildTaskContextLines(task, { mcpHints: true }));
   lines.push("");
   lines.push("# Working environment");
   lines.push("- You are in an isolated git worktree on a fresh branch.");
@@ -177,6 +203,47 @@ export function implementTemplate(task: TaskFull): ImplementTemplate {
     initialPrompt: buildImplementPrompt(task),
     taskId: task.id,
   };
+}
+
+/**
+ * Implement prompt for the Claude Code CLI harness (claude in tmux). Same
+ * task/plan context as buildImplementPrompt, but the operating contract is
+ * inverted: there is no orchestrator MCP server, and the agent itself
+ * commits, pushes, and opens the PR — the orchestrator only finds the PR
+ * by branch afterwards. Keep this the single source of truth for both the
+ * modal preview and the runner (mirrors buildImplementPrompt's contract).
+ */
+export function buildCliImplementPrompt(
+  task: TaskFull,
+  opts: { baseBranch?: string } = {}
+): string {
+  const baseBranch = opts.baseBranch ?? "main";
+  const lines: string[] = [];
+  lines.push(`You are an autonomous coding agent working on task ${task.id}.`);
+  lines.push(...buildTaskContextLines(task, { mcpHints: false }));
+  lines.push("");
+  lines.push("# Working environment");
+  lines.push("- You are in an isolated git worktree on a fresh branch.");
+  lines.push("- Make all changes here. Commit with a clear message.");
+  lines.push("- Run typecheck and lint where it applies; fix any errors you introduce.");
+  lines.push("- This is a non-interactive run. Make reasonable decisions; do not ask questions.");
+  lines.push("");
+  lines.push("# Finishing — you handle push and PR yourself");
+  lines.push("When the work is done:");
+  lines.push("1. Commit everything with a clear message.");
+  lines.push("2. Push the branch: `git push -u origin HEAD`");
+  lines.push(
+    `3. Open a PR against \`${baseBranch}\`: \`gh pr create --base ${baseBranch} --title "[${task.id}] <short title>" --body "..."\``
+  );
+  lines.push("4. Do NOT merge the PR.");
+  lines.push("");
+  lines.push(
+    "Your final chat message is NOT captured anywhere — everything reviewers need must be in the PR body:"
+  );
+  lines.push("- 1-3 sentences explaining what you did and why");
+  lines.push("- bullet list of the main files / behaviours that changed if non-trivial");
+  lines.push("- call out any caveats, follow-ups, or skipped acceptance criteria");
+  return lines.join("\n");
 }
 
 /**

@@ -188,6 +188,14 @@ export const agentSessions = sqliteTable(
     // Old chats.id for rows backfilled from chats by 0009. Lets the
     // future /chat/[id] redirect resolve the new run.
     legacyChatId: integer("legacy_chat_id"),
+    // 'pi' (SDK path) | 'claude_cli' (Claude Code CLI in tmux), since 0014.
+    harness: text("harness").notNull().default("pi"),
+    // Claude-CLI runs only: tmux session name, Claude Code transcript JSONL
+    // path (reported by the SessionStart hook), and the per-run bearer
+    // secret that authenticates hook callbacks at /api/runs/:id/hook.
+    tmuxSession: text("tmux_session"),
+    transcriptPath: text("transcript_path"),
+    hookToken: text("hook_token"),
     startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull().default(NOW),
     completedAt: integer("completed_at", { mode: "timestamp_ms" }),
   },

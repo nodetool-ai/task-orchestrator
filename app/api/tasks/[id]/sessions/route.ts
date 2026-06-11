@@ -30,6 +30,7 @@ export async function POST(
       model: input.model,
       baseBranch: input.baseBranch,
       resumeOf: input.resumeOf,
+      harness: input.harness,
     });
     return NextResponse.json(session, { status: 201 });
   } catch (e) {

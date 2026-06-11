@@ -11,6 +11,7 @@ export const dynamic = "force-dynamic";
 // cwdStrategy/budget/initialPrompt/taskId straight through.
 const createRunSchema = z.object({
   goal: z.string().min(1).optional(),
+  harness: z.enum(["pi", "claude_cli"]).optional(),
   toolsProfile: z.string().min(1).optional(),
   cwdStrategy: z.enum(["worktree", "worktree_at_pr", "repo", "none"]).optional(),
   repoId: z.string().nullable().optional(),
@@ -47,6 +48,7 @@ export async function POST(req: NextRequest) {
     const uid = await userId();
     const run = runs.create({
       goal: input.goal ?? "<implement>",
+      harness: input.harness,
       toolsProfile: input.toolsProfile,
       cwdStrategy: input.cwdStrategy,
       repoId: input.repoId ?? undefined,

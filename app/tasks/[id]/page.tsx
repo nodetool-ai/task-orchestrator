@@ -17,6 +17,7 @@ import {
   IMPLEMENT_DEFAULT_BUDGET_USD,
   REVIEW_DEFAULT_BUDGET_USD,
   buildChatPromptPrefix,
+  buildCliImplementPrompt,
   buildImplementPrompt,
   buildReviewPrompt,
 } from "@/lib/run-templates";
@@ -80,6 +81,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
             taskId={task.id}
             hasActive={Boolean(activeSession)}
             initialPrompt={buildImplementPrompt(task)}
+            cliInitialPrompt={buildCliImplementPrompt(task)}
             budgetMaxUsd={IMPLEMENT_DEFAULT_BUDGET_USD}
             personas={personas}
           />

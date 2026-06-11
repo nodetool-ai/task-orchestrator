@@ -30,6 +30,7 @@
 
 import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -42,7 +43,17 @@ import { getModel } from "@earendil-works/pi-ai";
 import { db } from "@/db";
 import { agentEvents, agentMessages, agentSessions } from "@/db/schema";
 import * as repo from "./repo";
-import { buildImplementPrompt, extractReviewOutcome } from "./run-templates";
+import { buildCliImplementPrompt, buildImplementPrompt, extractReviewOutcome } from "./run-templates";
+import {
+  checkClaudeCliAvailable,
+  getHandle as getClaudeCliHandle,
+  killTmuxSession,
+  startClaudeCli,
+  tmuxSessionName,
+  type ClaudeCliDone,
+  type ClaudeCliHandle,
+  type ClaudeHookEvent,
+} from "./claude-cli";
 import { parsePrUrl } from "./gh-url";
 import type { SdkContentBlock } from "./sdk-message";
 import type { AgentSessionFull, SessionStatus } from "./types";
@@ -70,6 +81,7 @@ const SANDBOX_OPTS = {
 
 export type Goal = "<implement>" | "<chat>" | "<review>" | (string & {});
 export type CwdStrategy = "worktree" | "worktree_at_pr" | "repo" | "none";
+export type Harness = "pi" | "claude_cli";
 
 export interface Budget {
   maxTurns?: number;
@@ -79,6 +91,8 @@ export interface Budget {
 
 export interface CreateRunInput {
   goal: Goal;
+  /** Execution harness: 'pi' (SDK, default) or 'claude_cli' (Claude Code in tmux). */
+  harness?: Harness;
   toolsProfile?: string;
   cwdStrategy?: CwdStrategy;
   repoId?: string | null;
@@ -119,6 +133,11 @@ export interface RunRow {
   parentRunId: number | null;
   toolsProfile: string;
   cwdStrategy: CwdStrategy;
+  harness: Harness;
+  /** Claude-CLI runs: tmux session name for the attach hint / cancel. */
+  tmuxSession: string | null;
+  /** Claude-CLI runs: Claude Code transcript JSONL path (from SessionStart hook). */
+  transcriptPath: string | null;
   model: string | null;
   branch: string | null;
   worktreePath: string | null;
@@ -221,9 +240,19 @@ function getLock(runId: number): PerRunLock {
 export function create(input: CreateRunInput): RunRow {
   const goal = input.goal ?? "<chat>";
   const cwdStrategy: CwdStrategy = input.cwdStrategy ?? (goal === "<chat>" ? "none" : "worktree");
+  const harness: Harness = input.harness ?? "pi";
   const toolsProfile =
     input.toolsProfile ?? (goal === "<chat>" ? "orchestrator,repo_write" : "orchestrator,repo_write");
   const initialStatus: SessionStatus = input.defer || goal === "<chat>" ? "idle" : "pending";
+
+  // The Claude CLI harness only implements the worktree implement flow
+  // (one prompt → agent pushes + opens PR). Chats/reviews stay on pi.
+  if (harness === "claude_cli" && (goal === "<chat>" || cwdStrategy !== "worktree")) {
+    throw new repo.RepoError(
+      "harness=claude_cli only supports implement-style runs (cwd_strategy=worktree).",
+      400
+    );
+  }
 
   // Resolve repo: explicit > task's repo > plan's first repo > defaultRepo.
   // We don't error on missing repo at create time for chat-style runs; the
@@ -270,6 +299,7 @@ export function create(input: CreateRunInput): RunRow {
       parentRunId: input.parentRunId ?? null,
       toolsProfile,
       cwdStrategy,
+      harness,
       model: effectiveModel,
       title: input.title ?? null,
       userId: input.userId ?? null,
@@ -295,12 +325,21 @@ export function create(input: CreateRunInput): RunRow {
         400
       );
     }
-    void runImplement(
-      run.id,
-      input.taskId,
-      input.baseBranch ?? "main",
-      input.initialPrompt ?? null
-    );
+    if (harness === "claude_cli") {
+      void runClaudeCliImplement(
+        run.id,
+        input.taskId,
+        input.baseBranch ?? "main",
+        input.initialPrompt ?? null
+      );
+    } else {
+      void runImplement(
+        run.id,
+        input.taskId,
+        input.baseBranch ?? "main",
+        input.initialPrompt ?? null
+      );
+    }
   }
 
   // Review-style runs: spin up a worktree at the PR's head ref and run a
@@ -535,6 +574,12 @@ export function cancel(id: number): RunRow {
     .run();
   emitStatus(id, "cancelled");
   closeBus(id);
+  // Claude-CLI runs: a live runner's abort listener kills the tmux session,
+  // but after a server restart there is no runner — kill it directly
+  // (kill-session is idempotent, so doing both is harmless).
+  if (run.harness === "claude_cli" && run.tmuxSession) {
+    void killTmuxSession(run.tmuxSession);
+  }
   if (run.cwdStrategy === "worktree" && run.worktreePath) {
     cleanupWorktree(run.worktreePath, repoRoot(run)).catch(() => {});
   }
@@ -553,6 +598,9 @@ export function close(id: number): RunRow {
     .where(eq(agentSessions.id, id))
     .run();
   closeBus(id);
+  if (run.harness === "claude_cli" && run.tmuxSession) {
+    void killTmuxSession(run.tmuxSession);
+  }
   if (run.cwdStrategy === "worktree" && run.worktreePath) {
     cleanupWorktree(run.worktreePath, repoRoot(run)).catch(() => {});
   }
@@ -816,6 +864,326 @@ async function runImplement(
     runners.delete(runId);
     cleanupWorktree(worktreePath, root).catch(() => {});
   }
+}
+
+// ──────────────────────────────────────────────────────────
+// Claude CLI implement worker (worktree → claude in tmux → PR by branch)
+// ──────────────────────────────────────────────────────────
+//
+// Mirrors runImplement, but the agent is Claude Code CLI inside tmux
+// (lib/claude-cli.ts) and the operating contract is inverted: the agent
+// commits, pushes, and opens the PR itself; we wait for its Stop hook and
+// then find the PR by branch. Fallbacks: if it committed but skipped the
+// gh step we push/open the PR ourselves; if it produced no commits at all
+// we nudge once via tmux send-keys, then fail.
+
+const CLI_NUDGE_TEXT =
+  "Reminder: this run only counts when the work is committed and a PR exists. " +
+  "Commit your changes, push with `git push -u origin HEAD`, and open a PR with `gh pr create`. " +
+  "If you believe no code change is needed, say why in the PR body of an empty-change PR or commit a doc note.";
+
+const CLI_NUDGE_WAIT_MS = 15 * 60 * 1000;
+
+function cliTimeoutMs(run: RunRow): number {
+  const envMs = parseInt(process.env.TASK_ORCH_CLAUDE_TIMEOUT_MS ?? "", 10);
+  const base = Number.isFinite(envMs) && envMs > 0 ? envMs : 2 * 60 * 60 * 1000;
+  if (run.budgetMaxSeconds != null && run.budgetMaxSeconds > 0) {
+    return Math.min(base, run.budgetMaxSeconds * 1000);
+  }
+  return base;
+}
+
+/** Origin the Claude Code hooks curl back to. */
+function hookBaseUrl(): string {
+  return (
+    process.env.TASK_ORCH_BASE_URL ??
+    process.env.NEXTAUTH_URL ??
+    `http://localhost:${process.env.PORT ?? 3000}`
+  );
+}
+
+/**
+ * Durable + live system note on a run's timeline. Persists the shape the
+ * run view's extractSystemMeta expects ([{type:<kind>, …payload}], plus a
+ * text block so SystemEventRow renders prose instead of JSON) and emits a
+ * `system` bus event for connected SSE clients.
+ */
+function systemNote(runId: number, kind: "info" | "warning", text: string) {
+  try {
+    persistMessage(runId, "system", [
+      { type: kind, message: text } as any,
+      { type: "text", text } as any,
+    ]);
+  } catch {
+    // best-effort
+  }
+  emitRunEvent(runId, "system", { kind, text });
+}
+
+async function findPrByBranch(branch: string, cwd: string): Promise<string | null> {
+  try {
+    const out = await sh(
+      ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "url", "--jq", ".[0].url"],
+      cwd
+    );
+    const url = out.trim();
+    return url.startsWith("http") ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+async function countCommitsAhead(baseBranch: string, cwd: string): Promise<number> {
+  try {
+    const out = await sh(["git", "rev-list", "--count", `${baseBranch}..HEAD`], cwd);
+    const n = parseInt(out.trim(), 10);
+    return Number.isFinite(n) ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function cliDoneError(done: ClaudeCliDone): string {
+  switch (done.kind) {
+    case "exited":
+      return (
+        `Claude Code exited (code ${done.exitCode}) before finishing the task.` +
+        (done.paneTail ? `\n\nLast terminal output:\n${done.paneTail}` : "")
+      );
+    case "killed":
+      return "The tmux session for this run disappeared (killed externally?).";
+    case "timeout":
+      return "Claude Code run timed out.";
+    default:
+      return "Claude Code run ended unexpectedly.";
+  }
+}
+
+async function runClaudeCliImplement(
+  runId: number,
+  taskId: string,
+  baseBranch: string,
+  initialPrompt: string | null
+): Promise<void> {
+  const abort = new AbortController();
+  const bus = new EventEmitter();
+  runners.set(runId, { abort, bus });
+
+  let run = get(runId)!;
+  let task = repo.getTask(taskId);
+  if (!task) {
+    fail(runId, `Task ${taskId} disappeared before run could start`);
+    runners.delete(runId);
+    return;
+  }
+  const root = repoRoot(run);
+  const worktreeRoot = resolve(root, ".worktrees");
+  const branch = `claude/${taskId.toLowerCase()}-${runId}`;
+  const worktreePath = resolve(worktreeRoot, String(runId));
+
+  let handle: ClaudeCliHandle | null = null;
+  try {
+    // Fail fast before touching git if tmux/claude aren't usable.
+    const unavailable = await checkClaudeCliAvailable();
+    if (unavailable) throw new Error(unavailable);
+
+    setStatus(runId, "preparing");
+    await mkdir(worktreeRoot, { recursive: true });
+    await sh(["git", "worktree", "add", "-b", branch, worktreePath, baseBranch], root);
+
+    const claudeSessionId = randomUUID();
+    const hookToken = randomBytes(24).toString("hex");
+    const tmuxSession = tmuxSessionName(runId);
+    db.update(agentSessions)
+      .set({
+        branch,
+        worktreePath,
+        repoId: run.repoId ?? task.repoId ?? null,
+        // Claude's session UUID doubles as the harness-side session id
+        // (the pi path stores its session file path here).
+        sdkSessionId: claudeSessionId,
+        hookToken,
+        tmuxSession,
+      })
+      .where(eq(agentSessions.id, runId))
+      .run();
+    run = get(runId)!;
+
+    if (task.state === "todo" || task.state === "blocked") {
+      try {
+        repo.transitionTask(taskId, {
+          state: "in_progress",
+          assignee: task.assignee ?? "claude-agent",
+          note: `Started Claude CLI agent run #${runId}.`,
+        });
+      } catch {
+        // Best-effort.
+      }
+    }
+
+    setStatus(runId, "running");
+    task = repo.getTask(taskId)!;
+    const prompt = initialPrompt ?? buildCliImplementPrompt(task, { baseBranch });
+
+    handle = await startClaudeCli({
+      runId,
+      cwd: worktreePath,
+      prompt,
+      claudeSessionId,
+      hookToken,
+      baseUrl: hookBaseUrl(),
+      timeoutMs: cliTimeoutMs(run),
+      onEnvelope: (env) => {
+        bus.emit("event", { type: "sdk", sdk: env });
+        if (env.type === "assistant" && env.message.content.length > 0) {
+          persistMessage(runId, "agent", env.message.content as any);
+        } else if (env.type === "user") {
+          const blocks = env.message.content;
+          const toolResults = blocks.filter((b: any) => b.type === "tool_result");
+          if (toolResults.length > 0) {
+            persistMessage(runId, "tool", toolResults as any);
+          } else if (blocks.length > 0) {
+            // A human attached to the tmux session and typed something.
+            persistMessage(runId, "user", blocks as any);
+          }
+        }
+      },
+      onSystem: (kind, payload) => {
+        systemNote(runId, kind, String(payload.text ?? JSON.stringify(payload)));
+      },
+    });
+    abort.signal.addEventListener("abort", () => {
+      void handle?.cancel();
+    });
+
+    systemNote(
+      runId,
+      "info",
+      `Claude Code is running in tmux — watch or steer with: ${handle.attachHint}`
+    );
+
+    let done = await handle.done;
+    let prUrl: string | null = null;
+    let nudged = false;
+    for (;;) {
+      if (abort.signal.aborted) {
+        runners.delete(runId);
+        return;
+      }
+      if (done.kind !== "stop") throw new Error(cliDoneError(done));
+
+      setStatus(runId, "opening_pr");
+      prUrl = await findPrByBranch(branch, worktreePath);
+      if (prUrl) break;
+
+      const commits = await countCommitsAhead(baseBranch, worktreePath);
+      if (commits > 0) {
+        // The agent committed but skipped push and/or `gh pr create` —
+        // fall back to the orchestrator handoff used by the pi path.
+        setStatus(runId, "pushing");
+        await sh(["git", "push", "-u", "origin", branch], worktreePath);
+        setStatus(runId, "opening_pr");
+        prUrl = await openPr({ task, branch, baseBranch, worktreePath, summary: null });
+        break;
+      }
+
+      if (nudged) {
+        throw new Error("Claude Code finished without making any commits.");
+      }
+      nudged = true;
+      systemNote(
+        runId,
+        "warning",
+        "Agent stopped without committing anything — sending a one-time reminder."
+      );
+      setStatus(runId, "running");
+      done = await handle.nudge(CLI_NUDGE_TEXT, CLI_NUDGE_WAIT_MS);
+    }
+
+    if (prUrl) {
+      db.update(agentSessions).set({ prUrl }).where(eq(agentSessions.id, runId)).run();
+    }
+
+    try {
+      repo.transitionTask(taskId, {
+        state: "review",
+        note: prUrl ? `Agent finished. PR: ${prUrl}` : `Agent finished. Branch: ${branch}`,
+      });
+    } catch (err) {
+      repo.addNote(taskId, "claude-agent", `Could not transition to review: ${describe(err)}`);
+    }
+
+    db.update(agentSessions)
+      .set({ status: "completed", completedAt: new Date() })
+      .where(eq(agentSessions.id, runId))
+      .run();
+    emitStatus(runId, "completed");
+  } catch (err) {
+    if (abort.signal.aborted) {
+      runners.delete(runId);
+      return;
+    }
+    fail(runId, describe(err));
+    try {
+      repo.transitionTask(taskId, {
+        state: "blocked",
+        note: `Agent run #${runId} failed: ${describe(err)}`,
+      });
+    } catch {
+      // Ignore — task may not accept blocked from its current state.
+    }
+  } finally {
+    closeBus(runId);
+    runners.delete(runId);
+    await handle?.cancel().catch(() => {});
+    cleanupWorktree(worktreePath, root).catch(() => {});
+  }
+}
+
+/**
+ * Entry point for /api/runs/:id/hook — feed a Claude Code lifecycle hook
+ * callback to the run. SessionStart also persists the transcript path the
+ * tailer needs (and a future reattach could resume from). Must return
+ * fast: the worker, not the caller, performs the PR/completion flow.
+ */
+export function handleClaudeHook(runId: number, payload: Record<string, unknown>): void {
+  const event = payload.hook_event_name;
+  if (event !== "SessionStart" && event !== "Stop" && event !== "SessionEnd") return;
+
+  if (event === "SessionStart") {
+    const transcriptPath = payload.transcript_path;
+    if (typeof transcriptPath === "string" && transcriptPath) {
+      db.update(agentSessions)
+        .set({ transcriptPath })
+        .where(eq(agentSessions.id, runId))
+        .run();
+    }
+  }
+  getClaudeCliHandle(runId)?.hook(event as ClaudeHookEvent, payload);
+}
+
+/**
+ * Targeted read for the hook route's bearer-token check. hookToken is
+ * deliberately not part of RunRow (it would leak into page props).
+ */
+export function getHookAuth(
+  runId: number
+): { hookToken: string | null; status: SessionStatus; harness: Harness } | null {
+  const row = db
+    .select({
+      hookToken: agentSessions.hookToken,
+      status: agentSessions.status,
+      harness: agentSessions.harness,
+    })
+    .from(agentSessions)
+    .where(eq(agentSessions.id, runId))
+    .get();
+  if (!row) return null;
+  return {
+    hookToken: row.hookToken,
+    status: row.status as SessionStatus,
+    harness: (row.harness as Harness) ?? "pi",
+  };
 }
 
 // ──────────────────────────────────────────────────────────
@@ -1239,6 +1607,9 @@ function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     parentRunId: row.parentRunId,
     toolsProfile: row.toolsProfile,
     cwdStrategy: row.cwdStrategy as CwdStrategy,
+    harness: (row.harness as Harness) ?? "pi",
+    tmuxSession: row.tmuxSession,
+    transcriptPath: row.transcriptPath,
     model: row.model,
     branch: row.branch,
     worktreePath: row.worktreePath,

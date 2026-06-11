@@ -10,6 +10,7 @@ import {
   FolderClosed,
   GitBranch,
   Square,
+  TerminalSquare,
   UserRound,
   X,
 } from "lucide-react";
@@ -76,11 +77,13 @@ let tmpIdCounter = -1;
 const nextTmpId = () => tmpIdCounter--;
 
 interface StreamEventClient {
-  type: "user_message" | "sdk" | "done" | "error" | "status" | "_eos";
+  type: "user_message" | "sdk" | "done" | "error" | "status" | "system" | "_eos";
   message?: MessageRow;
   sdk?: SdkMessageEnvelope;
   status?: SessionStatus;
   error?: string;
+  /** `system` events (lib/runs.ts systemNote): {kind: SystemKind, …payload}. */
+  payload?: Record<string, unknown>;
 }
 
 export function RunView({
@@ -190,6 +193,30 @@ export function RunView({
     }
     if (event.type === "sdk" && event.sdk) {
       mergeSdkEnvelope(event.sdk);
+      return;
+    }
+    if (event.type === "system" && event.payload) {
+      // Live system notes from the worker (e.g. the Claude-CLI harness's
+      // attach hint or needs-login warning). The persisted copy renders on
+      // reload via extractSystemMeta; this makes it appear in real time.
+      // Carry `text` as a content block so SystemEventRow renders prose
+      // instead of the JSON payload fallback.
+      const { kind, text, ...rest } = event.payload as {
+        kind?: string;
+        text?: string;
+      } & Record<string, unknown>;
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: nextTmpId(),
+          role: "system",
+          content: typeof text === "string" ? [{ type: "text", text }] : [],
+          createdAt: new Date(),
+          systemKind: (kind as SystemKind) ?? "info",
+          systemPayload:
+            typeof text === "string" ? { message: text, ...rest } : rest,
+        },
+      ]);
       return;
     }
     if (event.type === "error") {
@@ -442,6 +469,15 @@ export function RunView({
             <span className="inline-flex items-center gap-1 min-w-0" title={run.branch}>
               <GitBranch className="size-3 shrink-0" />
               <code className="font-mono truncate max-w-[180px]">{run.branch}</code>
+            </span>
+          )}
+          {run.harness === "claude_cli" && run.tmuxSession && !terminal && (
+            <span
+              className="inline-flex items-center gap-1"
+              title="Claude Code runs inside this tmux session — attach to watch or steer"
+            >
+              <TerminalSquare className="size-3 shrink-0" />
+              <code className="font-mono">tmux attach -t {run.tmuxSession}</code>
             </span>
           )}
           {task && (

@@ -15,6 +15,7 @@ import { db } from "@/db";
 import { agentEvents, agentSessions, tasks } from "@/db/schema";
 import * as repo from "./repo";
 import * as runs from "./runs";
+import { killTmuxSession } from "./claude-cli";
 import {
   isTerminalStatus,
   type AgentEventRow,
@@ -92,6 +93,12 @@ function reapOrphans() {
         createdAt: now,
       })
       .run();
+    // Claude-CLI runs: the claude process survives the orchestrator restart
+    // inside its tmux session — kill it so it doesn't keep burning tokens
+    // on a run we just marked failed.
+    if (orphan.tmuxSession) {
+      killTmuxSession(orphan.tmuxSession).catch(() => {});
+    }
     if (orphan.worktreePath && orphan.taskId) {
       const root = repoRootForSession(orphan.taskId);
       cleanupWorktree(orphan.worktreePath, root).catch(() => {});
@@ -197,6 +204,7 @@ export interface StartSessionInput {
   model?: string;
   baseBranch?: string;
   resumeOf?: number;
+  harness?: runs.Harness;
 }
 
 export function startSession(input: StartSessionInput): AgentSessionFull {
@@ -226,6 +234,7 @@ export function startSession(input: StartSessionInput): AgentSessionFull {
   const created = runs.create({
     goal: "<implement>",
     cwdStrategy: "worktree",
+    harness: input.harness,
     // gh_pr/gh_ci let the agent inspect its own PR and fetch CI results
     // (e.g. when reacting to webhook-driven CI failures).
     toolsProfile: "orchestrator,repo_write,gh_pr,gh_ci",

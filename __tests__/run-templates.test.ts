@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   REVIEW_DEFAULT_BUDGET_USD,
   buildChatPromptPrefix,
+  buildCliImplementPrompt,
+  buildImplementPrompt,
   buildPlanChatPromptPrefix,
   buildReviewPrompt,
   extractReviewOutcome,
@@ -31,6 +33,70 @@ function fakeTask(overrides: Partial<TaskFull> = {}): TaskFull {
     ...overrides,
   };
 }
+
+describe("buildImplementPrompt", () => {
+  it("keeps the orchestrator-handles-push contract and MCP tool hints", () => {
+    const prompt = buildImplementPrompt(fakeTask());
+    expect(prompt).toContain("Do NOT push and do NOT open a PR");
+    expect(prompt).toContain("mcp__task_orch__add_note");
+    expect(prompt).toContain("- [x] first criterion");
+  });
+});
+
+describe("buildCliImplementPrompt", () => {
+  it("includes the task context like the SDK variant", () => {
+    const prompt = buildCliImplementPrompt(fakeTask());
+    expect(prompt).toContain("T-test");
+    expect(prompt).toContain("# Test task");
+    expect(prompt).toContain("Body text");
+    expect(prompt).toContain("- [x] first criterion");
+    expect(prompt).toContain("- [ ] second criterion");
+  });
+
+  it("instructs the agent to push and open the PR itself", () => {
+    const prompt = buildCliImplementPrompt(fakeTask(), { baseBranch: "develop" });
+    expect(prompt).toContain("git push -u origin HEAD");
+    expect(prompt).toContain("gh pr create --base develop");
+    expect(prompt).toContain("[T-test]");
+    expect(prompt).toContain("Do NOT merge");
+    expect(prompt).not.toContain("Do NOT push");
+  });
+
+  it("defaults the PR base branch to main", () => {
+    const prompt = buildCliImplementPrompt(fakeTask());
+    expect(prompt).toContain("gh pr create --base main");
+  });
+
+  it("contains no orchestrator MCP tool references", () => {
+    const prompt = buildCliImplementPrompt(
+      fakeTask({
+        attachments: [
+          {
+            id: 1,
+            planId: null,
+            taskId: "T-test",
+            author: "matti",
+            filename: "mock.png",
+            kind: "image",
+            mimeType: "image/png",
+            sizeBytes: 123,
+            createdAt: new Date(),
+          },
+        ],
+      })
+    );
+    expect(prompt).not.toContain("mcp__task_orch__");
+    // Attachments are still listed, but flagged as unreachable.
+    expect(prompt).toContain("mock.png");
+    expect(prompt).toContain("NOT accessible");
+  });
+
+  it("warns that the final chat message is not captured", () => {
+    const prompt = buildCliImplementPrompt(fakeTask());
+    expect(prompt).toContain("NOT captured");
+    expect(prompt).toContain("PR body");
+  });
+});
 
 describe("buildReviewPrompt", () => {
   it("embeds the task id, title, PR url, and numbered criteria", () => {

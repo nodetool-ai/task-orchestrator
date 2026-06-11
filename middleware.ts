@@ -31,6 +31,12 @@ export default auth((req) => {
   if (path === "/api/github/webhook") {
     return NextResponse.next();
   }
+  // /api/runs/:id/hook authenticates via the run's per-run bearer token
+  // (agent_runs.hook_token) — it's curl'd by Claude Code lifecycle hooks,
+  // which have no browser session.
+  if (/^\/api\/runs\/\d+\/hook$/.test(path)) {
+    return NextResponse.next();
+  }
 
   if (req.auth) return NextResponse.next();
 

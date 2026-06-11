@@ -9,11 +9,15 @@ import {
   type PersonaOption,
 } from "@/components/pickers/persona-picker";
 
+type Harness = "pi" | "claude_cli";
+
 interface Props {
   taskId: string;
   hasActive: boolean;
   /** Pre-rendered implement prompt; user can edit before submitting. */
   initialPrompt: string;
+  /** Implement prompt variant for the Claude Code CLI harness. */
+  cliInitialPrompt?: string;
   /** Budget cap (USD) shown next to the textarea. */
   budgetMaxUsd: number;
   /** Available personas for the picker (fetched server-side). */
@@ -32,23 +36,29 @@ export function RunAgentButton({
   taskId,
   hasActive,
   initialPrompt,
+  cliInitialPrompt,
   budgetMaxUsd,
   personas = [],
   className,
 }: Props) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
+  const [harness, setHarness] = useState<Harness>("pi");
   const [prompt, setPrompt] = useState(initialPrompt);
   const [personaId, setPersonaId] = useState(personas[0]?.id ?? "implementor");
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
+  const promptFor = (h: Harness) =>
+    h === "claude_cli" ? (cliInitialPrompt ?? initialPrompt) : initialPrompt;
+
   // Re-sync local state whenever the modal is (re-)opened so edits from a
   // previous open don't linger and stale prompts from the task page don't
   // overwrite the user's draft mid-typing.
   useEffect(() => {
     if (open) {
+      setHarness("pi");
       setPrompt(initialPrompt);
       setPersonaId(personas[0]?.id ?? "implementor");
       setError(null);
@@ -57,6 +67,13 @@ export function RunAgentButton({
       return () => window.clearTimeout(id);
     }
   }, [open, initialPrompt]);
+
+  // Switching harness swaps in the matching prompt template (discarding
+  // edits, same as re-opening the modal does).
+  const selectHarness = (h: Harness) => {
+    setHarness(h);
+    setPrompt(promptFor(h));
+  };
 
   // ESC to close.
   useEffect(() => {
@@ -81,6 +98,7 @@ export function RunAgentButton({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           goal: "<implement>",
+          harness,
           toolsProfile: "orchestrator,repo_write",
           cwdStrategy: "worktree",
           taskId,
@@ -152,19 +170,35 @@ export function RunAgentButton({
 
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
               <div className="grid grid-cols-2 gap-4 text-xs">
+                <Field label="Harness">
+                  <select
+                    value={harness}
+                    onChange={(e) => selectHarness(e.target.value as Harness)}
+                    className="rounded border border-border/60 bg-background px-2 py-0.5 font-mono text-[11px] outline-none focus:border-foreground/40"
+                  >
+                    <option value="pi">pi (SDK)</option>
+                    <option value="claude_cli">Claude Code CLI (tmux)</option>
+                  </select>
+                </Field>
                 <Field label="Tools profile">
-                  <code className="font-mono">orchestrator, repo_write</code>
+                  <code className="font-mono">
+                    {harness === "claude_cli"
+                      ? "(Claude Code's own tools)"
+                      : "orchestrator, repo_write"}
+                  </code>
                 </Field>
                 <Field label="Cwd strategy">
                   <code className="font-mono">worktree</code>
                 </Field>
                 <Field label="Budget (max USD)">
-                  <code className="font-mono tabular-nums">${budgetMaxUsd.toFixed(2)}</code>
+                  <code className="font-mono tabular-nums">
+                    {harness === "claude_cli" ? "—" : `$${budgetMaxUsd.toFixed(2)}`}
+                  </code>
                 </Field>
                 <Field label="Goal">
                   <code className="font-mono">&lt;implement&gt;</code>
                 </Field>
-                {personas.length > 0 && (
+                {personas.length > 0 && harness === "pi" && (
                   <Field label="Persona">
                     <PersonaPicker
                       personas={personas}
