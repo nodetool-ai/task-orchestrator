@@ -55,12 +55,23 @@ export class ClaudeBackend implements AgentBackend {
   readonly id = "claude" as const;
 
   async runTurn(args: RunTurnArgs): Promise<TurnOutcome> {
-    const { cwd, model, extensions, abort, prompt, onEvent } = args;
+    const { cwd, model, thinkingLevel, extensions, abort, prompt, onEvent } = args;
 
     if (!process.env.ANTHROPIC_API_KEY) {
       throw new Error(
         "ANTHROPIC_API_KEY is required for the Claude agent backend " +
           "(TASK_ORCH_AGENT_BACKEND=claude). Set it or switch the backend to 'pi'."
+      );
+    }
+
+    // The Claude backend speaks only to Anthropic. Fail early with an actionable
+    // message rather than letting a non-Anthropic provider reach the SDK and
+    // surface a more opaque error downstream.
+    if (model.provider && model.provider !== "anthropic") {
+      throw new Error(
+        `The Claude agent backend only supports the 'anthropic' provider, but the ` +
+          `persona is configured with provider '${model.provider}' (model '${model.id}'). ` +
+          `Switch the persona to an Anthropic model or set TASK_ORCH_AGENT_BACKEND=pi.`
       );
     }
 
@@ -135,6 +146,9 @@ export class ClaudeBackend implements AgentBackend {
       options: {
         cwd,
         model: model.id,
+        // Persona thinkingLevel maps 1:1 onto the SDK's effort levels
+        // ('low' | 'medium' | 'high'); omitted lets the model default apply.
+        ...(thinkingLevel ? { effort: thinkingLevel } : {}),
         permissionMode: "bypassPermissions",
         systemPrompt: { type: "preset", preset: "claude_code", ...(append ? { append } : {}) },
         mcpServers: { [MCP_SERVER_NAME]: server },

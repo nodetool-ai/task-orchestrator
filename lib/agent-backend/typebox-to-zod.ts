@@ -40,20 +40,54 @@ export function toZodType(schema: any): z.ZodTypeAny {
 
   switch (schema.type) {
     case "string":
-      return z.string();
+      return applyStringConstraints(z.string(), schema);
     case "integer":
-      return z.number().int();
+      return applyNumberConstraints(z.number().int(), schema);
     case "number":
-      return z.number();
+      return applyNumberConstraints(z.number(), schema);
     case "boolean":
       return z.boolean();
     case "array":
-      return z.array(toZodType(schema.items ?? {}));
+      return applyArrayConstraints(z.array(toZodType(schema.items ?? {})), schema);
     case "object":
       return z.object(toZodRawShape(schema));
     default:
       return z.any();
   }
+}
+
+// Carry across the JSON-Schema validation keywords our tools actually use, so
+// the Claude backend enforces the same input contracts as pi/MCP instead of
+// passing unvalidated params through to tool implementations.
+function applyStringConstraints(z0: z.ZodString, schema: any): z.ZodString {
+  let zt = z0;
+  if (typeof schema.minLength === "number") zt = zt.min(schema.minLength);
+  if (typeof schema.maxLength === "number") zt = zt.max(schema.maxLength);
+  if (typeof schema.pattern === "string") {
+    try {
+      zt = zt.regex(new RegExp(schema.pattern));
+    } catch {
+      /* an un-compilable pattern shouldn't make the tool un-registerable */
+    }
+  }
+  return zt;
+}
+
+function applyNumberConstraints(z0: z.ZodNumber, schema: any): z.ZodNumber {
+  let zt = z0;
+  if (typeof schema.minimum === "number") zt = zt.min(schema.minimum);
+  if (typeof schema.maximum === "number") zt = zt.max(schema.maximum);
+  // draft-07 numeric form of the exclusive bounds (TypeBox emits these).
+  if (typeof schema.exclusiveMinimum === "number") zt = zt.gt(schema.exclusiveMinimum);
+  if (typeof schema.exclusiveMaximum === "number") zt = zt.lt(schema.exclusiveMaximum);
+  return zt;
+}
+
+function applyArrayConstraints(z0: z.ZodArray<any>, schema: any): z.ZodArray<any> {
+  let zt = z0;
+  if (typeof schema.minItems === "number") zt = zt.min(schema.minItems);
+  if (typeof schema.maxItems === "number") zt = zt.max(schema.maxItems);
+  return zt;
 }
 
 /** Convert a TypeBox object schema to a Zod raw shape (`{ key: ZodType }`),
