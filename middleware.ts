@@ -15,6 +15,8 @@ import { authConfig } from "@/auth.config";
 const { auth } = NextAuth(authConfig);
 
 export default auth((req) => {
+  if (process.env.NODE_ENV === "development") return NextResponse.next();
+
   const path = req.nextUrl.pathname;
 
   if (path === "/login" || path === "/login-link" || path.startsWith("/api/auth/")) {

@@ -22,6 +22,8 @@
     "@earendil-works/pi-ai": "^0.74.0",
     "@earendil-works/pi-coding-agent": "^0.74.0",
     "@types/bcryptjs": "^2.4.6",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^11.5.0",
     "class-variance-authority": "^0.7.1",
@@ -37,6 +39,7 @@
     "react-dom": "^19.0.0",
     "tailwind-merge": "^2.5.4",
     "typebox": "^1.1.0",
+    "ws": "^8.21.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
@@ -45,6 +48,7 @@
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/ws": "^8.18.1",
     "autoprefixer": "^10.4.20",
     "drizzle-kit": "^0.28.1",
     "postcss": "^8.4.49",

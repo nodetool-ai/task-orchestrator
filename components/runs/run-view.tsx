@@ -15,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { cn, formatDateTime } from "@/lib/utils";
+import { TerminalView } from "@/components/runs/terminal-view";
 import { isTerminalStatus, type SessionStatus } from "@/lib/types";
 import type { RunRow, MessageRow } from "@/lib/runs";
 import type { SdkContentBlock, SdkMessageEnvelope } from "@/lib/sdk-message";
@@ -122,6 +123,9 @@ export function RunView({
 
   const status = run.status;
   const terminal = isTerminalStatus(status);
+  const hasTerminal =
+    run.harness === "claude_cli" && !!run.tmuxSession && !terminal;
+  const [terminalOpen, setTerminalOpen] = useState(hasTerminal);
   const closed = status === "closed";
   const composerDisabled = closed;
   const canCancel =
@@ -480,6 +484,22 @@ export function RunView({
               <code className="font-mono">tmux attach -t {run.tmuxSession}</code>
             </span>
           )}
+          {hasTerminal && (
+            <button
+              type="button"
+              onClick={() => setTerminalOpen((o) => !o)}
+              className={cn(
+                "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono transition-colors",
+                terminalOpen
+                  ? "bg-foreground/10 text-foreground"
+                  : "text-muted-foreground/60 hover:text-foreground hover:bg-foreground/5"
+              )}
+              title={terminalOpen ? "Hide terminal" : "Show live terminal"}
+            >
+              <TerminalSquare className="size-3" />
+              {terminalOpen ? "hide terminal" : "terminal"}
+            </button>
+          )}
           {task && (
             <Link
               href={`/tasks/${task.id}`}
@@ -493,6 +513,11 @@ export function RunView({
           )}
         </div>
       </header>
+
+      {/* Live terminal — only for running claude_cli runs */}
+      {hasTerminal && terminalOpen && run.tmuxSession && (
+        <TerminalView runId={run.id} tmuxSession={run.tmuxSession} />
+      )}
 
       {/* Message stream */}
       <div className="flex-1 overflow-y-auto bg-background">

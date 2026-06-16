@@ -286,6 +286,7 @@ export function create(input: CreateRunInput): RunRow {
   // used, not a placeholder env value.
   const personaId = input.personaId ?? "implementor";
   const personaRow = repo.getPersona(personaId);
+  const effectivePersonaId = personaRow ? personaId : null;
   const effectiveModel =
     input.model ?? personaRow?.modelId ?? DEFAULT_MODEL;
 
@@ -304,7 +305,7 @@ export function create(input: CreateRunInput): RunRow {
       title: input.title ?? null,
       userId: input.userId ?? null,
       prUrl: input.prUrl ?? null,
-      personaId,
+      personaId: effectivePersonaId,
       budgetMaxTurns: input.budget?.maxTurns ?? null,
       budgetMaxUsd: input.budget?.maxUsd ?? null,
       budgetMaxSeconds: input.budget?.maxSeconds ?? null,
@@ -1369,7 +1370,9 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     );
   }
 
-  const modelId = run.model ?? persona.modelId;
+  const [resolvedProvider, resolvedModelId] = run.model?.includes("/")
+    ? run.model.split("/", 2)
+    : [persona.modelProvider, run.model ?? persona.modelId];
   const profileSpec = run.toolsProfile ?? persona.toolsProfile;
 
   const profileCtx: ProfileContext = {
@@ -1383,7 +1386,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     name: persona.name,
     description: persona.description ?? "",
     systemPrompt: persona.systemPrompt,
-    model: { provider: persona.modelProvider, id: persona.modelId },
+    model: { provider: resolvedProvider, id: resolvedModelId },
     thinkingLevel: (persona.thinkingLevel ?? undefined) as "low" | "medium" | "high" | undefined,
     toolsProfile: persona.toolsProfile,
     skillPaths: [] as string[],
@@ -1417,7 +1420,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
 
   const { session } = await createAgentSession({
     cwd,
-    model: getModel(persona.modelProvider as any, modelId as any),
+    model: getModel(resolvedProvider as any, resolvedModelId as any),
     thinkingLevel: (persona.thinkingLevel ?? undefined) as any,
     authStorage,
     modelRegistry,

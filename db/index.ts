@@ -4,6 +4,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as schema from "./schema";
+import { PERSONAS } from "../lib/personas";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = join(__dirname, "migrations");
@@ -109,12 +110,49 @@ declare global {
   var __tasksDb: DB | undefined;
 }
 
+function seedPersonasSync(sqlite: Database.Database) {
+  try {
+    const existing = new Set(
+      (sqlite.prepare("SELECT id FROM personas").all() as { id: string }[]).map((r) => r.id)
+    );
+    const insert = sqlite.prepare(
+      `INSERT OR IGNORE INTO personas
+         (id, name, description, system_prompt, model_provider, model_id,
+          thinking_level, tools_profile, skill_paths, budget_max_turns,
+          budget_max_seconds, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    );
+    const now = Date.now();
+    for (const p of PERSONAS) {
+      if (existing.has(p.id)) continue;
+      insert.run(
+        p.id,
+        p.name,
+        p.description ?? null,
+        p.systemPrompt,
+        p.model.provider,
+        p.model.id,
+        p.thinkingLevel ?? null,
+        p.toolsProfile,
+        "[]",
+        p.budget?.maxTurns ?? null,
+        p.budget?.maxSeconds ?? null,
+        now,
+        now
+      );
+    }
+  } catch {
+    // Personas table may not exist yet (pre-migration DB) — skip silently.
+  }
+}
+
 function createDb(): DB {
   const sqlite = new Database(resolveDbPath());
   sqlite.pragma("journal_mode = WAL");
   sqlite.pragma("foreign_keys = ON");
   sqlite.pragma("busy_timeout = 2000");
   applyMigrations(sqlite);
+  seedPersonasSync(sqlite);
   syncDefaultRepoFromEnv(sqlite);
   return drizzle(sqlite, { schema }) as DB;
 }

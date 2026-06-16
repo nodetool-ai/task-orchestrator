@@ -1,18 +1,13 @@
 // Next.js 13+ runtime hook: invoked once per process on first request /
 // cold start.
 //
-// Historically this started the hourly worktree-GC sweep when
-// TASK_ORCH_WORKTREE_GC was truthy. The dynamic import survives `next dev`
-// (tsx loader resolves the .ts file at runtime) but loses its
-// /* webpackIgnore: true */ annotation under `next build`, so the prod
-// bundle hard-fails on `Cannot find module .next/server/lib/worktree-gc`
-// at boot.
+// The dynamic import for worktree-gc survives `next dev` (tsx loader resolves
+// the .ts file at runtime) but loses its /* webpackIgnore: true */ annotation
+// under `next build`, so the prod bundle hard-fails on missing module.
+// Gate it behind TASK_ORCH_WORKTREE_GC so production skips it.
 //
-// For now, gate every side effect behind the env flag so production (which
-// doesn't set TASK_ORCH_WORKTREE_GC) skips the import entirely. The worktree
-// GC sweep can run from a cron / one-shot script when needed.
-//
-// Persona seeding is handled by `npm run db:seed` (scripts/seed.ts), not here.
+// Persona seeding uses a static import (no webpack issues) and runs
+// insert-if-missing so it's safe on every cold start.
 //
 // See https://nextjs.org/docs/app/building-your-application/optimizing/instrumentation
 export async function register(): Promise<void> {

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import * as runs from "@/lib/runs";
 import { errorResponse } from "@/lib/api";
+import { getUserById } from "@/lib/users";
 
 export const dynamic = "force-dynamic";
 
@@ -38,7 +39,9 @@ const createRunSchema = z.object({
 async function userId(): Promise<number | null> {
   const session = await auth();
   const id = session?.user?.id;
-  return id ? Number(id) : null;
+  if (!id) return null;
+  const n = Number(id);
+  return getUserById(n) ? n : null;
 }
 
 export async function POST(req: NextRequest) {

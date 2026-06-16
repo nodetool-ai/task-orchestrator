@@ -18,7 +18,7 @@ export default function PersonasPage() {
   }));
 
   return (
-    <main className="space-y-6">
+    <main style={{ padding: "20px 20px 80px", maxWidth: 1480, margin: "0 auto" }} className="space-y-6">
       <header className="space-y-1">
         <h1 className="text-xl font-semibold tracking-tight">Personas</h1>
         <p className="text-sm text-muted-foreground">

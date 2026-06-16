@@ -4,27 +4,23 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, Search, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+export interface ModelOption {
+  id: string;       // model ID, e.g. "claude-sonnet-4-6"
+  name: string;     // display name, e.g. "Claude Sonnet 4.6"
+  provider: string; // provider ID, e.g. "anthropic"
+}
+
 interface Props {
-  value: string;
-  options: string[];
-  onChange: (next: string) => void;
+  value: string;          // currently selected "provider/modelId"
+  options: ModelOption[];
+  onChange: (next: string) => void; // emits "provider/modelId"
   disabled?: boolean;
   id?: string;
 }
 
-function family(model: string): "opus" | "sonnet" | "haiku" | "other" {
-  if (model.includes("opus")) return "opus";
-  if (model.includes("sonnet")) return "sonnet";
-  if (model.includes("haiku")) return "haiku";
-  return "other";
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
-
-const FAMILY_LABEL: Record<ReturnType<typeof family>, string> = {
-  opus: "Opus",
-  sonnet: "Sonnet",
-  haiku: "Haiku",
-  other: "Other",
-};
 
 export function ModelPicker({ value, options, onChange, disabled, id }: Props) {
   const [open, setOpen] = useState(false);
@@ -32,24 +28,39 @@ export function ModelPicker({ value, options, onChange, disabled, id }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const allOptions = useMemo(() => {
-    return options.includes(value) ? options : [...options, value];
+  // Ensure current value is always in the list.
+  const allOptions = useMemo((): ModelOption[] => {
+    const qualified = options.map((o) => `${o.provider}/${o.id}`);
+    if (qualified.includes(value)) return options;
+    // Derive a fallback entry from the qualified string.
+    const parts = value.split("/");
+    const modelId = parts[parts.length - 1];
+    const provider = parts.length > 1 ? parts.slice(0, -1).join("/") : "unknown";
+    return [...options, { id: modelId, name: modelId, provider }];
   }, [options, value]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return allOptions;
-    return allOptions.filter((m) => m.toLowerCase().includes(q));
+    return allOptions.filter(
+      (m) => m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)
+    );
   }, [allOptions, query]);
 
+  // Group by provider.
   const grouped = useMemo(() => {
-    const groups: Record<string, string[]> = {};
+    const groups: Record<string, ModelOption[]> = {};
     for (const m of filtered) {
-      const fam = FAMILY_LABEL[family(m)];
-      (groups[fam] ??= []).push(m);
+      (groups[m.provider] ??= []).push(m);
     }
     return Object.entries(groups);
   }, [filtered]);
+
+  // Display label: last segment of the qualified value string.
+  const displayLabel = useMemo(() => {
+    const parts = value.split("/");
+    return parts[parts.length - 1];
+  }, [value]);
 
   useEffect(() => {
     if (!open) return;
@@ -83,12 +94,12 @@ export function ModelPicker({ value, options, onChange, disabled, id }: Props) {
         aria-expanded={open}
       >
         <Sparkles className="size-3 text-state-review" />
-        <span className="truncate max-w-[180px]">{value}</span>
+        <span className="truncate max-w-[180px]">{displayLabel}</span>
         <ChevronDown className={cn("size-3 text-muted-foreground transition-transform", open && "rotate-180")} />
       </button>
 
       {open && (
-        <div className="absolute right-0 z-30 mt-1 w-72 rounded-lg border border-border/60 bg-card shadow-lg shadow-black/20 animate-fade-in">
+        <div className="absolute left-0 z-30 mt-1 w-72 rounded-lg border border-border/60 bg-card shadow-lg shadow-black/20 animate-fade-in">
           <div className="flex items-center gap-1.5 border-b border-border/60 px-2.5 py-2">
             <Search className="size-3 text-muted-foreground" />
             <input
@@ -105,19 +116,20 @@ export function ModelPicker({ value, options, onChange, disabled, id }: Props) {
                 No models match.
               </div>
             ) : (
-              grouped.map(([label, models]) => (
-                <div key={label}>
+              grouped.map(([provider, models]) => (
+                <div key={provider}>
                   <div className="px-2.5 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/70">
-                    {label}
+                    {capitalize(provider)}
                   </div>
                   {models.map((m) => {
-                    const selected = m === value;
+                    const qualified = `${m.provider}/${m.id}`;
+                    const selected = qualified === value;
                     return (
                       <button
-                        key={m}
+                        key={qualified}
                         type="button"
                         onClick={() => {
-                          onChange(m);
+                          onChange(qualified);
                           setOpen(false);
                           setQuery("");
                         }}
@@ -134,7 +146,7 @@ export function ModelPicker({ value, options, onChange, disabled, id }: Props) {
                             selected ? "text-state-done" : "opacity-0"
                           )}
                         />
-                        <span className="truncate">{m}</span>
+                        <span className="truncate">{m.name || m.id}</span>
                       </button>
                     );
                   })}
