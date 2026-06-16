@@ -1,13 +1,15 @@
 // lib/extensions/types.ts
 //
-// Shared types for pi extensions used by the task-orchestrator runner.
-// ExtensionFactory is re-exported from the pi-coding-agent SDK so downstream
-// modules don't import directly from the SDK.
+// Shared types for the task-orchestrator extensions. ExtensionFactory is the
+// backend-neutral Extension type (lib/agent-backend), so extensions register
+// against a BackendRegistrar rather than a concrete SDK's API. Each backend
+// adapter translates the registrar calls to its SDK.
 
-import type { ExtensionFactory as PiExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { Extension, BackendRegistrar } from "../agent-backend/types";
 import type { RunRow } from "../runs";
 
-export type ExtensionFactory = PiExtensionFactory;
+export type ExtensionFactory = Extension;
+export type { BackendRegistrar };
 
 /**
  * Per-turn context passed to each profile's extension factory builder.

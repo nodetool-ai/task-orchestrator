@@ -7,7 +7,6 @@
 //
 // Pure helpers re-exported for direct unit testing.
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { eq } from "drizzle-orm";
 
@@ -272,8 +271,8 @@ export interface SpawnExtensionOptions {
 
 export const spawnExtension =
   ({ runId, runRow }: SpawnExtensionOptions): ExtensionFactory =>
-  (pi: ExtensionAPI) => {
-    pi.registerTool({
+  (reg) => {
+    reg.registerTool({
       name: "spawn__spawn_agent",
       label: "Spawn Agent",
       description:
@@ -388,7 +387,7 @@ export const spawnExtension =
       },
     });
 
-    pi.registerTool({
+    reg.registerTool({
       name: "spawn__get_run",
       label: "Get Run",
       description:
@@ -421,7 +420,7 @@ export const spawnExtension =
       },
     });
 
-    pi.registerTool({
+    reg.registerTool({
       name: "spawn__append_message",
       label: "Append Message",
       description:

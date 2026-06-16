@@ -5,7 +5,6 @@
 // old file.
 
 import { spawn } from "node:child_process";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
   ownerRepoFromRemote,
@@ -51,7 +50,7 @@ export interface GhPrExtensionOptions {
 
 export const ghPrExtension =
   (opts: GhPrExtensionOptions = {}): ExtensionFactory =>
-  (pi: ExtensionAPI) => {
+  (reg) => {
     const cwd = opts.cwd;
 
     function gate(url: string):
@@ -62,7 +61,7 @@ export const ghPrExtension =
       return { ok: true, parsed: v.parsed, matched: v.matched };
     }
 
-    pi.registerTool({
+    reg.registerTool({
       name: "gh_pr__pr_view",
       label: "PR View",
       description:
@@ -111,7 +110,7 @@ export const ghPrExtension =
       },
     });
 
-    pi.registerTool({
+    reg.registerTool({
       name: "gh_pr__pr_diff",
       label: "PR Diff",
       description:
@@ -136,7 +135,7 @@ export const ghPrExtension =
       },
     });
 
-    pi.registerTool({
+    reg.registerTool({
       name: "gh_pr__pr_review",
       label: "PR Review",
       description:
@@ -180,7 +179,7 @@ export const ghPrExtension =
       },
     });
 
-    pi.registerTool({
+    reg.registerTool({
       name: "gh_pr__pr_comment",
       label: "PR Comment",
       description:
@@ -267,7 +266,7 @@ export const ghPrExtension =
       },
     });
 
-    pi.registerTool({
+    reg.registerTool({
       name: "gh_pr__pr_merge",
       label: "PR Merge",
       description:

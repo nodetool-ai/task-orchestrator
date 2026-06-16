@@ -36,8 +36,6 @@ import { tmpdir } from "node:os";
 import path, { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, notInArray, or } from "drizzle-orm";
-import { createAgentSession, SessionManager, AuthStorage, ModelRegistry, DefaultResourceLoader, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { getModel } from "@earendil-works/pi-ai";
 
 import { db } from "@/db";
 import { agentEvents, agentMessages, agentSessions } from "@/db/schema";
@@ -48,7 +46,8 @@ import type { SdkContentBlock } from "./sdk-message";
 import type { AgentSessionFull, SessionStatus } from "./types";
 import { isTerminalStatus } from "./types";
 import { resolveProfiles, type ProfileContext } from "./profiles";
-import { mapPiEvent, type RunEnvelope } from "./pi-event-mapper";
+import { type RunEnvelope } from "./pi-event-mapper";
+import { getBackend, type Extension } from "./agent-backend";
 import { sandboxFactory } from "./extensions/sandbox";
 import { personaPromptFactory } from "./extensions/persona-prompt";
 import { personaMemoryFactory } from "./extensions/persona-memory";
@@ -1021,41 +1020,13 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     skillPaths: [] as string[],
   };
 
-  const factories = [
+  const extensions: Extension[] = [
     personaPromptFactory(personaForExt),
     personaMemoryFactory(personaForExt, run, repo, cwd),
     sandboxFactory(cwd, sandboxDbPath),
     abortBridgeFactory(abort),
     ...profileFactories,
   ];
-
-  const sessionDir = path.join(cwd, ".pi", "sessions");
-  const sessionManager = run.sdkSessionId
-    ? SessionManager.open(run.sdkSessionId, sessionDir)
-    : SessionManager.create(cwd, sessionDir);
-
-  const authStorage = AuthStorage.create();
-  const modelRegistry = ModelRegistry.create(authStorage);
-
-  const agentDir = getAgentDir();
-  // Skills come from pi's default discovery: <cwd>/.pi/skills/, .agents/skills/
-  // (cwd + ancestors), ~/.pi/agent/skills/, ~/.agents/skills/. We don't add
-  // persona-specific paths anymore; skills belong to the project, not the role.
-  const resourceLoader = new DefaultResourceLoader({
-    cwd,
-    agentDir,
-    extensionFactories: factories,
-  });
-
-  const { session } = await createAgentSession({
-    cwd,
-    model: getModel(persona.modelProvider as any, modelId as any),
-    thinkingLevel: (persona.thinkingLevel ?? undefined) as any,
-    authStorage,
-    modelRegistry,
-    sessionManager,
-    resourceLoader,
-  });
 
   const envelopes: RunEnvelope[] = [];
   const assistantBlocks: any[] = [];
@@ -1064,52 +1035,53 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   let sdkSessionId: string | null = null;
   let inputTokens: number | null = null;
   let outputTokens: number | null = null;
-  let turns = 0;
 
-  const stop = session.subscribe((rawEv: any) => {
-    if (abort.signal.aborted) return;
+  // Persist/accumulate each mapped envelope as the turn streams. The shape is
+  // identical across backends (RunEnvelope), so downstream is backend-agnostic.
+  const onEvent = (env: RunEnvelope) => {
+    envelopes.push(env);
+    onSdk?.(env);
 
-    if (rawEv.type === "turn_end") turns += 1;
-
-    for (const env of mapPiEvent(rawEv, session, sessionManager)) {
-      envelopes.push(env);
-      onSdk?.(env);
-
-      if (env.type === "system" && env.subtype === "init" && env.session_id) {
-        sdkSessionId = env.session_id;
-        db.update(agentSessions)
-          .set({ sdkSessionId })
-          .where(eq(agentSessions.id, run.id))
-          .run();
-      }
-
-      if (env.type === "assistant" && env.message?.content) {
-        for (const b of env.message.content) assistantBlocks.push(b);
-        const text = env.message.content
-          .filter((b: any) => b.type === "text" && typeof b.text === "string")
-          .map((b: any) => b.text)
-          .join("\n").trim();
-        if (text) lastAssistantText = text;
-      }
-
-      if (env.type === "user" && env.message?.content) {
-        const toolResults = env.message.content.filter((b: any) => b.type === "tool_result");
-        if (toolResults.length > 0) persistMessage(run.id, "tool", toolResults as any);
-      }
-
-      if (env.type === "result") {
-        if (!env.is_error && typeof env.result === "string") summary = env.result.trim() || null;
-        inputTokens = env.usage?.input_tokens ?? inputTokens;
-        outputTokens = env.usage?.output_tokens ?? outputTokens;
-      }
+    if (env.type === "system" && env.subtype === "init" && env.session_id) {
+      sdkSessionId = env.session_id;
+      db.update(agentSessions)
+        .set({ sdkSessionId })
+        .where(eq(agentSessions.id, run.id))
+        .run();
     }
-  });
 
-  try {
-    await session.prompt(prompt);  // resolves after agent_end settles
-  } finally {
-    stop();
-  }
+    if (env.type === "assistant" && env.message?.content) {
+      for (const b of env.message.content) assistantBlocks.push(b);
+      const text = env.message.content
+        .filter((b: any) => b.type === "text" && typeof b.text === "string")
+        .map((b: any) => b.text)
+        .join("\n").trim();
+      if (text) lastAssistantText = text;
+    }
+
+    if (env.type === "user" && env.message?.content) {
+      const toolResults = env.message.content.filter((b: any) => b.type === "tool_result");
+      if (toolResults.length > 0) persistMessage(run.id, "tool", toolResults as any);
+    }
+
+    if (env.type === "result") {
+      if (!env.is_error && typeof env.result === "string") summary = env.result.trim() || null;
+      inputTokens = env.usage?.input_tokens ?? inputTokens;
+      outputTokens = env.usage?.output_tokens ?? outputTokens;
+    }
+  };
+
+  const backend = await getBackend();
+  const outcome = await backend.runTurn({
+    cwd,
+    model: { provider: persona.modelProvider, id: modelId },
+    thinkingLevel: (persona.thinkingLevel ?? undefined) as "low" | "medium" | "high" | undefined,
+    extensions,
+    resumeToken: run.sdkSessionId ?? null,
+    abort,
+    prompt,
+    onEvent,
+  });
 
   if (assistantBlocks.length > 0) {
     persistMessage(run.id, "agent", assistantBlocks as any);
@@ -1117,19 +1089,25 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
 
   return {
     envelopes: envelopes as any,
-    summary: summary ?? lastAssistantText,
-    sdkSessionId,
-    totalCostUsd: null,
-    inputTokens,
-    outputTokens,
-    turns,
+    summary: summary ?? lastAssistantText ?? outcome.summary,
+    // outcome.resumeToken is authoritative (backend-tagged); fall back to the
+    // session id observed mid-turn, then the prior token.
+    sdkSessionId: outcome.resumeToken ?? sdkSessionId ?? run.sdkSessionId ?? null,
+    totalCostUsd: outcome.totalCostUsd,
+    inputTokens: inputTokens ?? outcome.inputTokens,
+    outputTokens: outputTokens ?? outcome.outputTokens,
+    turns: outcome.turns,
   };
 }
 
 function checkBudget(run: RunRow, result: TurnResult): boolean {
+  // Note: `turns` is counted per-backend (pi: turn_end events; Claude: the
+  // result's num_turns), so a given budgetMaxTurns may behave slightly
+  // differently across backends.
   if (run.budgetMaxTurns != null && result.turns >= run.budgetMaxTurns) return true;
-  // budgetMaxUsd not enforced under pi (no total_cost_usd surface);
-  // column kept for historical data (see SCHEMA.md).
+  // budgetMaxUsd is not enforced: pi exposes no cost surface (totalCostUsd is
+  // null), and while the Claude backend does report total_cost_usd we keep the
+  // cap dormant for parity. Column kept for historical data (see SCHEMA.md).
   return false;
 }
 

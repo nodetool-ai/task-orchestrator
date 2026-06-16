@@ -18,6 +18,9 @@ const nextConfig = {
     "@earendil-works/pi-ai",
     "@earendil-works/pi-agent-core",
     "@earendil-works/pi-tui",
+    // The Claude Agent SDK bundles a native CLI binary; same bundling hazard as
+    // the pi packages, so keep it external too.
+    "@anthropic-ai/claude-agent-sdk",
   ],
 };
 
