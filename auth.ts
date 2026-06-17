@@ -1,10 +1,11 @@
-import NextAuth from "next-auth";
+import NextAuth, { type Session } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
-import { verifyCredentials, findUser } from "@/lib/users";
+import { verifyCredentials, findUser, ensureDevUser } from "@/lib/users";
 import { verifyMagicToken } from "@/lib/magic-link";
 import { authConfig } from "./auth.config";
+import { isAuthDisabled } from "@/lib/auth-mode";
 
-export const { handlers, auth, signIn, signOut } = NextAuth({
+const nextAuth = NextAuth({
   ...authConfig,
   providers: [
     Credentials({
@@ -55,3 +56,22 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     },
   },
 });
+
+export const { handlers, signIn, signOut } = nextAuth;
+
+// In development the login gate is off (see lib/auth-mode). A no-arg
+// `await auth()` then returns a synthetic session for the local dev user so
+// the layout and every API route see a logged-in user with a real users.id.
+// Any other call form (middleware/route-handler wrappers) delegates to the
+// real NextAuth handler unchanged.
+export const auth = ((...args: unknown[]) => {
+  if (args.length === 0 && isAuthDisabled()) {
+    const user = ensureDevUser();
+    const session: Session = {
+      user: { id: String(user.id), email: user.email } as Session["user"],
+      expires: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    };
+    return Promise.resolve(session);
+  }
+  return (nextAuth.auth as (...a: unknown[]) => unknown)(...args);
+}) as typeof nextAuth.auth;
