@@ -4,7 +4,7 @@ export const dynamic = "force-dynamic";
 
 export default function TokensPage() {
   return (
-    <main className="space-y-6">
+    <main style={{ padding: "20px 20px 80px", maxWidth: 1480, margin: "0 auto" }} className="space-y-6">
       <header className="space-y-1">
         <h1 className="text-xl font-semibold tracking-tight">API tokens</h1>
         <p className="text-sm text-muted-foreground">

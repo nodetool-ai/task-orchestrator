@@ -2,31 +2,29 @@ import Link from "next/link";
 import { MessagesSquare } from "lucide-react";
 import * as repo from "@/lib/repo";
 import { listRuns } from "@/lib/runs";
+import { getDefaultModel } from "@/lib/chat";
 import { relativeDate } from "@/lib/utils";
 import { NewChatBox } from "@/components/new-chat-box";
+import { SessionStatusPill } from "@/components/session-status-pill";
 
 export const dynamic = "force-dynamic";
 
 export default async function ChatPage() {
-  const personas = repo.listPersonas().map((p) => ({
-    id: p.id,
-    name: p.name,
-    modelProvider: p.modelProvider,
-    modelId: p.modelId,
-  }));
   const repositories = repo.listRepositories().map((r) => ({ id: r.id, name: r.name }));
   const chatRuns = listRuns({}).filter((r) => r.goal === "<chat>").slice(0, 30);
+  const defaultModel = getDefaultModel();
 
   return (
+    <div style={{ padding: "20px 20px 80px", maxWidth: 1480, margin: "0 auto" }}>
     <div className="space-y-8">
       <section className="space-y-3">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">Chat</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">New Chat</h1>
           <p className="text-sm text-muted-foreground">
             Free-form conversation with the agent. Each chat is its own run, listed below.
           </p>
         </div>
-        <NewChatBox personas={personas} repositories={repositories} />
+        <NewChatBox defaultModel={defaultModel} repositories={repositories} />
       </section>
 
       <section className="space-y-3">
@@ -45,10 +43,8 @@ export default async function ChatPage() {
                   <span className="text-sm flex-1 truncate">
                     {r.title ?? `Chat #${r.id}`}
                   </span>
-                  <span className="text-[11px] text-muted-foreground tabular-nums shrink-0">
-                    {r.status}
-                  </span>
-                  <span className="text-[11px] text-muted-foreground tabular-nums shrink-0">
+                  <SessionStatusPill status={r.status} className="shrink-0" />
+                  <span className="font-mono text-[11px] text-muted-foreground tabular-nums shrink-0">
                     {relativeDate(r.startedAt)}
                   </span>
                 </Link>
@@ -57,6 +53,7 @@ export default async function ChatPage() {
           </ul>
         )}
       </section>
+    </div>
     </div>
   );
 }
