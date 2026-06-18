@@ -1,14 +1,17 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowUp, Loader2, MessageCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   PersonaPicker,
   type PersonaOption,
 } from "@/components/pickers/persona-picker";
+import { ModelPicker, type ModelOption } from "@/components/chat/model-picker";
 
 export type { PersonaOption };
+
+const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
 
 interface Props {
   taskId: string;
@@ -34,9 +37,28 @@ interface Props {
 export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], className }: Props) {
   const [input, setInput] = useState("");
   const [personaId, setPersonaId] = useState(personas[0]?.id ?? "implementor");
+  const [model, setModel] = useState(DEFAULT_MODEL);
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    fetch("/api/providers")
+      .then((res) => res.json())
+      .then((data: { providers: { id: string; models: { id: string; name: string }[] }[] }) => {
+        const flat: ModelOption[] = [];
+        for (const provider of data.providers ?? []) {
+          for (const m of provider.models ?? []) {
+            flat.push({ id: m.id, name: m.name, provider: provider.id });
+          }
+        }
+        setModelOptions(flat);
+        const qualified = flat.map((o) => `${o.provider}/${o.id}`);
+        setModel((cur) => (qualified.includes(cur) ? cur : qualified[0] ?? cur));
+      })
+      .catch(() => {});
+  }, []);
 
   // Auto-grow the textarea like the run-view composer.
   function onInput(e: React.ChangeEvent<HTMLTextAreaElement>) {
@@ -74,6 +96,7 @@ export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], class
           taskId,
           repoId,
           personaId,
+          model,
         }),
       });
       if (!createRes.ok) {
@@ -117,12 +140,20 @@ export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], class
           <MessageCircle className="size-3.5" />
           <span>Ask the agent about this task — opens a new chat run.</span>
         </div>
-        <PersonaPicker
-          personas={personas}
-          value={personaId}
-          onChange={setPersonaId}
-          size="compact"
-        />
+        <div className="flex items-center gap-2">
+          <PersonaPicker
+            personas={personas}
+            value={personaId}
+            onChange={setPersonaId}
+            size="compact"
+          />
+          <ModelPicker
+            value={model}
+            options={modelOptions}
+            onChange={setModel}
+            disabled={pending}
+          />
+        </div>
       </div>
       <div className="flex items-end gap-2 rounded-2xl border border-border/60 bg-card/40 px-3 py-2 focus-within:border-foreground/30 transition-colors">
         <textarea

@@ -9,7 +9,6 @@ import { makeRegistrar } from "../helpers/fake-registrar";
 const persona: Persona = {
   id: "reviewer", name: "Reviewer", description: "",
   systemPrompt: "review code",
-  model: { provider: "anthropic", id: "claude-opus-4-5" },
   toolsProfile: "repo_read"
 };
 
@@ -21,7 +20,6 @@ describe("personaMemoryFactory", () => {
     db.delete(personasTable).run();
     db.insert(personasTable).values({
       id: "reviewer", name: "Reviewer", systemPrompt: "x",
-      modelProvider: "anthropic", modelId: "claude-opus-4-5",
       toolsProfile: "repo_read",
     }).run();
   });

@@ -10,6 +10,7 @@ import {
   type RepositoryOption,
 } from "@/components/pickers/repository-picker";
 import { ModelPicker, type ModelOption } from "@/components/chat/model-picker";
+import { stashPendingMessage } from "@/lib/pending-first-message";
 
 // Re-export so existing server-component callers can keep importing the
 // PersonaOption type from this module.
@@ -49,6 +50,12 @@ export function NewChatBox({ defaultModel, repositories }: Props) {
           }
         }
         setModelOptions(flat);
+        // Snap to a model the active backend actually offers. The default is a
+        // provider-qualified id, but if it isn't in the backend's catalog
+        // (e.g. a non-Anthropic backend) sending it would fail the turn — fall
+        // back to the first offered model so "send" always resolves.
+        const qualified = flat.map((o) => `${o.provider}/${o.id}`);
+        setModel((cur) => (qualified.includes(cur) ? cur : qualified[0] ?? cur));
       })
       .catch(() => {
         // Leave modelOptions empty; ModelPicker will show fallback entry.
@@ -96,12 +103,13 @@ export function NewChatBox({ defaultModel, repositories }: Props) {
       }
       const run = (await createRes.json()) as { id: number };
 
-      // Send the first message; let the run page pick up streaming via SSE.
-      void fetch(`/api/runs/${run.id}/messages`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-      }).catch(() => {});
+      // Hand the first message to the conversation view rather than posting it
+      // here. RunView is the authoritative streamer for a chat turn — if we
+      // POST and immediately navigate, that turn's SSE stream is discarded and
+      // the message never renders (the read-only /events bus doesn't carry the
+      // user message). RunView picks this up on mount and sends it through its
+      // normal optimistic + streaming path.
+      stashPendingMessage(run.id, text);
 
       router.push(`/runs/${run.id}`);
     } catch (err) {

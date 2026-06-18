@@ -16,8 +16,8 @@ describe("GET /api/personas", () => {
     expect(body.personas.length).toBe(5);
     const r = body.personas.find((p: any) => p.id === "reviewer");
     expect(r).toMatchObject({ id: "reviewer", name: "Reviewer" });
-    expect(typeof r.modelProvider).toBe("string");
-    expect(typeof r.modelId).toBe("string");
+    expect(r.modelProvider).toBeUndefined();
+    expect(r.modelId).toBeUndefined();
     expect(typeof r.systemPrompt).toBe("string");
     expect(typeof r.toolsProfile).toBe("string");
   });

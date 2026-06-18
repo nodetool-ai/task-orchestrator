@@ -9,8 +9,6 @@ export default function PersonasPage() {
     name: p.name,
     description: p.description,
     systemPrompt: p.systemPrompt,
-    modelProvider: p.modelProvider,
-    modelId: p.modelId,
     thinkingLevel: p.thinkingLevel,
     toolsProfile: p.toolsProfile,
     budgetMaxTurns: p.budgetMaxTurns,
@@ -22,8 +20,9 @@ export default function PersonasPage() {
       <header className="space-y-1">
         <h1 className="text-xl font-semibold tracking-tight">Personas</h1>
         <p className="text-sm text-muted-foreground">
-          Each persona bundles a system prompt, model, tools profile, and
-          budget defaults. Skills are loaded automatically from the project
+          Each persona bundles a system prompt, tools profile, and budget
+          defaults. The model is chosen per-run when you launch the agent.
+          Skills are loaded automatically from the project
           (<code>.pi/skills/</code>, <code>.agents/skills/</code>) — no
           per-persona setup needed. Edits saved here override the seed in{" "}
           <code>lib/personas/*.ts</code>.

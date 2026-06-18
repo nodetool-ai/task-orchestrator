@@ -31,7 +31,7 @@
 import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,7 +55,7 @@ import { abortBridgeFactory } from "./extensions/abort-bridge";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
-const DEFAULT_MODEL = process.env.TASK_ORCH_AGENT_MODEL ?? "claude-sonnet-4-5";
+const DEFAULT_MODEL = process.env.TASK_ORCH_AGENT_MODEL ?? "anthropic/claude-sonnet-4-6";
 const KEEP_WORKTREES = !!process.env.TASK_ORCH_KEEP_WORKTREES;
 
 const SANDBOX_OPTS = {
@@ -250,14 +250,12 @@ export function create(input: CreateRunInput): RunRow {
     throw new repo.RepoError(`Plan ${input.planId} not found`, 404);
   }
 
-  // Resolve the effective model. Priority: explicit input.model > persona's
-  // configured model > TASK_ORCH_AGENT_MODEL env default. We persist the
-  // resolved value so the UI and downstream consumers see what was actually
-  // used, not a placeholder env value.
+  // Resolve the effective model. The model is a per-run choice (the run-agent
+  // dialog / chat composers emit a provider-qualified "provider/id"); it is no
+  // longer tied to the persona. Fall back to the env default when the caller
+  // omits one. We persist the resolved value so the UI shows what was used.
   const personaId = input.personaId ?? "implementor";
-  const personaRow = repo.getPersona(personaId);
-  const effectiveModel =
-    input.model ?? personaRow?.modelId ?? DEFAULT_MODEL;
+  const effectiveModel = input.model ?? DEFAULT_MODEL;
 
   const inserted = db
     .insert(agentSessions)
@@ -672,12 +670,37 @@ function repoRoot(run: { repoId: string | null; taskId: string | null }): string
   return ORCHESTRATOR_ROOT;
 }
 
+/**
+ * Guard the resolved working directory before it reaches the agent backend.
+ * A missing cwd makes `child_process.spawn` emit `ENOENT` *against the
+ * executable*, which the Claude Agent SDK then misreports as a native-binary /
+ * libc mismatch ("binary exists but failed to launch"). Validate here so a
+ * stale repository `local_path` surfaces as an actionable error naming the
+ * offending repo instead of a misleading message about the Claude binary.
+ */
+export function validateCwd(dir: string, ctx: { runId: number; repoId: string | null }): string {
+  const where = `repository '${ctx.repoId ?? "(default)"}'`;
+  if (!existsSync(dir)) {
+    throw new Error(
+      `Run #${ctx.runId}: working directory '${dir}' does not exist. ` +
+        `Check the local_path of ${where}.`
+    );
+  }
+  if (!statSync(dir).isDirectory()) {
+    throw new Error(
+      `Run #${ctx.runId}: working directory '${dir}' is not a directory. ` +
+        `Check the local_path of ${where}.`
+    );
+  }
+  return dir;
+}
+
 async function prepareCwd(run: RunRow): Promise<string> {
   if (run.cwdStrategy === "none") {
-    return repoRoot(run);
+    return validateCwd(repoRoot(run), { runId: run.id, repoId: run.repoId });
   }
   if (run.cwdStrategy === "repo") {
-    return repoRoot(run);
+    return validateCwd(repoRoot(run), { runId: run.id, repoId: run.repoId });
   }
   // worktree / worktree_at_pr: re-materialize if missing.
   if (!run.branch || !run.worktreePath) {
@@ -694,7 +717,7 @@ async function prepareCwd(run: RunRow): Promise<string> {
     // sufficient — git checks out the existing branch into the new path.
     await sh(["git", "worktree", "add", run.worktreePath, run.branch], root);
   }
-  return run.worktreePath;
+  return validateCwd(run.worktreePath, { runId: run.id, repoId: run.repoId });
 }
 
 // ──────────────────────────────────────────────────────────
@@ -1000,7 +1023,13 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     );
   }
 
-  const modelId = run.model ?? persona.modelId;
+  // The model is chosen per-run, not by the persona. The model picker emits a
+  // provider-qualified "provider/id"; a bare value (e.g. a legacy
+  // TASK_ORCH_AGENT_MODEL) defaults to the anthropic provider.
+  const rawModel = run.model ?? DEFAULT_MODEL;
+  const [resolvedProvider, resolvedModelId] = rawModel.includes("/")
+    ? (rawModel.split("/", 2) as [string, string])
+    : ["anthropic", rawModel];
   const profileSpec = run.toolsProfile ?? persona.toolsProfile;
 
   const profileCtx: ProfileContext = {
@@ -1014,7 +1043,6 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     name: persona.name,
     description: persona.description ?? "",
     systemPrompt: persona.systemPrompt,
-    model: { provider: persona.modelProvider, id: persona.modelId },
     thinkingLevel: (persona.thinkingLevel ?? undefined) as "low" | "medium" | "high" | undefined,
     toolsProfile: persona.toolsProfile,
     skillPaths: [] as string[],
@@ -1074,7 +1102,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   const backend = await getBackend();
   const outcome = await backend.runTurn({
     cwd,
-    model: { provider: persona.modelProvider, id: modelId },
+    model: { provider: resolvedProvider, id: resolvedModelId },
     thinkingLevel: (persona.thinkingLevel ?? undefined) as "low" | "medium" | "high" | undefined,
     extensions,
     resumeToken: run.sdkSessionId ?? null,

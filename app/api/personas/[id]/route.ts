@@ -8,8 +8,6 @@ const PatchBody = z.object({
   name: z.string().min(1).optional(),
   description: z.string().nullable().optional(),
   systemPrompt: z.string().min(1).optional(),
-  modelProvider: z.string().min(1).optional(),
-  modelId: z.string().min(1).optional(),
   thinkingLevel: z.enum(["low", "medium", "high"]).nullable().optional(),
   toolsProfile: z.string().min(1).optional(),
   budgetMaxTurns: z.number().int().positive().nullable().optional(),
@@ -50,8 +48,6 @@ export async function PATCH(
         ? parsed.data.description
         : existing.description,
     systemPrompt: parsed.data.systemPrompt ?? existing.systemPrompt,
-    modelProvider: parsed.data.modelProvider ?? existing.modelProvider,
-    modelId: parsed.data.modelId ?? existing.modelId,
     thinkingLevel:
       parsed.data.thinkingLevel !== undefined
         ? parsed.data.thinkingLevel
@@ -75,8 +71,6 @@ export async function PATCH(
       name: next.name,
       description: next.description,
       systemPrompt: next.systemPrompt,
-      modelProvider: next.modelProvider,
-      modelId: next.modelId,
       thinkingLevel: next.thinkingLevel,
       toolsProfile: next.toolsProfile,
       budgetMaxTurns: next.budgetMaxTurns,

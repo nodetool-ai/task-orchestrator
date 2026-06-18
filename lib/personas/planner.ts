@@ -8,7 +8,6 @@ export const planner: Persona = {
 testable tasks with explicit acceptance criteria. Use the orchestrator tools
 to create plans, tasks, and dependencies. Keep tasks bite-sized; prefer many
 small tasks over one large one.`,
-  model: { provider: "kimi-coding", id: "kimi-for-coding" },
   thinkingLevel: "medium",
   toolsProfile: "orchestrator,repo_read",
   budget: { maxTurns: 40 },

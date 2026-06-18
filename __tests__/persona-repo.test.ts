@@ -14,10 +14,7 @@ function seedReviewer() {
     id: "reviewer",
     name: "Reviewer",
     description: "Reviews PRs",
-    systemPrompt: "You review code.",
-    modelProvider: "anthropic",
-    modelId: "claude-opus-4-5",
-    thinkingLevel: "high",
+    systemPrompt: "You review code.",    thinkingLevel: "high",
     toolsProfile: "repo_read,gh_pr",
     skillPaths: "[]",
   }).run();
@@ -42,8 +39,7 @@ describe("persona repo", () => {
     seedReviewer();
     db.insert(personasTable).values({
       id: "implementor", name: "Implementor", systemPrompt: "x",
-      modelProvider: "anthropic", modelId: "claude-sonnet-4-5",
-      toolsProfile: "orchestrator,repo_write",
+           toolsProfile: "orchestrator,repo_write",
     }).run();
     expect(repo.listPersonaIds()).toEqual(["implementor", "reviewer"]);
   });
@@ -112,14 +108,12 @@ describe("persona repo", () => {
   it("upsertPersona inserts then updates by id", () => {
     repo.upsertPersona({
       id: "qa", name: "QA", systemPrompt: "test things",
-      modelProvider: "anthropic", modelId: "claude-sonnet-4-5",
-      toolsProfile: "repo_read", skillPaths: [],
+           toolsProfile: "repo_read", skillPaths: [],
     });
     expect(repo.getPersona("qa")!.systemPrompt).toBe("test things");
     repo.upsertPersona({
       id: "qa", name: "QA", systemPrompt: "test all the things",
-      modelProvider: "anthropic", modelId: "claude-sonnet-4-5",
-      toolsProfile: "repo_read", skillPaths: [],
+           toolsProfile: "repo_read", skillPaths: [],
     });
     expect(repo.getPersona("qa")!.systemPrompt).toBe("test all the things");
   });

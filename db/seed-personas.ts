@@ -21,8 +21,6 @@ export function seedPersonas(opts: { force?: boolean } = {}): void {
       name: p.name,
       description: p.description,
       systemPrompt: p.systemPrompt,
-      modelProvider: p.model.provider,
-      modelId: p.model.id,
       thinkingLevel: p.thinkingLevel ?? null,
       toolsProfile: p.toolsProfile,
       skillPaths: [],

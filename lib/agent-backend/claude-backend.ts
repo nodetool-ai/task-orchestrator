@@ -8,6 +8,9 @@
 //                          mechanism is heavier; injection gives cross-backend parity).
 //   - tool-call interceptors → a PreToolUse hook (deny / updatedInput).
 //   - abort wiring        → query's native abortController.
+//   - auth                → inherited from the env, resolved like Claude Code:
+//                          ANTHROPIC_API_KEY when set, else the claude.ai
+//                          subscription (`claude login` / CLAUDE_CODE_OAUTH_TOKEN).
 // The Claude SDK (and its native bits) is dynamically imported so it never loads
 // under the pi backend.
 
@@ -56,13 +59,6 @@ export class ClaudeBackend implements AgentBackend {
 
   async runTurn(args: RunTurnArgs): Promise<TurnOutcome> {
     const { cwd, model, thinkingLevel, extensions, abort, prompt, onEvent } = args;
-
-    if (!process.env.ANTHROPIC_API_KEY) {
-      throw new Error(
-        "ANTHROPIC_API_KEY is required for the Claude agent backend " +
-          "(TASK_ORCH_AGENT_BACKEND=claude). Set it or switch the backend to 'pi'."
-      );
-    }
 
     // The Claude backend speaks only to Anthropic. Fail early with an actionable
     // message rather than letting a non-Anthropic provider reach the SDK and
@@ -132,6 +128,13 @@ export class ClaudeBackend implements AgentBackend {
 
     const resume = claudeResumeId(args.resumeToken);
 
+    // Auth is inherited from the environment, resolved like the Claude Code CLI:
+    // ANTHROPIC_API_KEY when set, otherwise the claude.ai subscription (stored
+    // OAuth from `claude login`, or CLAUDE_CODE_OAUTH_TOKEN). The SDK's `env`
+    // REPLACES the subprocess environment (no merge), so spread process.env to
+    // keep PATH/HOME/the key/etc., then layer any caller-supplied env.
+    const sdkEnv: Record<string, string | undefined> = { ...process.env, ...args.env };
+
     const envelopes: RunEnvelope[] = [];
     let summary: string | null = null;
     let lastAssistantText: string | null = null;
@@ -156,7 +159,7 @@ export class ClaudeBackend implements AgentBackend {
         abortController: abort,
         includePartialMessages: true,
         ...(resume ? { resume } : {}),
-        ...(args.env ? { env: args.env } : {}),
+        env: sdkEnv,
       } as any,
     });
 
@@ -208,8 +211,8 @@ export class ClaudeBackend implements AgentBackend {
       {
         id: "anthropic",
         models: [
-          { id: "claude-opus-4-6", name: "Claude Opus 4.6" },
-          { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5" },
+          { id: "claude-opus-4-8", name: "Claude Opus 4.8" },
+          { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
           { id: "claude-haiku-4-5", name: "Claude Haiku 4.5" },
         ],
       },

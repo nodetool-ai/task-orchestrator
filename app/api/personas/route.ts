@@ -14,8 +14,6 @@ function serialize(p: ReturnType<typeof repo.listPersonas>[number]) {
     name: p.name,
     description: p.description,
     systemPrompt: p.systemPrompt,
-    modelProvider: p.modelProvider,
-    modelId: p.modelId,
     thinkingLevel: p.thinkingLevel,
     toolsProfile: p.toolsProfile,
     budgetMaxTurns: p.budgetMaxTurns,

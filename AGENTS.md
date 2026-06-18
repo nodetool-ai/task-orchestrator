@@ -82,7 +82,10 @@ where a failed run left off, use the Resume button (or `agent
 resume <id>`): the new session passes the prior SDK session id to
 `query()` so the model has its prior conversation in context.
 
-Requires `ANTHROPIC_API_KEY` and an authed `gh` CLI.
+Requires an authed `gh` CLI, plus agent-backend auth: the default `pi`
+backend's own credentials, or — for `TASK_ORCH_AGENT_BACKEND=claude` —
+`ANTHROPIC_API_KEY` when set, otherwise a claude.ai subscription via
+`claude login` / `CLAUDE_CODE_OAUTH_TOKEN`.
 
 While running, the agent can call back into the task system via the
 orchestrator MCP tools — see [README.md](README.md) for the list. Use

@@ -21,6 +21,7 @@ import { SessionStatusPill } from "@/components/session-status-pill";
 import { RunMessage } from "@/components/runs/run-message";
 import { SystemEventRow } from "@/components/runs/system-event-row";
 import { useConfirm } from "@/components/ui/dialog-provider";
+import { takePendingMessage } from "@/lib/pending-first-message";
 
 interface SidebarRepo {
   id: string;
@@ -116,6 +117,7 @@ export function RunView({
   const endRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const didInitialScrollRef = useRef(false);
+  const handoffSentRef = useRef(false);
 
   const status = run.status;
   const terminal = isTerminalStatus(status);
@@ -180,6 +182,21 @@ export function RunView({
     // that resumes (idle → running) reconnects without a full reload.
   }, [run.id, terminal, status, router]);
 
+  // First-message handoff: the /chat composer stashes a brand-new run's first
+  // message and navigates here. Send it through the normal optimistic + SSE
+  // path so it renders identically to every subsequent message. Read-once
+  // storage plus the ref guard make this safe under StrictMode and refreshes.
+  useEffect(() => {
+    if (handoffSentRef.current) return;
+    const pending = takePendingMessage(run.id);
+    if (pending) {
+      handoffSentRef.current = true;
+      void sendText(pending);
+    }
+    // Mount-only for this run; sendText is a stable closure for a fresh run.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run.id]);
+
   function handleSseEvent(event: StreamEventClient) {
     if (event.type === "status" && event.status) {
       setRun((r) => ({ ...r, status: event.status! }));
@@ -230,7 +247,11 @@ export function RunView({
   }
 
   async function send() {
-    const text = input.trim();
+    return sendText(input);
+  }
+
+  async function sendText(rawText: string) {
+    const text = rawText.trim();
     if (!text || sending || composerDisabled) return;
     setInput("");
     setSending(true);

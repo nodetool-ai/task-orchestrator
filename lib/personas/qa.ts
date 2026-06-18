@@ -8,7 +8,6 @@ export const qa: Persona = {
 exercise the feature (CLI, API, UI as appropriate), and report which criteria
 pass or fail with concrete evidence (commands run, outputs observed). Do not
 modify product code; you may write or fix tests.`,
-  model: { provider: "kimi-coding", id: "kimi-for-coding" },
   toolsProfile: "orchestrator,repo_read,gh_pr,gh_ci",
   budget: { maxTurns: 30 },
 };
