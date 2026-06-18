@@ -45,7 +45,7 @@ import * as repo from "./repo";
 import { buildImplementPrompt, extractReviewOutcome } from "./run-templates";
 import { parsePrUrl } from "./gh-url";
 import type { SdkContentBlock } from "./sdk-message";
-import type { AgentSessionFull, SessionStatus } from "./types";
+import type { AgentSessionFull, PlanningStage, SessionStatus } from "./types";
 import { isTerminalStatus } from "./types";
 import { resolveProfiles, type ProfileContext } from "./profiles";
 import { mapPiEvent, type RunEnvelope } from "./pi-event-mapper";
@@ -68,7 +68,7 @@ const SANDBOX_OPTS = {
 // Public types
 // ──────────────────────────────────────────────────────────
 
-export type Goal = "<implement>" | "<chat>" | "<review>" | (string & {});
+export type Goal = "<implement>" | "<chat>" | "<review>" | "<plan>" | (string & {});
 export type CwdStrategy = "worktree" | "worktree_at_pr" | "repo" | "none";
 
 export interface Budget {
@@ -137,6 +137,8 @@ export interface RunRow {
   personaId: string | null;
   /** Pre-migration-0009 chats.id, for /chat/[id] redirect lookups. */
   legacyChatId: number | null;
+  /** Planning-flow stage for `<plan>` runs; null for ordinary runs. */
+  planningStage: PlanningStage | null;
   startedAt: Date;
   completedAt: Date | null;
 }
@@ -220,10 +222,16 @@ function getLock(runId: number): PerRunLock {
 
 export function create(input: CreateRunInput): RunRow {
   const goal = input.goal ?? "<chat>";
-  const cwdStrategy: CwdStrategy = input.cwdStrategy ?? (goal === "<chat>" ? "none" : "worktree");
+  // Planning runs share the chat surface: no git lifecycle, idle until the
+  // first user message. They never kick off the implement/review workers.
+  const isConversational = goal === "<chat>" || goal === "<plan>";
+  const cwdStrategy: CwdStrategy = input.cwdStrategy ?? (isConversational ? "none" : "worktree");
   const toolsProfile =
     input.toolsProfile ?? (goal === "<chat>" ? "orchestrator,repo_write" : "orchestrator,repo_write");
-  const initialStatus: SessionStatus = input.defer || goal === "<chat>" ? "idle" : "pending";
+  const initialStatus: SessionStatus = input.defer || isConversational ? "idle" : "pending";
+  // A `<plan>` run enters the gated flow at the `gathering` stage; ordinary
+  // runs leave planning_stage NULL.
+  const planningStage: PlanningStage | null = goal === "<plan>" ? "gathering" : null;
 
   // Resolve repo: explicit > task's repo > plan's first repo > defaultRepo.
   // We don't error on missing repo at create time for chat-style runs; the
@@ -279,6 +287,7 @@ export function create(input: CreateRunInput): RunRow {
       budgetMaxUsd: input.budget?.maxUsd ?? null,
       budgetMaxSeconds: input.budget?.maxSeconds ?? null,
       status: initialStatus,
+      planningStage,
       startedAt: new Date(),
     })
     .returning()
@@ -1256,6 +1265,7 @@ function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     title: row.title,
     personaId: row.personaId,
     legacyChatId: row.legacyChatId,
+    planningStage: (row.planningStage as PlanningStage | null) ?? null,
     startedAt: row.startedAt,
     completedAt: row.completedAt,
   };
