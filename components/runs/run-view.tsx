@@ -20,6 +20,7 @@ import type { SdkContentBlock, SdkMessageEnvelope } from "@/lib/sdk-message";
 import { SessionStatusPill } from "@/components/session-status-pill";
 import { RunMessage } from "@/components/runs/run-message";
 import { SystemEventRow } from "@/components/runs/system-event-row";
+import { PlanningReviewCard } from "@/components/runs/planning-review-card";
 import { useConfirm } from "@/components/ui/dialog-provider";
 import { takePendingMessage } from "@/lib/pending-first-message";
 
@@ -196,6 +197,21 @@ export function RunView({
     // Mount-only for this run; sendText is a stable closure for a fresh run.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [run.id]);
+
+  function handleStageChange(newStage: string) {
+    setRun((r) => ({ ...r, planningStage: newStage }));
+  }
+
+  function handleRequestChanges(hint: string) {
+    setInput(hint);
+    // Defer focus so the textarea is present in the DOM.
+    setTimeout(() => {
+      textareaRef.current?.focus();
+      // Move caret to the end.
+      const el = textareaRef.current;
+      if (el) el.selectionStart = el.selectionEnd = el.value.length;
+    }, 0);
+  }
 
   function handleSseEvent(event: StreamEventClient) {
     if (event.type === "status" && event.status) {
@@ -519,8 +535,18 @@ export function RunView({
         )}
       </div>
 
-      {/* Composer — present for every status except `closed` */}
-      {!closed && (
+      {/* Planning review card — shown when the planning agent is waiting for approval */}
+      {(run.planningStage === "spec_review" || run.planningStage === "plan_review" || run.planningStage === "done") && (
+        <PlanningReviewCard
+          run={run}
+          messages={messages}
+          onStageChange={handleStageChange}
+          onRequestChanges={handleRequestChanges}
+        />
+      )}
+
+      {/* Composer — shown for non-done planning stages and all non-closed non-planning runs */}
+      {!closed && run.planningStage !== "done" && (
         <div className="border-t border-border/60 bg-background px-4 py-3">
           <div className="mx-auto max-w-3xl">
             <div className="flex items-end gap-2 rounded-2xl border border-border/60 bg-card/60 px-3 py-2 focus-within:border-foreground/40 focus-within:ring-2 focus-within:ring-foreground/10 transition-all">
@@ -566,7 +592,7 @@ export function RunView({
           </div>
         </div>
       )}
-      {closed && (
+      {closed && run.planningStage !== "done" && (
         <div className="border-t border-border/60 bg-muted/30 px-4 py-3 text-center text-xs text-muted-foreground">
           This run is closed.
           {run.prUrl && (
