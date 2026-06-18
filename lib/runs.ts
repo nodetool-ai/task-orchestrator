@@ -221,10 +221,13 @@ function getLock(runId: number): PerRunLock {
 
 export function create(input: CreateRunInput): RunRow {
   const goal = input.goal ?? "<chat>";
-  const cwdStrategy: CwdStrategy = input.cwdStrategy ?? (goal === "<chat>" ? "none" : "worktree");
+  const cwdStrategy: CwdStrategy =
+    input.cwdStrategy ??
+    (goal === "<chat>" || goal === "<plan>" ? "none" : "worktree");
   const toolsProfile =
     input.toolsProfile ?? (goal === "<chat>" ? "orchestrator,repo_write" : "orchestrator,repo_write");
-  const initialStatus: SessionStatus = input.defer || goal === "<chat>" ? "idle" : "pending";
+  const initialStatus: SessionStatus =
+    input.defer || goal === "<chat>" || goal === "<plan>" ? "idle" : "pending";
 
   // Resolve repo: explicit > task's repo > plan's first repo > defaultRepo.
   // We don't error on missing repo at create time for chat-style runs; the

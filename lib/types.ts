@@ -42,6 +42,25 @@ export const PLAN_TRANSITIONS: Record<PlanState, PlanState[]> = {
   cancelled: [],
 };
 
+export const PLANNING_STAGES = [
+  "gathering",
+  "spec_review",
+  "building_plan",
+  "plan_review",
+  "committing",
+  "done",
+] as const;
+export type PlanningStage = (typeof PLANNING_STAGES)[number];
+
+export const PLANNING_STAGE_TRANSITIONS: Record<PlanningStage, PlanningStage[]> = {
+  gathering: ["spec_review"],
+  spec_review: ["building_plan"],
+  building_plan: ["plan_review"],
+  plan_review: ["committing"],
+  committing: ["done"],
+  done: [],
+};
+
 export type AttachmentKind = "image" | "artifact";
 
 /**
