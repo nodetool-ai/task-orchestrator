@@ -43,7 +43,7 @@ import * as repo from "./repo";
 import { buildImplementPrompt, extractReviewOutcome } from "./run-templates";
 import { parsePrUrl } from "./gh-url";
 import type { SdkContentBlock } from "./sdk-message";
-import type { AgentSessionFull, SessionStatus } from "./types";
+import type { AgentSessionFull, PlanningStage, SessionStatus } from "./types";
 import { isTerminalStatus } from "./types";
 import { resolveProfiles, type ProfileContext } from "./profiles";
 import { type RunEnvelope } from "./pi-event-mapper";
@@ -136,6 +136,8 @@ export interface RunRow {
   personaId: string | null;
   /** Pre-migration-0009 chats.id, for /chat/[id] redirect lookups. */
   legacyChatId: number | null;
+  /** Planning-flow stage for `<plan>` runs; null for ordinary runs. */
+  planningStage: PlanningStage | null;
   startedAt: Date;
   completedAt: Date | null;
 }
@@ -222,7 +224,11 @@ export function create(input: CreateRunInput): RunRow {
   const cwdStrategy: CwdStrategy = input.cwdStrategy ?? (goal === "<chat>" ? "none" : "worktree");
   const toolsProfile =
     input.toolsProfile ?? (goal === "<chat>" ? "orchestrator,repo_write" : "orchestrator,repo_write");
-  const initialStatus: SessionStatus = input.defer || goal === "<chat>" ? "idle" : "pending";
+  const isConversational = goal === "<chat>" || goal === "<plan>";
+  const initialStatus: SessionStatus = input.defer || isConversational ? "idle" : "pending";
+  // A `<plan>` run enters the gated flow at the `gathering` stage; ordinary
+  // runs leave planning_stage NULL.
+  const planningStage: PlanningStage | null = goal === "<plan>" ? "gathering" : null;
 
   // Resolve repo: explicit > task's repo > plan's first repo > defaultRepo.
   // We don't error on missing repo at create time for chat-style runs; the
@@ -276,6 +282,7 @@ export function create(input: CreateRunInput): RunRow {
       budgetMaxUsd: input.budget?.maxUsd ?? null,
       budgetMaxSeconds: input.budget?.maxSeconds ?? null,
       status: initialStatus,
+      planningStage,
       startedAt: new Date(),
     })
     .returning()
@@ -285,7 +292,7 @@ export function create(input: CreateRunInput): RunRow {
   // Implement-style runs (goal != '<chat>', cwdStrategy='worktree') kick
   // off the full lifecycle (worktree → SDK → push → PR). Chat-style runs
   // sit at 'idle' until the first runs.append().
-  if (!input.defer && goal !== "<chat>" && cwdStrategy === "worktree") {
+  if (!input.defer && !isConversational && cwdStrategy === "worktree") {
     if (!input.taskId) {
       throw new repo.RepoError(
         "Implement-style runs require a taskId (the worker creates a branch and PR for the task).",
@@ -1262,6 +1269,7 @@ function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     title: row.title,
     personaId: row.personaId,
     legacyChatId: row.legacyChatId,
+    planningStage: (row.planningStage as PlanningStage | null) ?? null,
     startedAt: row.startedAt,
     completedAt: row.completedAt,
   };

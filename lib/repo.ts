@@ -21,10 +21,13 @@ import {
 import {
   TASK_TRANSITIONS,
   PLAN_TRANSITIONS,
+  PLANNING_STAGE_TRANSITIONS,
+  PLANNING_STAGES,
   type AttachmentKind,
   type AttachmentMeta,
   type PlanFull,
   type PlanProgress,
+  type PlanningStage,
   type PlanState,
   type RepositoryRow,
   type TaskFull,
@@ -1298,4 +1301,47 @@ export function removePersonaMemoryLine(
     .where(and(eq(personaMemories.personaId, personaId), eq(personaMemories.scope, scope)))
     .run();
   return removed;
+}
+
+// ──────────────────────────────────────────────────────────
+// Planning runs
+// ──────────────────────────────────────────────────────────
+
+/**
+ * Advance a planning run to a new stage, enforcing the stage machine in
+ * PLANNING_STAGE_TRANSITIONS. Rejects:
+ *   • a run that isn't a planning run (planning_stage IS NULL);
+ *   • an unknown target stage;
+ *   • an illegal transition from the run's current stage.
+ *
+ * Returns the new stage on success. Self-transitions on the review stages
+ * (spec_review, plan_review) are legal — they model "Request changes", where
+ * the stage is held while the agent re-proposes.
+ */
+export function setPlanningStage(runId: number, stage: PlanningStage): PlanningStage {
+  const row = db
+    .select({ planningStage: agentSessions.planningStage })
+    .from(agentSessions)
+    .where(eq(agentSessions.id, runId))
+    .get();
+  if (!row) throw new RepoError(`Run ${runId} not found`, 404);
+  const current = row.planningStage as PlanningStage | null;
+  if (current == null) {
+    throw new RepoError(`Run ${runId} is not a planning run`, 400);
+  }
+  if (!PLANNING_STAGES.includes(stage)) {
+    throw new RepoError(`Unknown planning stage '${stage}'`, 400);
+  }
+  const allowed = PLANNING_STAGE_TRANSITIONS[current] ?? [];
+  if (!allowed.includes(stage)) {
+    throw new RepoError(
+      `Illegal planning stage transition: ${current} → ${stage}`,
+      409
+    );
+  }
+  db.update(agentSessions)
+    .set({ planningStage: stage })
+    .where(eq(agentSessions.id, runId))
+    .run();
+  return stage;
 }

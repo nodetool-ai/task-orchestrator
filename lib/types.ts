@@ -42,6 +42,32 @@ export const PLAN_TRANSITIONS: Record<PlanState, PlanState[]> = {
   cancelled: [],
 };
 
+// Planning-agent stage machine, carried on agent_runs.planning_stage for
+// `<plan>` runs (NULL = ordinary run). Only an Approve (a user action)
+// advances a review stage; the agent's write tools check the stage.
+export const PLANNING_STAGES = [
+  "gathering",
+  "spec_review",
+  "building_plan",
+  "plan_review",
+  "committing",
+  "done",
+] as const;
+export type PlanningStage = (typeof PLANNING_STAGES)[number];
+
+// Legal stage transitions. The forward arc is
+//   gathering → spec_review → building_plan → plan_review → committing → done
+// The self-loops on the two review stages cover "Request changes": the stage
+// is held while the agent re-proposes a fresh spec / implementation plan.
+export const PLANNING_STAGE_TRANSITIONS: Record<PlanningStage, PlanningStage[]> = {
+  gathering: ["spec_review"],
+  spec_review: ["spec_review", "building_plan"],
+  building_plan: ["plan_review"],
+  plan_review: ["plan_review", "committing"],
+  committing: ["done"],
+  done: [],
+};
+
 export type AttachmentKind = "image" | "artifact";
 
 /**
