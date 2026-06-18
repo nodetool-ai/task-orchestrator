@@ -4,6 +4,7 @@ import { implementor } from "./implementor";
 import { planner } from "./planner";
 import { designer } from "./designer";
 import { qa } from "./qa";
+import { planningAgent } from "./planning-agent";
 
 export type { Persona };
 export const PERSONAS: ReadonlyArray<Persona> = [
@@ -12,4 +13,5 @@ export const PERSONAS: ReadonlyArray<Persona> = [
   planner,
   designer,
   qa,
+  planningAgent,
 ];

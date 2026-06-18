@@ -10,17 +10,17 @@ describe("seedPersonas", () => {
     db.delete(personasTable).run();
   });
 
-  it("inserts all five personas on first call", () => {
+  it("inserts all personas on first call", () => {
     seedPersonas();
     expect(listPersonaIds().sort()).toEqual(
-      ["designer", "implementor", "planner", "qa", "reviewer"]
+      ["designer", "implementor", "planner", "planning-agent", "qa", "reviewer"]
     );
   });
 
   it("is idempotent — second call is a no-op semantically", () => {
     seedPersonas();
     seedPersonas();
-    expect(listPersonaIds()).toHaveLength(5);
+    expect(listPersonaIds()).toHaveLength(6);
   });
 
   it("does NOT overwrite a UI-edited persona on subsequent seeds", () => {
