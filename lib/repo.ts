@@ -1299,3 +1299,23 @@ export function removePersonaMemoryLine(
     .run();
   return removed;
 }
+
+// ──────────────────────────────────────────────────────────
+// Planning stage helper
+// ──────────────────────────────────────────────────────────
+
+export type PlanningStage =
+  | "gathering"
+  | "spec_review"
+  | "building_plan"
+  | "plan_review"
+  | "committing"
+  | "done";
+
+/** Advance the planning_stage on an agent_runs row. */
+export function setPlanningStage(runId: number, stage: PlanningStage): void {
+  db.update(agentSessions)
+    .set({ planningStage: stage })
+    .where(eq(agentSessions.id, runId))
+    .run();
+}
