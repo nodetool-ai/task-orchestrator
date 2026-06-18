@@ -59,6 +59,12 @@ const PROFILES: Record<string, ProfileDef> = {
       return [spawnExtension({ runId: ctx.runId, runRow: ctx.run })];
     },
   },
+  planning: {
+    factories: async (ctx) => {
+      const { planningExtension } = await import("./extensions/planning");
+      return [planningExtension({ runId: ctx.runId, run: ctx.run })];
+    },
+  },
 };
 
 /** Static list of known profile keys for UI pickers and validation. */

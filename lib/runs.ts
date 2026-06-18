@@ -136,6 +136,8 @@ export interface RunRow {
   personaId: string | null;
   /** Pre-migration-0009 chats.id, for /chat/[id] redirect lookups. */
   legacyChatId: number | null;
+  /** Null for ordinary runs; set to 'gathering' when a planning run is created. */
+  planningStage: string | null;
   startedAt: Date;
   completedAt: Date | null;
 }
@@ -1262,6 +1264,7 @@ function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     title: row.title,
     personaId: row.personaId,
     legacyChatId: row.legacyChatId,
+    planningStage: row.planningStage ?? null,
     startedAt: row.startedAt,
     completedAt: row.completedAt,
   };

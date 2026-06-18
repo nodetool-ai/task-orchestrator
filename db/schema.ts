@@ -188,6 +188,9 @@ export const agentSessions = sqliteTable(
     // Old chats.id for rows backfilled from chats by 0009. Lets the
     // future /chat/[id] redirect resolve the new run.
     legacyChatId: integer("legacy_chat_id"),
+    // Null for ordinary runs. Non-null for planning-agent runs:
+    // gathering | spec_review | building_plan | plan_review | committing | done
+    planningStage: text("planning_stage"),
     startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull().default(NOW),
     completedAt: integer("completed_at", { mode: "timestamp_ms" }),
   },
