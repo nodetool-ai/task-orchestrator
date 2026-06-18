@@ -21,11 +21,13 @@ import {
 import {
   TASK_TRANSITIONS,
   PLAN_TRANSITIONS,
+  PLANNING_STAGE_TRANSITIONS,
   type AttachmentKind,
   type AttachmentMeta,
   type PlanFull,
   type PlanProgress,
   type PlanState,
+  type PlanningStage,
   type RepositoryRow,
   type TaskFull,
   type TaskState,
@@ -1304,16 +1306,26 @@ export function removePersonaMemoryLine(
 // Planning stage helper
 // ──────────────────────────────────────────────────────────
 
-export type PlanningStage =
-  | "gathering"
-  | "spec_review"
-  | "building_plan"
-  | "plan_review"
-  | "committing"
-  | "done";
+export type { PlanningStage };
 
-/** Advance the planning_stage on an agent_runs row. */
+/**
+ * Advance the planning_stage on an agent_runs row, enforcing the state
+ * machine defined in PLANNING_STAGE_TRANSITIONS.
+ */
 export function setPlanningStage(runId: number, stage: PlanningStage): void {
+  const row = db
+    .select({ planningStage: agentSessions.planningStage })
+    .from(agentSessions)
+    .where(eq(agentSessions.id, runId))
+    .get();
+  const current = (row?.planningStage as PlanningStage | null) ?? "gathering";
+  const allowed = PLANNING_STAGE_TRANSITIONS[current];
+  if (!allowed.includes(stage)) {
+    throw new RepoError(
+      `Cannot advance planning stage from '${current}' to '${stage}'`,
+      409
+    );
+  }
   db.update(agentSessions)
     .set({ planningStage: stage })
     .where(eq(agentSessions.id, runId))
