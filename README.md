@@ -196,7 +196,10 @@ the SDK's `total_cost_usd` and token counts on every run and surfaces
 them on the session detail page.
 
 Requires:
-- `ANTHROPIC_API_KEY` in env
+- Agent-backend auth. The `claude` backend resolves it like the Claude Code CLI:
+  `ANTHROPIC_API_KEY` when set, otherwise the claude.ai subscription (`claude login`,
+  or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` for headless hosts). The
+  default `pi` backend has its own auth.
 - `gh` CLI installed and authenticated for PR creation
 - A `main` branch on `origin` (override per-session via `baseBranch`)
 

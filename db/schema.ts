@@ -259,8 +259,6 @@ export const personas = sqliteTable("personas", {
   name: text("name").notNull(),
   description: text("description"),
   systemPrompt: text("system_prompt").notNull(),
-  modelProvider: text("model_provider").notNull(),
-  modelId: text("model_id").notNull(),
   thinkingLevel: text("thinking_level"),
   toolsProfile: text("tools_profile").notNull(),
   skillPaths: text("skill_paths").notNull().default("[]"),

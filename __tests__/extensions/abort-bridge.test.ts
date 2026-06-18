@@ -1,26 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { abortBridgeFactory } from "../../lib/extensions/abort-bridge";
+import { makeRegistrar } from "../helpers/fake-registrar";
 
 describe("abortBridgeFactory", () => {
-  it("calls ctx.abort() when the AbortController is aborted after agent_start", () => {
-    const handlers = new Map<string, Function>();
-    const pi: any = { on: (e: string, h: Function) => handlers.set(e, h), registerTool: () => {} };
+  it("calls ctx.abort() when the AbortController is aborted after agent start", () => {
+    const r = makeRegistrar();
     const abort = new AbortController();
-    abortBridgeFactory(abort)(pi);
+    abortBridgeFactory(abort)(r.reg);
     let aborted = false;
-    const ctx = { abort: () => { aborted = true; } };
-    handlers.get("agent_start")!({}, ctx);
+    r.agentStartFns[0]({ abort: () => { aborted = true; } });
     abort.abort();
     expect(aborted).toBe(true);
   });
 
   it("is safe if ctx.abort throws", () => {
-    const handlers = new Map<string, Function>();
-    const pi: any = { on: (e: string, h: Function) => handlers.set(e, h), registerTool: () => {} };
+    const r = makeRegistrar();
     const abort = new AbortController();
-    abortBridgeFactory(abort)(pi);
-    const ctx = { abort: () => { throw new Error("nope"); } };
-    handlers.get("agent_start")!({}, ctx);
+    abortBridgeFactory(abort)(r.reg);
+    r.agentStartFns[0]({ abort: () => { throw new Error("nope"); } });
     expect(() => abort.abort()).not.toThrow();
   });
 });

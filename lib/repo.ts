@@ -1190,8 +1190,6 @@ export interface PersonaUpsert {
   name: string;
   description?: string | null;
   systemPrompt: string;
-  modelProvider: string;
-  modelId: string;
   thinkingLevel?: string | null;
   toolsProfile: string;
   skillPaths: string[];
@@ -1225,8 +1223,6 @@ export function upsertPersona(p: PersonaUpsert): void {
       name: p.name,
       description: p.description ?? null,
       systemPrompt: p.systemPrompt,
-      modelProvider: p.modelProvider,
-      modelId: p.modelId,
       thinkingLevel: p.thinkingLevel ?? null,
       toolsProfile: p.toolsProfile,
       skillPaths: JSON.stringify(p.skillPaths),
@@ -1241,8 +1237,6 @@ export function upsertPersona(p: PersonaUpsert): void {
         name: p.name,
         description: p.description ?? null,
         systemPrompt: p.systemPrompt,
-        modelProvider: p.modelProvider,
-        modelId: p.modelId,
         thinkingLevel: p.thinkingLevel ?? null,
         toolsProfile: p.toolsProfile,
         skillPaths: JSON.stringify(p.skillPaths),

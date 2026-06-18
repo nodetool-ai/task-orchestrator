@@ -6,7 +6,7 @@ import { Bot, Sparkles } from "lucide-react";
 import { ChatMessage } from "@/components/chat/chat-message";
 import { ChatComposer, type ChatComposerHandle } from "@/components/chat/chat-composer";
 import { ThreadErrorBanner } from "@/components/chat/thread-error-banner";
-import { ModelPicker } from "@/components/chat/model-picker";
+import { ModelPicker, type ModelOption } from "@/components/chat/model-picker";
 import type { ChatMessageRow, ChatRole, ChatRow } from "@/lib/types";
 import type { SdkContentBlock, SdkMessageEnvelope } from "@/lib/sdk-message";
 import { RepositoryPicker } from "@/components/pickers/repository-picker";
@@ -26,11 +26,11 @@ interface Props {
   repositories: SidebarRepo[];
 }
 
-const MODEL_OPTIONS = [
-  "claude-opus-4-7",
-  "claude-sonnet-4-6",
-  "claude-sonnet-4-5",
-  "claude-haiku-4-5-20251001",
+const MODEL_OPTIONS: ModelOption[] = [
+  { id: "claude-opus-4-8", name: "Claude Opus 4.8", provider: "anthropic" },
+  { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "anthropic" },
+  { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", provider: "anthropic" },
+  { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", provider: "anthropic" },
 ];
 
 interface UiMessage {
@@ -60,7 +60,10 @@ export function ChatThread({
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [model, setModel] = useState<string>(chat.model ?? defaultModel);
+  const [model, setModel] = useState<string>(() => {
+    const m = chat.model ?? defaultModel;
+    return m.includes("/") ? m : `anthropic/${m}`;
+  });
   const [repoId, setRepoId] = useState<string | null>(chat.repoId);
   const [savingModel, setSavingModel] = useState(false);
   const [savingRepo, setSavingRepo] = useState(false);

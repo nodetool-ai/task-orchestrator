@@ -3,8 +3,6 @@
 export interface PersonaOption {
   id: string;
   name: string;
-  modelProvider: string;
-  modelId: string;
 }
 
 interface Props {
@@ -19,7 +17,7 @@ interface Props {
 }
 
 /**
- * Single dropdown that lists personas as `Name — provider/model`. Used by
+ * Single dropdown that lists personas by name. Used by
  * the chat composer, the task chat box, the new-task form, and the
  * implement-run modal.
  */
@@ -46,7 +44,7 @@ export function PersonaPicker({
     >
       {personas.map((p) => (
         <option key={p.id} value={p.id}>
-          {p.name} — {p.modelProvider}/{p.modelId}
+          {p.name}
         </option>
       ))}
     </select>

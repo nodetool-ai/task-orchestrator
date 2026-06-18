@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { Loader2, Check, Save } from "lucide-react";
-import { ProviderModelPicker } from "@/components/pickers/provider-model-picker";
 import { ToolsPicker } from "@/components/pickers/tools-picker";
 import {
   ThinkingLevelPicker,
@@ -14,8 +13,6 @@ export interface PersonaDto {
   name: string;
   description: string | null;
   systemPrompt: string;
-  modelProvider: string;
-  modelId: string;
   thinkingLevel: string | null;
   toolsProfile: string;
   budgetMaxTurns: number | null;
@@ -49,8 +46,6 @@ export function PersonaEditor({ persona }: Props) {
           name: draft.name,
           description: draft.description ?? "",
           systemPrompt: draft.systemPrompt,
-          modelProvider: draft.modelProvider,
-          modelId: draft.modelId,
           thinkingLevel: draft.thinkingLevel || null,
           toolsProfile: draft.toolsProfile,
           budgetMaxTurns: draft.budgetMaxTurns ?? null,
@@ -105,28 +100,12 @@ export function PersonaEditor({ persona }: Props) {
         />
       </Field>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        <div className="md:col-span-2">
-          <ProviderModelPicker
-            provider={draft.modelProvider}
-            model={draft.modelId}
-            onChange={({ provider, model }) => {
-              setDraft((d) => ({
-                ...d,
-                modelProvider: provider,
-                modelId: model,
-              }));
-              setSaveState("idle");
-            }}
-          />
-        </div>
-        <Field label="Thinking">
-          <ThinkingLevelPicker
-            value={draft.thinkingLevel as ThinkingLevel | null}
-            onChange={(v) => update("thinkingLevel", v)}
-          />
-        </Field>
-      </div>
+      <Field label="Thinking">
+        <ThinkingLevelPicker
+          value={draft.thinkingLevel as ThinkingLevel | null}
+          onChange={(v) => update("thinkingLevel", v)}
+        />
+      </Field>
 
       <Field label="Tools">
         <ToolsPicker

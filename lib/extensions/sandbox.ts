@@ -1,13 +1,15 @@
 // lib/extensions/sandbox.ts
 //
-// Filesystem sandbox via pi's tool_call hook. Replaces the Claude SDK's
-// always-on `sandbox: SANDBOX_OPTS`. Two invariants:
+// Filesystem sandbox via the backend's tool-call interceptor. Two invariants,
+// enforced identically on every backend:
 //   1. write/edit tool paths must resolve inside cwd.
 //   2. bash subprocesses see the run-scoped TASK_ORCH_DB env var so they
 //      cannot mutate the host data.db.
+// Built-in tool calls reach the interceptor in a canonical vocabulary
+// (write/edit → input.path, bash → input.command); each backend adapter maps
+// its SDK's names/params onto that.
 
 import path from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ExtensionFactory } from "./types";
 
 function shellEscape(s: string): string {
@@ -16,8 +18,8 @@ function shellEscape(s: string): string {
 
 export const sandboxFactory =
   (cwd: string, sandboxDbPath: string): ExtensionFactory =>
-  (pi: ExtensionAPI) => {
-    pi.on("tool_call", async (event: any) => {
+  (reg) => {
+    reg.interceptToolCall((event) => {
       if (event.toolName === "write" || event.toolName === "edit") {
         const target = event.input?.path;
         if (typeof target !== "string") return;
@@ -29,9 +31,13 @@ export const sandboxFactory =
         return;
       }
       if (event.toolName === "bash" && typeof event.input?.command === "string") {
-        event.input.command =
-          `export TASK_ORCH_DB=${shellEscape(sandboxDbPath)}\n` +
-          event.input.command;
+        return {
+          input: {
+            command:
+              `export TASK_ORCH_DB=${shellEscape(sandboxDbPath)}\n` +
+              event.input.command,
+          },
+        };
       }
     });
   };

@@ -48,8 +48,6 @@ describe("seedPersonas", () => {
   it("reviewer persona has expected shape", () => {
     seedPersonas();
     const r = getPersona("reviewer")!;
-    expect(r.modelProvider).toBeTruthy();
-    expect(r.modelId).toBeTruthy();
     expect(r.toolsProfile).toContain("gh_pr");
   });
 });

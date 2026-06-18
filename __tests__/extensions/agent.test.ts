@@ -12,26 +12,18 @@ import {
 } from "../../db/schema";
 import * as repo from "../../lib/repo";
 import { orchestratorExtension } from "../../lib/extensions/agent";
-
-function makeStub() {
-  const calls: Array<{ name: string; def: any }> = [];
-  const pi: any = {
-    registerTool: (def: any) => { calls.push({ name: def.name, def }); },
-    on: () => {},
-  };
-  return { calls, pi };
-}
+import { makeRegistrar } from "../helpers/fake-registrar";
 
 describe("orchestratorExtension", () => {
   it("registers 35 task_orch tools", () => {
-    const { calls, pi } = makeStub();
-    orchestratorExtension({ author: "test" })(pi);
-    expect(calls.length).toBe(35);
-    for (const c of calls) {
-      expect(c.name).toMatch(/^task_orch__/);
-      expect(c.def.label).toBeDefined();
-      expect(c.def.description).toBeDefined();
-      expect(c.def.parameters).toBeDefined();
+    const r = makeRegistrar();
+    orchestratorExtension({ author: "test" })(r.reg);
+    expect(r.tools.size).toBe(35);
+    for (const [name, def] of r.tools) {
+      expect(name).toMatch(/^task_orch__/);
+      expect(def.label).toBeDefined();
+      expect(def.description).toBeDefined();
+      expect(def.parameters).toBeDefined();
     }
   });
 });
@@ -48,11 +40,11 @@ describe("orchestrator plan defaulting", () => {
   });
 
   function findTool(name: string) {
-    const { calls, pi } = makeStub();
-    orchestratorExtension({ author: "test", defaultPlanId: "P-2026-05-27-test" })(pi);
-    const hit = calls.find((c) => c.name === `task_orch__${name}`);
+    const r = makeRegistrar();
+    orchestratorExtension({ author: "test", defaultPlanId: "P-2026-05-27-test" })(r.reg);
+    const hit = r.tools.get(`task_orch__${name}`);
     if (!hit) throw new Error(`tool ${name} not registered`);
-    return hit.def;
+    return hit;
   }
 
   it("defaults plan_id on get_plan when scoped to a plan", async () => {
@@ -61,7 +53,7 @@ describe("orchestrator plan defaulting", () => {
     const def = findTool("get_plan");
     const result = await def.execute("call-1", {});
     expect(result.isError).toBeFalsy();
-    expect(result.content[0].text).toContain(p.id);
+    expect((result.content[0] as any).text).toContain(p.id);
   });
 
   it("defaults plan_id on create_task when scoped to a plan", async () => {
@@ -85,11 +77,11 @@ describe("orchestrator plan defaulting", () => {
   });
 
   it("errors when no plan id is provided and none is scoped", async () => {
-    const { calls, pi } = makeStub();
-    orchestratorExtension({ author: "test" })(pi); // no defaultPlanId
-    const def = calls.find((c) => c.name === "task_orch__get_plan")!.def;
+    const r = makeRegistrar();
+    orchestratorExtension({ author: "test" })(r.reg); // no defaultPlanId
+    const def = r.tools.get("task_orch__get_plan")!;
     const result = await def.execute("call-1", {});
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toMatch(/plan id required/);
+    expect((result.content[0] as any).text).toMatch(/plan id required/);
   });
 });

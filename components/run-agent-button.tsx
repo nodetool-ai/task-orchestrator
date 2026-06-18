@@ -8,6 +8,11 @@ import {
   PersonaPicker,
   type PersonaOption,
 } from "@/components/pickers/persona-picker";
+import { ModelPicker, type ModelOption } from "@/components/chat/model-picker";
+
+// Mirrors the chat composer's default; snapped to a backend-offered model
+// once /api/providers resolves so "Start run" always sends something valid.
+const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
 
 interface Props {
   taskId: string;
@@ -40,6 +45,8 @@ export function RunAgentButton({
   const [open, setOpen] = useState(false);
   const [prompt, setPrompt] = useState(initialPrompt);
   const [personaId, setPersonaId] = useState(personas[0]?.id ?? "implementor");
+  const [model, setModel] = useState(DEFAULT_MODEL);
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -52,6 +59,24 @@ export function RunAgentButton({
       setPrompt(initialPrompt);
       setPersonaId(personas[0]?.id ?? "implementor");
       setError(null);
+      // Fetch the active backend's model catalog and snap the selection to a
+      // model it actually offers (same pattern as the chat composer).
+      fetch("/api/providers")
+        .then((res) => res.json())
+        .then((data: { providers: { id: string; models: { id: string; name: string }[] }[] }) => {
+          const flat: ModelOption[] = [];
+          for (const provider of data.providers ?? []) {
+            for (const m of provider.models ?? []) {
+              flat.push({ id: m.id, name: m.name, provider: provider.id });
+            }
+          }
+          setModelOptions(flat);
+          const qualified = flat.map((o) => `${o.provider}/${o.id}`);
+          setModel((cur) => (qualified.includes(cur) ? cur : qualified[0] ?? cur));
+        })
+        .catch(() => {
+          // Leave options empty; ModelPicker shows the fallback entry.
+        });
       // Focus the textarea on open; small delay to let the dialog mount.
       const id = window.setTimeout(() => textareaRef.current?.focus(), 30);
       return () => window.clearTimeout(id);
@@ -86,6 +111,7 @@ export function RunAgentButton({
           taskId,
           initialPrompt: text,
           personaId,
+          model,
           budget: { maxUsd: budgetMaxUsd },
         }),
       });
@@ -174,6 +200,14 @@ export function RunAgentButton({
                     />
                   </Field>
                 )}
+                <Field label="Model">
+                  <ModelPicker
+                    value={model}
+                    options={modelOptions}
+                    onChange={setModel}
+                    disabled={pending}
+                  />
+                </Field>
               </div>
 
               <div>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowUp, Loader2, MessageCircle, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -11,8 +11,11 @@ import {
   RepositoryPicker,
   type RepositoryOption,
 } from "@/components/pickers/repository-picker";
+import { ModelPicker, type ModelOption } from "@/components/chat/model-picker";
 
 export type { PersonaOption };
+
+const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
 
 interface Props {
   planId: string;
@@ -68,9 +71,28 @@ export function PlanChatBox({
   const [input, setInput] = useState("");
   const [personaId, setPersonaId] = useState(personas[0]?.id ?? "implementor");
   const [repoId, setRepoId] = useState<string>(repoOptions[0]?.id ?? "");
+  const [model, setModel] = useState(DEFAULT_MODEL);
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    fetch("/api/providers")
+      .then((res) => res.json())
+      .then((data: { providers: { id: string; models: { id: string; name: string }[] }[] }) => {
+        const flat: ModelOption[] = [];
+        for (const provider of data.providers ?? []) {
+          for (const m of provider.models ?? []) {
+            flat.push({ id: m.id, name: m.name, provider: provider.id });
+          }
+        }
+        setModelOptions(flat);
+        const qualified = flat.map((o) => `${o.provider}/${o.id}`);
+        setModel((cur) => (qualified.includes(cur) ? cur : qualified[0] ?? cur));
+      })
+      .catch(() => {});
+  }, []);
 
   function onInput(e: React.ChangeEvent<HTMLTextAreaElement>) {
     setInput(e.target.value);
@@ -118,6 +140,7 @@ export function PlanChatBox({
           planId,
           repoId: repoId || null,
           personaId,
+          model,
         }),
       });
       if (!createRes.ok) {
@@ -162,6 +185,12 @@ export function PlanChatBox({
             value={personaId}
             onChange={setPersonaId}
             size="compact"
+          />
+          <ModelPicker
+            value={model}
+            options={modelOptions}
+            onChange={setModel}
+            disabled={pending}
           />
           {repoOptions.length > 1 && (
             <RepositoryPicker

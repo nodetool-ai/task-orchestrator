@@ -31,13 +31,11 @@
 import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, notInArray, or } from "drizzle-orm";
-import { createAgentSession, SessionManager, AuthStorage, ModelRegistry, DefaultResourceLoader, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { getModel } from "@earendil-works/pi-ai";
 
 import { db } from "@/db";
 import { agentEvents, agentMessages, agentSessions } from "@/db/schema";
@@ -48,7 +46,8 @@ import type { SdkContentBlock } from "./sdk-message";
 import type { AgentSessionFull, SessionStatus } from "./types";
 import { isTerminalStatus } from "./types";
 import { resolveProfiles, type ProfileContext } from "./profiles";
-import { mapPiEvent, type RunEnvelope } from "./pi-event-mapper";
+import { type RunEnvelope } from "./pi-event-mapper";
+import { getBackend, type Extension } from "./agent-backend";
 import { sandboxFactory } from "./extensions/sandbox";
 import { personaPromptFactory } from "./extensions/persona-prompt";
 import { personaMemoryFactory } from "./extensions/persona-memory";
@@ -56,7 +55,7 @@ import { abortBridgeFactory } from "./extensions/abort-bridge";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
-const DEFAULT_MODEL = process.env.TASK_ORCH_AGENT_MODEL ?? "claude-sonnet-4-5";
+const DEFAULT_MODEL = process.env.TASK_ORCH_AGENT_MODEL ?? "anthropic/claude-sonnet-4-6";
 const KEEP_WORKTREES = !!process.env.TASK_ORCH_KEEP_WORKTREES;
 
 const SANDBOX_OPTS = {
@@ -251,14 +250,12 @@ export function create(input: CreateRunInput): RunRow {
     throw new repo.RepoError(`Plan ${input.planId} not found`, 404);
   }
 
-  // Resolve the effective model. Priority: explicit input.model > persona's
-  // configured model > TASK_ORCH_AGENT_MODEL env default. We persist the
-  // resolved value so the UI and downstream consumers see what was actually
-  // used, not a placeholder env value.
+  // Resolve the effective model. The model is a per-run choice (the run-agent
+  // dialog / chat composers emit a provider-qualified "provider/id"); it is no
+  // longer tied to the persona. Fall back to the env default when the caller
+  // omits one. We persist the resolved value so the UI shows what was used.
   const personaId = input.personaId ?? "implementor";
-  const personaRow = repo.getPersona(personaId);
-  const effectiveModel =
-    input.model ?? personaRow?.modelId ?? DEFAULT_MODEL;
+  const effectiveModel = input.model ?? DEFAULT_MODEL;
 
   const inserted = db
     .insert(agentSessions)
@@ -673,12 +670,37 @@ function repoRoot(run: { repoId: string | null; taskId: string | null }): string
   return ORCHESTRATOR_ROOT;
 }
 
+/**
+ * Guard the resolved working directory before it reaches the agent backend.
+ * A missing cwd makes `child_process.spawn` emit `ENOENT` *against the
+ * executable*, which the Claude Agent SDK then misreports as a native-binary /
+ * libc mismatch ("binary exists but failed to launch"). Validate here so a
+ * stale repository `local_path` surfaces as an actionable error naming the
+ * offending repo instead of a misleading message about the Claude binary.
+ */
+export function validateCwd(dir: string, ctx: { runId: number; repoId: string | null }): string {
+  const where = `repository '${ctx.repoId ?? "(default)"}'`;
+  if (!existsSync(dir)) {
+    throw new Error(
+      `Run #${ctx.runId}: working directory '${dir}' does not exist. ` +
+        `Check the local_path of ${where}.`
+    );
+  }
+  if (!statSync(dir).isDirectory()) {
+    throw new Error(
+      `Run #${ctx.runId}: working directory '${dir}' is not a directory. ` +
+        `Check the local_path of ${where}.`
+    );
+  }
+  return dir;
+}
+
 async function prepareCwd(run: RunRow): Promise<string> {
   if (run.cwdStrategy === "none") {
-    return repoRoot(run);
+    return validateCwd(repoRoot(run), { runId: run.id, repoId: run.repoId });
   }
   if (run.cwdStrategy === "repo") {
-    return repoRoot(run);
+    return validateCwd(repoRoot(run), { runId: run.id, repoId: run.repoId });
   }
   // worktree / worktree_at_pr: re-materialize if missing.
   if (!run.branch || !run.worktreePath) {
@@ -695,7 +717,7 @@ async function prepareCwd(run: RunRow): Promise<string> {
     // sufficient — git checks out the existing branch into the new path.
     await sh(["git", "worktree", "add", run.worktreePath, run.branch], root);
   }
-  return run.worktreePath;
+  return validateCwd(run.worktreePath, { runId: run.id, repoId: run.repoId });
 }
 
 // ──────────────────────────────────────────────────────────
@@ -1001,7 +1023,13 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     );
   }
 
-  const modelId = run.model ?? persona.modelId;
+  // The model is chosen per-run, not by the persona. The model picker emits a
+  // provider-qualified "provider/id"; a bare value (e.g. a legacy
+  // TASK_ORCH_AGENT_MODEL) defaults to the anthropic provider.
+  const rawModel = run.model ?? DEFAULT_MODEL;
+  const [resolvedProvider, resolvedModelId] = rawModel.includes("/")
+    ? (rawModel.split("/", 2) as [string, string])
+    : ["anthropic", rawModel];
   const profileSpec = run.toolsProfile ?? persona.toolsProfile;
 
   const profileCtx: ProfileContext = {
@@ -1015,47 +1043,18 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     name: persona.name,
     description: persona.description ?? "",
     systemPrompt: persona.systemPrompt,
-    model: { provider: persona.modelProvider, id: persona.modelId },
     thinkingLevel: (persona.thinkingLevel ?? undefined) as "low" | "medium" | "high" | undefined,
     toolsProfile: persona.toolsProfile,
     skillPaths: [] as string[],
   };
 
-  const factories = [
+  const extensions: Extension[] = [
     personaPromptFactory(personaForExt),
     personaMemoryFactory(personaForExt, run, repo, cwd),
     sandboxFactory(cwd, sandboxDbPath),
     abortBridgeFactory(abort),
     ...profileFactories,
   ];
-
-  const sessionDir = path.join(cwd, ".pi", "sessions");
-  const sessionManager = run.sdkSessionId
-    ? SessionManager.open(run.sdkSessionId, sessionDir)
-    : SessionManager.create(cwd, sessionDir);
-
-  const authStorage = AuthStorage.create();
-  const modelRegistry = ModelRegistry.create(authStorage);
-
-  const agentDir = getAgentDir();
-  // Skills come from pi's default discovery: <cwd>/.pi/skills/, .agents/skills/
-  // (cwd + ancestors), ~/.pi/agent/skills/, ~/.agents/skills/. We don't add
-  // persona-specific paths anymore; skills belong to the project, not the role.
-  const resourceLoader = new DefaultResourceLoader({
-    cwd,
-    agentDir,
-    extensionFactories: factories,
-  });
-
-  const { session } = await createAgentSession({
-    cwd,
-    model: getModel(persona.modelProvider as any, modelId as any),
-    thinkingLevel: (persona.thinkingLevel ?? undefined) as any,
-    authStorage,
-    modelRegistry,
-    sessionManager,
-    resourceLoader,
-  });
 
   const envelopes: RunEnvelope[] = [];
   const assistantBlocks: any[] = [];
@@ -1064,52 +1063,53 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   let sdkSessionId: string | null = null;
   let inputTokens: number | null = null;
   let outputTokens: number | null = null;
-  let turns = 0;
 
-  const stop = session.subscribe((rawEv: any) => {
-    if (abort.signal.aborted) return;
+  // Persist/accumulate each mapped envelope as the turn streams. The shape is
+  // identical across backends (RunEnvelope), so downstream is backend-agnostic.
+  const onEvent = (env: RunEnvelope) => {
+    envelopes.push(env);
+    onSdk?.(env);
 
-    if (rawEv.type === "turn_end") turns += 1;
-
-    for (const env of mapPiEvent(rawEv, session, sessionManager)) {
-      envelopes.push(env);
-      onSdk?.(env);
-
-      if (env.type === "system" && env.subtype === "init" && env.session_id) {
-        sdkSessionId = env.session_id;
-        db.update(agentSessions)
-          .set({ sdkSessionId })
-          .where(eq(agentSessions.id, run.id))
-          .run();
-      }
-
-      if (env.type === "assistant" && env.message?.content) {
-        for (const b of env.message.content) assistantBlocks.push(b);
-        const text = env.message.content
-          .filter((b: any) => b.type === "text" && typeof b.text === "string")
-          .map((b: any) => b.text)
-          .join("\n").trim();
-        if (text) lastAssistantText = text;
-      }
-
-      if (env.type === "user" && env.message?.content) {
-        const toolResults = env.message.content.filter((b: any) => b.type === "tool_result");
-        if (toolResults.length > 0) persistMessage(run.id, "tool", toolResults as any);
-      }
-
-      if (env.type === "result") {
-        if (!env.is_error && typeof env.result === "string") summary = env.result.trim() || null;
-        inputTokens = env.usage?.input_tokens ?? inputTokens;
-        outputTokens = env.usage?.output_tokens ?? outputTokens;
-      }
+    if (env.type === "system" && env.subtype === "init" && env.session_id) {
+      sdkSessionId = env.session_id;
+      db.update(agentSessions)
+        .set({ sdkSessionId })
+        .where(eq(agentSessions.id, run.id))
+        .run();
     }
-  });
 
-  try {
-    await session.prompt(prompt);  // resolves after agent_end settles
-  } finally {
-    stop();
-  }
+    if (env.type === "assistant" && env.message?.content) {
+      for (const b of env.message.content) assistantBlocks.push(b);
+      const text = env.message.content
+        .filter((b: any) => b.type === "text" && typeof b.text === "string")
+        .map((b: any) => b.text)
+        .join("\n").trim();
+      if (text) lastAssistantText = text;
+    }
+
+    if (env.type === "user" && env.message?.content) {
+      const toolResults = env.message.content.filter((b: any) => b.type === "tool_result");
+      if (toolResults.length > 0) persistMessage(run.id, "tool", toolResults as any);
+    }
+
+    if (env.type === "result") {
+      if (!env.is_error && typeof env.result === "string") summary = env.result.trim() || null;
+      inputTokens = env.usage?.input_tokens ?? inputTokens;
+      outputTokens = env.usage?.output_tokens ?? outputTokens;
+    }
+  };
+
+  const backend = await getBackend();
+  const outcome = await backend.runTurn({
+    cwd,
+    model: { provider: resolvedProvider, id: resolvedModelId },
+    thinkingLevel: (persona.thinkingLevel ?? undefined) as "low" | "medium" | "high" | undefined,
+    extensions,
+    resumeToken: run.sdkSessionId ?? null,
+    abort,
+    prompt,
+    onEvent,
+  });
 
   if (assistantBlocks.length > 0) {
     persistMessage(run.id, "agent", assistantBlocks as any);
@@ -1117,19 +1117,25 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
 
   return {
     envelopes: envelopes as any,
-    summary: summary ?? lastAssistantText,
-    sdkSessionId,
-    totalCostUsd: null,
-    inputTokens,
-    outputTokens,
-    turns,
+    summary: summary ?? lastAssistantText ?? outcome.summary,
+    // outcome.resumeToken is authoritative (backend-tagged); fall back to the
+    // session id observed mid-turn, then the prior token.
+    sdkSessionId: outcome.resumeToken ?? sdkSessionId ?? run.sdkSessionId ?? null,
+    totalCostUsd: outcome.totalCostUsd,
+    inputTokens: inputTokens ?? outcome.inputTokens,
+    outputTokens: outputTokens ?? outcome.outputTokens,
+    turns: outcome.turns,
   };
 }
 
 function checkBudget(run: RunRow, result: TurnResult): boolean {
+  // Note: `turns` is counted per-backend (pi: turn_end events; Claude: the
+  // result's num_turns), so a given budgetMaxTurns may behave slightly
+  // differently across backends.
   if (run.budgetMaxTurns != null && result.turns >= run.budgetMaxTurns) return true;
-  // budgetMaxUsd not enforced under pi (no total_cost_usd surface);
-  // column kept for historical data (see SCHEMA.md).
+  // budgetMaxUsd is not enforced: pi exposes no cost surface (totalCostUsd is
+  // null), and while the Claude backend does report total_cost_usd we keep the
+  // cap dormant for parity. Column kept for historical data (see SCHEMA.md).
   return false;
 }
 

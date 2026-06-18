@@ -189,9 +189,6 @@ export function SpawnSheet({
                       {p.name}
                     </Text>
                   </View>
-                  <Mono style={{ fontSize: 10, color: c.muted2 }} numberOfLines={1}>
-                    {p.modelId}
-                  </Mono>
                 </Press>
               );
             })}

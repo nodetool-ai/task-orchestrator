@@ -4,7 +4,6 @@
 // flat-namespaced as gh_ci__<name>. Helpers come over verbatim.
 
 import { spawn } from "node:child_process";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { validatePrUrl, type ParsedPrUrl } from "../gh-url";
 import type { ExtensionFactory } from "./types";
@@ -106,7 +105,7 @@ export interface GhCiExtensionOptions {
 
 export const ghCiExtension =
   (opts: GhCiExtensionOptions = {}): ExtensionFactory =>
-  (pi: ExtensionAPI) => {
+  (reg) => {
     const cwd = opts.cwd;
 
     function gate(url: string):
@@ -117,7 +116,7 @@ export const ghCiExtension =
       return { ok: true, parsed: v.parsed, matched: v.matched };
     }
 
-    pi.registerTool({
+    reg.registerTool({
       name: "gh_ci__ci_runs",
       label: "CI Runs",
       description:
@@ -210,7 +209,7 @@ export const ghCiExtension =
       },
     });
 
-    pi.registerTool({
+    reg.registerTool({
       name: "gh_ci__ci_logs",
       label: "CI Logs",
       description:
@@ -273,7 +272,7 @@ export const ghCiExtension =
       },
     });
 
-    pi.registerTool({
+    reg.registerTool({
       name: "gh_ci__ci_rerun",
       label: "CI Rerun",
       description:

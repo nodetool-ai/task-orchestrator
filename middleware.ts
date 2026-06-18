@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import NextAuth from "next-auth";
 import { authConfig } from "@/auth.config";
+import { isAuthDisabled } from "@/lib/auth-mode";
 
 // Auth.js gate. Every route requires a signed-in user except /login itself
 // and Auth.js's own /api/auth/* handlers. Browser visitors are redirected
@@ -15,6 +16,11 @@ import { authConfig } from "@/auth.config";
 const { auth } = NextAuth(authConfig);
 
 export default auth((req) => {
+  // Local dev (NODE_ENV=development): no login gate. auth() returns a
+  // synthetic dev-user session, so the layout and API routes still see a
+  // logged-in user. See lib/auth-mode and auth.ts.
+  if (isAuthDisabled()) return NextResponse.next();
+
   const path = req.nextUrl.pathname;
 
   if (path === "/login" || path === "/login-link" || path.startsWith("/api/auth/")) {

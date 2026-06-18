@@ -2,6 +2,7 @@ import bcrypt from "bcryptjs";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { users, type User } from "@/db/schema";
+import { DEV_USER_EMAIL } from "@/lib/auth-mode";
 
 const BCRYPT_ROUNDS = 10;
 
@@ -54,6 +55,21 @@ export function findUser(email: string): User | undefined {
 
 export function getUserById(id: number): User | undefined {
   return db.select().from(users).where(eq(users.id, id)).get();
+}
+
+// Find-or-create the local dev user used when auth is disabled in development
+// (see lib/auth-mode). Idempotent. The password hash is an unusable placeholder
+// — this account exists only to satisfy the users.id foreign keys on runs,
+// chats and tokens; it is never logged into.
+export function ensureDevUser(): User {
+  const existing = findUser(DEV_USER_EMAIL);
+  if (existing) return existing;
+  const [row] = db
+    .insert(users)
+    .values({ email: DEV_USER_EMAIL, passwordHash: "!dev-no-login" })
+    .returning()
+    .all();
+  return row;
 }
 
 export async function verifyCredentials(

@@ -10,6 +10,7 @@ export default async function RepositoriesPage() {
   const repositories = repo.listRepositories();
 
   return (
+    <div style={{ padding: "20px 20px 80px", maxWidth: 1480, margin: "0 auto" }}>
     <div className="space-y-6">
       <header className="flex items-baseline justify-between">
         <div>
@@ -56,6 +57,7 @@ export default async function RepositoriesPage() {
           ))}
         </div>
       )}
+    </div>
     </div>
   );
 }
