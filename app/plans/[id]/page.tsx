@@ -3,6 +3,7 @@ import Link from "next/link";
 import { ArrowLeft, MessagesSquare } from "lucide-react";
 import { PlanRepositories } from "@/components/plan-repositories";
 import { DeleteButton } from "@/components/delete-button";
+import { ExecutePlanButton } from "@/components/execute-plan-button";
 import * as repo from "@/lib/repo";
 import { listRuns } from "@/lib/runs";
 import { STATE_LABEL, TASK_BOARD_STATES, type TaskState } from "@/lib/types";
@@ -52,7 +53,11 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
         <StateChanger kind="plan" planId={plan.id} current={plan.state} />
         {plan.owner && <span className="text-xs text-muted-foreground">@{plan.owner}</span>}
         <span className="text-xs text-muted-foreground">Created {formatDate(plan.createdAt)}</span>
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-2">
+          <ExecutePlanButton
+            planId={plan.id}
+            openTaskCount={tasks.filter((t) => t.state !== "done" && t.state !== "cancelled").length}
+          />
           <DeleteButton
             endpoint={`/api/plans/${plan.id}`}
             redirectTo="/plans"
