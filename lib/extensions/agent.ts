@@ -12,6 +12,8 @@ export interface OrchestratorExtensionOptions {
   author: string;
   defaultTaskId?: string;
   defaultPlanId?: string;
+  /** The run these tools execute inside; passed to spawned children as parent. */
+  runId?: number;
 }
 
 export const orchestratorExtension =
@@ -28,6 +30,7 @@ export const orchestratorExtension =
             author: opts.author,
             defaultTaskId: opts.defaultTaskId,
             defaultPlanId: opts.defaultPlanId,
+            runId: opts.runId,
           });
           return {
             content: r.content,
