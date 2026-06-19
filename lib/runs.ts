@@ -40,7 +40,12 @@ import { and, asc, desc, eq, inArray, isNotNull, isNull, notInArray, or } from "
 import { db } from "@/db";
 import { agentEvents, agentMessages, agentSessions } from "@/db/schema";
 import * as repo from "./repo";
-import { buildImplementPrompt, extractReviewOutcome, parseReviewVerdict } from "./run-templates";
+import {
+  buildExecutePrompt,
+  buildImplementPrompt,
+  extractReviewOutcome,
+  parseReviewVerdict,
+} from "./run-templates";
 import { parsePrUrl } from "./gh-url";
 import type { SdkContentBlock } from "./sdk-message";
 import type { AgentSessionFull, SessionStatus } from "./types";
@@ -67,7 +72,7 @@ const SANDBOX_OPTS = {
 // Public types
 // ──────────────────────────────────────────────────────────
 
-export type Goal = "<implement>" | "<chat>" | "<review>" | (string & {});
+export type Goal = "<implement>" | "<chat>" | "<review>" | "<execute>" | (string & {});
 export type CwdStrategy = "worktree" | "worktree_at_pr" | "repo" | "none";
 
 export interface Budget {
@@ -223,9 +228,16 @@ export function create(input: CreateRunInput): RunRow {
   const goal = input.goal ?? "<chat>";
   const cwdStrategy: CwdStrategy =
     input.cwdStrategy ??
-    (goal === "<chat>" || goal === "<plan>" ? "none" : "worktree");
+    (goal === "<chat>" || goal === "<plan>"
+      ? "none"
+      : goal === "<execute>"
+        ? "repo"
+        : "worktree");
   const toolsProfile =
-    input.toolsProfile ?? (goal === "<chat>" ? "orchestrator,repo_write" : "orchestrator,repo_write");
+    input.toolsProfile ??
+    (goal === "<execute>"
+      ? "orchestrator,gh_pr,repo_read,spawn"
+      : "orchestrator,repo_write");
   const initialStatus: SessionStatus =
     input.defer || goal === "<chat>" || goal === "<plan>" ? "idle" : "pending";
 
@@ -253,6 +265,12 @@ export function create(input: CreateRunInput): RunRow {
   }
   if (input.planId && !repo.getPlan(input.planId)) {
     throw new repo.RepoError(`Plan ${input.planId} not found`, 404);
+  }
+  if (!input.defer && goal === "<execute>" && !input.planId) {
+    throw new repo.RepoError(
+      "Plan-executor runs (goal=<execute>) require a planId.",
+      400
+    );
   }
 
   // Resolve the effective model. The model is a per-run choice (the run-agent
@@ -315,6 +333,13 @@ export function create(input: CreateRunInput): RunRow {
       );
     }
     void runReview(run.id, input.prUrl, input.initialPrompt ?? null);
+  }
+
+  // Plan-executor runs: a single long-running agent that drives a whole plan
+  // (implement → review → merge) by spawning child runs. Operates at the repo
+  // root (no worktree of its own); children make their own worktrees.
+  if (!input.defer && goal === "<execute>" && input.planId) {
+    void runExecute(run.id, input.planId, input.initialPrompt ?? null);
   }
 
   return run;
@@ -967,6 +992,87 @@ async function runReview(
     closeBus(runId);
     runners.delete(runId);
     cleanupWorktree(worktreePath, root).catch(() => {});
+  }
+}
+
+// ──────────────────────────────────────────────────────────
+// Plan-executor worker (one long-running agent drives the whole plan)
+// ──────────────────────────────────────────────────────────
+
+async function runExecute(
+  runId: number,
+  planId: string,
+  initialPrompt: string | null
+): Promise<void> {
+  const abort = new AbortController();
+  const bus = new EventEmitter();
+  runners.set(runId, { abort, bus });
+
+  let run = get(runId)!;
+
+  try {
+    const plan = repo.getPlan(planId);
+    if (!plan) {
+      fail(runId, `Plan ${planId} disappeared before execution could start`);
+      runners.delete(runId);
+      return;
+    }
+
+    setStatus(runId, "running");
+    // No worktree of its own — operate at the repo root so gh_pr tools shell
+    // out against the real checkout. Children create their own worktrees.
+    const cwd = await prepareCwd(run);
+    const prompt = initialPrompt ?? buildExecutePrompt(plan, repo.listTasks({ planId }));
+    const result = await runOneTurn({
+      run,
+      cwd,
+      prompt,
+      abort,
+      author: "claude-executor",
+      onSdk: (m) => bus.emit("event", { type: "sdk", sdk: m }),
+    });
+
+    if (abort.signal.aborted) {
+      runners.delete(runId);
+      return;
+    }
+
+    db.update(agentSessions)
+      .set({
+        status: "completed",
+        completedAt: new Date(),
+        sdkSessionId: result.sdkSessionId ?? run.sdkSessionId,
+        totalCostUsd: result.totalCostUsd ?? run.totalCostUsd,
+        inputTokens: result.inputTokens ?? run.inputTokens,
+        outputTokens: result.outputTokens ?? run.outputTokens,
+      })
+      .where(eq(agentSessions.id, runId))
+      .run();
+    emitStatus(runId, "completed");
+
+    // Fallback: if the agent drove every task to a terminal state but didn't
+    // close the plan itself, mark the plan done.
+    try {
+      const tasks = repo.listTasks({ planId });
+      const allClosed =
+        tasks.length > 0 &&
+        tasks.every((t) => t.state === "done" || t.state === "cancelled");
+      const planNow = repo.getPlan(planId);
+      if (allClosed && planNow && planNow.state === "accepted") {
+        repo.updatePlan(planId, { state: "done" });
+      }
+    } catch {
+      // Best-effort — the agent's own transition_plan is the primary path.
+    }
+  } catch (err) {
+    if (abort.signal.aborted) {
+      runners.delete(runId);
+      return;
+    }
+    fail(runId, describe(err));
+  } finally {
+    closeBus(runId);
+    runners.delete(runId);
   }
 }
 
