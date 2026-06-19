@@ -79,9 +79,16 @@ function loadRunsByGroup(): {
     const plan = planTitle(task?.planId ?? null);
     const wrapped = { run, task, planTitle: plan };
     if (ACTIVE_STATUSES.has(run.status)) groups.running.push(wrapped);
-    else if (REVIEW_STATUSES.has(run.status) || run.prUrl) groups.review.push(wrapped);
+    else if (REVIEW_STATUSES.has(run.status)) groups.review.push(wrapped);
     else if (BLOCKED_STATUSES.has(run.status)) groups.blocked.push(wrapped);
-    else if (SHIPPED_STATUSES.has(run.status)) groups.shipped.push(wrapped);
+    else if (SHIPPED_STATUSES.has(run.status)) {
+      // A completed run that opened a PR is "in review" only while its task is
+      // still awaiting review. Once the task is done/cancelled (PR merged or
+      // closed) the run is shipped, not live. Keying on run.prUrl alone misfiled
+      // every completed run as review.
+      if (run.prUrl && task?.state === "review") groups.review.push(wrapped);
+      else groups.shipped.push(wrapped);
+    }
   }
   // shipped: keep most recent 8
   groups.shipped = groups.shipped.slice(0, 8);
@@ -339,7 +346,7 @@ export function loadPaletteItems(): PaletteItem[] {
     sub: r.personaId || r.model || "",
     state: ACTIVE_STATUSES.has(r.status)
       ? "in_progress"
-      : REVIEW_STATUSES.has(r.status) || r.prUrl
+      : REVIEW_STATUSES.has(r.status)
       ? "review"
       : BLOCKED_STATUSES.has(r.status)
       ? "blocked"
