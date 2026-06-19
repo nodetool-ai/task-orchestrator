@@ -64,6 +64,7 @@ agent_sessions           one row per pi.dev SDK run on a task
   id              INTEGER  AUTOINC PK
   task_id         TEXT     FK → tasks.id ON DELETE CASCADE
   persona_id      TEXT     FK → personas.id ON DELETE SET NULL  default 'implementor'
+  planning_stage  TEXT     gated `<plan>` flow stage (NULL = ordinary run): gathering → spec_review → building_plan → plan_review → committing → done
   status          TEXT     see session status machine
   model           TEXT     e.g. claude-sonnet-4-5
   branch          TEXT     e.g. claude/agent-42
