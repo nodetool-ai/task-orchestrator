@@ -5,6 +5,7 @@ import {
   buildPlanChatPromptPrefix,
   buildReviewPrompt,
   extractReviewOutcome,
+  parseReviewVerdict,
 } from "../lib/run-templates";
 import type { PlanFull, TaskFull } from "../lib/types";
 
@@ -258,5 +259,35 @@ describe("extractReviewOutcome", () => {
     const outcome = extractReviewOutcome(text);
     // No JSON object found → falls back to first line.
     expect(outcome).toBe('"verdict": "approve" but not really');
+  });
+});
+
+describe("parseReviewVerdict", () => {
+  it("returns null for empty input", () => {
+    expect(parseReviewVerdict(null)).toBeNull();
+    expect(parseReviewVerdict(undefined)).toBeNull();
+    expect(parseReviewVerdict("")).toBeNull();
+  });
+
+  it("reads the verdict back out of an extracted outcome", () => {
+    const outcome = extractReviewOutcome(
+      'Looks good.\n{"verdict": "approve", "summary": "All criteria met."}'
+    );
+    expect(parseReviewVerdict(outcome)).toBe("approve");
+  });
+
+  it("returns the non-approve verdict verbatim", () => {
+    const outcome = extractReviewOutcome(
+      '{"verdict": "request_changes", "summary": "Missing tests."}'
+    );
+    expect(parseReviewVerdict(outcome)).toBe("request_changes");
+  });
+
+  it("returns null for the plain-text fallback outcome", () => {
+    // extractReviewOutcome falls back to the first line when no JSON verdict
+    // block is present — that text has no parseable verdict.
+    const outcome = extractReviewOutcome("Looks fine to me.");
+    expect(outcome).toBe("Looks fine to me.");
+    expect(parseReviewVerdict(outcome)).toBeNull();
   });
 });

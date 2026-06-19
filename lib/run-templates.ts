@@ -481,6 +481,27 @@ export function extractReviewOutcome(text: string | null | undefined): string | 
   return firstLine.slice(0, 200) || null;
 }
 
+/**
+ * Read the `verdict` field back out of an outcome string produced by
+ * `extractReviewOutcome`. Returns null when the outcome is the non-JSON
+ * fallback (a plain first line) or has no verdict — callers treat that as
+ * "no approval".
+ */
+export function parseReviewVerdict(
+  outcome: string | null | undefined
+): string | null {
+  if (!outcome) return null;
+  try {
+    const parsed = JSON.parse(outcome);
+    if (parsed && typeof parsed === "object" && typeof parsed.verdict === "string") {
+      return parsed.verdict;
+    }
+  } catch {
+    // Fallback outcome (plain text) — no structured verdict.
+  }
+  return null;
+}
+
 /** Scan a string for balanced top-level `{ ... }` blocks. */
 function findJsonObjects(s: string): string[] {
   const out: string[] = [];
