@@ -30,6 +30,41 @@ function attachmentSection(attachments: AttachmentMeta[]): string[] {
 
 export const IMPLEMENT_DEFAULT_BUDGET_USD = 20;
 export const REVIEW_DEFAULT_BUDGET_USD = 5;
+/** Per-task budget used to size the executor's default (own) budget cap. */
+export const EXECUTE_PER_TASK_BUDGET_USD = IMPLEMENT_DEFAULT_BUDGET_USD + REVIEW_DEFAULT_BUDGET_USD;
+
+/**
+ * Build the kickoff prompt for a plan-executor run: the plan, its open tasks
+ * with their states and dependencies, and the go-ahead. The detailed
+ * methodology (fan-out, await, review, auto-fix, merge) lives in the executor
+ * persona's system prompt; this supplies the situational data.
+ */
+export function buildExecutePrompt(plan: PlanFull, tasks: TaskFull[]): string {
+  const open = tasks.filter((t) => t.state !== "done" && t.state !== "cancelled");
+  const lines: string[] = [
+    `# Execute plan ${plan.id}: ${plan.title}`,
+    "",
+    "Drive this plan to completion: implement each task, review its PR, auto-fix on",
+    "request_changes (max 3 attempts), and squash-merge approved PRs into the default",
+    "branch. Run independent tasks in parallel — start every ready task before awaiting.",
+    "",
+    `## Tasks (${open.length} open of ${tasks.length})`,
+  ];
+  if (open.length === 0) {
+    lines.push("All tasks are already done or cancelled — just transition the plan to done.");
+  }
+  for (const t of tasks) {
+    const deps = t.dependencies.length ? ` deps:[${t.dependencies.join(", ")}]` : "";
+    const criteria = t.criteria.length ? ` criteria:${t.criteria.filter((c) => c.done).length}/${t.criteria.length}` : "";
+    lines.push(`- ${t.id} [${t.state}] ${t.title}${deps}${criteria}`);
+  }
+  lines.push(
+    "",
+    "Use list_tasks to refresh state as you go (it reflects child runs' transitions).",
+    "When every task is done or cancelled, transition the plan to done and summarise."
+  );
+  return lines.join("\n");
+}
 
 /**
  * Build the implement-style agent prompt for a task: title, body,
