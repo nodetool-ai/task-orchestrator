@@ -70,13 +70,15 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
           <h1 className="mt-2 text-2xl font-semibold tracking-tight leading-tight">{task.title}</h1>
         </div>
         <div className="flex flex-row sm:flex-col items-start sm:items-end gap-2 sm:gap-1.5 flex-wrap">
-          <RunAgentButton
-            taskId={task.id}
-            hasActive={Boolean(activeSession)}
-            initialPrompt={buildImplementPrompt(task)}
-            budgetMaxUsd={IMPLEMENT_DEFAULT_BUDGET_USD}
-            personas={personas}
-          />
+          {task.state !== "done" && task.state !== "cancelled" && (
+            <RunAgentButton
+              taskId={task.id}
+              hasActive={Boolean(activeSession)}
+              initialPrompt={buildImplementPrompt(task)}
+              budgetMaxUsd={IMPLEMENT_DEFAULT_BUDGET_USD}
+              personas={personas}
+            />
+          )}
           {latestPr && (
             <RunReviewButton
               taskId={task.id}
