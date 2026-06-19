@@ -40,7 +40,7 @@ import { and, asc, desc, eq, inArray, isNotNull, isNull, notInArray, or } from "
 import { db } from "@/db";
 import { agentEvents, agentMessages, agentSessions } from "@/db/schema";
 import * as repo from "./repo";
-import { buildImplementPrompt, extractReviewOutcome } from "./run-templates";
+import { buildImplementPrompt, extractReviewOutcome, parseReviewVerdict } from "./run-templates";
 import { parsePrUrl } from "./gh-url";
 import type { SdkContentBlock } from "./sdk-message";
 import type { AgentSessionFull, SessionStatus } from "./types";
@@ -939,6 +939,24 @@ async function runReview(
       .where(eq(agentSessions.id, runId))
       .run();
     emitStatus(runId, "completed");
+
+    // An approving verdict marks the task done. The outcome is the JSON
+    // verdict block extracted above (or a fallback first line, which won't
+    // parse — so a non-approve outcome simply leaves the task untouched).
+    if (run.taskId && parseReviewVerdict(outcome) === "approve") {
+      try {
+        repo.transitionTask(run.taskId, {
+          state: "done",
+          note: `Review run #${runId} approved the PR.`,
+        });
+      } catch (err) {
+        repo.addNote(
+          run.taskId,
+          "claude-reviewer",
+          `Review approved but could not transition task to done: ${describe(err)}`
+        );
+      }
+    }
   } catch (err) {
     if (abort.signal.aborted) {
       runners.delete(runId);
