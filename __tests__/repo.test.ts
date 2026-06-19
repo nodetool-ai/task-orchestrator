@@ -419,3 +419,31 @@ describe("task ↔ repository", () => {
     expect(resolved?.id).toBe(b.id);
   });
 });
+
+describe("task prUrl (latest run's PR)", () => {
+  function makeTask() {
+    const plan = repo.createPlan({ title: "PR Plan", date: "2026-01-15" });
+    return repo.createTask({ planId: plan.id, title: "T", date: "2026-01-15" });
+  }
+  function addRun(taskId: string, prUrl: string | null) {
+    db.insert(agentSessions)
+      .values({ taskId, goal: "<implement>", status: "completed", prUrl })
+      .run();
+  }
+
+  it("is null when no run has opened a PR", () => {
+    const t = makeTask();
+    addRun(t.id, null);
+    expect(repo.getTask(t.id)!.prUrl).toBeNull();
+    expect(repo.listTasks({ planId: t.planId })[0].prUrl).toBeNull();
+  });
+
+  it("surfaces the most recent run's PR on getTask and listTasks", () => {
+    const t = makeTask();
+    addRun(t.id, "https://github.com/o/r/pull/1");
+    addRun(t.id, "https://github.com/o/r/pull/2"); // later run wins
+    expect(repo.getTask(t.id)!.prUrl).toBe("https://github.com/o/r/pull/2");
+    const listed = repo.listTasks({ planId: t.planId }).find((x) => x.id === t.id)!;
+    expect(listed.prUrl).toBe("https://github.com/o/r/pull/2");
+  });
+});

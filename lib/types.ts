@@ -91,6 +91,10 @@ export interface TaskFull {
   estimate: string | null;
   tags: string[];
   repoId: string | null;
+  /** PR url of the task's most recent agent run that opened one, for display
+   *  (null if no run has opened a PR yet). A task can span several runs/PRs;
+   *  this is the latest. */
+  prUrl: string | null;
   createdAt: Date;
   updatedAt: Date;
   dependencies: string[];

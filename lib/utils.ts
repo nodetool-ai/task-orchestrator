@@ -5,6 +5,14 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+// Compact display label for a GitHub PR url: "owner/repo#123". Falls back to
+// the raw string for non-GitHub urls. Self-contained (no server deps) so it is
+// safe to import from client components.
+export function prShortLabel(url: string): string {
+  const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+  return m ? `${m[1]}/${m[2]}#${m[3]}` : url;
+}
+
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "—";
   if (bytes < 1024) return `${bytes} B`;

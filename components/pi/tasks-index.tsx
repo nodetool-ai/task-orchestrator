@@ -19,6 +19,7 @@ import {
 } from "./primitives";
 import { openSpawn } from "./overlay-store";
 import { useIsMobile } from "./use-is-mobile";
+import { prShortLabel } from "@/lib/utils";
 
 export type TaskRowData = {
   id: string;
@@ -27,6 +28,7 @@ export type TaskRowData = {
   planId: string | null;
   state: PiState;
   runDbId: number | null;
+  prUrl: string | null;
   persona: string | null;
   criteria: { done: number; total: number } | null;
   tags: string[];
@@ -403,6 +405,26 @@ function TaskRow({ row, isMobile }: { row: TaskRowData; isMobile: boolean }) {
               {row.plan}
             </Link>
           ) : null}
+          {row.prUrl && (
+            <a
+              href={row.prUrl}
+              target="_blank"
+              rel="noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              title={prShortLabel(row.prUrl)}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                color: "var(--pi-muted)",
+                fontSize: 11,
+                textDecoration: "none",
+              }}
+            >
+              <Icon name="pr" size={11} />
+              <span className="pi-mono">{prShortLabel(row.prUrl)}</span>
+            </a>
+          )}
           <span style={{ flex: 1 }} />
           {row.persona ? (
             <PersonaChip id={row.persona} />
@@ -493,7 +515,27 @@ function TaskRow({ row, isMobile }: { row: TaskRowData; isMobile: boolean }) {
         )}
       </span>
 
-      <span style={{ display: "inline-flex", gap: 6 }}>
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+        {row.prUrl && (
+          <a
+            href={row.prUrl}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            title={prShortLabel(row.prUrl)}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+              color: "var(--pi-muted)",
+              fontSize: 11,
+              textDecoration: "none",
+            }}
+          >
+            <Icon name="pr" size={11} />
+            <span className="pi-mono">{prShortLabel(row.prUrl)}</span>
+          </a>
+        )}
         {row.state === "todo" && (
           <span
             onClick={(e) => {

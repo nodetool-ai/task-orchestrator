@@ -290,6 +290,7 @@ export function loadTasksIndexData(): {
     planId: t.planId,
     state: TASK_STATE_TO_PI[t.state],
     runDbId: liveRunByTask.get(t.id) ?? null,
+    prUrl: t.prUrl,
     persona: t.assignee,
     criteria: t.criteria.length
       ? { done: t.criteria.filter((c) => c.done).length, total: t.criteria.length }

@@ -25,16 +25,10 @@ import { AddNoteForm } from "@/components/add-note-form";
 import { AddCriterionForm } from "@/components/add-criterion-form";
 import { Attachments, AttachmentsHeading } from "@/components/attachments";
 import { Meta } from "@/components/meta";
-import { formatDate, formatDateTime, relativeDate } from "@/lib/utils";
+import { formatDate, formatDateTime, prShortLabel, relativeDate } from "@/lib/utils";
 import { isTerminalStatus } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
-
-// Render a GitHub PR URL as `owner/repo#NNN` (or just the URL for non-GH hosts).
-function prShortLabel(url: string): string {
-  const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
-  return m ? `${m[1]}/${m[2]}#${m[3]}` : url;
-}
 
 export default async function TaskPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -51,8 +45,8 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   // newest first, capped at the 10 most recent so the page doesn't grow
   // unbounded. listRuns already orders by startedAt desc.
   const inbox = runs.listRuns({ taskId: task.id }).slice(0, 10);
-  // Sessions are listed newest-first; first one with a PR is the latest PR.
-  const latestPr = sessions.find((s) => s.prUrl)?.prUrl ?? null;
+  // The task's latest PR (denormalised onto TaskFull from its most recent run).
+  const latestPr = task.prUrl;
   const repository = task.repoId ? repo.getRepository(task.repoId) : null;
   const planRepoOptions = plan?.repos ?? [];
   const chatPromptPrefix = buildChatPromptPrefix(task, latestPr);
