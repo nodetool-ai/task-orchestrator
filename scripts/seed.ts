@@ -1,5 +1,9 @@
-// Seeds the DB with a demo plan + a few tasks so first-run isn't empty.
-// Safe to re-run — skips if seed plan already exists.
+// Seeds the personas the DB needs as FK targets for agent_runs.persona_id.
+//
+// A demo plan + tasks can also be seeded for an empty first-run, but only when
+// explicitly requested with SEED_DEMO=1 (npm run db:seed:demo). The default
+// `db:seed` is persona-only, so running it never writes plans/tasks into a
+// real database.
 import * as repo from "../lib/repo";
 import { seedPersonas } from "../db/seed-personas";
 
@@ -9,6 +13,11 @@ function main() {
   // Personas are FK targets for agent_runs.persona_id; seed them every time so
   // CLI flows (which never boot instrumentation.ts) still find them.
   seedPersonas();
+
+  if (process.env.SEED_DEMO !== "1") {
+    console.log("Seeded personas. Set SEED_DEMO=1 to also seed the demo plan.");
+    return;
+  }
 
   if (repo.getPlan(SEED_PLAN_ID)) {
     console.log(`Seed plan ${SEED_PLAN_ID} already exists — skipping.`);
