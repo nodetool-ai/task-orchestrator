@@ -44,16 +44,22 @@ export default async function RunPage({
   // Persona for the header display.
   const persona = run.personaId ? repo.getPersona(run.personaId) : null;
 
+  // Bound the run view to the viewport (minus the 48px top nav) so its internal
+  // flex column scrolls the message stream while the composer stays pinned to
+  // the bottom. Without a definite height here, RunView's `h-full` collapses
+  // and the whole document scrolls (the composer scrolls off-screen).
   return (
-    <RunView
-      run={run}
-      initialMessages={messages}
-      live={runs.isLive(runId)}
-      userEmail={session?.user?.email ?? null}
-      repositories={repositories}
-      parent={parent}
-      task={task ? { id: task.id, title: task.title } : null}
-      personaName={persona?.name ?? null}
-    />
+    <div className="h-[calc(100dvh-3rem)] overflow-hidden">
+      <RunView
+        run={run}
+        initialMessages={messages}
+        live={runs.isLive(runId)}
+        userEmail={session?.user?.email ?? null}
+        repositories={repositories}
+        parent={parent}
+        task={task ? { id: task.id, title: task.title } : null}
+        personaName={persona?.name ?? null}
+      />
+    </div>
   );
 }
