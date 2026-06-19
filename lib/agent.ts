@@ -197,6 +197,9 @@ export interface StartSessionInput {
   model?: string;
   baseBranch?: string;
   resumeOf?: number;
+  /** Lineage parent (e.g. the plan executor that spawned this). Used for UI
+   *  grouping and the tree budget cap. `resumeOf` takes precedence. */
+  parentRunId?: number | null;
 }
 
 export function startSession(input: StartSessionInput): AgentSessionFull {
@@ -233,7 +236,7 @@ export function startSession(input: StartSessionInput): AgentSessionFull {
     repoId: task.repoId ?? null,
     model: input.model ?? DEFAULT_MODEL,
     baseBranch: input.baseBranch ?? "main",
-    parentRunId: input.resumeOf ?? null,
+    parentRunId: input.resumeOf ?? input.parentRunId ?? null,
   });
 
   return runs.toAgentSessionFull(created);

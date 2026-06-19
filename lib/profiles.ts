@@ -36,6 +36,7 @@ const PROFILES: Record<string, ProfileDef> = {
         author: ctx.author,
         defaultTaskId: ctx.taskId ?? undefined,
         defaultPlanId: ctx.planId ?? undefined,
+        runId: ctx.runId,
       })];
     },
   },

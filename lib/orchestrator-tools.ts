@@ -1,13 +1,21 @@
 // lib/orchestrator-tools.ts
 //
-// Shared registry of the 35 orchestrator tool definitions.
+// Shared registry of the 37 orchestrator tool definitions.
 // The pi extension consumes this and registers each with the task_orch__ prefix.
 // The MCP server consumes this directly (bare names).
 
 import { Type, type TSchema } from "typebox";
 import * as repo from "./repo";
 import * as agentLib from "./agent";
-import { PLAN_STATES, TASK_STATES, type PlanState, type TaskState } from "./types";
+import * as runs from "./runs";
+import { REVIEW_DEFAULT_BUDGET_USD, parseReviewVerdict } from "./run-templates";
+import {
+  PLAN_STATES,
+  TASK_STATES,
+  isTerminalStatus,
+  type PlanState,
+  type TaskState,
+} from "./types";
 import type { TaskFull, PlanFull, AgentSessionFull, AttachmentMeta } from "./types";
 
 // ──────────────────────────────────────────────────────
@@ -18,6 +26,10 @@ export interface OrchestratorToolContext {
   author: string;
   defaultTaskId?: string;
   defaultPlanId?: string;
+  /** The run this tool is executing inside, if any. Child runs spawned by
+   *  start_session/start_review are parented to it so they group in the UI
+   *  and share the tree budget. Undefined when invoked via the MCP server. */
+  runId?: number;
 }
 
 // Content blocks an orchestrator tool may return. Both the MCP server and the
@@ -103,6 +115,8 @@ const findCriterion = (taskId: string, needle: string) => {
     null
   );
 };
+
+const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
 
 function safe<T>(fn: () => T): T | { _error: string } {
   try {
@@ -928,20 +942,99 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "start_session",
     label: "Start Session",
     description:
-      "Kick off a background Claude agent to work on a task. Creates a worktree, runs the agent, opens a PR when done. Returns the session id.",
+      "Kick off a background Claude agent to implement a task. Creates a worktree, runs the agent, opens a PR when done, and moves the task to review. Returns the session id immediately (non-blocking) — call await_session to wait for it to finish.",
     parameters: Type.Object({
       task_id: Type.String({ minLength: 1 }),
       model: Type.Optional(Type.String()),
       base_branch: Type.Optional(Type.String()),
     }),
-    execute: async ({ task_id, model, base_branch }, _ctx) => {
+    execute: async ({ task_id, model, base_branch }, ctx) => {
       const result = safe(() =>
-        agentLib.startSession({ taskId: task_id, model, baseBranch: base_branch })
+        agentLib.startSession({
+          taskId: task_id,
+          model,
+          baseBranch: base_branch,
+          parentRunId: ctx.runId ?? null,
+        })
       );
       if ("_error" in result) return errResult(`Error: ${result._error}`);
       return ok(
         `Started session #${result.id} on ${result.taskId} (model: ${result.model ?? "default"}).`
       );
+    },
+  },
+
+  {
+    name: "start_review",
+    label: "Start Review",
+    description:
+      "Kick off a background reviewer agent for a task's open PR. Creates a worktree at the PR head, judges the diff against the acceptance criteria, and records a verdict (approve | request_changes | comment) in the session outcome. On 'approve' the task auto-transitions to done. Returns the session id immediately (non-blocking) — call await_session to wait for the verdict.",
+    parameters: Type.Object({
+      task_id: Type.String({ minLength: 1 }),
+      pr_url: Type.String({ minLength: 1 }),
+      model: Type.Optional(Type.String()),
+    }),
+    execute: async ({ task_id, pr_url, model }, ctx) => {
+      const task = repo.getTask(task_id);
+      if (!task) return errResult(`Error: Task ${task_id} not found`);
+      const result = safe(() =>
+        runs.create({
+          goal: "<review>",
+          cwdStrategy: "worktree_at_pr",
+          toolsProfile: "orchestrator,repo_read,gh_pr",
+          taskId: task_id,
+          prUrl: pr_url,
+          repoId: task.repoId ?? null,
+          personaId: "reviewer",
+          model: model ?? null,
+          parentRunId: ctx.runId ?? null,
+          budget: { maxUsd: REVIEW_DEFAULT_BUDGET_USD },
+        })
+      );
+      if ("_error" in result) return errResult(`Error: ${result._error}`);
+      return ok(
+        `Started review session #${result.id} for ${task_id} on PR ${pr_url}.`
+      );
+    },
+  },
+
+  {
+    name: "await_session",
+    label: "Await Session",
+    description:
+      "Block until an agent session reaches a terminal status (completed | failed | cancelled | closed | budget_exhausted), then return its status, outcome, review verdict (if any), PR url, error, and cost. Use after start_session / start_review to wait for a child run to finish. Times out after timeout_seconds (default 1800) and returns the current (non-terminal) status with timed_out=true.",
+    parameters: Type.Object({
+      session_id: Type.Integer(),
+      timeout_seconds: Type.Optional(Type.Integer({ minimum: 1 })),
+    }),
+    execute: async ({ session_id, timeout_seconds }, _ctx) => {
+      const timeoutMs = (timeout_seconds ?? 1800) * 1000;
+      const intervalMs = 1500;
+      const startedAt = Date.now();
+      let run = runs.get(session_id);
+      if (!run) return errResult(`Error: Session ${session_id} not found`);
+      while (!isTerminalStatus(run.status)) {
+        if (Date.now() - startedAt > timeoutMs) {
+          return jsonResult({
+            session_id,
+            status: run.status,
+            timed_out: true,
+            pr_url: run.prUrl,
+          });
+        }
+        await sleep(intervalMs);
+        run = runs.get(session_id);
+        if (!run) return errResult(`Error: Session ${session_id} disappeared`);
+      }
+      return jsonResult({
+        session_id,
+        status: run.status,
+        outcome: run.outcome,
+        verdict: parseReviewVerdict(run.outcome),
+        pr_url: run.prUrl,
+        error: run.error,
+        total_cost_usd: run.totalCostUsd,
+      });
     },
   },
 
