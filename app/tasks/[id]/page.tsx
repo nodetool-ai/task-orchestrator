@@ -55,10 +55,11 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   return (
     <article className="mx-auto max-w-3xl">
       <Link
-        href="/tasks"
-        className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground mb-6"
+        href={plan ? `/plans/${plan.id}` : "/tasks"}
+        className="inline-flex items-center gap-1 max-w-full text-xs text-muted-foreground hover:text-foreground mb-6"
       >
-        <ArrowLeft className="size-3.5" /> Tasks
+        <ArrowLeft className="size-3.5 shrink-0" />
+        <span className="truncate">{plan ? plan.title : "Tasks"}</span>
       </Link>
 
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-4">
