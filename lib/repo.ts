@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, inArray, like, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNotNull, like, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
   acceptanceCriteria,
@@ -162,7 +162,8 @@ function hydrateTask(
   deps: string[],
   notes: TaskFull["notes"],
   criteria: TaskFull["criteria"],
-  attachmentMetas: AttachmentMeta[]
+  attachmentMetas: AttachmentMeta[],
+  prUrl: string | null = null
 ): TaskFull {
   return {
     id: row.id,
@@ -174,6 +175,7 @@ function hydrateTask(
     estimate: row.estimate,
     tags: safeJsonArray(row.tags),
     repoId: row.repoId,
+    prUrl,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     dependencies: deps,
@@ -181,6 +183,23 @@ function hydrateTask(
     criteria,
     attachments: attachmentMetas,
   };
+}
+
+/** Map of taskId → latest (highest run id) PR url, for a set of tasks. */
+function latestPrUrlByTask(taskIds: string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  if (taskIds.length === 0) return out;
+  const rows = db
+    .select({ taskId: agentSessions.taskId, prUrl: agentSessions.prUrl })
+    .from(agentSessions)
+    .where(and(inArray(agentSessions.taskId, taskIds), isNotNull(agentSessions.prUrl)))
+    .orderBy(asc(agentSessions.id))
+    .all();
+  // Ascending by id → the last write per task wins, i.e. the most recent run.
+  for (const r of rows) {
+    if (r.taskId && r.prUrl) out.set(r.taskId, r.prUrl);
+  }
+  return out;
 }
 
 // ──────────────────────────────────────────────────────────
@@ -392,6 +411,7 @@ export function listTasks(filters: TaskFilters = {}): TaskFull[] {
   const notesByTask = groupBy(noteRows, (r) => r.taskId);
   const critsByTask = groupBy(critRows, (r) => r.taskId);
   const attByTask = attachmentsForTasks(ids);
+  const prByTask = latestPrUrlByTask(ids);
   return rows.map((r) =>
     hydrateTask(
       r,
@@ -408,7 +428,8 @@ export function listTasks(filters: TaskFilters = {}): TaskFull[] {
         done: c.done,
         position: c.position,
       })),
-      attByTask.get(r.id) ?? []
+      attByTask.get(r.id) ?? [],
+      prByTask.get(r.id) ?? null
     )
   );
 }
@@ -436,7 +457,14 @@ export function getTask(id: string): TaskFull | null {
     .orderBy(asc(acceptanceCriteria.position))
     .all()
     .map((c) => ({ id: c.id, text: c.text, done: c.done, position: c.position }));
-  return hydrateTask(row, deps, notes, criteria, attachmentsForTask(id));
+  return hydrateTask(
+    row,
+    deps,
+    notes,
+    criteria,
+    attachmentsForTask(id),
+    latestPrUrlByTask([id]).get(id) ?? null
+  );
 }
 
 /** Distinct non-null assignees observed across all tasks, alphabetical. */

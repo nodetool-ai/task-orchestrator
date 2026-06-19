@@ -20,6 +20,7 @@ function fakeTask(overrides: Partial<TaskFull> = {}): TaskFull {
     estimate: null,
     tags: [],
     repoId: null,
+    prUrl: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     dependencies: [],
