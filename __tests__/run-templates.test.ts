@@ -248,6 +248,25 @@ describe("extractReviewOutcome", () => {
     expect(outcome!.length).toBeLessThanOrEqual(200);
   });
 
+  it("stays valid JSON (verdict recoverable) when the summary can't absorb the overflow", () => {
+    // A long verdict with a short summary used to push the serialized object
+    // over 200 chars, and the old slice(0,200) fallback corrupted the JSON so
+    // parseReviewVerdict silently dropped the verdict (blocking approve→done).
+    const text = JSON.stringify({ verdict: "approve_" + "x".repeat(250), summary: "ok" });
+    const outcome = extractReviewOutcome(text);
+    expect(outcome).not.toBeNull();
+    // Must round-trip as JSON and preserve the verdict.
+    const parsed = JSON.parse(outcome!);
+    expect(parsed.verdict).toBe("approve_" + "x".repeat(250));
+  });
+
+  it("caps a long summary while keeping the outcome parseable", () => {
+    const text = JSON.stringify({ verdict: "approve", summary: "y".repeat(400) });
+    const outcome = extractReviewOutcome(text);
+    expect(outcome!.length).toBeLessThanOrEqual(200);
+    expect(parseReviewVerdict(outcome)).toBe("approve");
+  });
+
   it("falls back to the first non-empty line when no verdict block present", () => {
     const text = "PR looks fine but I didn't follow the verdict format.\nMore text below.";
     const outcome = extractReviewOutcome(text);

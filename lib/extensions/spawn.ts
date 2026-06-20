@@ -572,32 +572,7 @@ export const spawnExtension =
 
         const awaitIdle = args.await === true;
 
-        // 3. If awaiting, subscribe before kicking off the append so we
-        //    never miss the terminal status emit.
-        let donePromise: Promise<void> | null = null;
-        let unsubscribe: () => void = () => {};
-        if (awaitIdle) {
-          donePromise = new Promise<void>((resolveDone) => {
-            unsubscribe = runs.subscribe(args.run_id, (event: unknown) => {
-              const e = event as { type?: string; status?: string };
-              if (e?.type === "status") {
-                const s = e.status;
-                if (
-                  s === "idle" ||
-                  s === "failed" ||
-                  s === "cancelled" ||
-                  s === "closed" ||
-                  s === "completed" ||
-                  s === "budget_exhausted"
-                ) {
-                  resolveDone();
-                }
-              }
-            });
-          });
-        }
-
-        // 4. Fire the append.
+        // 3. Fire the append.
         let appendError: string | null = null;
         const drain = (async () => {
           try {
@@ -641,10 +616,13 @@ export const spawnExtension =
           );
         }
 
-        // 5. Awaiting path: wait for the drain *and* a terminal-status signal.
-        await Promise.race([drain, donePromise!.catch(() => {})]);
+        // 4. Awaiting path: `drain` resolves only when runs.append's generator
+        //    completes, which happens once the turn reaches a terminal status
+        //    (it yields `done` last) — that is the terminal signal. A
+        //    pre-append runs.subscribe() would be a no-op here anyway: the
+        //    run's event bus only exists while the turn is live, i.e. after
+        //    append has already started.
         await drain.catch(() => {});
-        unsubscribe();
 
         if (appendError) {
           return errResult(`append failed: ${appendError}`);

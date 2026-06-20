@@ -888,9 +888,20 @@ async function gitSyncAfterTurn(
 ): Promise<string | null> {
   if (!run.branch) return run.prUrl;
   const base = repoDefaultBranch(run);
+  // Count the commits this branch added beyond its base. Prefer the
+  // remote-tracking base (origin/<base>): it reflects the branch's real PR base
+  // and isn't thrown off by a stale local checkout of <base>. Fall back to the
+  // local ref when origin/<base> hasn't been fetched.
+  let baseRef = base;
+  try {
+    await sh(["git", "rev-parse", "--verify", "--quiet", `origin/${base}`], cwd);
+    baseRef = `origin/${base}`;
+  } catch {
+    // origin/<base> unavailable; use the local base ref.
+  }
   let ahead = 0;
   try {
-    const out = await sh(["git", "rev-list", "--count", `${base}..HEAD`], cwd);
+    const out = await sh(["git", "rev-list", "--count", `${baseRef}..HEAD`], cwd);
     ahead = parseInt(out.trim() || "0", 10) || 0;
   } catch {
     ahead = 0;

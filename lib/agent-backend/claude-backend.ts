@@ -172,7 +172,13 @@ export class ClaudeBackend implements AgentBackend {
 
     for await (const msg of stream) {
       if (abort.signal.aborted) break;
-      if (msg.type === "result") turns = (msg as any).num_turns ?? turns;
+      if (msg.type === "result") {
+        turns = (msg as any).num_turns ?? turns;
+        // The result envelope also carries the session id; capture it so a
+        // resumed query (which may emit no fresh system/init) still yields a
+        // resume token instead of silently dropping multi-turn continuity.
+        if ((msg as any).session_id) sessionId = (msg as any).session_id;
+      }
       if (msg.type === "system" && (msg as any).subtype === "init" && (msg as any).session_id) {
         sessionId = (msg as any).session_id;
       }
@@ -198,6 +204,13 @@ export class ClaudeBackend implements AgentBackend {
           totalCostUsd = env.total_cost_usd ?? totalCostUsd;
         }
       }
+    }
+
+    // If the loop exited because of an abort (rather than the SDK throwing),
+    // surface it as a thrown error so lib/runs.ts treats the turn as a clean
+    // cancel instead of overwriting the `cancelled` status with `completed`.
+    if (abort.signal.aborted) {
+      throw new Error("Turn aborted");
     }
 
     return {
