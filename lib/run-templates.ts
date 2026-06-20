@@ -30,6 +30,28 @@ function attachmentSection(attachments: AttachmentMeta[]): string[] {
 
 export const IMPLEMENT_DEFAULT_BUDGET_USD = 20;
 export const REVIEW_DEFAULT_BUDGET_USD = 5;
+
+/**
+ * Build the message the `Resolve merge` button posts into a task's attached run.
+ * Merges the PR's base branch into the current branch and resolves conflicts.
+ * `baseRef` is the PR's actual base; falls back to "main" when unknown.
+ */
+export function buildMergePrompt(baseRef: string | null): string {
+  const base = baseRef && baseRef.trim() ? baseRef.trim() : "main";
+  return [
+    `The PR for this task has merge conflicts with its base branch \`${base}\`.`,
+    "",
+    `Bring the branch up to date:`,
+    `1. \`git fetch origin ${base}\` to get the latest base.`,
+    `2. Merge \`origin/${base}\` into the current branch.`,
+    "3. Resolve every conflict so the result is coherent — reconcile the intent",
+    "   of both sides, don't just delete conflict markers or blindly pick one side.",
+    "4. Run typecheck and lint where they apply and fix anything you broke.",
+    "5. Commit the merge with a clear message.",
+    "",
+    "Do not open a new PR — pushing the existing branch updates it.",
+  ].join("\n");
+}
 /** Per-task budget used to size the executor's default (own) budget cap. */
 export const EXECUTE_PER_TASK_BUDGET_USD = IMPLEMENT_DEFAULT_BUDGET_USD + REVIEW_DEFAULT_BUDGET_USD;
 

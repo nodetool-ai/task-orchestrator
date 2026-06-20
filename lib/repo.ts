@@ -467,6 +467,65 @@ export function getTask(id: string): TaskFull | null {
   );
 }
 
+// ──────────────────────────────────────────────────────────
+// Attached run (one canonical worktree session per task)
+// ──────────────────────────────────────────────────────────
+
+/** Minimal view of a task's attached run for the UI + open-or-create endpoint. */
+export interface AttachedRunRef {
+  id: number;
+  status: string;
+  cwdStrategy: string;
+  prUrl: string | null;
+  branch: string | null;
+}
+
+/** A `closed` attached run is treated as absent — the next interaction mints a
+ *  fresh one. `failed`/`cancelled` are reused (their worktree/branch persist). */
+export function isUsableAttachedRun(status: string): boolean {
+  return status !== "closed";
+}
+
+/**
+ * Resolve a task's attached run, or null when unset, deleted, or `closed`.
+ * Does not import lib/runs (avoids a cycle) — reads the agent_runs row directly.
+ */
+export function resolveAttachedRun(taskId: string): AttachedRunRef | null {
+  const t = db
+    .select({ rid: tasks.attachedRunId })
+    .from(tasks)
+    .where(eq(tasks.id, taskId))
+    .get();
+  if (!t?.rid) return null;
+  const r = db
+    .select({
+      id: agentSessions.id,
+      status: agentSessions.status,
+      cwdStrategy: agentSessions.cwdStrategy,
+      prUrl: agentSessions.prUrl,
+      branch: agentSessions.branch,
+    })
+    .from(agentSessions)
+    .where(eq(agentSessions.id, t.rid))
+    .get();
+  if (!r) return null;
+  if (!isUsableAttachedRun(r.status)) return null;
+  return r;
+}
+
+/**
+ * Point a task at its attached run. With `ifUnset`, no-ops when the task already
+ * has a usable attached run (so executor-spawned runs only adopt an empty slot).
+ */
+export function attachRunToTask(
+  taskId: string,
+  runId: number,
+  opts: { ifUnset?: boolean } = {}
+): void {
+  if (opts.ifUnset && resolveAttachedRun(taskId)) return;
+  db.update(tasks).set({ attachedRunId: runId }).where(eq(tasks.id, taskId)).run();
+}
+
 /** Distinct non-null assignees observed across all tasks, alphabetical. */
 export function listAssignees(): string[] {
   const rows = db

@@ -8,6 +8,7 @@ import {
   type PersonaOption,
 } from "@/components/pickers/persona-picker";
 import { ModelPicker, type ModelOption } from "@/components/chat/model-picker";
+import { ThinkingLevelPicker, type ThinkingLevel } from "@/components/pickers/thinking-level-picker";
 
 export type { PersonaOption };
 
@@ -38,6 +39,7 @@ export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], class
   const [input, setInput] = useState("");
   const [personaId, setPersonaId] = useState(personas[0]?.id ?? "implementor");
   const [model, setModel] = useState(DEFAULT_MODEL);
+  const [reasoning, setReasoning] = useState<ThinkingLevel | null>(null);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -83,36 +85,29 @@ export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], class
     setError(null);
     setPending(true);
     try {
-      // 1. Create the chat run scoped to the task. No initialPrompt — chat
-      //    runs sit idle until the first user message lands via /messages.
-      const cwdStrategy = repoId ? "repo" : "none";
-      const createRes = await fetch("/api/runs", {
+      // 1. Open-or-create the task's single attached run (deferred — no implement
+      //    seed; this message is its first turn). The pickers are honored only
+      //    when the run is first created.
+      const createRes = await fetch(`/api/tasks/${taskId}/attached-run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          goal: "<chat>",
-          toolsProfile: "orchestrator,repo_write",
-          cwdStrategy,
-          taskId,
-          repoId,
-          personaId,
-          model,
-        }),
+        body: JSON.stringify({ seed: false, personaId, model, thinkingLevel: reasoning }),
       });
       if (!createRes.ok) {
         const body = await createRes.json().catch(() => ({}));
         setError(body.error ?? `HTTP ${createRes.status}`);
         return;
       }
-      const run = (await createRes.json()) as { id: number };
+      const { runId, created } = (await createRes.json()) as {
+        runId: number;
+        created: boolean;
+      };
 
-      // 2. Send the user's message (prefixed with task context) as the first
-      //    turn. The endpoint streams SSE back; we don't need to read it —
-      //    the new tab will pick up streaming via its own SSE subscription.
-      //    Fire-and-forget the post so we open the tab immediately; if the
-      //    request errors out the user sees it on the run page.
-      const messageText = `${promptPrefix}\n\n---\n\n${text}`;
-      void fetch(`/api/runs/${run.id}/messages`, {
+      // 2. Send the user's message. Prefix the task context only on the first
+      //    message of a fresh run — an existing session already has it.
+      //    Fire-and-forget; the run page surfaces any error and streams the reply.
+      const messageText = created ? `${promptPrefix}\n\n---\n\n${text}` : text;
+      void fetch(`/api/runs/${runId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: messageText }),
@@ -120,8 +115,8 @@ export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], class
         // The /runs/[id] page surfaces errors; nothing useful to do here.
       });
 
-      // 3. Side-panel semantics → open in a new tab.
-      window.open(`/runs/${run.id}`, "_blank", "noopener,noreferrer");
+      // 3. Side-panel semantics → open the attached run in a new tab.
+      window.open(`/runs/${runId}`, "_blank", "noopener,noreferrer");
 
       // Reset input on success.
       setInput("");
@@ -138,7 +133,7 @@ export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], class
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <MessageCircle className="size-3.5" />
-          <span>Ask the agent about this task — opens a new chat run.</span>
+          <span>Ask the agent about this task — opens its attached run.</span>
         </div>
         <div className="flex items-center gap-2">
           <PersonaPicker
@@ -152,6 +147,11 @@ export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], class
             options={modelOptions}
             onChange={setModel}
             disabled={pending}
+          />
+          <ThinkingLevelPicker
+            value={reasoning}
+            onChange={setReasoning}
+            className="rounded-md border border-border/60 bg-background px-2 py-1 text-xs outline-none focus:border-foreground/40"
           />
         </div>
       </div>

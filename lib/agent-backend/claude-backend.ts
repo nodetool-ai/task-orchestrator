@@ -18,28 +18,27 @@ import { randomUUID } from "node:crypto";
 import { mapClaudeMessage } from "./claude-event-mapper";
 import { collectExtensions, composeSystemPrompt, runInterceptors } from "./collect";
 import { toZodRawShape } from "./typebox-to-zod";
+import { interceptorToolName, isFileTool } from "../builtin-tools";
 import type { AgentBackend, RunTurnArgs, TurnOutcome } from "./types";
 import type { RunEnvelope } from "../pi-event-mapper";
 
 const TAG = "claude:";
 const MCP_SERVER_NAME = "task_orch";
 
-/** pi `write`/`edit`/`bash` (path/command) vs Claude `Write`/`Edit`/`Bash`
- *  (file_path/command). Normalize to the canonical vocabulary the sandbox
- *  interceptor expects, and de-normalize mutations on the way back. */
-const NAME_MAP: Record<string, string> = { Write: "write", Edit: "edit", Bash: "bash" };
-
+/** Claude names the built-in tools TitleCase (`Read`/`Write`/`Grep`/`Glob`/…) and
+ *  passes file paths as `file_path`; pi (and the canonical interceptor seam) use
+ *  lowercase names and `path`. Normalize to the shared vocabulary before
+ *  interceptors run, and de-normalize file mutations on the way back. */
 function normalizeToolCall(name: string, input: Record<string, any>): { toolName: string; input: Record<string, any> } {
-  const toolName = NAME_MAP[name] ?? name;
-  if (toolName === "write" || toolName === "edit") {
+  const toolName = interceptorToolName(name);
+  if (isFileTool(name)) {
     return { toolName, input: { ...input, path: input.file_path ?? input.path } };
   }
   return { toolName, input };
 }
 
 function denormalizeToolInput(name: string, original: Record<string, any>, canonical: Record<string, any>): Record<string, any> {
-  const toolName = NAME_MAP[name] ?? name;
-  if (toolName === "write" || toolName === "edit") {
+  if (isFileTool(name)) {
     const { path, ...rest } = canonical;
     return { ...rest, file_path: path ?? original.file_path };
   }
@@ -155,6 +154,14 @@ export class ClaudeBackend implements AgentBackend {
         permissionMode: "bypassPermissions",
         systemPrompt: { type: "preset", preset: "claude_code", ...(append ? { append } : {}) },
         mcpServers: { [MCP_SERVER_NAME]: server },
+        // Use ONLY our in-process orchestrator server. Without this, the
+        // claude_code preset also loads MCP servers from the ambient Claude
+        // config (~/.claude.json project entries, project .mcp.json, plugins).
+        // A user who has a "task-orchestrator" server pointed at a *remote*
+        // deployment there would have the agent write plans/tasks to that
+        // remote DB — the run reports success but nothing appears in this
+        // instance. strictMcpConfig isolates the run to the tools we pass.
+        strictMcpConfig: true,
         ...(preToolUse ? { hooks: { PreToolUse: preToolUse } } : {}),
         abortController: abort,
         includePartialMessages: true,

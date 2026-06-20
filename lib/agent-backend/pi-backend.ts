@@ -19,6 +19,7 @@ import {
 import { getModel, getProviders, getModels } from "@earendil-works/pi-ai";
 
 import { mapPiEvent, type RunEnvelope } from "../pi-event-mapper";
+import { interceptorToolName } from "../builtin-tools";
 import { collectExtensions, composeSystemPrompt } from "./collect";
 import type { AgentBackend, AmbientSkill, RunTurnArgs, TurnOutcome } from "./types";
 
@@ -76,7 +77,10 @@ export class PiBackend implements AgentBackend {
       if (collected.interceptors.length > 0) {
         pi.on("tool_call", async (event: any) => {
           for (const fn of collected.interceptors) {
-            const decision = await fn({ toolName: event.toolName, input: event.input });
+            // pi's built-ins are already lowercase but use its own names
+            // (`find`/`ls`); fold them into the shared canonical vocabulary so
+            // interceptors key on one set of names across both harnesses.
+            const decision = await fn({ toolName: interceptorToolName(event.toolName), input: event.input });
             if (!decision) continue;
             if ("block" in decision) return { block: true, reason: decision.reason };
             if ("input" in decision) Object.assign(event.input, decision.input);

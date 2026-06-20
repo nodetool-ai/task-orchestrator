@@ -3,15 +3,10 @@ import * as repo from "@/lib/repo";
 import * as runsLib from "@/lib/runs";
 import { auth } from "@/auth";
 import { errorResponse } from "@/lib/api";
+import { bucketFor, dedupeLiveByTask, LIVE_BUCKET_PRIORITY } from "@/lib/run-buckets";
 import type { LiveSessionItem } from "@/components/pi/live-sidebar";
 
 export const dynamic = "force-dynamic";
-
-const ACTIVE = new Set(["preparing", "running", "pushing"]);
-const REVIEW = new Set(["opening_pr"]);
-const BLOCKED = new Set(["failed", "budget_exhausted"]);
-
-type Bucket = LiveSessionItem["bucket"];
 
 function shortRunId(id: number, startedAt: Date): string {
   const y = startedAt.getFullYear();
@@ -19,16 +14,6 @@ function shortRunId(id: number, startedAt: Date): string {
   const d = String(startedAt.getDate()).padStart(2, "0");
   return `R-${y}${m}${d}-${String(id).padStart(3, "0")}`;
 }
-
-function bucketFor(status: string, prUrl: string | null): Bucket | null {
-  if (ACTIVE.has(status)) return "running";
-  if (REVIEW.has(status) || prUrl) return "review";
-  if (BLOCKED.has(status)) return "blocked";
-  return null;
-}
-
-// Sort order: review first (loudest attention), then blocked, then running (newest first within).
-const BUCKET_ORDER: Record<Bucket, number> = { review: 0, blocked: 1, running: 2 };
 
 export async function GET() {
   try {
@@ -40,9 +25,9 @@ export async function GET() {
     const runs = runsLib.listRuns().filter((r) => r.origin === "task");
     const items: LiveSessionItem[] = [];
     for (const r of runs) {
-      const b = bucketFor(r.status, r.prUrl);
-      if (!b) continue;
       const task = r.taskId ? repo.getTask(r.taskId) : null;
+      const b = bucketFor(r.status, r.prUrl, task?.state);
+      if (!b) continue;
       const prMatch = r.prUrl?.match(/\/pull\/(\d+)/);
       let reason: string | null = null;
       if (b === "blocked") {
@@ -69,13 +54,16 @@ export async function GET() {
       });
     }
 
-    items.sort((a, b) => {
-      const d = BUCKET_ORDER[a.bucket] - BUCKET_ORDER[b.bucket];
+    // One card per task — a review/blocked/running task usually has several
+    // runs behind it (implement, review, fixes); show only its representative.
+    const deduped = dedupeLiveByTask(items);
+    deduped.sort((a, b) => {
+      const d = LIVE_BUCKET_PRIORITY[a.bucket] - LIVE_BUCKET_PRIORITY[b.bucket];
       if (d !== 0) return d;
       return b.startedAt - a.startedAt;
     });
 
-    return NextResponse.json({ items });
+    return NextResponse.json({ items: deduped });
   } catch (e) {
     return errorResponse(e);
   }

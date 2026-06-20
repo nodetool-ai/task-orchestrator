@@ -19,10 +19,29 @@ describe("Claude built-in tool vocabulary translation", () => {
     });
   });
 
-  it("passes through unknown tools unchanged", () => {
-    expect(normalizeToolCall("Read", { file_path: "x" })).toEqual({
-      toolName: "Read",
-      input: { file_path: "x" },
+  it("normalizes Read name and file_path → path", () => {
+    expect(normalizeToolCall("Read", { file_path: "/a/b.ts" })).toEqual({
+      toolName: "read",
+      input: { file_path: "/a/b.ts", path: "/a/b.ts" },
+    });
+  });
+
+  it("normalizes the search family to the shared vocabulary without remapping params", () => {
+    // Grep/Glob already use `path`/`pattern` in both harnesses, so only the name folds.
+    expect(normalizeToolCall("Grep", { pattern: "foo", path: "src" })).toEqual({
+      toolName: "grep",
+      input: { pattern: "foo", path: "src" },
+    });
+    expect(normalizeToolCall("Glob", { pattern: "**/*.ts" })).toEqual({
+      toolName: "glob",
+      input: { pattern: "**/*.ts" },
+    });
+  });
+
+  it("passes through unrecognized (MCP / orchestrator) tools unchanged", () => {
+    expect(normalizeToolCall("task_orch__create_task", { title: "x" })).toEqual({
+      toolName: "task_orch__create_task",
+      input: { title: "x" },
     });
   });
 

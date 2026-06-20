@@ -4,6 +4,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as schema from "./schema";
+import { PERSONAS } from "@/lib/personas";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = join(__dirname, "migrations");
@@ -115,8 +116,46 @@ function createDb(): DB {
   sqlite.pragma("foreign_keys = ON");
   sqlite.pragma("busy_timeout = 2000");
   applyMigrations(sqlite);
+  seedRequiredPersonas(sqlite);
   syncDefaultRepoFromEnv(sqlite);
   return drizzle(sqlite, { schema }) as DB;
+}
+
+// Personas are code-defined (lib/personas/*.ts) but agent_runs.persona_id carries
+// a foreign key into the personas table, so a migrated-but-unseeded DB makes every
+// run-create fail with "FOREIGN KEY constraint failed". `npm run db:seed` is the
+// manual path; this guarantees the FK targets exist on every cold start too.
+//
+// INSERT OR IGNORE is insert-if-missing: persona rows edited through the UI are
+// left untouched (matching seedPersonas's default semantics). lib/personas has no
+// DB dependency, so importing it here is safe.
+function seedRequiredPersonas(sqlite: Database.Database) {
+  try {
+    const stmt = sqlite.prepare(
+      `INSERT OR IGNORE INTO personas
+         (id, name, description, system_prompt, thinking_level, tools_profile, budget_max_turns, budget_max_seconds)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    const seed = sqlite.transaction(() => {
+      for (const p of PERSONAS) {
+        stmt.run(
+          p.id,
+          p.name,
+          p.description ?? null,
+          p.systemPrompt,
+          p.thinkingLevel ?? null,
+          p.toolsProfile,
+          p.budget?.maxTurns ?? null,
+          p.budget?.maxSeconds ?? null
+        );
+      }
+    });
+    seed();
+  } catch (err) {
+    // Table missing or other oddity — log and continue. Migrations should have
+    // run by now; if they didn't, that's the real problem to surface.
+    console.warn("db: failed to seed required personas:", err);
+  }
 }
 
 // One-shot bridge: if TASK_ORCH_TARGET_REPO is set, ensure R-default's

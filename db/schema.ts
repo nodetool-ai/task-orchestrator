@@ -71,6 +71,11 @@ export const tasks = sqliteTable(
     estimate: text("estimate"),
     tags: text("tags").notNull().default("[]"),
     repoId: text("repo_id").references(() => repositories.id, { onDelete: "set null" }),
+    // The task's single canonical "attached run" — the worktree session that
+    // carries implement / chat / merge turns. NULL until first interaction.
+    // The FK (→ agent_runs.id ON DELETE SET NULL) lives in migration 0017; we
+    // omit `.references()` here to avoid a tasks↔agent_runs type-inference cycle.
+    attachedRunId: integer("attached_run_id"),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().default(NOW),
   },
@@ -175,6 +180,9 @@ export const agentSessions = sqliteTable(
     resumeOf: integer("resume_of"),
     repoId: text("repo_id").references(() => repositories.id, { onDelete: "set null" }),
     goal: text("goal").notNull().default("<implement>"),
+    // Reasoning level for this run: low | medium | high | xhigh. NULL inherits the
+    // persona's level (which may itself be NULL = model default).
+    thinkingLevel: text("thinking_level"),
     toolsProfile: text("tools_profile").notNull().default("orchestrator,repo_write"),
     cwdStrategy: text("cwd_strategy").notNull().default("worktree"),
     parentRunId: integer("parent_run_id"),

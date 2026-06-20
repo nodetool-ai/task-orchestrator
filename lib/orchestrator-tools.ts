@@ -946,13 +946,19 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     parameters: Type.Object({
       task_id: Type.String({ minLength: 1 }),
       model: Type.Optional(Type.String()),
+      reasoning: Type.Optional(
+        Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh")], {
+          description: "Reasoning level for the agent. Omit to use the persona's default.",
+        })
+      ),
       base_branch: Type.Optional(Type.String()),
     }),
-    execute: async ({ task_id, model, base_branch }, ctx) => {
+    execute: async ({ task_id, model, reasoning, base_branch }, ctx) => {
       const result = safe(() =>
         agentLib.startSession({
           taskId: task_id,
           model,
+          thinkingLevel: reasoning ?? null,
           baseBranch: base_branch,
           parentRunId: ctx.runId ?? null,
         })
@@ -973,8 +979,13 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       task_id: Type.String({ minLength: 1 }),
       pr_url: Type.String({ minLength: 1 }),
       model: Type.Optional(Type.String()),
+      reasoning: Type.Optional(
+        Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh")], {
+          description: "Reasoning level for the reviewer. Omit to use the persona's default.",
+        })
+      ),
     }),
-    execute: async ({ task_id, pr_url, model }, ctx) => {
+    execute: async ({ task_id, pr_url, model, reasoning }, ctx) => {
       const task = repo.getTask(task_id);
       if (!task) return errResult(`Error: Task ${task_id} not found`);
       const result = safe(() =>
@@ -987,6 +998,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
           repoId: task.repoId ?? null,
           personaId: "reviewer",
           model: model ?? null,
+          thinkingLevel: reasoning ?? null,
           parentRunId: ctx.runId ?? null,
           budget: { maxUsd: REVIEW_DEFAULT_BUDGET_USD },
         })

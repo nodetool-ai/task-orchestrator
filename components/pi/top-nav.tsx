@@ -161,28 +161,6 @@ export function TopNav({ email }: { email?: string }) {
         </span>
       </button>
 
-      <button
-        onClick={openSpawn}
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-          padding: "6px 12px",
-          borderRadius: 6,
-          background: "var(--pi-fg)",
-          color: "var(--pi-bg)",
-          border: "none",
-          fontSize: 12,
-          fontWeight: 600,
-          cursor: "pointer",
-          fontFamily: "inherit",
-          marginLeft: 6,
-        }}
-      >
-        <Icon name="spark" size={13} />
-        Spawn agent
-      </button>
-
       <div style={{ width: 8 }} />
       {email && (
         <span
@@ -276,24 +254,6 @@ function TopNavMobile({ pathname, email }: { pathname: string; email?: string })
 
         <button onClick={openPalette} aria-label="Search" style={iconBtnStyle}>
           <Icon name="search" size={15} />
-        </button>
-        <button
-          onClick={openSpawn}
-          aria-label="Spawn agent"
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            width: 32,
-            height: 32,
-            borderRadius: 6,
-            background: "var(--pi-fg)",
-            color: "var(--pi-bg)",
-            border: "none",
-            cursor: "pointer",
-          }}
-        >
-          <Icon name="spark" size={14} />
         </button>
       </div>
 

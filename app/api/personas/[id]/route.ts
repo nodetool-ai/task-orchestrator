@@ -8,7 +8,7 @@ const PatchBody = z.object({
   name: z.string().min(1).optional(),
   description: z.string().nullable().optional(),
   systemPrompt: z.string().min(1).optional(),
-  thinkingLevel: z.enum(["low", "medium", "high"]).nullable().optional(),
+  thinkingLevel: z.enum(["low", "medium", "high", "xhigh"]).nullable().optional(),
   toolsProfile: z.string().min(1).optional(),
   budgetMaxTurns: z.number().int().positive().nullable().optional(),
   budgetMaxSeconds: z.number().int().positive().nullable().optional(),

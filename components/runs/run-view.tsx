@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import {
   ArrowUp,
   ChevronLeft,
+  Brain,
   Cpu,
   FolderClosed,
   GitBranch,
@@ -469,6 +470,12 @@ export function RunView({
             <span className="inline-flex items-center gap-1">
               <Cpu className="size-3" />
               <code className="font-mono">{run.model}</code>
+            </span>
+          )}
+          {run.thinkingLevel && (
+            <span className="inline-flex items-center gap-1" title="Reasoning level">
+              <Brain className="size-3" />
+              <code className="font-mono">{run.thinkingLevel}</code>
             </span>
           )}
           <span className="inline-flex items-center gap-1 min-w-0" title={cwdHint}>

@@ -3,30 +3,22 @@ import Link from "next/link";
 import { ArrowLeft, GitPullRequest } from "lucide-react";
 import { TaskRepoSelector } from "@/components/task-repo-selector";
 import * as repo from "@/lib/repo";
-import * as agent from "@/lib/agent";
 import * as runs from "@/lib/runs";
 import { StateIcon } from "@/components/state-icon";
 import { StateChanger } from "@/components/state-changer";
 import { MarkdownBody } from "@/components/markdown-body";
 import { CriterionCheckbox } from "@/components/criterion-checkbox";
-import { RunAgentButton } from "@/components/run-agent-button";
-import { RunReviewButton } from "@/components/run-review-button";
+import { TaskAgentButton } from "@/components/task-agent-button";
+import { ResolveMergeButton } from "@/components/resolve-merge-button";
 import { DeleteButton } from "@/components/delete-button";
 import { TaskChatBox } from "@/components/task-chat-box";
-import {
-  IMPLEMENT_DEFAULT_BUDGET_USD,
-  REVIEW_DEFAULT_BUDGET_USD,
-  buildChatPromptPrefix,
-  buildImplementPrompt,
-  buildReviewPrompt,
-} from "@/lib/run-templates";
+import { buildChatPromptPrefix } from "@/lib/run-templates";
 import { SessionStatusPill } from "@/components/session-status-pill";
 import { AddNoteForm } from "@/components/add-note-form";
 import { AddCriterionForm } from "@/components/add-criterion-form";
 import { Attachments, AttachmentsHeading } from "@/components/attachments";
 import { Meta } from "@/components/meta";
 import { formatDate, formatDateTime, prShortLabel, relativeDate } from "@/lib/utils";
-import { isTerminalStatus } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -39,12 +31,17 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   const deps = task.dependencies
     .map((depId) => repo.getTask(depId))
     .filter((t): t is NonNullable<typeof t> => Boolean(t));
-  const sessions = agent.listSessions(task.id);
-  const activeSession = sessions.find((s) => !isTerminalStatus(s.status));
+  // The task's single attached run (one canonical session), if any.
+  const attachedRun = repo.resolveAttachedRun(task.id);
   // Inbox: every run scoped to this task (chat + implement + review),
   // newest first, capped at the 10 most recent so the page doesn't grow
-  // unbounded. listRuns already orders by startedAt desc.
-  const inbox = runs.listRuns({ taskId: task.id }).slice(0, 10);
+  // unbounded. listRuns already orders by startedAt desc. Pin the attached
+  // run to the top so a return visit lands on it in one click.
+  const allRuns = runs.listRuns({ taskId: task.id });
+  const inbox = [
+    ...allRuns.filter((r) => r.id === attachedRun?.id),
+    ...allRuns.filter((r) => r.id !== attachedRun?.id),
+  ].slice(0, 10);
   // The task's latest PR (denormalised onto TaskFull from its most recent run).
   const latestPr = task.prUrl;
   const repository = task.repoId ? repo.getRepository(task.repoId) : null;
@@ -72,22 +69,9 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         </div>
         <div className="flex flex-row sm:flex-col items-start sm:items-end gap-2 sm:gap-1.5 flex-wrap">
           {task.state !== "done" && task.state !== "cancelled" && (
-            <RunAgentButton
-              taskId={task.id}
-              hasActive={Boolean(activeSession)}
-              initialPrompt={buildImplementPrompt(task)}
-              budgetMaxUsd={IMPLEMENT_DEFAULT_BUDGET_USD}
-              personas={personas}
-            />
+            <TaskAgentButton taskId={task.id} hasAttachedRun={Boolean(attachedRun)} />
           )}
-          {latestPr && (
-            <RunReviewButton
-              taskId={task.id}
-              prUrl={latestPr}
-              initialPrompt={buildReviewPrompt(task, latestPr)}
-              budgetMaxUsd={REVIEW_DEFAULT_BUDGET_USD}
-            />
-          )}
+          <ResolveMergeButton taskId={task.id} />
           <DeleteButton
             endpoint={`/api/tasks/${task.id}`}
             redirectTo={plan ? `/plans/${plan.id}` : "/tasks"}

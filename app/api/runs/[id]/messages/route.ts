@@ -1,6 +1,7 @@
 import { type NextRequest } from "next/server";
 import { auth } from "@/auth";
 import * as runs from "@/lib/runs";
+import { buildMergePrompt } from "@/lib/run-templates";
 
 export const dynamic = "force-dynamic";
 
@@ -23,13 +24,19 @@ export async function POST(
   const session = await auth();
   const author = session?.user?.email ?? "chat";
 
-  let body: { text?: string };
+  let body: { text?: string; resolveMergeBaseRef?: string | null };
   try {
-    body = (await req.json()) as { text?: string };
+    body = (await req.json()) as { text?: string; resolveMergeBaseRef?: string | null };
   } catch {
     return new Response("Bad JSON", { status: 400 });
   }
-  const text = (body.text ?? "").trim();
+  // The Resolve-merge button posts a base-ref hint instead of free text; the
+  // canonical merge prompt is built here so it stays a single source of truth.
+  const text = (
+    "resolveMergeBaseRef" in body
+      ? buildMergePrompt(body.resolveMergeBaseRef ?? null)
+      : body.text ?? ""
+  ).trim();
   if (!text) return new Response("Empty message", { status: 400 });
 
   const abort = new AbortController();
