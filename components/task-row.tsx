@@ -2,7 +2,7 @@ import Link from "next/link";
 import { GitPullRequest } from "lucide-react";
 import type { TaskFull } from "@/lib/types";
 import { StateIcon } from "./state-icon";
-import { prShortLabel, relativeDate } from "@/lib/utils";
+import { prNumberLabel, prShortLabel, relativeDate } from "@/lib/utils";
 
 export function TaskRow({ task }: { task: TaskFull }) {
   return (
@@ -39,7 +39,7 @@ export function TaskRow({ task }: { task: TaskFull }) {
           className="relative z-10 inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
         >
           <GitPullRequest className="size-3.5 text-state-review" />
-          <span className="hidden sm:inline font-mono">{prShortLabel(task.prUrl)}</span>
+          <span className="hidden sm:inline font-mono">{prNumberLabel(task.prUrl)}</span>
         </a>
       )}
       <span className="hidden lg:inline-block text-xs text-muted-foreground tabular-nums w-20 text-right">

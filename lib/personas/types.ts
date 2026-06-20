@@ -3,7 +3,7 @@ export interface Persona {
   name: string;
   description: string;
   systemPrompt: string;
-  thinkingLevel?: "low" | "medium" | "high";
+  thinkingLevel?: "low" | "medium" | "high" | "xhigh";
   toolsProfile: string;
   budget?: { maxTurns?: number; maxSeconds?: number };
 }

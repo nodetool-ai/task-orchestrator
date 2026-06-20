@@ -31,6 +31,7 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
   const [open, setOpen] = useState(false);
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
+  const [instructions, setInstructions] = useState("");
   const [maxUsd, setMaxUsd] = useState(Math.max(openTaskCount, 1) * 25);
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
@@ -38,6 +39,7 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
   useEffect(() => {
     if (!open) return;
     setError(null);
+    setInstructions("");
     setMaxUsd(Math.max(openTaskCount, 1) * 25);
     fetch("/api/providers")
       .then((res) => res.json())
@@ -79,6 +81,7 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
           planId,
           personaId: "executor",
           model,
+          initialPrompt: instructions.trim() || undefined,
           budget: { maxUsd, maxTurns: 200 },
         }),
       });
@@ -171,6 +174,31 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
                 The executor is the budget root; child runs share a cap of budget × 3. Sized
                 to ~$25 per open task by default — raise it for larger plans.
               </p>
+
+              <div>
+                <label
+                  htmlFor="execute-instructions"
+                  className="block text-[10px] uppercase tracking-wide text-muted-foreground/80 mb-1"
+                >
+                  Instructions{" "}
+                  <span className="normal-case tracking-normal text-muted-foreground/70">
+                    (optional — appended to the executor&apos;s prompt)
+                  </span>
+                </label>
+                <textarea
+                  id="execute-instructions"
+                  value={instructions}
+                  onChange={(e) => setInstructions(e.target.value)}
+                  disabled={pending}
+                  rows={4}
+                  placeholder="Steer the executor: priorities, constraints, what to skip, branch/PR conventions…"
+                  className={cn(
+                    "w-full resize-y rounded-md border border-border bg-background px-3 py-2",
+                    "text-xs leading-relaxed text-foreground/90",
+                    "focus:outline-none focus:ring-1 focus:ring-foreground/40 disabled:opacity-50"
+                  )}
+                />
+              </div>
 
               {error && <p className="text-xs text-state-blocked">{error}</p>}
             </div>

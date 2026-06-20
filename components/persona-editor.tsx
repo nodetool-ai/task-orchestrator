@@ -100,7 +100,7 @@ export function PersonaEditor({ persona }: Props) {
         />
       </Field>
 
-      <Field label="Thinking">
+      <Field label="Reasoning">
         <ThinkingLevelPicker
           value={draft.thinkingLevel as ThinkingLevel | null}
           onChange={(v) => update("thinkingLevel", v)}

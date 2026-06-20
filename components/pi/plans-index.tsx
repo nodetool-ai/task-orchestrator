@@ -43,6 +43,7 @@ export function PlansIndex({ plans, repos = [] }: { plans: PlanCardData[]; repos
   const [q, setQ] = React.useState("");
   const [filter, setFilter] = React.useState<"all" | "active" | "done">("all");
   const [planWithAgent, setPlanWithAgent] = React.useState(false);
+  const [newPlan, setNewPlan] = React.useState(false);
 
   const filtered = React.useMemo(() => {
     const out = plans.filter((p) => {
@@ -95,7 +96,10 @@ export function PlansIndex({ plans, repos = [] }: { plans: PlanCardData[]; repos
           </div>
         </div>
         <div style={{ display: "inline-flex", gap: 8 }}>
-          <button style={{ ...piButtons.ghostSm(), flex: isMobile ? 1 : undefined, justifyContent: "center" }}>
+          <button
+            onClick={() => setNewPlan(true)}
+            style={{ ...piButtons.ghostSm(), flex: isMobile ? 1 : undefined, justifyContent: "center" }}
+          >
             <Icon name="plus" size={12} />
             New plan
           </button>
@@ -169,6 +173,7 @@ export function PlansIndex({ plans, repos = [] }: { plans: PlanCardData[]; repos
       {planWithAgent && (
         <PlanWithAgentDialog repos={repos} onClose={() => setPlanWithAgent(false)} />
       )}
+      {newPlan && <NewPlanDialog repos={repos} onClose={() => setNewPlan(false)} />}
     </div>
   );
 }
@@ -177,6 +182,7 @@ function PlanWithAgentDialog({ repos, onClose }: { repos: RepoOption[]; onClose:
   const router = useRouter();
   const [idea, setIdea] = React.useState("");
   const [repoId, setRepoId] = React.useState(repos[0]?.id ?? "");
+  const [reasoning, setReasoning] = React.useState<"" | "low" | "medium" | "high" | "xhigh">("");
   const [pending, startTransition] = React.useTransition();
   const [error, setError] = React.useState<string | null>(null);
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
@@ -206,6 +212,7 @@ function PlanWithAgentDialog({ repos, onClose }: { repos: RepoOption[]; onClose:
           personaId: "planning-agent",
           cwdStrategy: repoId ? "repo" : "none",
           repoId: repoId || null,
+          thinkingLevel: reasoning || null,
           initialPrompt: text,
         }),
       });
@@ -320,6 +327,21 @@ function PlanWithAgentDialog({ repos, onClose }: { repos: RepoOption[]; onClose:
             </div>
           )}
 
+          <div>
+            <div style={fieldLabelSt}>Reasoning (optional)</div>
+            <select
+              value={reasoning}
+              onChange={(e) => setReasoning(e.target.value as typeof reasoning)}
+              style={inputSt}
+            >
+              <option value="">Persona default</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+            </select>
+          </div>
+
           {error && (
             <div style={{ fontSize: 12, color: "var(--s-blocked)" }}>{error}</div>
           )}
@@ -372,6 +394,212 @@ function PlanWithAgentDialog({ repos, onClose }: { repos: RepoOption[]; onClose:
             >
               <Icon name="spark" size={12} />
               {pending ? "Starting…" : "Plan with agent"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NewPlanDialog({ repos, onClose }: { repos: RepoOption[]; onClose: () => void }) {
+  const router = useRouter();
+  const [title, setTitle] = React.useState("");
+  const [body, setBody] = React.useState("");
+  const [repoId, setRepoId] = React.useState(repos[0]?.id ?? "");
+  const [pending, startTransition] = React.useTransition();
+  const [error, setError] = React.useState<string | null>(null);
+  const titleRef = React.useRef<HTMLInputElement | null>(null);
+  const isMobile = useIsMobile();
+
+  React.useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  React.useEffect(() => {
+    const id = window.setTimeout(() => titleRef.current?.focus(), 30);
+    return () => window.clearTimeout(id);
+  }, []);
+
+  const submit = () => {
+    setError(null);
+    const t = title.trim();
+    if (!t) { setError("Please enter a title."); return; }
+    startTransition(async () => {
+      const res = await fetch("/api/plans", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: t,
+          body: body.trim() || undefined,
+          repoIds: repoId ? [repoId] : undefined,
+        }),
+      });
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}));
+        setError(b.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      const created = (await res.json()) as { id: string };
+      router.push(`/plans/${created.id}`);
+    });
+  };
+
+  const fieldLabelSt: React.CSSProperties = {
+    fontSize: 11,
+    fontWeight: 600,
+    color: "var(--pi-muted)",
+    textTransform: "uppercase",
+    letterSpacing: "0.08em",
+    marginBottom: 6,
+  };
+  const inputSt: React.CSSProperties = {
+    width: "100%",
+    background: "var(--pi-bg)",
+    border: "1px solid var(--pi-hairline)",
+    borderRadius: 6,
+    padding: "8px 10px",
+    color: "var(--pi-fg)",
+    fontFamily: "inherit",
+    fontSize: 13,
+    outline: "none",
+  };
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 100,
+        background: "hsla(240 6% 4% / 0.75)",
+        backdropFilter: "blur(6px)",
+        display: "flex",
+        alignItems: isMobile ? "flex-start" : "center",
+        justifyContent: "center",
+        padding: isMobile ? "8px" : 0,
+      }}
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 560,
+          maxWidth: isMobile ? "100%" : "calc(100vw - 40px)",
+          background: "var(--pi-surface)",
+          border: "1px solid var(--pi-hairline-strong)",
+          borderRadius: 12,
+          boxShadow: "0 24px 80px hsla(0 0% 0% / 0.6)",
+          animation: "pi-fade-in 200ms ease-out",
+        }}
+      >
+        <div
+          style={{
+            padding: "16px 20px",
+            borderBottom: "1px solid var(--pi-hairline)",
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+          }}
+        >
+          <Icon name="plus" size={14} />
+          <h2 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "var(--pi-fg)" }}>New plan</h2>
+          <span style={{ flex: 1 }} />
+          <button
+            onClick={onClose}
+            style={{ background: "transparent", border: "none", color: "var(--pi-muted)", cursor: "pointer" }}
+          >
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+
+        <div style={{ padding: isMobile ? 14 : 20, display: "flex", flexDirection: "column", gap: 16 }}>
+          <div>
+            <div style={fieldLabelSt}>Title</div>
+            <input
+              ref={titleRef}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+              placeholder="What is this plan about?"
+              style={inputSt}
+            />
+          </div>
+
+          <div>
+            <div style={fieldLabelSt}>Goal / approach (optional)</div>
+            <textarea
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              rows={5}
+              placeholder="Markdown supported…"
+              style={{ ...inputSt, resize: "vertical", lineHeight: 1.55 }}
+            />
+          </div>
+
+          {repos.length > 0 && (
+            <div>
+              <div style={fieldLabelSt}>Repository (optional)</div>
+              <select value={repoId} onChange={(e) => setRepoId(e.target.value)} style={inputSt}>
+                <option value="">No repo</option>
+                {repos.map((r) => (
+                  <option key={r.id} value={r.id}>{r.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {error && <div style={{ fontSize: 12, color: "var(--s-blocked)" }}>{error}</div>}
+
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "flex-end",
+              gap: 8,
+              paddingTop: 8,
+              borderTop: "1px solid var(--pi-hairline)",
+            }}
+          >
+            <button
+              onClick={onClose}
+              disabled={pending}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 6,
+                background: "transparent",
+                color: "var(--pi-muted)",
+                fontSize: 12,
+                fontWeight: 500,
+                border: "1px solid var(--pi-hairline)",
+                cursor: "pointer",
+                fontFamily: "inherit",
+                opacity: pending ? 0.4 : 1,
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={submit}
+              disabled={pending || !title.trim()}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "8px 14px",
+                borderRadius: 6,
+                background: "var(--pi-fg)",
+                color: "var(--pi-bg)",
+                fontWeight: 600,
+                fontSize: 12,
+                border: "none",
+                cursor: pending || !title.trim() ? "not-allowed" : "pointer",
+                fontFamily: "inherit",
+                opacity: pending || !title.trim() ? 0.4 : 1,
+              }}
+            >
+              <Icon name="plus" size={12} />
+              {pending ? "Creating…" : "Create plan"}
             </button>
           </div>
         </div>

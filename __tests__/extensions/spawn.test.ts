@@ -4,11 +4,14 @@ import {
   sumTreeCost,
   checkTreeBudget,
   checkAppendableStatus,
+  checkToolsProfile,
+  checkSpawnStartable,
   extractLatestAssistantText,
   MAX_DEPTH,
   DEFAULT_TREE_BUDGET_MULT,
   spawnExtension,
 } from "../../lib/extensions/spawn";
+import { listProfiles } from "../../lib/profiles";
 
 describe("computeDepth", () => {
   it("root run (empty chain) is depth 0", () => {
@@ -259,6 +262,75 @@ describe("append_message + tree-budget interaction", () => {
       ok: false,
       reason: "status",
     });
+  });
+});
+
+describe("checkToolsProfile (spawn_agent profile validation predicate)", () => {
+  it("admits a single known profile", () => {
+    expect(checkToolsProfile("orchestrator")).toBeNull();
+  });
+
+  it("admits a comma-separated list of known profiles", () => {
+    expect(checkToolsProfile("orchestrator,repo_write,gh_pr,gh_ci")).toBeNull();
+  });
+
+  it("tolerates surrounding whitespace and empty segments", () => {
+    expect(checkToolsProfile(" orchestrator , repo_read ,")).toBeNull();
+  });
+
+  it("rejects an unknown single profile and lists the valid ones", () => {
+    const msg = checkToolsProfile("default");
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/default/);
+    // The error must enumerate the real registry so the agent can self-correct.
+    for (const p of listProfiles()) expect(msg).toContain(p);
+  });
+
+  it("rejects 'code' — the exact value that stuck the executor's children", () => {
+    const msg = checkToolsProfile("code");
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/code/);
+  });
+
+  it("rejects a list where only one entry is unknown, naming the bad one", () => {
+    const msg = checkToolsProfile("orchestrator,bogus,gh_pr");
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/bogus/);
+  });
+
+  it("rejects an empty / whitespace-only profile string", () => {
+    expect(checkToolsProfile("")).not.toBeNull();
+    expect(checkToolsProfile("   ")).not.toBeNull();
+  });
+});
+
+describe("checkSpawnStartable (spawn_agent startability guard)", () => {
+  it("admits a worktree spawn with a task_id (auto-starts the implement worker)", () => {
+    expect(checkSpawnStartable({ cwdStrategy: "worktree", taskId: "T-1" })).toBeNull();
+  });
+
+  it("rejects a worktree spawn with no task_id", () => {
+    const msg = checkSpawnStartable({ cwdStrategy: "worktree", taskId: null });
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/task_id/);
+  });
+
+  it("rejects a cwd_strategy=none spawn — the exact combo that stuck run 85 at pending", () => {
+    const msg = checkSpawnStartable({ cwdStrategy: "none", taskId: null });
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/none/);
+    expect(msg).toMatch(/pending|start/i);
+  });
+
+  it("rejects a cwd_strategy=repo spawn (no worker auto-starts a free-form repo run)", () => {
+    const msg = checkSpawnStartable({ cwdStrategy: "repo", taskId: null });
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/repo/);
+  });
+
+  it("rejecting repo/none stands even if a task_id is supplied", () => {
+    expect(checkSpawnStartable({ cwdStrategy: "none", taskId: "T-1" })).not.toBeNull();
+    expect(checkSpawnStartable({ cwdStrategy: "repo", taskId: "T-1" })).not.toBeNull();
   });
 });
 

@@ -10,6 +10,7 @@ import {
   type RepositoryOption,
 } from "@/components/pickers/repository-picker";
 import { ModelPicker, type ModelOption } from "@/components/chat/model-picker";
+import { ThinkingLevelPicker, type ThinkingLevel } from "@/components/pickers/thinking-level-picker";
 import { stashPendingMessage } from "@/lib/pending-first-message";
 
 // Re-export so existing server-component callers can keep importing the
@@ -32,6 +33,7 @@ export function NewChatBox({ defaultModel, repositories }: Props) {
   const router = useRouter();
   const [input, setInput] = useState("");
   const [model, setModel] = useState(defaultModel);
+  const [reasoning, setReasoning] = useState<ThinkingLevel | null>(null);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [repoId, setRepoId] = useState<string>(repositories[0]?.id ?? "");
   const [pending, setPending] = useState(false);
@@ -94,6 +96,7 @@ export function NewChatBox({ defaultModel, repositories }: Props) {
           cwdStrategy,
           repoId: repoId || null,
           model,
+          thinkingLevel: reasoning,
         }),
       });
       if (!createRes.ok) {
@@ -138,6 +141,11 @@ export function NewChatBox({ defaultModel, repositories }: Props) {
             options={modelOptions}
             onChange={setModel}
             disabled={pending}
+          />
+          <ThinkingLevelPicker
+            value={reasoning}
+            onChange={setReasoning}
+            className="rounded-md border border-border/60 bg-background/60 px-2 py-1 text-[11px] text-foreground transition-colors hover:bg-muted/40 focus:border-foreground/30 focus:outline-none disabled:opacity-50"
           />
           {repositories.length > 0 && (
             <RepositoryPicker

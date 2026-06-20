@@ -7,6 +7,8 @@ import {
   CircleCheck,
   Edit3,
   FileText,
+  FolderSearch,
+  FolderTree,
   Globe,
   ListTodo,
   Loader2,
@@ -17,6 +19,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { canonicalToolName, TOOL_INPUT_KEYS, type CanonicalTool } from "@/lib/builtin-tools";
 import type { SdkContentBlock } from "@/lib/sdk-message";
 
 export interface ToolMeta {
@@ -29,16 +32,17 @@ export interface ToolMeta {
   label?: string;
 }
 
-const TOOL_META: Record<string, ToolMeta> = {
+// Keyed by canonical identity (see lib/builtin-tools). getToolMeta resolves a raw
+// tool name from either harness — pi's `grep`/`find`/`ls` or Claude's
+// `Grep`/`Glob` — to the same entry, so both backends render identically.
+const TOOL_META: Record<CanonicalTool, ToolMeta> = {
   Bash: { Icon: Terminal, color: "text-emerald-500", chip: "bg-emerald-500/10 border-emerald-500/20" },
-  BashOutput: { Icon: Terminal, color: "text-emerald-500", chip: "bg-emerald-500/10 border-emerald-500/20" },
   Read: { Icon: FileText, color: "text-sky-500", chip: "bg-sky-500/10 border-sky-500/20" },
   Write: { Icon: Edit3, color: "text-amber-500", chip: "bg-amber-500/10 border-amber-500/20" },
   Edit: { Icon: Edit3, color: "text-amber-500", chip: "bg-amber-500/10 border-amber-500/20" },
-  MultiEdit: { Icon: Edit3, color: "text-amber-500", chip: "bg-amber-500/10 border-amber-500/20" },
-  NotebookEdit: { Icon: Edit3, color: "text-amber-500", chip: "bg-amber-500/10 border-amber-500/20" },
   Grep: { Icon: Search, color: "text-violet-500", chip: "bg-violet-500/10 border-violet-500/20" },
-  Glob: { Icon: Search, color: "text-violet-500", chip: "bg-violet-500/10 border-violet-500/20" },
+  Glob: { Icon: FolderSearch, color: "text-violet-500", chip: "bg-violet-500/10 border-violet-500/20" },
+  LS: { Icon: FolderTree, color: "text-violet-500", chip: "bg-violet-500/10 border-violet-500/20" },
   WebFetch: { Icon: Globe, color: "text-cyan-500", chip: "bg-cyan-500/10 border-cyan-500/20" },
   WebSearch: { Icon: Globe, color: "text-cyan-500", chip: "bg-cyan-500/10 border-cyan-500/20" },
   TodoWrite: { Icon: ListTodo, color: "text-pink-500", chip: "bg-pink-500/10 border-pink-500/20" },
@@ -52,28 +56,18 @@ const FALLBACK: ToolMeta = {
 };
 
 export function getToolMeta(name: string | undefined): ToolMeta {
-  if (!name) return FALLBACK;
-  return TOOL_META[name] ?? FALLBACK;
+  const canonical = canonicalToolName(name);
+  return canonical ? TOOL_META[canonical] : FALLBACK;
 }
 
 /** Pull the most informative single line out of a tool's input object. */
 export function toolInputPreview(name: string | undefined, input: unknown): string | null {
   if (!input || typeof input !== "object") return null;
   const obj = input as Record<string, unknown>;
-  const order: Record<string, string[]> = {
-    Bash: ["command", "description"],
-    Read: ["file_path"],
-    Write: ["file_path"],
-    Edit: ["file_path"],
-    MultiEdit: ["file_path"],
-    Grep: ["pattern", "path"],
-    Glob: ["pattern"],
-    WebFetch: ["url"],
-    WebSearch: ["query"],
-    Task: ["description"],
-    TodoWrite: [],
-  };
-  const keys = order[name ?? ""] ?? ["command", "file_path", "path", "query", "url", "pattern"];
+  const canonical = canonicalToolName(name);
+  const keys = canonical
+    ? TOOL_INPUT_KEYS[canonical]
+    : ["command", "file_path", "path", "query", "url", "pattern"];
   for (const key of keys) {
     const v = obj[key];
     if (typeof v === "string" && v.length > 0) return v;

@@ -1,6 +1,6 @@
 "use client";
 
-export type ThinkingLevel = "low" | "medium" | "high";
+export type ThinkingLevel = "low" | "medium" | "high" | "xhigh";
 
 interface Props {
   /** null = "—" (unset). */
@@ -30,6 +30,7 @@ export function ThinkingLevelPicker({
       <option value="low">low</option>
       <option value="medium">medium</option>
       <option value="high">high</option>
+      <option value="xhigh">xhigh</option>
     </select>
   );
 }

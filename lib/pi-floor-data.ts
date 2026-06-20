@@ -9,11 +9,13 @@ import type {
 import type { PlanCardData } from "@/components/pi/plans-index";
 import type { TaskRowData } from "@/components/pi/tasks-index";
 import type { PiState } from "@/components/pi/primitives";
-
-const ACTIVE_STATUSES = new Set(["preparing", "running", "pushing"]);
-const REVIEW_STATUSES = new Set(["opening_pr"]);
-const BLOCKED_STATUSES = new Set(["failed", "budget_exhausted"]);
-const SHIPPED_STATUSES = new Set(["completed"]);
+import {
+  ACTIVE_STATUSES,
+  REVIEW_STATUSES,
+  BLOCKED_STATUSES,
+  SHIPPED_STATUSES,
+  classifyRun,
+} from "@/lib/run-buckets";
 
 function shortRunId(id: number, startedAt: Date): string {
   const y = startedAt.getFullYear();
@@ -78,17 +80,11 @@ function loadRunsByGroup(): {
     const task = joinTask(run.taskId);
     const plan = planTitle(task?.planId ?? null);
     const wrapped = { run, task, planTitle: plan };
-    if (ACTIVE_STATUSES.has(run.status)) groups.running.push(wrapped);
-    else if (REVIEW_STATUSES.has(run.status)) groups.review.push(wrapped);
-    else if (BLOCKED_STATUSES.has(run.status)) groups.blocked.push(wrapped);
-    else if (SHIPPED_STATUSES.has(run.status)) {
-      // A completed run that opened a PR is "in review" only while its task is
-      // still awaiting review. Once the task is done/cancelled (PR merged or
-      // closed) the run is shipped, not live. Keying on run.prUrl alone misfiled
-      // every completed run as review.
-      if (run.prUrl && task?.state === "review") groups.review.push(wrapped);
-      else groups.shipped.push(wrapped);
-    }
+    const cat = classifyRun(run.status, run.prUrl, task?.state);
+    if (cat === "running") groups.running.push(wrapped);
+    else if (cat === "review") groups.review.push(wrapped);
+    else if (cat === "blocked") groups.blocked.push(wrapped);
+    else if (cat === "shipped") groups.shipped.push(wrapped);
   }
   // shipped: keep most recent 8
   groups.shipped = groups.shipped.slice(0, 8);

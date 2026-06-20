@@ -92,6 +92,9 @@ export interface CreateRunInput {
   prUrl?: string | null;
   parentRunId?: number | null;
   model?: string | null;
+  /** Reasoning level for this run; overrides the persona's. Omitted/null
+   *  inherits the persona's level (which may itself be unset = model default). */
+  thinkingLevel?: "low" | "medium" | "high" | "xhigh" | null;
   budget?: Budget | null;
   userId?: number | null;
   title?: string | null;
@@ -124,6 +127,8 @@ export interface RunRow {
   toolsProfile: string;
   cwdStrategy: CwdStrategy;
   model: string | null;
+  /** Per-run reasoning level (low|medium|high|xhigh), or null to inherit the persona. */
+  thinkingLevel: "low" | "medium" | "high" | "xhigh" | null;
   branch: string | null;
   worktreePath: string | null;
   prUrl: string | null;
@@ -278,6 +283,11 @@ export function create(input: CreateRunInput): RunRow {
   // longer tied to the persona. Fall back to the env default when the caller
   // omits one. We persist the resolved value so the UI shows what was used.
   const personaId = input.personaId ?? "implementor";
+  if (!repo.getPersona(personaId)) {
+    // persona_id is a foreign key; surface a clear 404 instead of letting the
+    // insert fail with an opaque "FOREIGN KEY constraint failed".
+    throw new repo.RepoError(`Persona '${personaId}' not found`, 404);
+  }
   const effectiveModel = input.model ?? DEFAULT_MODEL;
 
   const inserted = db
@@ -291,6 +301,7 @@ export function create(input: CreateRunInput): RunRow {
       toolsProfile,
       cwdStrategy,
       model: effectiveModel,
+      thinkingLevel: input.thinkingLevel ?? null,
       title: input.title ?? null,
       userId: input.userId ?? null,
       prUrl: input.prUrl ?? null,
@@ -305,22 +316,26 @@ export function create(input: CreateRunInput): RunRow {
     .all();
   const run = hydrateRun(inserted[0]);
 
-  // Implement-style runs (goal != '<chat>', cwdStrategy='worktree') kick
-  // off the full lifecycle (worktree → SDK → push → PR). Chat-style runs
-  // sit at 'idle' until the first runs.append().
+  // A worktree run with a task is that task's attached session — point
+  // `tasks.attached_run_id` at it (for both the kicked-off Agent path and the
+  // deferred chat-box path). `ifUnset` means executor-spawned runs only adopt an
+  // empty slot. Bare worktree runs (no task, e.g. tests) skip this.
+  if (goal !== "<chat>" && cwdStrategy === "worktree" && input.taskId) {
+    repo.attachRunToTask(input.taskId, run.id, { ifUnset: true });
+  }
+
+  // Implement-style kickoff: run the first turn through the unified engine
+  // (runs.append → branch create → turn → conditional push/PR). Deferred runs
+  // (chat box, bare test runs) skip this and wait for the user's first message.
   if (!input.defer && goal !== "<chat>" && cwdStrategy === "worktree") {
     if (!input.taskId) {
       throw new repo.RepoError(
-        "Implement-style runs require a taskId (the worker creates a branch and PR for the task).",
+        "Worktree runs require a taskId (the engine creates a branch and PR for the task).",
         400
       );
     }
-    void runImplement(
-      run.id,
-      input.taskId,
-      input.baseBranch ?? "main",
-      input.initialPrompt ?? null
-    );
+    const task = repo.getTask(input.taskId)!;
+    void kickoffFirstTurn(run.id, input.initialPrompt ?? buildImplementPrompt(task));
   }
 
   // Review-style runs: spin up a worktree at the PR's head ref and run a
@@ -431,19 +446,17 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
   });
 
   try {
-    const run = get(input.runId);
+    let run = get(input.runId);
     if (!run) {
       yield { type: "error", error: `Run ${input.runId} not found` };
       return;
     }
-    if (isTerminalStatus(run.status) && run.status !== "idle") {
-      yield {
-        type: "error",
-        error: `Run ${input.runId} is in terminal status '${run.status}'; cannot resume.`,
-      };
-      return;
-    }
-    if (run.status === "running" || run.status === "pushing" || run.status === "opening_pr") {
+    if (
+      run.status === "running" ||
+      run.status === "preparing" ||
+      run.status === "pushing" ||
+      run.status === "opening_pr"
+    ) {
       // The lock guards against the in-process race; this guards against
       // a different process / a stale row inheriting status from before
       // this worker started.
@@ -451,6 +464,21 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
         type: "error",
         error: `Run ${input.runId} is already in flight (status=${run.status}).`,
       };
+      return;
+    }
+    // A worktree run (the task's attached session) is resumable even after it
+    // lands `completed`/`failed`: prepareCwd re-materializes the worktree on its
+    // branch. Only `closed` is a hard stop. Chat/none runs keep idle-only resume.
+    if (
+      isTerminalStatus(run.status) &&
+      run.status !== "idle" &&
+      !isResumableWorktreeRun(run.status, run.cwdStrategy)
+    ) {
+      const why =
+        run.status === "closed"
+          ? "is closed; fork it to continue"
+          : `is in terminal status '${run.status}'; cannot resume`;
+      yield { type: "error", error: `Run ${input.runId} ${why}.` };
       return;
     }
 
@@ -461,11 +489,13 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
 
     setStatus(run.id, "running");
 
-    // Re-materialize a missing worktree before invoking the SDK. Server
-    // restarts and `git worktree prune` both kill the directory; the branch
-    // on origin (and the local refs) survive, so we can recreate it.
+    // First turn of a worktree run: create its branch + worktree. On later
+    // turns this is a no-op and prepareCwd re-materializes a missing worktree
+    // (server restarts / `git worktree prune` kill the directory; the branch
+    // survives, so we recreate it).
     let cwd: string;
     try {
+      run = await ensureWorktreeBranch(run);
       cwd = await prepareCwd(run);
     } catch (err) {
       const msg = describe(err);
@@ -505,8 +535,6 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       return;
     }
 
-    runners.delete(run.id);
-
     // Forward streamed SDK envelopes to the caller. We accumulated them in
     // the turn helper rather than yielding live so the per-message persistence
     // and the SSE stream see the same sequence.
@@ -514,9 +542,30 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       yield { type: "sdk", sdk: env };
     }
 
-    // Stream end → idle (chat-style) unless we hit a budget cap.
+    // Worktree runs sync git after each turn: if the branch gained commits,
+    // push them (updating the PR) and open a PR the first time round. A no-op
+    // for chat-only turns (no commits) and for non-worktree runs.
+    let prUrlUpdate = run.prUrl;
+    if (run.cwdStrategy === "worktree") {
+      try {
+        prUrlUpdate = await gitSyncAfterTurn(run, cwd, result.summary);
+      } catch (err) {
+        persistMessage(run.id, "system", [
+          { type: "text", text: `Push/PR sync failed: ${describe(err)}` },
+        ]);
+      }
+    }
+
+    // Worktree runs (the task's attached session) land at `completed` after each
+    // turn — terminal so the executor's await_session resolves, but resumable
+    // via the guard above. Chat/none runs land `idle`. Budget caps win.
     const budgetHit = checkBudget(run, result);
-    const nextStatus: SessionStatus = budgetHit ? "budget_exhausted" : "idle";
+    const isWorktree = run.cwdStrategy === "worktree";
+    const nextStatus: SessionStatus = budgetHit
+      ? "budget_exhausted"
+      : isWorktree
+        ? "completed"
+        : "idle";
     // Review-style runs surface a structured verdict in `outcome`. Gated on
     // goal so chat/implement append flows are unaffected.
     const outcomeUpdate =
@@ -531,15 +580,18 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
         inputTokens: result.inputTokens ?? run.inputTokens,
         outputTokens: result.outputTokens ?? run.outputTokens,
         outcome: outcomeUpdate,
-        completedAt: budgetHit ? new Date() : null,
+        prUrl: prUrlUpdate,
+        completedAt: budgetHit || isWorktree ? new Date() : null,
       })
       .where(eq(agentSessions.id, run.id))
       .run();
     // Tell live SSE subscribers (the run-view in the browser) that the turn
-    // ended. Without this, the client's React state stays at "running" even
-    // though the DB row is idle, and the composer renders the queue hint
-    // forever.
+    // ended — emit BEFORE dropping the runner so the bus still exists. The
+    // Agent-button kickoff drains this generator with no POST consumer, so the
+    // /events bus is its only live signal. Without it the client's React state
+    // stays at "running" and the composer renders the queue hint forever.
     emitStatus(run.id, nextStatus);
+    runners.delete(run.id);
 
     yield { type: "done" };
   } finally {
@@ -751,122 +803,127 @@ async function prepareCwd(run: RunRow): Promise<string> {
 }
 
 // ──────────────────────────────────────────────────────────
-// Implement-style worker (initial turn → push → PR → idle)
+// Unified turn engine helpers (used by append for worktree runs)
 // ──────────────────────────────────────────────────────────
 
-async function runImplement(
-  runId: number,
-  taskId: string,
-  baseBranch: string,
-  initialPrompt: string | null
-): Promise<void> {
-  const abort = new AbortController();
-  const bus = new EventEmitter();
-  runners.set(runId, { abort, bus });
+/**
+ * Resume predicate: a worktree run (the task's attached session) can be resumed
+ * even after it lands `completed`/`failed`/`budget_exhausted` — its branch and
+ * worktree persist (and re-materialize on demand). `closed` and in-flight states
+ * are not resumable. Non-worktree runs use the legacy idle-only rule.
+ */
+export function isResumableWorktreeRun(status: string, cwdStrategy: string): boolean {
+  if (cwdStrategy !== "worktree") return false;
+  return (
+    status === "idle" ||
+    status === "completed" ||
+    status === "failed" ||
+    status === "budget_exhausted"
+  );
+}
 
-  let run = get(runId)!;
-  let task = repo.getTask(taskId);
-  if (!task) {
-    fail(runId, `Task ${taskId} disappeared before run could start`);
-    runners.delete(runId);
-    return;
+/** The base branch a task's worktree branches from / merges in. */
+function repoDefaultBranch(run: { repoId: string | null; taskId: string | null }): string {
+  if (run.repoId) {
+    const r = repo.getRepository(run.repoId);
+    if (r?.defaultBranch) return r.defaultBranch;
   }
+  if (run.taskId) {
+    const r = repo.resolveRepoForTask(run.taskId);
+    if (r?.defaultBranch) return r.defaultBranch;
+  }
+  const fallback = repo.defaultRepo();
+  if (fallback?.defaultBranch) return fallback.defaultBranch;
+  return "main";
+}
+
+/**
+ * First turn of a worktree run: create its branch (`claude/<task>-<run>`) and
+ * worktree off the base branch, persist them, and move the task to in_progress.
+ * No-op once a branch exists (later turns re-materialize via prepareCwd).
+ */
+async function ensureWorktreeBranch(run: RunRow): Promise<RunRow> {
+  if (run.cwdStrategy !== "worktree" || run.branch) return run;
+  if (!run.taskId) {
+    throw new Error(
+      `Run #${run.id} is a worktree run without a task_id; cannot create a branch.`
+    );
+  }
+  const base = repoDefaultBranch(run);
   const root = repoRoot(run);
   const worktreeRoot = resolve(root, ".worktrees");
-  const branch = `claude/${taskId.toLowerCase()}-${runId}`;
-  const worktreePath = resolve(worktreeRoot, String(runId));
-
-  try {
-    setStatus(runId, "preparing");
-    await mkdir(worktreeRoot, { recursive: true });
-    await sh(["git", "worktree", "add", "-b", branch, worktreePath, baseBranch], root);
-    db.update(agentSessions)
-      .set({ branch, worktreePath, repoId: run.repoId ?? task.repoId ?? null })
-      .where(eq(agentSessions.id, runId))
-      .run();
-    run = get(runId)!;
-
-    if (task.state === "todo" || task.state === "blocked") {
-      try {
-        repo.transitionTask(taskId, {
-          state: "in_progress",
-          assignee: task.assignee ?? "claude-agent",
-          note: `Started agent run #${runId}.`,
-        });
-      } catch {
-        // Best-effort.
-      }
-    }
-
-    setStatus(runId, "running");
-    task = repo.getTask(taskId)!;
-    // Caller-supplied prompt (from the modal preview) wins; otherwise
-    // generate the canonical implement template from the task state.
-    const prompt = initialPrompt ?? buildImplementPrompt(task);
-    const author = "claude-agent";
-    const result = await runOneTurn({
-      run,
-      cwd: worktreePath,
-      prompt,
-      abort,
-      author,
-      onSdk: (m) => bus.emit("event", { type: "sdk", sdk: m }),
-    });
-
-    if (abort.signal.aborted) {
-      runners.delete(runId);
-      return;
-    }
-
-    setStatus(runId, "pushing");
-    await sh(["git", "push", "-u", "origin", branch], worktreePath);
-
-    setStatus(runId, "opening_pr");
-    const summary = result.summary;
-    const prUrl = await openPr({ task, branch, baseBranch, worktreePath, summary });
-    if (prUrl) {
-      db.update(agentSessions).set({ prUrl }).where(eq(agentSessions.id, runId)).run();
-    }
-
+  const branch = `claude/${run.taskId.toLowerCase()}-${run.id}`;
+  const worktreePath = resolve(worktreeRoot, String(run.id));
+  await mkdir(worktreeRoot, { recursive: true });
+  await sh(["git", "worktree", "add", "-b", branch, worktreePath, base], root);
+  db.update(agentSessions)
+    .set({ branch, worktreePath, repoId: run.repoId ?? repo.getTask(run.taskId)?.repoId ?? null })
+    .where(eq(agentSessions.id, run.id))
+    .run();
+  const task = repo.getTask(run.taskId);
+  if (task && (task.state === "todo" || task.state === "blocked")) {
     try {
-      repo.transitionTask(taskId, {
-        state: "review",
-        note: prUrl ? `Agent finished. PR: ${prUrl}` : `Agent finished. Branch: ${branch}`,
-      });
-    } catch (err) {
-      repo.addNote(taskId, "claude-agent", `Could not transition to review: ${describe(err)}`);
-    }
-
-    db.update(agentSessions)
-      .set({
-        status: "completed",
-        completedAt: new Date(),
-        sdkSessionId: result.sdkSessionId ?? run.sdkSessionId,
-        totalCostUsd: result.totalCostUsd ?? run.totalCostUsd,
-        inputTokens: result.inputTokens ?? run.inputTokens,
-        outputTokens: result.outputTokens ?? run.outputTokens,
-      })
-      .where(eq(agentSessions.id, runId))
-      .run();
-    emitStatus(runId, "completed");
-  } catch (err) {
-    if (abort.signal.aborted) {
-      runners.delete(runId);
-      return;
-    }
-    fail(runId, describe(err));
-    try {
-      repo.transitionTask(taskId, {
-        state: "blocked",
-        note: `Agent run #${runId} failed: ${describe(err)}`,
+      repo.transitionTask(run.taskId, {
+        state: "in_progress",
+        assignee: task.assignee ?? "claude-agent",
+        note: `Started agent run #${run.id}.`,
       });
     } catch {
-      // Ignore — task may not accept blocked from its current state.
+      // Best-effort.
     }
-  } finally {
-    closeBus(runId);
-    runners.delete(runId);
-    cleanupWorktree(worktreePath, root).catch(() => {});
+  }
+  return get(run.id)!;
+}
+
+/**
+ * After a worktree turn: if the branch gained commits ahead of its base, push
+ * them. The first time (no PR yet) open one and move the task to review;
+ * afterwards the push just updates the existing PR. Returns the (possibly new)
+ * PR url. A no-op when the turn produced no commits (pure conversation).
+ */
+async function gitSyncAfterTurn(
+  run: RunRow,
+  cwd: string,
+  summary: string | null
+): Promise<string | null> {
+  if (!run.branch) return run.prUrl;
+  const base = repoDefaultBranch(run);
+  let ahead = 0;
+  try {
+    const out = await sh(["git", "rev-list", "--count", `${base}..HEAD`], cwd);
+    ahead = parseInt(out.trim() || "0", 10) || 0;
+  } catch {
+    ahead = 0;
+  }
+  if (ahead <= 0) return run.prUrl;
+
+  await sh(["git", "push", "-u", "origin", run.branch], cwd);
+  if (run.prUrl) return run.prUrl;
+  if (!run.taskId) return null;
+  const task = repo.getTask(run.taskId);
+  if (!task) return null;
+  const prUrl = await openPr({ task, branch: run.branch, baseBranch: base, worktreePath: cwd, summary });
+  if (prUrl) {
+    try {
+      repo.transitionTask(run.taskId, {
+        state: "review",
+        note: `Agent finished. PR: ${prUrl}`,
+      });
+    } catch (err) {
+      repo.addNote(run.taskId, "claude-agent", `Could not transition to review: ${describe(err)}`);
+    }
+  }
+  return prUrl ?? run.prUrl;
+}
+
+/** Fire a worktree run's first turn through the unified engine, server-side. */
+async function kickoffFirstTurn(runId: number, prompt: string): Promise<void> {
+  try {
+    for await (const ev of append({ runId, role: "user", text: prompt })) {
+      void ev; // drained; live events reach the run-view via the /events bus
+    }
+  } catch {
+    // append marks the run failed on error; nothing else to do here.
   }
 }
 
@@ -1022,7 +1079,12 @@ async function runExecute(
     // No worktree of its own — operate at the repo root so gh_pr tools shell
     // out against the real checkout. Children create their own worktrees.
     const cwd = await prepareCwd(run);
-    const prompt = initialPrompt ?? buildExecutePrompt(plan, repo.listTasks({ planId }));
+    // The execute scaffold (orchestration loop + task list) always runs; an
+    // operator-supplied prompt is appended as steering guidance rather than
+    // replacing it, so the executor never loses its core instructions.
+    const base = buildExecutePrompt(plan, repo.listTasks({ planId }));
+    const extra = initialPrompt?.trim();
+    const prompt = extra ? `${base}\n\n## Operator instructions\n\n${extra}` : base;
     const result = await runOneTurn({
       run,
       cwd,
@@ -1172,7 +1234,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     name: persona.name,
     description: persona.description ?? "",
     systemPrompt: persona.systemPrompt,
-    thinkingLevel: (persona.thinkingLevel ?? undefined) as "low" | "medium" | "high" | undefined,
+    thinkingLevel: (persona.thinkingLevel ?? undefined) as "low" | "medium" | "high" | "xhigh" | undefined,
     toolsProfile: persona.toolsProfile,
     skillPaths: [] as string[],
   };
@@ -1232,7 +1294,14 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   const outcome = await backend.runTurn({
     cwd,
     model: { provider: resolvedProvider, id: resolvedModelId },
-    thinkingLevel: (persona.thinkingLevel ?? undefined) as "low" | "medium" | "high" | undefined,
+    // Per-run reasoning level overrides the persona's; fall back to the
+    // persona's (which may be unset, leaving the model default to apply).
+    thinkingLevel: (run.thinkingLevel ?? persona.thinkingLevel ?? undefined) as
+      | "low"
+      | "medium"
+      | "high"
+      | "xhigh"
+      | undefined,
     extensions,
     resumeToken: run.sdkSessionId ?? null,
     abort,
@@ -1375,6 +1444,7 @@ function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     toolsProfile: row.toolsProfile,
     cwdStrategy: row.cwdStrategy as CwdStrategy,
     model: row.model,
+    thinkingLevel: (row.thinkingLevel as "low" | "medium" | "high" | "xhigh" | null) ?? null,
     branch: row.branch,
     worktreePath: row.worktreePath,
     prUrl: row.prUrl,

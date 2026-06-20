@@ -80,7 +80,7 @@ export type Extension = (reg: BackendRegistrar) => void | Promise<void>;
 export interface RunTurnArgs {
   cwd: string;
   model: { provider: string; id: string };
-  thinkingLevel?: "low" | "medium" | "high";
+  thinkingLevel?: "low" | "medium" | "high" | "xhigh";
   extensions: Extension[];
   /** Backend-tagged resume token from a prior turn ("pi:<path>" / "claude:<id>"),
    *  or null for a fresh session. An adapter ignores a token that isn't its own. */

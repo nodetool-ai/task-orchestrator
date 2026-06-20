@@ -13,6 +13,13 @@ export function prShortLabel(url: string): string {
   return m ? `${m[1]}/${m[2]}#${m[3]}` : url;
 }
 
+// Just the PR number (`#24`). Use in dense rows where the repo is already
+// established by context; the full owner/repo lives in prShortLabel for tooltips.
+export function prNumberLabel(url: string): string {
+  const m = url.match(/\/pull\/(\d+)/);
+  return m ? `#${m[1]}` : url;
+}
+
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "—";
   if (bytes < 1024) return `${bytes} B`;

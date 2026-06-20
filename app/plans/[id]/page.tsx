@@ -87,16 +87,7 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
         </div>
       )}
 
-      <div className="my-8 h-px bg-border/60" />
-
-      <MarkdownBody source={plan.body} />
-
-      <section className="mt-10 space-y-3">
-        <AttachmentsHeading count={plan.attachments.length} />
-        <Attachments scope="plan" ownerId={plan.id} attachments={plan.attachments} />
-      </section>
-
-      <section className="mt-12">
+      <section className="mt-8">
         <div className="flex items-baseline justify-between mb-3">
           <h2 className="text-sm font-semibold tracking-tight">Tasks</h2>
           <NewTaskForm
@@ -175,6 +166,15 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
           </div>
         </section>
       )}
+
+      <div className="my-8 h-px bg-border/60" />
+
+      <MarkdownBody source={plan.body} />
+
+      <section className="mt-10 space-y-3">
+        <AttachmentsHeading count={plan.attachments.length} />
+        <Attachments scope="plan" ownerId={plan.id} attachments={plan.attachments} />
+      </section>
     </article>
   );
 }

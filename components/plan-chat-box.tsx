@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, Loader2, MessageCircle, Sparkles } from "lucide-react";
+import { ArrowUp, Loader2, MessageCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   PersonaPicker,
@@ -12,6 +12,7 @@ import {
   type RepositoryOption,
 } from "@/components/pickers/repository-picker";
 import { ModelPicker, type ModelOption } from "@/components/chat/model-picker";
+import { ThinkingLevelPicker, type ThinkingLevel } from "@/components/pickers/thinking-level-picker";
 
 export type { PersonaOption };
 
@@ -72,6 +73,7 @@ export function PlanChatBox({
   const [personaId, setPersonaId] = useState(personas[0]?.id ?? "implementor");
   const [repoId, setRepoId] = useState<string>(repoOptions[0]?.id ?? "");
   const [model, setModel] = useState(DEFAULT_MODEL);
+  const [reasoning, setReasoning] = useState<ThinkingLevel | null>(null);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -141,6 +143,7 @@ export function PlanChatBox({
           repoId: repoId || null,
           personaId,
           model,
+          thinkingLevel: reasoning,
         }),
       });
       if (!createRes.ok) {
@@ -192,6 +195,11 @@ export function PlanChatBox({
             onChange={setModel}
             disabled={pending}
           />
+          <ThinkingLevelPicker
+            value={reasoning}
+            onChange={setReasoning}
+            className="rounded-md border border-border/60 bg-background px-2 py-1 text-xs outline-none focus:border-foreground/40"
+          />
           {repoOptions.length > 1 && (
             <RepositoryPicker
               repositories={repoOptions}
@@ -236,9 +244,8 @@ export function PlanChatBox({
               key={q.label}
               type="button"
               onClick={() => pickQuickPrompt(q.prompt)}
-              className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-card/30 px-2 py-1 text-[11px] text-muted-foreground hover:border-foreground/30 hover:bg-card hover:text-foreground transition-colors"
+              className="inline-flex items-center rounded-md border border-border/60 bg-card/30 px-2 py-1 text-[11px] text-muted-foreground hover:border-foreground/30 hover:bg-card hover:text-foreground transition-colors"
             >
-              <Sparkles className="size-3 text-state-review" />
               {q.label}
             </button>
           ))}

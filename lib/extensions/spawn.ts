@@ -15,6 +15,7 @@ import { agentSessions, agentMessages } from "@/db/schema";
 import * as repo from "../repo";
 import * as runs from "../runs";
 import type { RunRow, CwdStrategy } from "../runs";
+import { listProfiles } from "../profiles";
 import type { ExtensionFactory } from "./types";
 
 // ────────────────────────────────────────
@@ -115,6 +116,70 @@ export function extractLatestAssistantText(
     if (text) return text;
   }
   return null;
+}
+
+/**
+ * Pure validator: is every entry of a comma-separated `tools_profile` string a
+ * known profile key? Returns null when valid, or an error message naming the
+ * unknown entries and listing the valid registry otherwise.
+ *
+ * The runner only discovers an unknown profile deep inside resolveProfiles()
+ * (one turn in, after a worktree may already exist), which marks the spawned
+ * run `failed` a second later. Validating here lets spawn_agent reject the bad
+ * call up front with an actionable list, so the agent self-corrects instead of
+ * littering the run list with instant-fail children. Mirrors the persona check.
+ */
+export function checkToolsProfile(profileString: string): string | null {
+  const valid = listProfiles();
+  const names = profileString
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (names.length === 0) {
+    return `tools_profile is empty. Valid profiles: ${valid.join(", ")}.`;
+  }
+  const unknown = names.filter((n) => !valid.includes(n));
+  if (unknown.length > 0) {
+    return (
+      `Unknown tools profile${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}. ` +
+      `Valid profiles: ${valid.join(", ")}. ` +
+      `tools_profile is a comma-separated list of these keys.`
+    );
+  }
+  return null;
+}
+
+/**
+ * Pure guard: would a spawned run with this (cwd_strategy, task_id) actually be
+ * picked up by a worker? Returns null when it auto-starts, or an error message
+ * otherwise.
+ *
+ * spawn_agent goals are always free-form (never the special '<chat>'/'<execute>'
+ * sentinels), so runs.create() only kicks off a worker for `worktree` + a
+ * task_id (the implement lifecycle). A `repo`/`none` spawn — or a `worktree`
+ * spawn with no task_id — is inserted at `pending` and then nothing runs it: it
+ * hangs forever, and the <implement>-only reaper never cleans it up (that is
+ * exactly how run #85 got stuck). Reject up front instead of minting a zombie.
+ */
+export function checkSpawnStartable(args: {
+  cwdStrategy: string;
+  taskId?: string | null;
+}): string | null {
+  if (args.cwdStrategy === "worktree") {
+    if (!args.taskId) {
+      return (
+        `cwd_strategy=worktree spawns an implement-style child that branches off a ` +
+        `task; pass task_id. To review a PR instead, use the start_review tool.`
+      );
+    }
+    return null;
+  }
+  return (
+    `cwd_strategy='${args.cwdStrategy}' isn't startable via spawn_agent: no worker ` +
+    `runs a free-form ${args.cwdStrategy} child, so it would hang at 'pending' forever. ` +
+    `Use cwd_strategy=worktree with a task_id to implement a task, or the start_review tool ` +
+    `to review a PR.`
+  );
 }
 
 /**
@@ -280,12 +345,29 @@ export const spawnExtension =
       parameters: Type.Object({
         goal: Type.String({ minLength: 1 }),
         persona: Type.String({ minLength: 1 }),
-        tools_profile: Type.String({ minLength: 1 }),
-        cwd_strategy: Type.Union([
-          Type.Literal("worktree"),
-          Type.Literal("repo"),
-          Type.Literal("none"),
-        ]),
+        reasoning: Type.Optional(
+          Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh")], {
+            description: "Reasoning level for the child agent. Omit to use the persona's default.",
+          })
+        ),
+        tools_profile: Type.String({
+          minLength: 1,
+          description:
+            "Comma-separated list of tool-profile keys. Valid keys: orchestrator " +
+            "(plans/tasks/notes), repo_write, repo_read, gh_pr, gh_ci, spawn, planning. " +
+            "Typical implementor: 'orchestrator,repo_write,gh_pr,gh_ci'; reviewer: " +
+            "'orchestrator,repo_read,gh_pr'. These are NOT free-form (e.g. 'default'/'code' are invalid).",
+        }),
+        cwd_strategy: Type.Union(
+          [Type.Literal("worktree"), Type.Literal("repo"), Type.Literal("none")],
+          {
+            description:
+              "Working-directory strategy. Use 'worktree' (with task_id) to implement a task " +
+              "on a fresh branch — this is the only strategy spawn_agent auto-starts. 'repo'/'none' " +
+              "are not picked up by any worker here and would hang at 'pending'; review PRs via the " +
+              "start_review tool instead.",
+          }
+        ),
         task_id: Type.Optional(Type.String()),
         pr_url: Type.Optional(Type.String()),
         repo_id: Type.Optional(Type.String()),
@@ -301,6 +383,27 @@ export const spawnExtension =
           return errResult(
             `Unknown persona '${args.persona}'. Valid: ${validIds.join(", ")}`
           );
+        }
+
+        // 1b. tools_profile validation. Without this, an unknown profile is only
+        //     caught one turn in by resolveProfiles(), after the child run is
+        //     created and marked `failed` — exactly how 'default'/'code' guesses
+        //     left a trail of dead child runs. Reject up front instead.
+        const profileError = checkToolsProfile(args.tools_profile);
+        if (profileError) {
+          return errResult(profileError);
+        }
+
+        // 1c. Startability guard. A repo/none spawn (or a worktree spawn with no
+        //     task_id) is inserted at `pending` and then never picked up by any
+        //     worker — it hangs forever (run #85). Reject instead of minting a
+        //     zombie the agent will poll indefinitely.
+        const startableError = checkSpawnStartable({
+          cwdStrategy: args.cwd_strategy,
+          taskId: args.task_id ?? null,
+        });
+        if (startableError) {
+          return errResult(startableError);
         }
 
         // 2. Depth check.
@@ -346,6 +449,7 @@ export const spawnExtension =
           newRun = runs.create({
             goal: args.goal,
             personaId: args.persona,
+            thinkingLevel: args.reasoning ?? null,
             toolsProfile: args.tools_profile,
             cwdStrategy: args.cwd_strategy as CwdStrategy,
             taskId: args.task_id ?? null,

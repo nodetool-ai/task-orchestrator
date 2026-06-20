@@ -195,6 +195,7 @@ function ghPrState(prUrl: string): Promise<PrState | null> {
 export interface StartSessionInput {
   taskId: string;
   model?: string;
+  thinkingLevel?: "low" | "medium" | "high" | "xhigh" | null;
   baseBranch?: string;
   resumeOf?: number;
   /** Lineage parent (e.g. the plan executor that spawned this). Used for UI
@@ -235,6 +236,7 @@ export function startSession(input: StartSessionInput): AgentSessionFull {
     taskId: input.taskId,
     repoId: task.repoId ?? null,
     model: input.model ?? DEFAULT_MODEL,
+    thinkingLevel: input.thinkingLevel ?? null,
     baseBranch: input.baseBranch ?? "main",
     parentRunId: input.resumeOf ?? input.parentRunId ?? null,
   });
