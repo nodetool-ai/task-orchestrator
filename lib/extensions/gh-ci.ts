@@ -243,29 +243,30 @@ export const ghCiExtension =
 
         const r = await gh(args, cwd);
         // `gh run view --log-failed` exits 0 even when there are no failed
-        // steps (returns an empty body). We surface stderr as an error only
-        // when exit code is non-zero.
-        if (r.code !== 0) {
-          // Special-case: if --log-failed produced no output (e.g. no failed
-          // steps yet), fall back to --log so the agent still sees something.
-          if (effectiveMode === "failed" && !r.stdout.trim()) {
-            const fallbackArgs = [
-              "run",
-              "view",
-              String(run_id),
-              "--repo",
-              `${g.parsed.owner}/${g.parsed.repo}`,
-              "--log",
-            ];
-            if (job && job.length > 0) fallbackArgs.push("--job", job);
-            const fb = await gh(fallbackArgs, cwd);
-            if (fb.code !== 0) {
-              return errResult(
-                fb.stderr.trim() || `gh run view failed (exit ${fb.code})`
-              );
-            }
-            return ok(trimLog(fb.stdout));
+        // steps yet (an in-progress or green run), returning an empty body.
+        // Detect that empty result regardless of exit code and fall back to
+        // the full --log so the agent sees something instead of a blank
+        // success — the previous code gated this fallback behind a non-zero
+        // exit, so the documented exit-0 case never reached it.
+        if (effectiveMode === "failed" && !r.stdout.trim()) {
+          const fallbackArgs = [
+            "run",
+            "view",
+            String(run_id),
+            "--repo",
+            `${g.parsed.owner}/${g.parsed.repo}`,
+            "--log",
+          ];
+          if (job && job.length > 0) fallbackArgs.push("--job", job);
+          const fb = await gh(fallbackArgs, cwd);
+          if (fb.code !== 0) {
+            return errResult(
+              fb.stderr.trim() || `gh run view failed (exit ${fb.code})`
+            );
           }
+          return ok(trimLog(fb.stdout));
+        }
+        if (r.code !== 0) {
           return errResult(r.stderr.trim() || `gh run view failed (exit ${r.code})`);
         }
         return ok(trimLog(r.stdout));

@@ -115,44 +115,56 @@ async function pollMergedPrs(): Promise<void> {
     .where(and(isNotNull(agentSessions.prUrl), inArray(tasks.state, ["in_progress", "review"])))
     .all();
 
-  const latestByTask = new Map<string, (typeof rows)[number]>();
+  // Group every PR-bearing run by task. A task can have more than one run with
+  // a PR (e.g. a stale run plus a follow-up that opened a different PR), and the
+  // *merged* one isn't necessarily the newest — collapsing to the latest run
+  // per task would miss it and strand the task open.
+  const byTask = new Map<string, (typeof rows)[number][]>();
   for (const r of rows) {
-    if (!r.taskId) continue;
-    const prev = latestByTask.get(r.taskId);
-    if (!prev || r.startedAt > prev.startedAt) latestByTask.set(r.taskId, r);
+    if (!r.taskId || !r.prUrl) continue;
+    const list = byTask.get(r.taskId);
+    if (list) list.push(r);
+    else byTask.set(r.taskId, [r]);
   }
 
-  for (const r of latestByTask.values()) {
-    if (!r.prUrl || !r.taskId) continue;
-    const info = await ghPrState(r.prUrl);
-    if (!info) continue;
-    if (info.state !== "MERGED") continue;
-    try {
-      repo.transitionTask(r.taskId, {
-        state: "done",
-        note: `PR merged: ${r.prUrl}`,
-        // A merged PR is authoritative — close the task even if acceptance
-        // criteria were never checked off, rather than stranding it open.
-        bypassCriteria: true,
-      });
-      db.insert(agentEvents)
-        .values({
-          sessionId: r.sessionId,
-          type: "pr_merged",
-          payload: JSON.stringify({ url: r.prUrl, mergedAt: info.mergedAt }),
-          createdAt: new Date(),
-        })
-        .run();
-    } catch (err) {
+  for (const [taskId, taskRows] of byTask) {
+    // Newest-first so a freshly merged PR is found quickly, but still fall
+    // through to older PR-bearing runs.
+    taskRows.sort((a, b) => (a.startedAt > b.startedAt ? -1 : 1));
+    for (const r of taskRows) {
+      if (!r.prUrl) continue;
+      const info = await ghPrState(r.prUrl);
+      if (!info || info.state !== "MERGED") continue;
       try {
-        repo.addNote(
-          r.taskId,
-          "claude-agent",
-          `PR merged but could not transition to done: ${describe(err)}`
-        );
-      } catch {
-        // ignore
+        repo.transitionTask(taskId, {
+          state: "done",
+          note: `PR merged: ${r.prUrl}`,
+          // A merged PR is authoritative — close the task even if acceptance
+          // criteria were never checked off, rather than stranding it open.
+          bypassCriteria: true,
+        });
+        db.insert(agentEvents)
+          .values({
+            sessionId: r.sessionId,
+            type: "pr_merged",
+            payload: JSON.stringify({ url: r.prUrl, mergedAt: info.mergedAt }),
+            createdAt: new Date(),
+          })
+          .run();
+      } catch (err) {
+        try {
+          repo.addNote(
+            taskId,
+            "claude-agent",
+            `PR merged but could not transition to done: ${describe(err)}`
+          );
+        } catch {
+          // ignore
+        }
       }
+      // The task is resolved (or we recorded why it couldn't be); stop checking
+      // its remaining PRs.
+      break;
     }
   }
 }

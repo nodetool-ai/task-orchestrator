@@ -11,6 +11,17 @@
 import { z } from "zod";
 import type { TSchema } from "typebox";
 
+// Build a union of literals, guarding against Zod's requirement of >= 2 options:
+// z.union throws on a single-element array, which would make a tool with a
+// one-value non-string enum/const un-registerable — the exact "never
+// un-registerable" guarantee this module promises. Collapse to the lone literal
+// (or z.any() for the empty case) instead.
+function literalUnion(vals: any[]): z.ZodTypeAny {
+  if (vals.length === 0) return z.any();
+  if (vals.length === 1) return z.literal(vals[0]);
+  return z.union(vals.map((v) => z.literal(v)) as any);
+}
+
 export function toZodType(schema: any): z.ZodTypeAny {
   if (!schema || typeof schema !== "object") return z.any();
 
@@ -23,7 +34,7 @@ export function toZodType(schema: any): z.ZodTypeAny {
       if (vals.every((v: any) => typeof v === "string")) {
         return z.enum(vals as [string, ...string[]]);
       }
-      return z.union(vals.map((v: any) => z.literal(v)) as any);
+      return literalUnion(vals);
     }
     const opts = all.map(toZodType);
     if (opts.length >= 2) return z.union(opts as any);
@@ -35,7 +46,7 @@ export function toZodType(schema: any): z.ZodTypeAny {
     if (vals.length > 0 && vals.every((v: any) => typeof v === "string")) {
       return z.enum(vals as [string, ...string[]]);
     }
-    return z.union(vals.map((v: any) => z.literal(v)) as any);
+    return literalUnion(vals);
   }
 
   switch (schema.type) {

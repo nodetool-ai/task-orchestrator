@@ -162,6 +162,15 @@ export class PiBackend implements AgentBackend {
       stop();
     }
 
+    // pi resolves prompt() normally even when the turn was aborted, so signal
+    // the cancellation by throwing here. lib/runs.ts's append loop checks
+    // abort.signal.aborted in its catch and treats it as a clean cancel; without
+    // this the run's success path would overwrite the `cancelled` status with
+    // `completed` and push/PR partial work.
+    if (abort.signal.aborted) {
+      throw new Error("Turn aborted");
+    }
+
     const file = sessionManager.getSessionFile();
     return {
       envelopes,

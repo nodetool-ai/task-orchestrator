@@ -66,6 +66,23 @@ describe("toZodRawShape", () => {
     expect(shape.s.safeParse("anything").success).toBe(true);
   });
 
+  it("converts single-value non-string enums/consts without throwing", () => {
+    // z.union requires >= 2 options, so a one-element numeric enum/const must
+    // collapse to the lone literal rather than crashing tool registration.
+    const shape = toZodRawShape({
+      type: "object",
+      properties: {
+        only: { enum: [42] },
+        anyofOne: { anyOf: [{ const: 7 }] },
+      },
+      required: ["only", "anyofOne"],
+    });
+    expect(shape.only.safeParse(42).success).toBe(true);
+    expect(shape.only.safeParse(43).success).toBe(false);
+    expect(shape.anyofOne.safeParse(7).success).toBe(true);
+    expect(shape.anyofOne.safeParse(8).success).toBe(false);
+  });
+
   it("handles arrays and nested objects", () => {
     const schema = Type.Object({
       tags: Type.Array(Type.String()),

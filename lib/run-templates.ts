@@ -516,15 +516,20 @@ export function extractReviewOutcome(text: string | null | undefined): string | 
             typeof parsed.summary === "string" ? parsed.summary : undefined,
         };
         let serialized = JSON.stringify(outcome);
-        if (serialized.length > 200) {
-          // Truncate summary so total fits in 200 chars.
-          const overflow = serialized.length - 200;
-          if (outcome.summary && outcome.summary.length > overflow + 1) {
-            outcome.summary = outcome.summary.slice(0, outcome.summary.length - overflow - 1) + "…";
-            serialized = JSON.stringify(outcome);
-          } else {
-            serialized = serialized.slice(0, 200);
-          }
+        if (serialized.length > 200 && outcome.summary) {
+          // Trim the summary to keep the outcome ~200 chars. Slicing the
+          // serialized JSON string directly (the old behaviour) produced
+          // invalid JSON, which made parseReviewVerdict silently drop the
+          // verdict and block the approve→done transition. Trim the summary
+          // field instead so the result stays valid JSON; if even
+          // `{verdict}` alone is too long, drop the summary rather than
+          // corrupt the object (the 200-char cap is best-effort, valid JSON
+          // and a recoverable verdict are not).
+          const base = JSON.stringify({ verdict: outcome.verdict, summary: "" }).length;
+          const room = 200 - base;
+          outcome.summary =
+            room > 1 ? outcome.summary.slice(0, room - 1) + "…" : undefined;
+          serialized = JSON.stringify(outcome);
         }
         return serialized;
       }

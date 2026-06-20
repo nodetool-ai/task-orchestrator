@@ -99,6 +99,33 @@ describe("mapPiEvent", () => {
     }]);
   });
 
+  it("agent_end marks is_error when the last assistant message aborted/errored", () => {
+    for (const stopReason of ["error", "aborted"]) {
+      const got = mapPiEvent({
+        type: "agent_end",
+        messages: [
+          { role: "assistant", content: [{ type: "text", text: "partial" }] },
+          { role: "assistant", content: [{ type: "text", text: "" }], stopReason, errorMessage: "boom" },
+        ],
+      }, {}, sm("/x"));
+      expect(got).toEqual([{
+        type: "result",
+        result: "boom",
+        is_error: true,
+        total_cost_usd: null,
+        usage: undefined,
+      }]);
+    }
+  });
+
+  it("agent_end stays is_error=false for a clean stopReason", () => {
+    const got = mapPiEvent({
+      type: "agent_end",
+      messages: [{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "endTurn" }],
+    }, {}, sm("/x"));
+    expect(got[0]).toMatchObject({ type: "result", result: "done", is_error: false });
+  });
+
   it("message_update text_delta emits a stream_text envelope", () => {
     const got = mapPiEvent(
       { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "ab" } },

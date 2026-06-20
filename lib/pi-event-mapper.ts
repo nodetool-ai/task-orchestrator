@@ -70,13 +70,29 @@ export function mapPiEvent(
       return [{ type: "user", message: { content: [block] } }];
     }
     case "agent_end": {
-      const messages = ev.messages as Array<{ content?: RunEnvelopeContentBlock[] }> | undefined;
+      const messages = ev.messages as
+        | Array<{
+            role?: string;
+            content?: RunEnvelopeContentBlock[];
+            stopReason?: string;
+            errorMessage?: string;
+          }>
+        | undefined;
       const lastText = extractLastText(messages);
       const usage = ev.usage as { input_tokens?: number; output_tokens?: number } | undefined;
+      // pi encodes failures/aborts as an assistant message with stopReason
+      // "error"/"aborted" (see pi-agent-core handleRunFailure). Derive is_error
+      // from it instead of hard-coding false, which would otherwise report
+      // every failed pi turn as a clean success to downstream consumers.
+      const lastAssistant = [...(messages ?? [])]
+        .reverse()
+        .find((m) => m?.role === "assistant");
+      const isError =
+        lastAssistant?.stopReason === "error" || lastAssistant?.stopReason === "aborted";
       return [{
         type: "result",
-        result: lastText,
-        is_error: false,
+        result: isError && lastAssistant?.errorMessage ? lastAssistant.errorMessage : lastText,
+        is_error: isError,
         total_cost_usd: null,
         usage,
       }];
