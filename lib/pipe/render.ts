@@ -35,8 +35,9 @@ export class TranscriptBuilder {
         const text = assistantText(blocks);
         if (text) this.parts.push(text);
         for (const tu of toolUses(blocks)) {
-          const name = tu.name ?? "tool";
-          this.parts.push(`> 🔧 ${inlineCode(`${name}(${summarizeInput(tu.input)})`)}`);
+          const name = prettyToolName(tu.name ?? "tool");
+          const args = summarizeInput(tu.input);
+          this.parts.push(`> 🔧 ${inlineCode(args ? `${name}(${args})` : name)}`);
         }
         break;
       }
@@ -76,10 +77,26 @@ export function chunkForDiscord(text: string, limit = DISCORD_LIMIT): string[] {
 }
 
 /**
- * Wrap text in a Discord inline-code span so its contents render literally.
- * Without this, the `__` in MCP tool names (e.g. `mcp__task_orch__list_tasks`)
- * is parsed as underline markup and stripped, leaving a mangled name. Backticks
- * in the content would close the span early, so swap them for a look-alike.
+ * Humanize a tool name for display. Builtin tools (Bash, Read, ToolSearch …)
+ * pass through unchanged. MCP tools are named `mcp__<server>__<tool>`, often
+ * with the server name duplicated inside the tool (e.g.
+ * `mcp__task_orch__task_orch__list_repositories`). Strip the `mcp__<server>__`
+ * prefix and any duplicated server segment, then render the bare action with
+ * underscores as spaces — `list repositories`.
+ */
+export function prettyToolName(name: string): string {
+  if (!name.startsWith("mcp__")) return name;
+  const segs = name.split("__").filter(Boolean); // ["mcp", server, ...tool]
+  if (segs.length < 3) return name;
+  const [, server, ...rest] = segs;
+  if (rest.length > 1 && rest[0] === server) rest.shift(); // drop duplicated server prefix
+  return rest.join(" ").replace(/_/g, " ").trim();
+}
+
+/**
+ * Wrap text in a Discord inline-code span so its contents render literally —
+ * spaces, `__`, and other markdown stay intact. Backticks in the content would
+ * close the span early, so swap them for a look-alike.
  */
 function inlineCode(s: string): string {
   return "`" + s.replace(/`/g, "ʼ") + "`";
