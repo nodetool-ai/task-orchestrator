@@ -16,8 +16,21 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_NAME="task-orchestrator"
+PIPE_SERVICE="task-orchestrator-pipe"
 HEALTH_TIMEOUT=60
 HEALTH_INTERVAL=2
+
+# Restart the Discord pipe bridge if its unit is installed. It's a user-level
+# systemd service (linger keeps it alive without a login session), so no sudo —
+# just point at the runtime dir in case this runs from a non-login context.
+# Separate unit, no HTTP health check; a failure here must not fail the deploy.
+restart_pipe() {
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  if systemctl --user cat "$PIPE_SERVICE" >/dev/null 2>&1; then
+    echo "--- Restarting $PIPE_SERVICE (user unit) ---"
+    systemctl --user restart "$PIPE_SERVICE" || echo "WARN: $PIPE_SERVICE restart failed"
+  fi
+}
 
 ACTION=""
 while (( $# )); do
@@ -58,6 +71,7 @@ case "$ACTION" in
     rm -rf "$SCRIPT_DIR/.next"
     mv "$SCRIPT_DIR/.next.prev" "$SCRIPT_DIR/.next"
     sudo systemctl restart "$SERVICE_NAME"
+    restart_pipe
     exit 0
     ;;
 esac
@@ -111,6 +125,7 @@ npm run build
 echo ""
 echo "--- Restarting service ---"
 sudo systemctl restart "$SERVICE_NAME"
+restart_pipe
 
 # ── Health check ─────────────────────────────────────────────────────
 
