@@ -429,3 +429,16 @@ export function selectMatchingRunIds(
   }
   return [...matched];
 }
+
+// ──────────────────────────────────────────────────────────
+// Auto-fix gating
+// ──────────────────────────────────────────────────────────
+
+/**
+ * Whether CI/review auto-fix is enabled, given the TASK_ORCH_CI_AUTOFIX env
+ * value. On by default — the orchestrator watches every PR's CI and fixes
+ * failures in place. Set TASK_ORCH_CI_AUTOFIX to 0/false/no/off to disable.
+ */
+export function autofixEnabledFor(value: string | undefined): boolean {
+  return !/^(0|false|no|off)$/i.test((value ?? "").trim());
+}
