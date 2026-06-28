@@ -252,6 +252,31 @@ export const agentEvents = sqliteTable(
   })
 );
 
+// Maps an external chat conversation (e.g. a Discord DM or guild channel/thread)
+// to a chat run (agent_runs row, goal='<chat>'). One row per (channel,
+// external_id) so the channel bridge (lib/pipe) can resume the same conversation
+// across restarts. ON DELETE CASCADE: deleting the run drops the mapping and the
+// bridge lazily creates a fresh run on the next message.
+export const channelThreads = sqliteTable(
+  "channel_threads",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    // Channel name, e.g. "discord".
+    channel: text("channel").notNull(),
+    // Conversation key within the channel: DM channel id or guild channel/thread id.
+    externalId: text("external_id").notNull(),
+    // The chat run this conversation maps to (agent_runs.id, goal='<chat>').
+    runId: integer("run_id")
+      .notNull()
+      .references(() => agentSessions.id, { onDelete: "cascade" }),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+  },
+  (t) => ({
+    uniq: uniqueIndex("channel_threads_channel_external_uniq").on(t.channel, t.externalId),
+    runIdx: index("channel_threads_run_idx").on(t.runId),
+  })
+);
+
 export const users = sqliteTable(
   "users",
   {
@@ -327,6 +352,7 @@ export type Attachment = typeof attachments.$inferSelect;
 export type AgentSession = typeof agentSessions.$inferSelect;
 export type AgentEvent = typeof agentEvents.$inferSelect;
 export type AgentMessage = typeof agentMessages.$inferSelect;
+export type ChannelThread = typeof channelThreads.$inferSelect;
 export type Repository = typeof repositories.$inferSelect;
 export type Persona = typeof personas.$inferSelect;
 export type PersonaMemory = typeof personaMemories.$inferSelect;
