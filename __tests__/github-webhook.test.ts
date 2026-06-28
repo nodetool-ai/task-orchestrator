@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  autofixEnabledFor,
   canonicalizePrUrl,
   parseWebhookEvent,
   selectMatchingRunIds,
@@ -213,5 +214,26 @@ describe("selectMatchingRunIds", () => {
     );
     // run 2 (R1) matches; run 3 (R2, unknown remote) does not.
     expect(ids).toEqual([2]);
+  });
+});
+
+describe("autofixEnabledFor", () => {
+  it("defaults to enabled when unset or empty", () => {
+    expect(autofixEnabledFor(undefined)).toBe(true);
+    expect(autofixEnabledFor("")).toBe(true);
+    expect(autofixEnabledFor("   ")).toBe(true);
+  });
+
+  it("stays enabled for truthy and unrelated values", () => {
+    expect(autofixEnabledFor("1")).toBe(true);
+    expect(autofixEnabledFor("true")).toBe(true);
+    expect(autofixEnabledFor("on")).toBe(true);
+    expect(autofixEnabledFor("yes")).toBe(true);
+  });
+
+  it("disables only for explicit off values (case/space-insensitive)", () => {
+    for (const v of ["0", "false", "no", "off", "OFF", " false "]) {
+      expect(autofixEnabledFor(v)).toBe(false);
+    }
   });
 });

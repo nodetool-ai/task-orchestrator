@@ -14,17 +14,17 @@ import * as repo from "./repo";
 import * as runs from "./runs";
 import { ownerRepoFromRemote } from "./gh-url";
 import {
+  autofixEnabledFor,
   selectMatchingRunIds,
   type CandidateRun,
   type NormalizedWebhookEvent,
 } from "./github-webhook";
 
 // Auto-fix: when CI fails (or a reviewer requests changes) on a task's PR,
-// resume the agent on the same branch to fix it. Off by default — it spends
-// model budget and pushes commits without a human in the loop.
-const AUTOFIX_ENABLED = /^(1|true|yes|on)$/i.test(
-  process.env.TASK_ORCH_CI_AUTOFIX ?? ""
-);
+// resume the agent on the same branch to fix it. On by default — the
+// orchestrator watches every PR's CI and fixes failures in place. Set
+// TASK_ORCH_CI_AUTOFIX=0 (or false/no/off) to disable.
+const AUTOFIX_ENABLED = autofixEnabledFor(process.env.TASK_ORCH_CI_AUTOFIX);
 // Cap auto-fix attempts per run so a persistently-red PR can't loop forever.
 const AUTOFIX_MAX = Math.max(0, Number(process.env.TASK_ORCH_CI_AUTOFIX_MAX ?? 3));
 // Debounce: ignore repeat triggers within this window (a single push fans out
