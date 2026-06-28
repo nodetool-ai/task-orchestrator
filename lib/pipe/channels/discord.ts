@@ -41,6 +41,10 @@ export class DiscordChannel implements Channel {
         GatewayIntentBits.DirectMessages,
       ],
       partials: [Partials.Channel], // required to receive DMs
+      // Never let agent-generated text ping anyone: suppress @everyone/@here and
+      // user/role mentions on every outbound send + edit. The bridge never
+      // intentionally mentions, so a blanket default is safe.
+      allowedMentions: { parse: [] },
     });
   }
 
