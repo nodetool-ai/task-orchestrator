@@ -83,10 +83,10 @@ export function createChat(
   userId: number | null,
   title = "New chat",
   repoId: string | null = repo.defaultRepoId(),
-  // Web chat defaults to 'none' (the agent works in the live repo checkout).
-  // Unattended channels (the Discord pipe) pass 'worktree' so each conversation
-  // gets an isolated git worktree instead of mutating the shared checkout.
-  cwdStrategy: CwdStrategy = "none"
+  // Every chat runs in its own git worktree so concurrent conversations never
+  // share (and clobber) the repo's working tree. Callers can override, but both
+  // the web composer and the Discord pipe take the default.
+  cwdStrategy: CwdStrategy = "worktree"
 ): ChatRow {
   if (repoId && !repo.getRepository(repoId)) {
     throw new repo.RepoError(`Repository ${repoId} not found`, 404);

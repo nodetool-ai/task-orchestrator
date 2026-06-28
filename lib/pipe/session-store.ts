@@ -40,9 +40,7 @@ export function getOrCreateRun(
   // Leave the title at createChat's "New chat" default (unless a caller overrides
   // it) so runChat auto-titles the run from the first user message — the web
   // /runs list then shows the conversation topic instead of a raw channel id.
-  // Discord conversations run unattended and concurrently, so isolate each in
-  // its own git worktree ('worktree') rather than the shared repo checkout.
-  const created = chat.createChat(null, opts.title, repo.defaultRepoId(), "worktree");
+  const created = chat.createChat(null, opts.title, repo.defaultRepoId());
   if (opts.model) chat.updateChatSettings(created.id, { model: opts.model });
   db.insert(channelThreads).values({ channel, externalId, runId: created.id }).run();
   return created.id;

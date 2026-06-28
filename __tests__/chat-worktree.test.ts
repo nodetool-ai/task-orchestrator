@@ -5,10 +5,10 @@ import { seedPersonas } from "../db/seed-personas";
 import * as chat from "../lib/chat";
 import { isImplementWorktree, worktreeBranchName } from "../lib/runs";
 
-// Discord-created sessions must run in their own git worktree (filesystem
-// isolation) instead of the shared repo checkout. They are chat-goal runs with
-// no task, so the worktree machinery has to work taskless: a `claude/chat-<id>`
-// branch, no auto-push, no PR, and an `idle`/resumable lifecycle.
+// Every chat session runs in its own git worktree (filesystem isolation) instead
+// of the shared repo checkout. Chat runs have no task, so the worktree machinery
+// must work taskless: a `claude/chat-<id>` branch, no auto-push, no PR, and an
+// `idle`/resumable lifecycle.
 
 beforeEach(() => {
   seedPersonas();
@@ -18,14 +18,14 @@ beforeEach(() => {
 });
 
 describe("createChat cwd strategy", () => {
-  it("defaults to 'none' so the web composer keeps live-checkout access", () => {
+  it("defaults to 'worktree' so every chat (web + Discord) is isolated", () => {
     const c = chat.createChat(null, "New chat", null);
-    expect(c.cwdStrategy).toBe("none");
+    expect(c.cwdStrategy).toBe("worktree");
   });
 
-  it("honors an explicit 'worktree' strategy (the Discord pipe path)", () => {
-    const c = chat.createChat(null, "discord:thread", null, "worktree");
-    expect(c.cwdStrategy).toBe("worktree");
+  it("honors an explicit override", () => {
+    const c = chat.createChat(null, "scratch", null, "none");
+    expect(c.cwdStrategy).toBe("none");
   });
 });
 
