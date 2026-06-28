@@ -546,7 +546,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // push them (updating the PR) and open a PR the first time round. A no-op
     // for chat-only turns (no commits) and for non-worktree runs.
     let prUrlUpdate = run.prUrl;
-    if (run.cwdStrategy === "worktree") {
+    if (isImplementWorktree(run)) {
       try {
         prUrlUpdate = await gitSyncAfterTurn(run, cwd, result.summary);
       } catch (err) {
@@ -560,10 +560,10 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // turn — terminal so the executor's await_session resolves, but resumable
     // via the guard above. Chat/none runs land `idle`. Budget caps win.
     const budgetHit = checkBudget(run, result);
-    const isWorktree = run.cwdStrategy === "worktree";
+    const landsCompleted = isImplementWorktree(run);
     const nextStatus: SessionStatus = budgetHit
       ? "budget_exhausted"
-      : isWorktree
+      : landsCompleted
         ? "completed"
         : "idle";
     // Review-style runs surface a structured verdict in `outcome`. Gated on
@@ -581,7 +581,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
         outputTokens: result.outputTokens ?? run.outputTokens,
         outcome: outcomeUpdate,
         prUrl: prUrlUpdate,
-        completedAt: budgetHit || isWorktree ? new Date() : null,
+        completedAt: budgetHit || landsCompleted ? new Date() : null,
       })
       .where(eq(agentSessions.id, run.id))
       .run();
@@ -822,6 +822,26 @@ export function isResumableWorktreeRun(status: string, cwdStrategy: string): boo
   );
 }
 
+/**
+ * Distinguishes the two flavors of worktree run. Implement-style runs follow the
+ * branch → push → PR lifecycle and land `completed`. Chat-goal worktree runs
+ * (e.g. a Discord conversation) get a private worktree purely for filesystem
+ * isolation: no auto-push, no PR, and they stay `idle`/resumable like any chat.
+ */
+export function isImplementWorktree(run: { cwdStrategy: string; goal: string }): boolean {
+  return run.cwdStrategy === "worktree" && run.goal !== "<chat>";
+}
+
+/**
+ * Branch name for a worktree run. Task-attached (implement) runs use the task id
+ * so the branch reads as `claude/<task>-<run>`; taskless chat worktrees fall back
+ * to `claude/chat-<run>`.
+ */
+export function worktreeBranchName(run: { id: number; taskId: string | null }): string {
+  const scope = run.taskId ? run.taskId.toLowerCase() : "chat";
+  return `claude/${scope}-${run.id}`;
+}
+
 /** The base branch a task's worktree branches from / merges in. */
 function repoDefaultBranch(run: { repoId: string | null; taskId: string | null }): string {
   if (run.repoId) {
@@ -844,24 +864,22 @@ function repoDefaultBranch(run: { repoId: string | null; taskId: string | null }
  */
 async function ensureWorktreeBranch(run: RunRow): Promise<RunRow> {
   if (run.cwdStrategy !== "worktree" || run.branch) return run;
-  if (!run.taskId) {
-    throw new Error(
-      `Run #${run.id} is a worktree run without a task_id; cannot create a branch.`
-    );
-  }
   const base = repoDefaultBranch(run);
   const root = repoRoot(run);
   const worktreeRoot = resolve(root, ".worktrees");
-  const branch = `claude/${run.taskId.toLowerCase()}-${run.id}`;
+  const branch = worktreeBranchName(run);
   const worktreePath = resolve(worktreeRoot, String(run.id));
   await mkdir(worktreeRoot, { recursive: true });
   await sh(["git", "worktree", "add", "-b", branch, worktreePath, base], root);
+  const taskRepoId = run.taskId ? repo.getTask(run.taskId)?.repoId ?? null : null;
   db.update(agentSessions)
-    .set({ branch, worktreePath, repoId: run.repoId ?? repo.getTask(run.taskId)?.repoId ?? null })
+    .set({ branch, worktreePath, repoId: run.repoId ?? taskRepoId })
     .where(eq(agentSessions.id, run.id))
     .run();
-  const task = repo.getTask(run.taskId);
-  if (task && (task.state === "todo" || task.state === "blocked")) {
+  // Task-attached (implement) runs move their task to in_progress; taskless chat
+  // worktrees have nothing to transition.
+  const task = run.taskId ? repo.getTask(run.taskId) : null;
+  if (run.taskId && task && (task.state === "todo" || task.state === "blocked")) {
     try {
       repo.transitionTask(run.taskId, {
         state: "in_progress",
@@ -1643,7 +1661,7 @@ function sandboxDbPathFor(run: RunRow, cwd: string): string {
   // Implement-style runs put the sandbox DB in the worktree (vanishes with
   // cleanup); chat-style runs share a per-run file in tmpdir so script state
   // built up earlier in the conversation persists across resumes.
-  if (run.cwdStrategy === "worktree") {
+  if (isImplementWorktree(run)) {
     return resolve(cwd, ".task-orch-sandbox.db");
   }
   return join(tmpdir(), `task-orch-run-${run.id}.sandbox.db`);

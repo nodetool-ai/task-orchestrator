@@ -1,3 +1,5 @@
+import type { CwdStrategy } from "./runs";
+
 export const TASK_STATES = [
   "todo",
   "in_progress",
@@ -200,6 +202,7 @@ export interface ChatRow {
   id: number;
   userId: number | null;
   title: string;
+  cwdStrategy: CwdStrategy;
   model: string | null;
   sdkSessionId: string | null;
   totalCostUsd: number | null;
