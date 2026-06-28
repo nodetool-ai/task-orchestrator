@@ -33,7 +33,7 @@ export class TranscriptBuilder {
         this.streaming = "";
         const blocks = env.message.content as SdkContentBlock[];
         const text = assistantText(blocks);
-        if (text) this.parts.push(text);
+        if (text) this.parts.push(convertMarkdownTables(text));
         for (const tu of toolUses(blocks)) {
           const name = prettyToolName(tu.name ?? "tool");
           const args = summarizeInput(tu.input);
@@ -74,6 +74,59 @@ export function chunkForDiscord(text: string, limit = DISCORD_LIMIT): string[] {
   }
   if (rest.length) chunks.push(rest);
   return chunks.length ? chunks : [""];
+}
+
+/**
+ * Convert GitHub-flavored markdown tables into Discord-renderable bullet lists.
+ * Discord has no table syntax, so a table sent verbatim shows up as broken raw
+ * `| ... |` text. We turn each body row into a bullet: the first cell is bolded
+ * as the row label, the remaining cells become `Header: value` pairs joined by
+ * `\u00b7`. Single-column tables become a plain bullet list. Non-table text is
+ * returned unchanged.
+ */
+export function convertMarkdownTables(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  const isSeparator = (line: string) =>
+    /\|/.test(line) && /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(line);
+  const cells = (line: string) =>
+    line
+      .trim()
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((c) => c.trim());
+
+  for (let i = 0; i < lines.length; i++) {
+    const header = lines[i];
+    const sep = lines[i + 1];
+    // A table is a header row with pipes, immediately followed by a separator.
+    if (header.includes("|") && sep !== undefined && isSeparator(sep)) {
+      const headers = cells(header);
+      let j = i + 2;
+      const rows: string[] = [];
+      while (j < lines.length && lines[j].includes("|") && lines[j].trim() !== "") {
+        const c = cells(lines[j]);
+        if (c.length === 1) {
+          rows.push(`- ${c[0]}`);
+        } else {
+          const rest = c
+            .slice(1)
+            .map((v, k) => `${headers[k + 1] ?? ""}: ${v}`)
+            .join(" \u00b7 ");
+          rows.push(`- **${c[0]}** \u00b7 ${rest}`);
+        }
+        j++;
+      }
+      if (rows.length) {
+        out.push(...rows);
+        i = j - 1;
+        continue;
+      }
+    }
+    out.push(header);
+  }
+  return out.join("\n");
 }
 
 /**
