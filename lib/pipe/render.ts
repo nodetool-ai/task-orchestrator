@@ -35,7 +35,9 @@ export class TranscriptBuilder {
         const text = assistantText(blocks);
         if (text) this.parts.push(text);
         for (const tu of toolUses(blocks)) {
-          this.parts.push(`> 🔧 ${tu.name ?? "tool"}(${summarizeInput(tu.input)})`);
+          const name = prettyToolName(tu.name ?? "tool");
+          const args = summarizeInput(tu.input);
+          this.parts.push(`> 🔧 ${inlineCode(args ? `${name}(${args})` : name)}`);
         }
         break;
       }
@@ -74,6 +76,32 @@ export function chunkForDiscord(text: string, limit = DISCORD_LIMIT): string[] {
   return chunks.length ? chunks : [""];
 }
 
+/**
+ * Humanize a tool name for display. Builtin tools (Bash, Read, ToolSearch …)
+ * pass through unchanged. MCP tools are named `mcp__<server>__<tool>`, often
+ * with the server name duplicated inside the tool (e.g.
+ * `mcp__task_orch__task_orch__list_repositories`). Strip the `mcp__<server>__`
+ * prefix and any duplicated server segment, then render the bare action with
+ * underscores as spaces — `list repositories`.
+ */
+export function prettyToolName(name: string): string {
+  if (!name.startsWith("mcp__")) return name;
+  const segs = name.split("__").filter(Boolean); // ["mcp", server, ...tool]
+  if (segs.length < 3) return name;
+  const [, server, ...rest] = segs;
+  if (rest.length > 1 && rest[0] === server) rest.shift(); // drop duplicated server prefix
+  return rest.join(" ").replace(/_/g, " ").trim();
+}
+
+/**
+ * Wrap text in a Discord inline-code span so its contents render literally —
+ * spaces, `__`, and other markdown stay intact. Backticks in the content would
+ * close the span early, so swap them for a look-alike.
+ */
+function inlineCode(s: string): string {
+  return "`" + s.replace(/`/g, "ʼ") + "`";
+}
+
 /** One-line, truncated summary of a tool-call input for a status line. */
 function summarizeInput(input: unknown): string {
   if (input == null) return "";
@@ -82,6 +110,7 @@ function summarizeInput(input: unknown): string {
     s = input;
   } else if (typeof input === "object") {
     const obj = input as Record<string, unknown>;
+    if (Object.keys(obj).length === 0) return "";
     // Prefer the human-meaningful fields the orchestrator/builtin tools use.
     const key = obj.command ?? obj.path ?? obj.file_path ?? obj.query ?? obj.text;
     s = typeof key === "string" ? key : JSON.stringify(obj);
