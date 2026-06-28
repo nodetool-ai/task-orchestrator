@@ -1,0 +1,38 @@
+// lib/pipe/channel-manager.ts
+//
+// Owns the channel lifecycle and wires each channel's inbound messages to the
+// message bus and the agent loop. Faithful to claude-pipe's manager: start all
+// channels, route messages, shut down cleanly.
+
+import { AgentLoop } from "./agent-loop";
+import { MessageBus } from "./bus";
+import type { Channel, PipeConfig } from "./types";
+
+export class ChannelManager {
+  private bus = new MessageBus();
+
+  constructor(
+    private channels: Channel[],
+    private config: PipeConfig
+  ) {}
+
+  async start(): Promise<void> {
+    for (const ch of this.channels) {
+      const loop = new AgentLoop(ch, this.config);
+      ch.onMessage((msg) => {
+        // Publish on the bus (fan-in point for future multi-channel use) and
+        // dispatch the turn. Fire-and-forget: distinct conversations run
+        // concurrently, while same-conversation turns serialise on
+        // runs.append's per-run lock.
+        this.bus.publishInbound(msg);
+        void loop.handle(msg).catch((e) => console.error("[pipe] agent-loop error:", e));
+      });
+      await ch.start();
+      console.log(`[pipe] channel '${ch.name}' started`);
+    }
+  }
+
+  async stop(): Promise<void> {
+    await Promise.allSettled(this.channels.map((c) => c.stop()));
+  }
+}
