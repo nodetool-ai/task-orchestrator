@@ -35,7 +35,8 @@ export class TranscriptBuilder {
         const text = assistantText(blocks);
         if (text) this.parts.push(text);
         for (const tu of toolUses(blocks)) {
-          this.parts.push(`> 🔧 ${tu.name ?? "tool"}(${summarizeInput(tu.input)})`);
+          const name = tu.name ?? "tool";
+          this.parts.push(`> 🔧 ${inlineCode(`${name}(${summarizeInput(tu.input)})`)}`);
         }
         break;
       }
@@ -74,6 +75,16 @@ export function chunkForDiscord(text: string, limit = DISCORD_LIMIT): string[] {
   return chunks.length ? chunks : [""];
 }
 
+/**
+ * Wrap text in a Discord inline-code span so its contents render literally.
+ * Without this, the `__` in MCP tool names (e.g. `mcp__task_orch__list_tasks`)
+ * is parsed as underline markup and stripped, leaving a mangled name. Backticks
+ * in the content would close the span early, so swap them for a look-alike.
+ */
+function inlineCode(s: string): string {
+  return "`" + s.replace(/`/g, "ʼ") + "`";
+}
+
 /** One-line, truncated summary of a tool-call input for a status line. */
 function summarizeInput(input: unknown): string {
   if (input == null) return "";
@@ -82,6 +93,7 @@ function summarizeInput(input: unknown): string {
     s = input;
   } else if (typeof input === "object") {
     const obj = input as Record<string, unknown>;
+    if (Object.keys(obj).length === 0) return "";
     // Prefer the human-meaningful fields the orchestrator/builtin tools use.
     const key = obj.command ?? obj.path ?? obj.file_path ?? obj.query ?? obj.text;
     s = typeof key === "string" ? key : JSON.stringify(obj);
