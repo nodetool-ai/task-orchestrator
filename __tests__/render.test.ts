@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { TranscriptBuilder, chunkForDiscord, prettyToolName } from "../lib/pipe/render";
+import {
+  TranscriptBuilder,
+  chunkForDiscord,
+  convertMarkdownTables,
+  prettyToolName,
+} from "../lib/pipe/render";
 import type { RunEnvelope } from "../lib/pi-event-mapper";
 
 const assistant = (content: unknown[]): RunEnvelope =>
@@ -72,6 +77,53 @@ describe("TranscriptBuilder tool lines", () => {
     const b = new TranscriptBuilder();
     b.push(assistant([{ type: "tool_use", input: {} }]));
     expect(b.text()).toBe("> 🔧 `tool`");
+  });
+});
+
+describe("convertMarkdownTables", () => {
+  it("converts a GFM table into a Discord-renderable bullet list", () => {
+    const md = [
+      "| Name  | Status  |",
+      "| ----- | ------- |",
+      "| build | ok      |",
+      "| test  | failing |",
+    ].join("\n");
+    const out = convertMarkdownTables(md);
+    expect(out).not.toContain("|");
+    expect(out).toContain("- **build** \u00b7 Status: ok");
+    expect(out).toContain("- **test** \u00b7 Status: failing");
+  });
+
+  it("renders a single-column table as a plain bullet list", () => {
+    const md = ["| Item |", "| ---- |", "| a |", "| b |"].join("\n");
+    const out = convertMarkdownTables(md);
+    expect(out).not.toContain("|");
+    expect(out).toContain("- a");
+    expect(out).toContain("- b");
+  });
+
+  it("leaves surrounding prose intact", () => {
+    const md = ["Before.", "", "| A | B |", "| - | - |", "| 1 | 2 |", "", "After."].join("\n");
+    const out = convertMarkdownTables(md);
+    expect(out.startsWith("Before.")).toBe(true);
+    expect(out.endsWith("After.")).toBe(true);
+    expect(out).toContain("- **1** \u00b7 B: 2");
+  });
+
+  it("leaves text without tables untouched", () => {
+    expect(convertMarkdownTables("just prose\nwith | a pipe")).toBe("just prose\nwith | a pipe");
+  });
+});
+
+describe("TranscriptBuilder table handling", () => {
+  it("converts markdown tables in assistant text to bullet lists", () => {
+    const b = new TranscriptBuilder();
+    b.push(
+      assistant([{ type: "text", text: "Results:\n\n| A | B |\n| - | - |\n| 1 | 2 |" }])
+    );
+    const out = b.text();
+    expect(out).not.toContain("|");
+    expect(out).toContain("- **1** \u00b7 B: 2");
   });
 });
 
