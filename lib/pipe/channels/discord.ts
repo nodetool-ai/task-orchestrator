@@ -7,10 +7,12 @@
 // non-allowlisted user.
 
 import {
+  ChannelType,
   Client,
   Events,
   GatewayIntentBits,
   Partials,
+  ThreadAutoArchiveDuration,
   type Message,
 } from "discord.js";
 
@@ -18,6 +20,12 @@ import type { Channel, DiscordConfig, InboundMessage, OutboundDraft } from "../t
 
 /** Minimal structural type for a channel we can post to. */
 type Sendable = { send: (content: string) => Promise<Message> };
+
+/** Top-level channel types we can spin a new thread off of. */
+const THREADABLE = new Set<ChannelType>([
+  ChannelType.GuildText,
+  ChannelType.GuildAnnouncement,
+]);
 
 export class DiscordChannel implements Channel {
   readonly name = "discord";
@@ -41,7 +49,11 @@ export class DiscordChannel implements Channel {
   }
 
   async start(): Promise<void> {
-    this.client.on(Events.MessageCreate, (m) => this.onDiscordMessage(m));
+    this.client.on(Events.MessageCreate, (m) => {
+      void this.onDiscordMessage(m).catch((err) =>
+        console.error("[pipe] message handler error:", err)
+      );
+    });
     await new Promise<void>((resolve, reject) => {
       this.client.once(Events.ClientReady, (c) => {
         console.log(`[pipe] discord logged in as ${c.user.tag}`);
@@ -55,17 +67,39 @@ export class DiscordChannel implements Channel {
     await this.client.destroy();
   }
 
-  private onDiscordMessage(m: Message): void {
+  private async onDiscordMessage(m: Message): Promise<void> {
     if (m.author.bot) return; // ignore bots (covers our own messages)
     if (!this.cfg.allowedUsers.includes(m.author.id)) return; // allowlist (mandatory)
-    if (this.cfg.allowedChannels.length && !this.cfg.allowedChannels.includes(m.channelId)) {
+
+    // The channel allowlist gates on the PARENT channel for thread messages — a
+    // thread's own id is never in the configured list.
+    const gateId = m.channel.isThread() ? m.channel.parentId ?? m.channelId : m.channelId;
+    if (this.cfg.allowedChannels.length && !this.cfg.allowedChannels.includes(gateId)) {
       return;
     }
+
     const text = stripSelfMention(m.content, this.client.user?.id).trim();
     if (!text) return;
+
+    // Auto-thread: a message in a top-level, threadable guild channel spawns a
+    // fresh thread, so each conversation is its own session (keyed by the thread
+    // id). DMs and messages already inside a thread stay where they are.
+    let externalId = m.channelId;
+    if (!m.channel.isThread() && THREADABLE.has(m.channel.type)) {
+      try {
+        const thread = await m.startThread({
+          name: threadName(text, m.author.username),
+          autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
+        });
+        externalId = thread.id;
+      } catch (err) {
+        console.error("[pipe] failed to open thread; falling back to channel:", err);
+      }
+    }
+
     this.handler?.({
       channel: this.name,
-      externalId: m.channelId, // DM channel id OR guild channel/thread id
+      externalId, // DM channel id, existing thread id, or a freshly opened thread id
       text,
       authorId: m.author.id,
       authorLabel: `discord:${m.author.username}`,
@@ -103,4 +137,11 @@ export class DiscordChannel implements Channel {
 function stripSelfMention(content: string, selfId: string | undefined): string {
   if (!selfId) return content;
   return content.replace(new RegExp(`<@!?${selfId}>`, "g"), "");
+}
+
+/** Build a Discord thread name from the first message (Discord caps names at 100). */
+function threadName(text: string, username: string): string {
+  const firstLine = text.split("\n")[0].trim().replace(/\s+/g, " ");
+  const base = firstLine || `Chat with ${username}`;
+  return base.length > 80 ? base.slice(0, 79) + "…" : base;
 }

@@ -37,11 +37,10 @@ export function getOrCreateRun(
   if (existing && chat.getChat(existing.runId)) return existing.runId;
   if (existing) db.delete(channelThreads).where(eq(channelThreads.id, existing.id)).run();
 
-  const created = chat.createChat(
-    null,
-    opts.title ?? `${channel}:${externalId}`,
-    repo.defaultRepoId()
-  );
+  // Leave the title at createChat's "New chat" default (unless a caller overrides
+  // it) so runChat auto-titles the run from the first user message — the web
+  // /runs list then shows the conversation topic instead of a raw channel id.
+  const created = chat.createChat(null, opts.title, repo.defaultRepoId());
   if (opts.model) chat.updateChatSettings(created.id, { model: opts.model });
   db.insert(channelThreads).values({ channel, externalId, runId: created.id }).run();
   return created.id;
