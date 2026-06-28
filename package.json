@@ -18,7 +18,8 @@
     "db:generate": "drizzle-kit generate",
     "db:seed": "tsx scripts/seed.ts",
     "db:seed:demo": "SEED_DEMO=1 tsx scripts/seed.ts",
-    "db:reset": "tsx scripts/reset.ts"
+    "db:reset": "tsx scripts/reset.ts",
+    "gc": "tsx scripts/worktree-gc.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.178",
