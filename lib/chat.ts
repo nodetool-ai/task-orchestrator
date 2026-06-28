@@ -16,6 +16,7 @@ import * as repo from "./repo";
 import * as runs from "./runs";
 import type { SdkContentBlock } from "./sdk-message";
 import type { RunEnvelope } from "./pi-event-mapper";
+import type { CwdStrategy } from "./runs";
 import type { ChatMessageRow, ChatRole, ChatRow } from "./types";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -81,7 +82,11 @@ export function getChat(id: number, userId?: number | null): ChatRow | null {
 export function createChat(
   userId: number | null,
   title = "New chat",
-  repoId: string | null = repo.defaultRepoId()
+  repoId: string | null = repo.defaultRepoId(),
+  // Every chat runs in its own git worktree so concurrent conversations never
+  // share (and clobber) the repo's working tree. Callers can override, but both
+  // the web composer and the Discord pipe take the default.
+  cwdStrategy: CwdStrategy = "worktree"
 ): ChatRow {
   if (repoId && !repo.getRepository(repoId)) {
     throw new repo.RepoError(`Repository ${repoId} not found`, 404);
@@ -90,7 +95,7 @@ export function createChat(
   // place. goal='<chat>' lands the run at status='idle' awaiting first append.
   const created = runs.create({
     goal: "<chat>",
-    cwdStrategy: "none",
+    cwdStrategy,
     toolsProfile: "orchestrator,repo_write",
     repoId,
     userId,
@@ -251,6 +256,7 @@ function hydrateChat(row: typeof agentSessions.$inferSelect): ChatRow {
     id: row.id,
     userId: row.userId,
     title: row.title ?? "New chat",
+    cwdStrategy: row.cwdStrategy as CwdStrategy,
     model: row.model,
     sdkSessionId: row.sdkSessionId,
     totalCostUsd: row.totalCostUsd,
