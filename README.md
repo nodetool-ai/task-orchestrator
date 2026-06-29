@@ -157,7 +157,10 @@ Each session:
    worktree shares one install and one warm build cache. A worktree that needs
    to change dependencies or wants a clean build can opt out with
    `npm run isolate-env`, which swaps the shared symlinks for a private
-   `node_modules` and `.next` and reinstalls
+   `node_modules` and `.next` and reinstalls. To preview the branch in a
+   browser, `npm run worktree-dev` starts the Next.js dev server on a stable
+   per-worktree port bound to loopback (behind the app's login); add
+   `-- --tunnel` for a secure HTTPS Cloudflare URL
 2. Transitions the task to `in_progress` (assignee `claude-agent`)
 3. Runs the SDK with `permissionMode: "bypassPermissions"`, the task
    body and acceptance criteria as the prompt, and the worktree as cwd

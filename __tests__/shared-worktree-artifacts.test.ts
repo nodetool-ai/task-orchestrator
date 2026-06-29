@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  DEV_PORT_BASE,
+  DEV_PORT_SPAN,
   linkSharedWorktreeArtifacts,
+  preferredDevPort,
   unlinkSharedWorktreeArtifacts,
 } from "../lib/worktree-env";
 
@@ -188,5 +191,42 @@ describe("unlinkSharedWorktreeArtifacts", () => {
 
     expect(removed).toEqual(["node_modules"]);
     expect((await lstat(join(worktree, ".next"))).isSymbolicLink()).toBe(false);
+  });
+});
+
+// `npm run worktree-dev` binds this port to loopback so concurrent worktrees
+// don't collide on 3000.
+describe("preferredDevPort", () => {
+  it("always lands inside the private dev-port range", () => {
+    for (const p of [
+      "/repo/.worktrees/1",
+      "/repo/.worktrees/999",
+      "/repo/.worktrees/review-42",
+      "/repo/.worktrees/chat-7",
+      "/some/oddly-named-worktree",
+    ]) {
+      const port = preferredDevPort(p);
+      expect(port).toBeGreaterThanOrEqual(DEV_PORT_BASE);
+      expect(port).toBeLessThan(DEV_PORT_BASE + DEV_PORT_SPAN);
+    }
+  });
+
+  it("is deterministic — same worktree path → same port", () => {
+    expect(preferredDevPort("/repo/.worktrees/12")).toBe(
+      preferredDevPort("/repo/.worktrees/12")
+    );
+  });
+
+  it("derives the port from the trailing run id", () => {
+    // `.worktrees/<id>` → BASE + (id % SPAN), a predictable mapping.
+    expect(preferredDevPort("/repo/.worktrees/5")).toBe(DEV_PORT_BASE + 5);
+    expect(preferredDevPort("/repo/.worktrees/review-5")).toBe(DEV_PORT_BASE + 5);
+  });
+
+  it("gives different ports to different worktrees (no trivial collision)", () => {
+    const ports = new Set(
+      [1, 2, 3, 4, 5].map((id) => preferredDevPort(`/repo/.worktrees/${id}`))
+    );
+    expect(ports.size).toBe(5);
   });
 });

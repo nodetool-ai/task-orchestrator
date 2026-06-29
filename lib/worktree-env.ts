@@ -15,7 +15,7 @@
 
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readlink, rm, symlink } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 export interface SharedArtifact {
   /** Path component shared from the repo root into each worktree. */
@@ -143,4 +143,45 @@ async function symlinkSharedTarget(target: string, linkPath: string): Promise<vo
 function describe(err: unknown): string {
   if (err instanceof Error) return err.message;
   return typeof err === "string" ? err : JSON.stringify(err);
+}
+
+// ──────────────────────────────────────────────────────────
+// Per-worktree dev-server ports
+// ──────────────────────────────────────────────────────────
+//
+// Concurrent worktrees can't all bind the default port 3000. Each worktree gets
+// a deterministic port in a private range so it's collision-free *and* stable
+// across restarts (the same worktree always gets the same URL). The
+// `npm run worktree-dev` script binds this port to loopback only.
+
+export const DEV_PORT_BASE = 3100;
+// 3100–3999: 900 slots, comfortably clear of 3000 (prod/default) and the
+// ephemeral range. Enough headroom that collisions need either >900 live
+// worktrees or a hash clash, both handled by the script's free-port probe.
+export const DEV_PORT_SPAN = 900;
+
+/**
+ * Deterministic preferred dev-server port for a worktree. Worktree dirs are
+ * named `.worktrees/<runId>` (or `review-<id>` / `chat-<id>`), so the trailing
+ * number drives the port for a predictable mapping; a non-numeric basename
+ * falls back to a stable hash. Always lands in [DEV_PORT_BASE, +DEV_PORT_SPAN).
+ *
+ * Deterministic only — it does not check whether the port is free. The
+ * worktree-dev script probes upward from here for an open port at launch.
+ */
+export function preferredDevPort(worktreePath: string): number {
+  const name = basename(resolve(worktreePath));
+  const trailing = name.match(/(\d+)$/);
+  const seed = trailing ? parseInt(trailing[1], 10) : hashString(name);
+  return DEV_PORT_BASE + (seed % DEV_PORT_SPAN);
+}
+
+/** Stable 32-bit FNV-1a hash → non-negative int. Used for non-numeric names. */
+function hashString(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return Math.abs(h | 0);
 }

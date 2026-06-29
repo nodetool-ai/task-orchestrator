@@ -192,6 +192,9 @@ export function buildImplementPrompt(task: TaskFull): string {
   lines.push(
     "- Need a private environment? If you must add/upgrade/remove a dependency or want a clean isolated build, run `npm run isolate-env` first. It swaps the shared symlinks for this worktree's own `node_modules` and `.next`, so your dependency changes stay local. After that, `npm install` / building here is safe."
   );
+  lines.push(
+    "- To preview your changes in a browser, run `npm run worktree-dev` (long-running — start it in the background). It serves this worktree on its own stable port bound to loopback only — never `0.0.0.0` — behind the app's normal login, so it won't collide with other worktrees or be exposed raw. Add `-- --tunnel` for a secure HTTPS Cloudflare URL you can share."
+  );
   lines.push("- Make all changes here. Commit with a clear message.");
   lines.push("- Do NOT push and do NOT open a PR — the orchestrator does both after you finish.");
   lines.push("- Run typecheck and lint where it applies; fix any errors you introduce.");

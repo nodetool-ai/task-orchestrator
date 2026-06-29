@@ -20,7 +20,8 @@
     "db:seed:demo": "SEED_DEMO=1 tsx scripts/seed.ts",
     "db:reset": "tsx scripts/reset.ts",
     "gc": "tsx scripts/worktree-gc.ts",
-    "isolate-env": "tsx scripts/isolate-worktree-env.ts"
+    "isolate-env": "tsx scripts/isolate-worktree-env.ts",
+    "worktree-dev": "tsx scripts/worktree-dev.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.178",

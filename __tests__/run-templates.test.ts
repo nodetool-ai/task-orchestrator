@@ -95,6 +95,12 @@ describe("buildImplementPrompt", () => {
     const prompt = buildImplementPrompt(fakeTask());
     expect(prompt).toContain("npm run isolate-env");
   });
+
+  it("tells the agent how to start a securely-exposed dev server", () => {
+    const prompt = buildImplementPrompt(fakeTask());
+    expect(prompt).toContain("npm run worktree-dev");
+    expect(prompt).toContain("loopback");
+  });
 });
 
 describe("buildChatPromptPrefix", () => {
