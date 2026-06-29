@@ -30,7 +30,7 @@
 
 import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
-import { mkdir } from "node:fs/promises";
+import { mkdir, symlink } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname, join, resolve } from "node:path";
@@ -798,6 +798,7 @@ async function prepareCwd(run: RunRow): Promise<string> {
     // review runs), so a plain `git worktree add <path> <branch>` is
     // sufficient — git checks out the existing branch into the new path.
     await sh(["git", "worktree", "add", run.worktreePath, run.branch], root);
+    await linkSharedWorktreeArtifacts(run.worktreePath, root);
   }
   return validateCwd(run.worktreePath, { runId: run.id, repoId: run.repoId });
 }
@@ -871,6 +872,7 @@ async function ensureWorktreeBranch(run: RunRow): Promise<RunRow> {
   const worktreePath = resolve(worktreeRoot, String(run.id));
   await mkdir(worktreeRoot, { recursive: true });
   await sh(["git", "worktree", "add", "-b", branch, worktreePath, base], root);
+  await linkSharedWorktreeArtifacts(worktreePath, root);
   const taskRepoId = run.taskId ? repo.getTask(run.taskId)?.repoId ?? null : null;
   db.update(agentSessions)
     .set({ branch, worktreePath, repoId: run.repoId ?? taskRepoId })
@@ -1007,6 +1009,7 @@ async function runReview(
       ["git", "worktree", "add", "-b", branch, worktreePath, "FETCH_HEAD"],
       root
     );
+    await linkSharedWorktreeArtifacts(worktreePath, root);
     db.update(agentSessions)
       .set({ branch, worktreePath })
       .where(eq(agentSessions.id, runId))
@@ -1705,6 +1708,55 @@ function sh(args: string[], cwd: string): Promise<string> {
       else rejectP(new Error(`${args.join(" ")} exited ${code}\n${stderr || stdout}`));
     });
   });
+}
+
+// Artifacts shared across every worktree of a repo via symlink into the repo
+// root. node_modules: one `npm install` at the root serves all worktrees, so a
+// fresh worktree doesn't need its own (slow, multi-hundred-MB) install. `.next`:
+// the Turbopack/Next.js build cache (`.next/cache`) stays warm across branches,
+// so rebuilds in a new worktree reuse prior compilation instead of starting
+// cold. Both are gitignored, so the symlinks never get committed.
+const SHARED_WORKTREE_ARTIFACTS = ["node_modules", ".next"] as const;
+
+/**
+ * Link each shared artifact from the repo root into a freshly-created worktree.
+ *
+ * - node_modules is only linked when the root actually has one — a dangling
+ *   symlink would break module resolution worse than a missing dir would.
+ * - `.next`'s target is created on demand so the first build can write the
+ *   shared cache through the link.
+ * - An existing real dir/link at the destination is left untouched (never
+ *   clobber what git or a prior link already put there).
+ *
+ * Best-effort: a link failure is logged, not thrown. The worktree still works
+ * without sharing — it's just colder (its own install / cache). Callers run
+ * this right after `git worktree add`.
+ */
+export async function linkSharedWorktreeArtifacts(
+  worktreePath: string,
+  root: string
+): Promise<void> {
+  // Don't symlink a worktree into its own root's store (e.g. degenerate setups
+  // where the worktree path resolves to the repo root) — that would create a
+  // self-referential link.
+  if (resolve(worktreePath) === resolve(root)) return;
+  for (const name of SHARED_WORKTREE_ARTIFACTS) {
+    const target = join(root, name);
+    const linkPath = join(worktreePath, name);
+    try {
+      if (existsSync(linkPath)) continue;
+      if (name === "node_modules") {
+        if (!existsSync(target)) continue; // nothing installed to share yet
+      } else {
+        await mkdir(target, { recursive: true }); // ensure the cache dir exists
+      }
+      await symlink(target, linkPath, "dir");
+    } catch (err) {
+      console.warn(
+        `[runs] failed to link shared ${name} into ${worktreePath}: ${describe(err)}`
+      );
+    }
+  }
 }
 
 function cleanupWorktree(path: string, root: string): Promise<void> {
