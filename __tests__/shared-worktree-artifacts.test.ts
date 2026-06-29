@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, symlinkSync } from "node:fs";
 import { lstat, readlink, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -70,5 +70,61 @@ describe("linkSharedWorktreeArtifacts", () => {
     await linkSharedWorktreeArtifacts(worktree, root);
     expect(await readlink(join(worktree, "node_modules"))).toBe(join(root, "node_modules"));
     expect(await readlink(join(worktree, ".next"))).toBe(join(root, ".next"));
+  });
+
+  it("is idempotent — a second call leaves a correct link untouched", async () => {
+    mkdirSync(join(root, "node_modules"), { recursive: true });
+    await linkSharedWorktreeArtifacts(worktree, root);
+    // A second run must not throw (no EEXIST) and must keep the same link.
+    await linkSharedWorktreeArtifacts(worktree, root);
+    expect((await lstat(join(worktree, "node_modules"))).isSymbolicLink()).toBe(true);
+    expect(await readlink(join(worktree, "node_modules"))).toBe(join(root, "node_modules"));
+  });
+
+  it("repairs a dangling node_modules symlink (existsSync would miss it)", async () => {
+    mkdirSync(join(root, "node_modules"), { recursive: true });
+    // Pre-existing link to a target that no longer exists.
+    symlinkSync(join(root, "gone-modules"), join(worktree, "node_modules"));
+    expect(existsSync(join(worktree, "node_modules"))).toBe(false); // dangling
+
+    await linkSharedWorktreeArtifacts(worktree, root);
+
+    expect(await readlink(join(worktree, "node_modules"))).toBe(join(root, "node_modules"));
+    expect(existsSync(join(worktree, "node_modules"))).toBe(true);
+  });
+
+  it("repairs a symlink pointing at the wrong target", async () => {
+    mkdirSync(join(root, "node_modules"), { recursive: true });
+    const stale = mkdtempSync(join(tmpdir(), "stale-store-"));
+    symlinkSync(stale, join(worktree, "node_modules"));
+
+    await linkSharedWorktreeArtifacts(worktree, root);
+
+    expect(await readlink(join(worktree, "node_modules"))).toBe(join(root, "node_modules"));
+  });
+
+  it("links both artifacts even if one would fail (best-effort, independent)", async () => {
+    // node_modules present so it links; .next target is occupied by a *file* at
+    // the worktree, so it's a real entry we must not clobber. The node_modules
+    // link must still be created regardless.
+    mkdirSync(join(root, "node_modules"), { recursive: true });
+    writeFileSync(join(worktree, ".next"), "i am a real file, leave me alone");
+
+    await linkSharedWorktreeArtifacts(worktree, root);
+
+    expect((await lstat(join(worktree, "node_modules"))).isSymbolicLink()).toBe(true);
+    // The real .next file is untouched (not a symlink, content preserved).
+    expect((await lstat(join(worktree, ".next"))).isSymbolicLink()).toBe(false);
+    expect(readFileSync(join(worktree, ".next"), "utf8")).toContain("leave me alone");
+  });
+
+  it("tolerates concurrent calls without throwing (EEXIST race)", async () => {
+    mkdirSync(join(root, "node_modules"), { recursive: true });
+    // Fire several materializations of the same worktree at once.
+    await Promise.all(
+      Array.from({ length: 5 }, () => linkSharedWorktreeArtifacts(worktree, root))
+    );
+    expect(await readlink(join(worktree, "node_modules"))).toBe(join(root, "node_modules"));
+    expect((await lstat(join(worktree, ".next"))).isSymbolicLink()).toBe(true);
   });
 });
