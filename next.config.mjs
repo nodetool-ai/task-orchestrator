@@ -1,7 +1,16 @@
 import { fileURLToPath } from "node:url";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Webpack's filesystem cache normally lives in each checkout's .next/cache, so
+// every git worktree builds cold. Point it at one shared directory instead:
+// webpack keys entries by content + config hash, so worktrees and the canonical
+// checkout safely reuse each other's compiled modules (mismatches are ignored,
+// never corrupted). Split dev/prod so the two modes don't churn one cache.
+const SHARED_WEBPACK_CACHE =
+  process.env.NEXT_WEBPACK_CACHE_DIR ?? join(homedir(), ".cache", "task-orch-webpack");
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -29,6 +38,12 @@ const nextConfig = {
     "isomorphic-dompurify",
     "jsdom",
   ],
+  webpack: (config, { dev }) => {
+    if (config.cache && config.cache.type === "filesystem") {
+      config.cache.cacheDirectory = join(SHARED_WEBPACK_CACHE, dev ? "dev" : "prod");
+    }
+    return config;
+  },
 };
 
 export default nextConfig;
