@@ -798,6 +798,7 @@ async function prepareCwd(run: RunRow): Promise<string> {
     // review runs), so a plain `git worktree add <path> <branch>` is
     // sufficient — git checks out the existing branch into the new path.
     await sh(["git", "worktree", "add", run.worktreePath, run.branch], root);
+    await ensureWorktreeDeps(run.worktreePath);
   }
   return validateCwd(run.worktreePath, { runId: run.id, repoId: run.repoId });
 }
@@ -871,6 +872,7 @@ async function ensureWorktreeBranch(run: RunRow): Promise<RunRow> {
   const worktreePath = resolve(worktreeRoot, String(run.id));
   await mkdir(worktreeRoot, { recursive: true });
   await sh(["git", "worktree", "add", "-b", branch, worktreePath, base], root);
+  await ensureWorktreeDeps(worktreePath);
   const taskRepoId = run.taskId ? repo.getTask(run.taskId)?.repoId ?? null : null;
   db.update(agentSessions)
     .set({ branch, worktreePath, repoId: run.repoId ?? taskRepoId })
@@ -1705,6 +1707,27 @@ function sh(args: string[], cwd: string): Promise<string> {
       else rejectP(new Error(`${args.join(" ")} exited ${code}\n${stderr || stdout}`));
     });
   });
+}
+
+/**
+ * Best-effort: warm a fresh worktree's node_modules from the shared pnpm store.
+ * pnpm hardlinks from a global content-addressable store, so this is ~1-2s and
+ * near-zero extra disk per worktree instead of a multi-minute `npm ci` + ~1.4G
+ * copy. Lockfile-gated so it only acts on pnpm projects — repos using npm/yarn
+ * or no package manager (e.g. Python targets) are left untouched. Never throws:
+ * a missing pnpm or a package.json/lockfile drift just leaves the agent to
+ * install on its own.
+ */
+async function ensureWorktreeDeps(worktreePath: string): Promise<void> {
+  if (!existsSync(resolve(worktreePath, "pnpm-lock.yaml"))) return;
+  try {
+    await sh(
+      ["corepack", "pnpm", "install", "--frozen-lockfile", "--prefer-offline", "--reporter=silent"],
+      worktreePath
+    );
+  } catch {
+    // Best-effort; the agent can run install itself if it actually needs deps.
+  }
 }
 
 function cleanupWorktree(path: string, root: string): Promise<void> {
