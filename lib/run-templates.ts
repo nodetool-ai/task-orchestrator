@@ -186,6 +186,9 @@ export function buildImplementPrompt(task: TaskFull): string {
   lines.push("");
   lines.push("# Working environment");
   lines.push("- You are in an isolated git worktree on a fresh branch.");
+  lines.push(
+    "- `node_modules` and the Turbopack/Next.js build cache (`.next`) are SHARED across all worktrees (symlinked to a common store). Dependencies are already installed — don't run `npm install` unless you're intentionally changing `package.json`, and never `rm -rf node_modules` or clear the build cache: that would clobber every other worktree running concurrently."
+  );
   lines.push("- Make all changes here. Commit with a clear message.");
   lines.push("- Do NOT push and do NOT open a PR — the orchestrator does both after you finish.");
   lines.push("- Run typecheck and lint where it applies; fix any errors you introduce.");
@@ -289,6 +292,9 @@ export function buildReviewPrompt(task: TaskFull, prUrl: string): string {
   lines.push("# Working environment");
   lines.push(
     "- You are in a git worktree checked out at the PR's head commit. Read the diff via `git diff <base>...HEAD` or via the gh_pr tools."
+  );
+  lines.push(
+    "- `node_modules` and the Turbopack/Next.js build cache (`.next`) are SHARED across all worktrees (symlinked to a common store). Dependencies are already installed — never `rm -rf node_modules` or clear the build cache: that would clobber every other worktree running concurrently."
   );
   lines.push(
     "- The `gh_pr` MCP server exposes `pr_view`, `pr_diff`, `pr_comments`, and similar tools — use them to load the PR's metadata, diff, CI status, and existing review comments."
