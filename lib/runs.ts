@@ -57,6 +57,7 @@ import { sandboxFactory } from "./extensions/sandbox";
 import { personaPromptFactory } from "./extensions/persona-prompt";
 import { personaMemoryFactory } from "./extensions/persona-memory";
 import { abortBridgeFactory } from "./extensions/abort-bridge";
+import { linkSharedWorktreeArtifacts } from "./worktree-env";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
@@ -798,6 +799,7 @@ async function prepareCwd(run: RunRow): Promise<string> {
     // review runs), so a plain `git worktree add <path> <branch>` is
     // sufficient — git checks out the existing branch into the new path.
     await sh(["git", "worktree", "add", run.worktreePath, run.branch], root);
+    await linkSharedWorktreeArtifacts(run.worktreePath, root);
   }
   return validateCwd(run.worktreePath, { runId: run.id, repoId: run.repoId });
 }
@@ -871,6 +873,7 @@ async function ensureWorktreeBranch(run: RunRow): Promise<RunRow> {
   const worktreePath = resolve(worktreeRoot, String(run.id));
   await mkdir(worktreeRoot, { recursive: true });
   await sh(["git", "worktree", "add", "-b", branch, worktreePath, base], root);
+  await linkSharedWorktreeArtifacts(worktreePath, root);
   const taskRepoId = run.taskId ? repo.getTask(run.taskId)?.repoId ?? null : null;
   db.update(agentSessions)
     .set({ branch, worktreePath, repoId: run.repoId ?? taskRepoId })
@@ -1007,6 +1010,7 @@ async function runReview(
       ["git", "worktree", "add", "-b", branch, worktreePath, "FETCH_HEAD"],
       root
     );
+    await linkSharedWorktreeArtifacts(worktreePath, root);
     db.update(agentSessions)
       .set({ branch, worktreePath })
       .where(eq(agentSessions.id, runId))

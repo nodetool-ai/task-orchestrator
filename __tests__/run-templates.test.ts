@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   REVIEW_DEFAULT_BUDGET_USD,
   buildChatPromptPrefix,
+  buildImplementPrompt,
   buildPlanChatPromptPrefix,
   buildReviewPrompt,
   extractReviewOutcome,
@@ -68,6 +69,37 @@ describe("buildReviewPrompt", () => {
   it("uses a smaller default budget than implement", () => {
     expect(REVIEW_DEFAULT_BUDGET_USD).toBeLessThan(20);
     expect(REVIEW_DEFAULT_BUDGET_USD).toBeGreaterThan(0);
+  });
+
+  it("flags the shared node_modules / build cache across worktrees", () => {
+    const prompt = buildReviewPrompt(fakeTask(), "https://github.com/o/r/pull/1");
+    expect(prompt).toContain("SHARED across all worktrees");
+    expect(prompt).toContain("node_modules");
+  });
+});
+
+describe("buildImplementPrompt", () => {
+  it("describes the worktree working environment", () => {
+    const prompt = buildImplementPrompt(fakeTask());
+    expect(prompt).toContain("isolated git worktree");
+  });
+
+  it("flags the shared node_modules / build cache across worktrees", () => {
+    const prompt = buildImplementPrompt(fakeTask());
+    expect(prompt).toContain("SHARED across all worktrees");
+    expect(prompt).toContain("node_modules");
+    expect(prompt).toContain("Turbopack");
+  });
+
+  it("tells the agent how to get a private/isolated environment", () => {
+    const prompt = buildImplementPrompt(fakeTask());
+    expect(prompt).toContain("npm run isolate-env");
+  });
+
+  it("tells the agent how to start a securely-exposed dev server", () => {
+    const prompt = buildImplementPrompt(fakeTask());
+    expect(prompt).toContain("npm run worktree-dev");
+    expect(prompt).toContain("loopback");
   });
 });
 
