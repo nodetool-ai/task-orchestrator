@@ -14,6 +14,10 @@ set -euo pipefail
 #   ./deploy.sh --rollback   # Rollback to previous build (if .next.prev exists)
 # =============================================================================
 
+# corepack provisions pnpm on demand; never block a non-interactive deploy on
+# its download confirmation prompt.
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_NAME="task-orchestrator"
 PIPE_SERVICE="task-orchestrator-pipe"
@@ -28,7 +32,34 @@ restart_pipe() {
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
   if systemctl --user cat "$PIPE_SERVICE" >/dev/null 2>&1; then
     echo "--- Restarting $PIPE_SERVICE (user unit) ---"
-    systemctl --user restart "$PIPE_SERVICE" || echo "WARN: $PIPE_SERVICE restart failed"
+    # Clear any prior crash-loop failure so `restart` actually starts it.
+    systemctl --user reset-failed "$PIPE_SERVICE" 2>/dev/null || true
+    if ! systemctl --user restart "$PIPE_SERVICE"; then
+      echo "WARN: $PIPE_SERVICE restart command failed"
+      return
+    fi
+    # Don't silently declare success — a unit that can't find node will exit
+    # 127 and auto-restart, leaving the bridge dead while the deploy looks fine.
+    sleep 3
+    if systemctl --user is-active --quiet "$PIPE_SERVICE"; then
+      echo "$PIPE_SERVICE is active."
+    else
+      echo "WARN: $PIPE_SERVICE is not active after restart — recent logs:"
+      journalctl --user -u "$PIPE_SERVICE" --no-pager -n 20 || true
+    fi
+  fi
+}
+
+# The systemd units source nvm.sh and select the `default` alias. nvm does not
+# create that alias on its own, and a clean `systemctl restart` runs with a bare
+# PATH — so a missing alias lands `npm: not found` (status=127) and crash-loops.
+# Re-assert it on every deploy (pointing at the latest installed node) so both
+# the app service and the pipe survive a restart regardless of prior state.
+ensure_nvm_default() {
+  if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
+    # shellcheck disable=SC1091
+    . "$HOME/.nvm/nvm.sh"
+    nvm alias default node >/dev/null 2>&1 || true
   fi
 }
 
@@ -70,6 +101,7 @@ case "$ACTION" in
     echo "Rolling back to previous build..."
     rm -rf "$SCRIPT_DIR/.next"
     mv "$SCRIPT_DIR/.next.prev" "$SCRIPT_DIR/.next"
+    ensure_nvm_default
     sudo systemctl restart "$SERVICE_NAME"
     restart_pipe
     exit 0
@@ -83,10 +115,16 @@ if [[ ! -f "$SCRIPT_DIR/.env.local" ]]; then
   exit 1
 fi
 
-# nvm is not available in non-interactive shells; rely on node already on PATH
-# (the systemd unit sources nvm.sh itself, so the deployed app works fine)
+# The systemd units source nvm.sh themselves; make sure they can resolve a node
+# version when restarted from a clean environment (see ensure_nvm_default).
+ensure_nvm_default
 
-echo "node: $(command -v node || echo missing) | npm: $(command -v npm || echo missing)"
+# Dependencies are managed by pnpm (via corepack, which ships with node — no
+# global install needed; the package.json "packageManager" field pins the
+# version). The runtime units still launch with `npm run start/pipe`, which is
+# fully compatible with pnpm's hoisted node_modules.
+PNPM=(corepack pnpm)
+echo "node: $(command -v node || echo missing) | pnpm: $("${PNPM[@]}" --version 2>/dev/null || echo missing)"
 echo ""
 
 # ── Pull ─────────────────────────────────────────────────────────────
@@ -108,7 +146,7 @@ echo ""
 # ── Build ────────────────────────────────────────────────────────────
 
 echo "--- Installing dependencies ---"
-npm ci
+"${PNPM[@]}" install --frozen-lockfile
 
 echo ""
 echo "--- Building ---"
@@ -118,7 +156,7 @@ if [[ -d "$SCRIPT_DIR/.next" ]]; then
   cp -a "$SCRIPT_DIR/.next" "$SCRIPT_DIR/.next.prev"
 fi
 
-npm run build
+"${PNPM[@]}" build
 
 # ── Deploy ───────────────────────────────────────────────────────────
 
