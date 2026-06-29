@@ -189,6 +189,9 @@ export function buildImplementPrompt(task: TaskFull): string {
   lines.push(
     "- `node_modules` and the Turbopack/Next.js build cache (`.next`) are SHARED across all worktrees (symlinked to a common store). Dependencies are already installed — don't run `npm install` unless you're intentionally changing `package.json`, and never `rm -rf node_modules` or clear the build cache: that would clobber every other worktree running concurrently."
   );
+  lines.push(
+    "- Need a private environment? If you must add/upgrade/remove a dependency or want a clean isolated build, run `npm run isolate-env` first. It swaps the shared symlinks for this worktree's own `node_modules` and `.next`, so your dependency changes stay local. After that, `npm install` / building here is safe."
+  );
   lines.push("- Make all changes here. Commit with a clear message.");
   lines.push("- Do NOT push and do NOT open a PR — the orchestrator does both after you finish.");
   lines.push("- Run typecheck and lint where it applies; fix any errors you introduce.");

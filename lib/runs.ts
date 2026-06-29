@@ -30,7 +30,7 @@
 
 import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
-import { lstat, mkdir, readlink, rm, symlink } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname, join, resolve } from "node:path";
@@ -57,6 +57,7 @@ import { sandboxFactory } from "./extensions/sandbox";
 import { personaPromptFactory } from "./extensions/persona-prompt";
 import { personaMemoryFactory } from "./extensions/persona-memory";
 import { abortBridgeFactory } from "./extensions/abort-bridge";
+import { linkSharedWorktreeArtifacts } from "./worktree-env";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
@@ -1708,110 +1709,6 @@ function sh(args: string[], cwd: string): Promise<string> {
       else rejectP(new Error(`${args.join(" ")} exited ${code}\n${stderr || stdout}`));
     });
   });
-}
-
-// Artifacts shared across every worktree of a repo via symlink into the repo
-// root. node_modules: one `npm install` at the root serves all worktrees, so a
-// fresh worktree doesn't need its own (slow, multi-hundred-MB) install. `.next`:
-// the Turbopack/Next.js build cache (`.next/cache`) stays warm across branches,
-// so rebuilds in a new worktree reuse prior compilation instead of starting
-// cold. Both are gitignored, so the symlinks never get committed.
-interface SharedArtifact {
-  /** Path component shared from the repo root into each worktree. */
-  name: string;
-  // When the root has no such entry: 'create' makes an empty dir (a writable
-  // cache the first build fills); 'skip' leaves the worktree unlinked — a
-  // dangling link would be worse than a missing dir (e.g. node_modules before
-  // the first install: a broken link makes module resolution fail outright).
-  whenMissingAtRoot: "create" | "skip";
-}
-
-const SHARED_WORKTREE_ARTIFACTS: SharedArtifact[] = [
-  { name: "node_modules", whenMissingAtRoot: "skip" },
-  { name: ".next", whenMissingAtRoot: "create" },
-];
-
-/**
- * Link each shared artifact from the repo root into a worktree, idempotently.
- *
- * Robust against re-runs and partial/stale state:
- * - A correct existing link is left as-is (safe to call repeatedly).
- * - A real dir/file the worktree already owns is never clobbered.
- * - A stale, wrong, or dangling symlink (e.g. the root store was wiped and
- *   reinstalled) is repaired — removed and re-pointed at the current target.
- * - Concurrent materialization of the same worktree is tolerated: an EEXIST
- *   race is accepted iff the link ended up pointing where we wanted.
- *
- * Best-effort per artifact: a failure is logged, not thrown, and never blocks
- * the other artifact. The worktree still works unlinked — just colder (its own
- * install / cache). Callers run this right after `git worktree add`.
- */
-export async function linkSharedWorktreeArtifacts(
-  worktreePath: string,
-  root: string
-): Promise<void> {
-  // Don't symlink a worktree into its own root's store (e.g. degenerate setups
-  // where the worktree path resolves to the repo root) — that would create a
-  // self-referential link.
-  if (resolve(worktreePath) === resolve(root)) return;
-  await Promise.all(
-    SHARED_WORKTREE_ARTIFACTS.map((artifact) =>
-      linkOneSharedArtifact(artifact, worktreePath, root).catch((err) => {
-        console.warn(
-          `[runs] failed to link shared ${artifact.name} into ${worktreePath}: ${describe(err)}`
-        );
-      })
-    )
-  );
-}
-
-async function linkOneSharedArtifact(
-  artifact: SharedArtifact,
-  worktreePath: string,
-  root: string
-): Promise<void> {
-  const target = join(root, artifact.name);
-  const linkPath = join(worktreePath, artifact.name);
-
-  // Ensure the shared target exists — or bail when we must not fabricate it.
-  if (!existsSync(target)) {
-    if (artifact.whenMissingAtRoot === "skip") return;
-    await mkdir(target, { recursive: true });
-  }
-
-  // Inspect the destination WITHOUT following the link (lstat, not existsSync)
-  // so we can see a dangling/stale symlink instead of treating it as absent.
-  const existing = await lstat(linkPath).catch(() => null);
-  if (existing) {
-    if (!existing.isSymbolicLink()) return; // a real dir/file — never clobber
-    if (await linkPointsAt(linkPath, target)) return; // already correct
-    await rm(linkPath, { force: true }); // stale/wrong/dangling → replace
-  }
-
-  await symlinkSharedTarget(target, linkPath);
-}
-
-/** True when `linkPath` is a symlink resolving to `target`. */
-async function linkPointsAt(linkPath: string, target: string): Promise<boolean> {
-  const current = await readlink(linkPath).catch(() => null);
-  if (current === null) return false;
-  // Resolve relative links against the link's own directory before comparing.
-  return resolve(dirname(linkPath), current) === resolve(target);
-}
-
-/** Create the link, tolerating a concurrent creator that beat us to the punch. */
-async function symlinkSharedTarget(target: string, linkPath: string): Promise<void> {
-  try {
-    await symlink(target, linkPath, "dir");
-  } catch (err) {
-    // Another worktree materialization may have created the same link between
-    // our check and our create. Accept it iff it points where we intended;
-    // otherwise surface the error.
-    if ((err as NodeJS.ErrnoException)?.code === "EEXIST" && (await linkPointsAt(linkPath, target))) {
-      return;
-    }
-    throw err;
-  }
 }
 
 function cleanupWorktree(path: string, root: string): Promise<void> {

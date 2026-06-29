@@ -90,6 +90,11 @@ describe("buildImplementPrompt", () => {
     expect(prompt).toContain("node_modules");
     expect(prompt).toContain("Turbopack");
   });
+
+  it("tells the agent how to get a private/isolated environment", () => {
+    const prompt = buildImplementPrompt(fakeTask());
+    expect(prompt).toContain("npm run isolate-env");
+  });
 });
 
 describe("buildChatPromptPrefix", () => {

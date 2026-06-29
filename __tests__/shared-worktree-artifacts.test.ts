@@ -3,7 +3,10 @@ import { lstat, readlink, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { linkSharedWorktreeArtifacts } from "../lib/runs";
+import {
+  linkSharedWorktreeArtifacts,
+  unlinkSharedWorktreeArtifacts,
+} from "../lib/worktree-env";
 
 // Each worktree shares the repo root's node_modules and Turbopack/.next build
 // cache via symlink, so a fresh worktree skips the (slow) install + cold build.
@@ -126,5 +129,64 @@ describe("linkSharedWorktreeArtifacts", () => {
     );
     expect(await readlink(join(worktree, "node_modules"))).toBe(join(root, "node_modules"));
     expect((await lstat(join(worktree, ".next"))).isSymbolicLink()).toBe(true);
+  });
+});
+
+// `npm run isolate-env` uses this to break a worktree out of the shared store
+// before installing private dependencies.
+describe("unlinkSharedWorktreeArtifacts", () => {
+  let root: string;
+  let worktree: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "isolate-root-"));
+    worktree = join(root, ".worktrees", "1");
+    mkdirSync(worktree, { recursive: true });
+  });
+
+  it("removes the shared symlinks and reports which it removed", async () => {
+    mkdirSync(join(root, "node_modules"), { recursive: true });
+    await linkSharedWorktreeArtifacts(worktree, root);
+    // Both are symlinks at this point.
+    expect((await lstat(join(worktree, "node_modules"))).isSymbolicLink()).toBe(true);
+
+    const removed = await unlinkSharedWorktreeArtifacts(worktree);
+
+    expect(removed).toEqual([".next", "node_modules"]); // sorted
+    expect(existsSync(join(worktree, "node_modules"))).toBe(false);
+    expect(existsSync(join(worktree, ".next"))).toBe(false);
+    // The shared root store is NOT touched — only the worktree's links.
+    expect(existsSync(join(root, "node_modules"))).toBe(true);
+    expect(existsSync(join(root, ".next"))).toBe(true);
+  });
+
+  it("leaves a real private dir untouched (already isolated)", async () => {
+    mkdirSync(join(worktree, "node_modules", "own-dep"), { recursive: true });
+
+    const removed = await unlinkSharedWorktreeArtifacts(worktree);
+
+    expect(removed).not.toContain("node_modules");
+    expect(existsSync(join(worktree, "node_modules", "own-dep"))).toBe(true);
+  });
+
+  it("is a no-op when nothing is present", async () => {
+    expect(await unlinkSharedWorktreeArtifacts(worktree)).toEqual([]);
+  });
+
+  it("only unlinks the symlinked artifact in a mixed worktree", async () => {
+    mkdirSync(join(root, "node_modules"), { recursive: true });
+    await linkSharedWorktreeArtifacts(worktree, root); // links both
+    // Replace the .next link with a real private dir.
+    await unlinkSharedWorktreeArtifacts(worktree); // clear both first
+    await linkSharedWorktreeArtifacts(worktree, root); // re-link node_modules + .next
+    // Now make .next private: unlink then mkdir a real dir.
+    const { rmSync } = await import("node:fs");
+    rmSync(join(worktree, ".next"), { force: true });
+    mkdirSync(join(worktree, ".next"), { recursive: true });
+
+    const removed = await unlinkSharedWorktreeArtifacts(worktree);
+
+    expect(removed).toEqual(["node_modules"]);
+    expect((await lstat(join(worktree, ".next"))).isSymbolicLink()).toBe(false);
   });
 });

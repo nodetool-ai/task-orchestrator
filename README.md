@@ -154,7 +154,10 @@ Each session:
 1. Creates a fresh git worktree at `.worktrees/<sessionId>/` on a new branch
    `claude/agent-<sessionId>`, symlinking `node_modules` and the
    Turbopack/Next.js build cache (`.next`) back to the repo root so every
-   worktree shares one install and one warm build cache
+   worktree shares one install and one warm build cache. A worktree that needs
+   to change dependencies or wants a clean build can opt out with
+   `npm run isolate-env`, which swaps the shared symlinks for a private
+   `node_modules` and `.next` and reinstalls
 2. Transitions the task to `in_progress` (assignee `claude-agent`)
 3. Runs the SDK with `permissionMode: "bypassPermissions"`, the task
    body and acceptance criteria as the prompt, and the worktree as cwd
