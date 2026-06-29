@@ -1,0 +1,16 @@
+# pnpm v10+ reads structured settings here, not from the package.json "pnpm"
+# field. pnpm blocks dependency build/postinstall scripts by default; allow the
+# same set npm ran so native + binary-fetching packages keep working:
+#   • better-sqlite3 — native node-gyp build for the app's DB driver (required)
+#   • esbuild        — used by tsx / vitest / drizzle-kit (binary linkage)
+#   • sharp          — Next.js image optimization
+#   • koffi          — FFI native lib pulled in by the pi agent backend (pi-tui)
+#   • protobufjs     — postinstall codegen for transitive proto consumers
+#   • @google/genai  — postinstall for the transitive genai client
+allowBuilds:
+  '@google/genai': true
+  better-sqlite3: true
+  esbuild: true
+  koffi: true
+  protobufjs: true
+  sharp: true

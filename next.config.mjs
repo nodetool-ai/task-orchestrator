@@ -21,6 +21,13 @@ const nextConfig = {
     // The Claude Agent SDK bundles a native CLI binary; same bundling hazard as
     // the pi packages, so keep it external too.
     "@anthropic-ai/claude-agent-sdk",
+    // isomorphic-dompurify pulls in jsdom, which reads data files (e.g.
+    // browser/default-stylesheet.css) via __dirname-relative paths. Bundling
+    // rewrites those paths and the asset goes missing at runtime — surfaced as
+    // a hard build failure under pnpm's symlinked store layout. Keep both
+    // external so they load from node_modules.
+    "isomorphic-dompurify",
+    "jsdom",
   ],
 };
 
