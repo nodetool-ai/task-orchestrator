@@ -17,15 +17,22 @@
 //   - `--tunnel` exposes the loopback server over a Cloudflare quick tunnel
 //     (`cloudflared tunnel --url`), yielding a random, unguessable HTTPS
 //     *.trycloudflare.com URL — matches the prod Cloudflare setup. The tunnel
-//     fronts the *loopback* port; we never widen the bind to do it.
+//     fronts the *loopback* port; we never widen the bind to do it. cloudflared
+//     is auto-installed into a shared cache on first use (see lib/cloudflared).
+//
+// The tunnel needs outbound egress to Cloudflare's edge (argotunnel.com): QUIC
+// over UDP/7844 by default. If your network blocks UDP, set
+// CLOUDFLARED_PROTOCOL=http2 to use TCP instead. Pin the binary with
+// CLOUDFLARED_VERSION or point at your own with CLOUDFLARED_PATH.
 //
 // To reach a loopback-only server from your machine, use your platform's
 // port-forwarding (e.g. an SSH tunnel: `ssh -L <port>:127.0.0.1:<port> host`)
 // or pass --tunnel for a shareable URL.
 
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { preferredDevPort, DEV_PORT_SPAN } from "../lib/worktree-env";
+import { resolveCloudflared } from "../lib/cloudflared";
 
 interface Args {
   tunnel: boolean;
@@ -99,18 +106,26 @@ const next = spawn("npx", ["next", "dev", "-H", args.host, "-p", String(port)], 
 children.push(next);
 
 if (args.tunnel) {
-  if (spawnSync("cloudflared", ["--version"], { stdio: "ignore" }).status === 0) {
+  try {
+    const cf = await resolveCloudflared();
+    if (cf.source === "download") {
+      console.log("Installed cloudflared into the shared cache.");
+    }
     console.log("Opening Cloudflare quick tunnel (watch below for the https URL)…");
-    const tunnel = spawn(
-      "cloudflared",
-      ["tunnel", "--url", localUrl, "--no-autoupdate"],
-      { cwd, stdio: "inherit", env: process.env }
-    );
+    // The tunnel data plane needs outbound egress to Cloudflare's edge
+    // (argotunnel.com): QUIC over UDP/7844, or TCP when forced to HTTP/2. On
+    // networks that block UDP, set CLOUDFLARED_PROTOCOL=http2 to skip QUIC.
+    const cfArgs = ["tunnel", "--url", localUrl, "--no-autoupdate"];
+    if (process.env.CLOUDFLARED_PROTOCOL) {
+      cfArgs.push("--protocol", process.env.CLOUDFLARED_PROTOCOL);
+    }
+    const tunnel = spawn(cf.path, cfArgs, { cwd, stdio: "inherit", env: process.env });
     children.push(tunnel);
-  } else {
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     console.warn(
-      "⚠ --tunnel requested but `cloudflared` is not installed. Serving loopback only.\n" +
-        "  Install it (https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)\n" +
+      `⚠ --tunnel requested but cloudflared could not be set up: ${msg}\n` +
+        "  Serving loopback only. Install cloudflared manually, set CLOUDFLARED_PATH,\n" +
         `  or forward the port yourself: ssh -L ${port}:127.0.0.1:${port} <host>`
     );
   }
