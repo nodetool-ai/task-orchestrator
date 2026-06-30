@@ -3,80 +3,52 @@ import {
   TranscriptBuilder,
   chunkForDiscord,
   convertMarkdownTables,
-  prettyToolName,
 } from "../lib/pipe/render";
 import type { RunEnvelope } from "../lib/pi-event-mapper";
 
 const assistant = (content: unknown[]): RunEnvelope =>
   ({ type: "assistant", message: { content } } as RunEnvelope);
 
-describe("prettyToolName", () => {
-  it("humanizes an MCP tool name, dropping the mcp__<server>__ noise", () => {
-    expect(prettyToolName("mcp__task_orch__list_tasks")).toBe("list tasks");
-  });
-
-  it("drops a duplicated server prefix inside the tool name", () => {
-    expect(prettyToolName("mcp__task_orch__task_orch__list_repositories")).toBe(
-      "list repositories"
-    );
-  });
-
-  it("handles other MCP servers", () => {
-    expect(prettyToolName("mcp__github__create_issue")).toBe("create issue");
-  });
-
-  it("leaves builtin tool names untouched", () => {
-    expect(prettyToolName("Bash")).toBe("Bash");
-    expect(prettyToolName("ToolSearch")).toBe("ToolSearch");
-  });
-});
-
-describe("TranscriptBuilder tool lines", () => {
-  it("shows a humanized MCP tool name wrapped in inline code", () => {
+describe("TranscriptBuilder tool collapsing", () => {
+  it("collapses multiple tool calls in one message into a single counter line", () => {
     const b = new TranscriptBuilder();
     b.push(
       assistant([
         { type: "text", text: "Looking it up." },
-        { type: "tool_use", name: "mcp__task_orch__task_orch__list_repositories", input: {} },
+        { type: "tool_use", name: "Bash", input: { command: "ls" } },
+        { type: "tool_use", name: "Read", input: { file_path: "/tmp/a" } },
+        { type: "tool_use", name: "mcp__task_orch__list_repositories", input: {} },
       ])
     );
-    const out = b.text();
-    expect(out).toContain("Looking it up.");
-    expect(out).toContain("> 🔧 `list repositories`");
+    expect(b.text()).toBe("Looking it up.\n\n> 🔧 3 tools called");
   });
 
-  it("includes a summarized input inside the code span", () => {
+  it("collapses consecutive tool-only assistant messages into a single counter", () => {
     const b = new TranscriptBuilder();
-    b.push(
-      assistant([
-        { type: "tool_use", name: "ToolSearch", input: { query: "select:mcp__task_orch__list_tasks" } },
-      ])
-    );
-    expect(b.text()).toBe("> 🔧 `ToolSearch(select:mcp__task_orch__list_tasks)`");
+    b.push(assistant([{ type: "tool_use", name: "Bash", input: { command: "ls" } }]));
+    b.push(assistant([{ type: "tool_use", name: "Read", input: { file_path: "/tmp/a" } }]));
+    b.push(assistant([{ type: "tool_use", name: "Bash", input: { command: "pwd" } }]));
+    expect(b.text()).toBe("> 🔧 3 tools called");
   });
 
-  it("omits empty parens when there is no input", () => {
+  it("flushes the pending counter when a text-bearing assistant message arrives", () => {
     const b = new TranscriptBuilder();
-    b.push(assistant([{ type: "tool_use", name: "mcp__task_orch__list_plans", input: {} }]));
-    expect(b.text()).toBe("> 🔧 `list plans`");
+    b.push(assistant([{ type: "tool_use", name: "Bash", input: { command: "ls" } }]));
+    b.push(assistant([{ type: "tool_use", name: "Bash", input: { command: "pwd" } }]));
+    b.push(assistant([{ type: "text", text: "Done." }]));
+    expect(b.text()).toBe("> 🔧 2 tools called\n\nDone.");
   });
 
-  it("sanitizes backticks in the input so they cannot break out of the code span", () => {
+  it("uses singular wording for a single tool call", () => {
     const b = new TranscriptBuilder();
-    b.push(
-      assistant([{ type: "tool_use", name: "Bash", input: { command: "echo `whoami`" } }])
-    );
-    const out = b.text();
-    expect(out.startsWith("> 🔧 `")).toBe(true);
-    expect(out.endsWith("`")).toBe(true);
-    // Exactly two backticks (the opening and closing of the span).
-    expect((out.match(/`/g) ?? []).length).toBe(2);
+    b.push(assistant([{ type: "tool_use", name: "Bash", input: { command: "ls" } }]));
+    expect(b.text()).toBe("> 🔧 1 tool called");
   });
 
-  it("falls back to `tool` when a tool_use block has no name", () => {
+  it("renders nothing for an assistant message with no text and no tools", () => {
     const b = new TranscriptBuilder();
-    b.push(assistant([{ type: "tool_use", input: {} }]));
-    expect(b.text()).toBe("> 🔧 `tool`");
+    b.push(assistant([]));
+    expect(b.text()).toBe("");
   });
 });
 
@@ -90,8 +62,8 @@ describe("convertMarkdownTables", () => {
     ].join("\n");
     const out = convertMarkdownTables(md);
     expect(out).not.toContain("|");
-    expect(out).toContain("- **build** \u00b7 Status: ok");
-    expect(out).toContain("- **test** \u00b7 Status: failing");
+    expect(out).toContain("- **build** · Status: ok");
+    expect(out).toContain("- **test** · Status: failing");
   });
 
   it("renders a single-column table as a plain bullet list", () => {
@@ -107,7 +79,7 @@ describe("convertMarkdownTables", () => {
     const out = convertMarkdownTables(md);
     expect(out.startsWith("Before.")).toBe(true);
     expect(out.endsWith("After.")).toBe(true);
-    expect(out).toContain("- **1** \u00b7 B: 2");
+    expect(out).toContain("- **1** · B: 2");
   });
 
   it("leaves text without tables untouched", () => {
@@ -123,7 +95,7 @@ describe("TranscriptBuilder table handling", () => {
     );
     const out = b.text();
     expect(out).not.toContain("|");
-    expect(out).toContain("- **1** \u00b7 B: 2");
+    expect(out).toContain("- **1** · B: 2");
   });
 });
 

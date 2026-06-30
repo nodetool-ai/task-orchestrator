@@ -14,13 +14,18 @@ export const DISCORD_LIMIT = 2000;
 /**
  * Running accumulator the agent loop feeds envelopes into. It shows live
  * `stream_text` deltas while a message is in flight, then replaces them with the
- * authoritative assistant text + compact tool-call lines when the message closes.
+ * authoritative assistant text + a single collapsed tool-call counter when the
+ * message closes. Consecutive tool calls (within a message or across messages
+ * with no text between them) collapse into one `🔧 N tools called` line so the
+ * Discord transcript stays compact.
  */
 export class TranscriptBuilder {
-  /** Finalized assistant text blocks and tool-call status lines, in order. */
+  /** Finalized assistant text blocks and tool-call summary lines, in order. */
   private parts: string[] = [];
   /** In-progress stream_text delta buffer (cleared when the message closes). */
   private streaming = "";
+  /** Count of consecutive tool calls not yet flushed into `parts`. */
+  private pendingTools = 0;
 
   push(env: RunEnvelope): void {
     switch (env.type) {
@@ -29,30 +34,44 @@ export class TranscriptBuilder {
         break;
       case "assistant": {
         // A complete assistant message: drop any partial stream buffer, then
-        // record the text and compact tool-call status lines.
+        // record the text and accumulate the tool count.
         this.streaming = "";
         const blocks = env.message.content as SdkContentBlock[];
         const text = assistantText(blocks);
-        if (text) this.parts.push(convertMarkdownTables(text));
-        for (const tu of toolUses(blocks)) {
-          const name = prettyToolName(tu.name ?? "tool");
-          const args = summarizeInput(tu.input);
-          this.parts.push(`> 🔧 ${inlineCode(args ? `${name}(${args})` : name)}`);
+        if (text) {
+          this.flushPendingTools();
+          this.parts.push(convertMarkdownTables(text));
         }
+        this.pendingTools += toolUses(blocks).length;
         break;
       }
       case "result":
-        if (env.is_error && env.result) this.parts.push(`⚠️ ${env.result}`);
+        if (env.is_error && env.result) {
+          this.flushPendingTools();
+          this.parts.push(`⚠️ ${env.result}`);
+        }
         break;
       // stream_thinking / system(init) / user(tool_result): not shown inline.
     }
   }
 
-  /** Current full transcript (finalized parts + live stream tail). */
+  /** Current full transcript (finalized parts + live pending-tool count + stream tail). */
   text(): string {
     const tail = this.streaming.trim();
-    return [...this.parts, tail].filter(Boolean).join("\n\n").trim();
+    const tools = this.pendingTools ? toolCountLine(this.pendingTools) : "";
+    return [...this.parts, tools, tail].filter(Boolean).join("\n\n").trim();
   }
+
+  private flushPendingTools(): void {
+    if (!this.pendingTools) return;
+    this.parts.push(toolCountLine(this.pendingTools));
+    this.pendingTools = 0;
+  }
+}
+
+/** Render the collapsed tool counter — singular vs plural. */
+function toolCountLine(n: number): string {
+  return `> 🔧 ${n === 1 ? "1 tool called" : `${n} tools called`}`;
 }
 
 /**
@@ -81,7 +100,7 @@ export function chunkForDiscord(text: string, limit = DISCORD_LIMIT): string[] {
  * Discord has no table syntax, so a table sent verbatim shows up as broken raw
  * `| ... |` text. We turn each body row into a bullet: the first cell is bolded
  * as the row label, the remaining cells become `Header: value` pairs joined by
- * `\u00b7`. Single-column tables become a plain bullet list. Non-table text is
+ * `·`. Single-column tables become a plain bullet list. Non-table text is
  * returned unchanged.
  */
 export function convertMarkdownTables(text: string): string {
@@ -113,8 +132,8 @@ export function convertMarkdownTables(text: string): string {
           const rest = c
             .slice(1)
             .map((v, k) => `${headers[k + 1] ?? ""}: ${v}`)
-            .join(" \u00b7 ");
-          rows.push(`- **${c[0]}** \u00b7 ${rest}`);
+            .join(" · ");
+          rows.push(`- **${c[0]}** · ${rest}`);
         }
         j++;
       }
@@ -127,49 +146,4 @@ export function convertMarkdownTables(text: string): string {
     out.push(header);
   }
   return out.join("\n");
-}
-
-/**
- * Humanize a tool name for display. Builtin tools (Bash, Read, ToolSearch …)
- * pass through unchanged. MCP tools are named `mcp__<server>__<tool>`, often
- * with the server name duplicated inside the tool (e.g.
- * `mcp__task_orch__task_orch__list_repositories`). Strip the `mcp__<server>__`
- * prefix and any duplicated server segment, then render the bare action with
- * underscores as spaces — `list repositories`.
- */
-export function prettyToolName(name: string): string {
-  if (!name.startsWith("mcp__")) return name;
-  const segs = name.split("__").filter(Boolean); // ["mcp", server, ...tool]
-  if (segs.length < 3) return name;
-  const [, server, ...rest] = segs;
-  if (rest.length > 1 && rest[0] === server) rest.shift(); // drop duplicated server prefix
-  return rest.join(" ").replace(/_/g, " ").trim();
-}
-
-/**
- * Wrap text in a Discord inline-code span so its contents render literally —
- * spaces, `__`, and other markdown stay intact. Backticks in the content would
- * close the span early, so swap them for a look-alike.
- */
-function inlineCode(s: string): string {
-  return "`" + s.replace(/`/g, "ʼ") + "`";
-}
-
-/** One-line, truncated summary of a tool-call input for a status line. */
-function summarizeInput(input: unknown): string {
-  if (input == null) return "";
-  let s: string;
-  if (typeof input === "string") {
-    s = input;
-  } else if (typeof input === "object") {
-    const obj = input as Record<string, unknown>;
-    if (Object.keys(obj).length === 0) return "";
-    // Prefer the human-meaningful fields the orchestrator/builtin tools use.
-    const key = obj.command ?? obj.path ?? obj.file_path ?? obj.query ?? obj.text;
-    s = typeof key === "string" ? key : JSON.stringify(obj);
-  } else {
-    s = String(input);
-  }
-  s = s.replace(/\s+/g, " ").trim();
-  return s.length > 80 ? s.slice(0, 79) + "…" : s;
 }
