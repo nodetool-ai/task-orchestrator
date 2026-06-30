@@ -35,10 +35,11 @@ import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, asc, desc, eq, inArray, isNotNull, isNull, notInArray, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, notInArray } from "drizzle-orm";
 
 import { db } from "@/db";
 import { agentEvents, agentMessages, agentSessions } from "@/db/schema";
+import { describe } from "@/lib/utils";
 import * as repo from "./repo";
 import {
   buildExecutePrompt,
@@ -47,9 +48,9 @@ import {
   parseReviewVerdict,
 } from "./run-templates";
 import { parsePrUrl } from "./gh-url";
-import type { SdkContentBlock } from "./sdk-message";
-import type { AgentSessionFull, SessionStatus } from "./types";
-import { isTerminalStatus } from "./types";
+import { assistantText, toolResults, type SdkContentBlock } from "./sdk-message";
+import type { AgentSessionFull, RepositoryRow, SessionStatus } from "./types";
+import { isTerminalStatus, SESSION_STATUSES } from "./types";
 import { resolveProfiles, type ProfileContext } from "./profiles";
 import { type RunEnvelope } from "./pi-event-mapper";
 import { getBackend, type Extension } from "./agent-backend";
@@ -399,13 +400,7 @@ export function list(filter: ListFilter = {}): RunRow[] {
   return rows.map(hydrateRun);
 }
 
-const TERMINAL_STATUS_LIST: SessionStatus[] = [
-  "completed",
-  "failed",
-  "cancelled",
-  "closed",
-  "budget_exhausted",
-];
+const TERMINAL_STATUS_LIST: SessionStatus[] = SESSION_STATUSES.filter(isTerminalStatus);
 
 export function get(id: number): RunRow | null {
   const row = db.select().from(agentSessions).where(eq(agentSessions.id, id)).get();
@@ -776,18 +771,26 @@ export async function followUp(
 // Worktree management & cwd resolution
 // ──────────────────────────────────────────────────────────
 
-function repoRoot(run: { repoId: string | null; taskId: string | null }): string {
+/**
+ * Resolve the repo a run belongs to: explicit repoId > task's repo > default
+ * repo. Shared by repoRoot/repoDefaultBranch, which differ only in which
+ * field of the resolved repo they read.
+ */
+function resolveRepo(run: { repoId: string | null; taskId: string | null }): RepositoryRow | null {
   if (run.repoId) {
     const r = repo.getRepository(run.repoId);
-    if (r?.localPath) return resolve(r.localPath);
+    if (r) return r;
   }
   if (run.taskId) {
     const r = repo.resolveRepoForTask(run.taskId);
-    if (r?.localPath) return resolve(r.localPath);
+    if (r) return r;
   }
-  const fallback = repo.defaultRepo();
-  if (fallback?.localPath) return resolve(fallback.localPath);
-  return ORCHESTRATOR_ROOT;
+  return repo.defaultRepo();
+}
+
+function repoRoot(run: { repoId: string | null; taskId: string | null }): string {
+  const r = resolveRepo(run);
+  return r?.localPath ? resolve(r.localPath) : ORCHESTRATOR_ROOT;
 }
 
 /**
@@ -816,10 +819,7 @@ export function validateCwd(dir: string, ctx: { runId: number; repoId: string | 
 }
 
 async function prepareCwd(run: RunRow): Promise<string> {
-  if (run.cwdStrategy === "none") {
-    return validateCwd(repoRoot(run), { runId: run.id, repoId: run.repoId });
-  }
-  if (run.cwdStrategy === "repo") {
+  if (run.cwdStrategy === "none" || run.cwdStrategy === "repo") {
     return validateCwd(repoRoot(run), { runId: run.id, repoId: run.repoId });
   }
   // worktree / worktree_at_pr: re-materialize if missing.
@@ -883,17 +883,7 @@ export function worktreeBranchName(run: { id: number; taskId: string | null }): 
 
 /** The base branch a task's worktree branches from / merges in. */
 function repoDefaultBranch(run: { repoId: string | null; taskId: string | null }): string {
-  if (run.repoId) {
-    const r = repo.getRepository(run.repoId);
-    if (r?.defaultBranch) return r.defaultBranch;
-  }
-  if (run.taskId) {
-    const r = repo.resolveRepoForTask(run.taskId);
-    if (r?.defaultBranch) return r.defaultBranch;
-  }
-  const fallback = repo.defaultRepo();
-  if (fallback?.defaultBranch) return fallback.defaultBranch;
-  return "main";
+  return resolveRepo(run)?.defaultBranch ?? "main";
 }
 
 /**
@@ -1018,7 +1008,7 @@ async function runReview(
   try {
     const parsed = parsePrUrl(prUrl);
     if (!parsed) {
-      fail(runId, `Could not parse PR url: ${prUrl}`);
+      setError(runId, `Could not parse PR url: ${prUrl}`);
       runners.delete(runId);
       return;
     }
@@ -1036,7 +1026,7 @@ async function runReview(
         root
       );
     } catch (err) {
-      fail(
+      setError(
         runId,
         `git fetch failed for ${prUrl}: ${describe(err)}. Is the PR's origin remote configured?`
       );
@@ -1114,7 +1104,7 @@ async function runReview(
       runners.delete(runId);
       return;
     }
-    fail(runId, describe(err));
+    setError(runId, describe(err));
   } finally {
     closeBus(runId);
     runners.delete(runId);
@@ -1140,7 +1130,7 @@ async function runExecute(
   try {
     const plan = repo.getPlan(planId);
     if (!plan) {
-      fail(runId, `Plan ${planId} disappeared before execution could start`);
+      setError(runId, `Plan ${planId} disappeared before execution could start`);
       runners.delete(runId);
       return;
     }
@@ -1201,7 +1191,7 @@ async function runExecute(
       runners.delete(runId);
       return;
     }
-    fail(runId, describe(err));
+    setError(runId, describe(err));
   } finally {
     closeBus(runId);
     runners.delete(runId);
@@ -1341,16 +1331,13 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
 
     if (env.type === "assistant" && env.message?.content) {
       for (const b of env.message.content) assistantBlocks.push(b);
-      const text = env.message.content
-        .filter((b: any) => b.type === "text" && typeof b.text === "string")
-        .map((b: any) => b.text)
-        .join("\n").trim();
+      const text = assistantText(env.message.content as SdkContentBlock[]);
       if (text) lastAssistantText = text;
     }
 
     if (env.type === "user" && env.message?.content) {
-      const toolResults = env.message.content.filter((b: any) => b.type === "tool_result");
-      if (toolResults.length > 0) persistMessage(run.id, "tool", toolResults as any);
+      const results = toolResults(env.message.content as SdkContentBlock[]);
+      if (results.length > 0) persistMessage(run.id, "tool", results as any);
     }
 
     if (env.type === "result") {
@@ -1501,10 +1488,6 @@ function setError(runId: number, error: string) {
   emitStatus(runId, "failed", { error });
 }
 
-function fail(runId: number, error: string) {
-  setError(runId, error);
-}
-
 function emitStatus(runId: number, status: SessionStatus, extra?: Record<string, unknown>) {
   // Mirror to agent_events so legacy /sessions UI keeps showing transitions.
   try {
@@ -1637,18 +1620,6 @@ export function toAgentSessionFull(row: RunRow): AgentSessionFull {
 }
 
 // ──────────────────────────────────────────────────────────
-// Predicates used by lib/chat.ts and lib/agent.ts shims
-// ──────────────────────────────────────────────────────────
-
-export function chatRunPredicate() {
-  return or(eq(agentSessions.goal, "<chat>"), isNotNull(agentSessions.legacyChatId));
-}
-
-export function implementRunPredicate() {
-  return and(isNotNull(agentSessions.taskId), eq(agentSessions.goal, "<implement>"));
-}
-
-// ──────────────────────────────────────────────────────────
 // /runs UI read path: unified lister + legacy chat id resolver
 // ──────────────────────────────────────────────────────────
 //
@@ -1664,19 +1635,9 @@ export interface RunFilters {
   planId?: string;
 }
 
+/** /runs UI lister — a thin, narrower-typed wrapper over list(). */
 export function listRuns(filters: RunFilters = {}): RunRow[] {
-  const wheres = [];
-  if (filters.repoId) wheres.push(eq(agentSessions.repoId, filters.repoId));
-  if (filters.taskId) wheres.push(eq(agentSessions.taskId, filters.taskId));
-  if (filters.planId) wheres.push(eq(agentSessions.planId, filters.planId));
-  const where = wheres.length === 0 ? undefined : wheres.length === 1 ? wheres[0] : and(...wheres);
-  const rows = db
-    .select()
-    .from(agentSessions)
-    .where(where)
-    .orderBy(desc(agentSessions.startedAt))
-    .all();
-  return rows.map(hydrateRun);
+  return list(filters);
 }
 
 // Lookup any run by id, regardless of whether it's task-derived or
@@ -1768,31 +1729,6 @@ function sandboxDbPathFor(run: RunRow, cwd: string): string {
   return join(tmpdir(), `task-orch-run-${run.id}.sandbox.db`);
 }
 
-function sanitizeEnv(
-  input: NodeJS.ProcessEnv,
-  opts: { sandboxDbPath: string }
-): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(input)) {
-    if (v === undefined) continue;
-    if (
-      k === "CLAUDECODE" ||
-      k.startsWith("CLAUDE_CODE_") ||
-      k.startsWith("CLAUDE_SESSION_") ||
-      k.startsWith("CLAUDE_ENABLE_") ||
-      k.startsWith("CLAUDE_AFTER_") ||
-      k.startsWith("CLAUDE_AUTO_") ||
-      k === "TASK_ORCH_DB" ||
-      k === "AUTH_SECRET"
-    ) {
-      continue;
-    }
-    out[k] = v;
-  }
-  out.TASK_ORCH_DB = opts.sandboxDbPath;
-  return out;
-}
-
 function sh(args: string[], cwd: string): Promise<string> {
   return new Promise((resolveP, rejectP) => {
     const child = spawn(args[0], args.slice(1), { cwd, env: process.env });
@@ -1816,9 +1752,4 @@ function cleanupWorktree(path: string, root: string): Promise<void> {
     child.on("close", () => res());
     child.on("error", () => res());
   });
-}
-
-function describe(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return typeof err === "string" ? err : JSON.stringify(err);
 }

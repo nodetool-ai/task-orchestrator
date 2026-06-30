@@ -20,6 +20,12 @@ export function prNumberLabel(url: string): string {
   return m ? `#${m[1]}` : url;
 }
 
+/** Render a caught error as a human-readable string, regardless of its shape. */
+export function describe(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return typeof err === "string" ? err : JSON.stringify(err);
+}
+
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "—";
   if (bytes < 1024) return `${bytes} B`;

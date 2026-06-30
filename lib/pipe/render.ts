@@ -104,6 +104,7 @@ export function chunkForDiscord(text: string, limit = DISCORD_LIMIT): string[] {
  * returned unchanged.
  */
 export function convertMarkdownTables(text: string): string {
+  if (!text.includes("|")) return text;
   const lines = text.split("\n");
   const out: string[] = [];
   const isSeparator = (line: string) =>

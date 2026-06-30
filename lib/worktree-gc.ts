@@ -26,6 +26,7 @@ import { desc, eq, isNotNull, max } from "drizzle-orm";
 
 import { db } from "@/db";
 import { agentMessages, agentSessions, repositories } from "@/db/schema";
+import { describe } from "@/lib/utils";
 
 const DEFAULT_GC_DAYS = 7;
 const HOUR_MS = 60 * 60 * 1000;
@@ -425,11 +426,6 @@ function defaultAppendSystemMessage(runId: number, text: string): void {
   } catch (err) {
     console.warn(`[worktree-gc] failed to append system message for run ${runId}: ${describe(err)}`);
   }
-}
-
-function describe(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return typeof err === "string" ? err : JSON.stringify(err);
 }
 
 // `isNotNull` is imported above but only kept for downstream queries that may
