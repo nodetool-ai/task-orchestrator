@@ -5,6 +5,7 @@
 // (no tokens spent). Unknown slashes fall through and are treated as a prompt.
 
 import * as chat from "@/lib/chat";
+import * as runs from "@/lib/runs";
 import { currentRunId, getOrCreateRun, resetThread } from "./session-store";
 import type { InboundMessage, PipeConfig } from "./types";
 
@@ -17,6 +18,8 @@ export interface CommandResult {
 
 const HELP = [
   "**Commands**",
+  "`/stop` — interrupt the agent's current turn (aliases: `/cancel`, `/abort`)",
+  "`/status` — show whether the agent is working right now",
   "`/new` or `/reset` — start a fresh conversation",
   "`/model <provider/id>` — set the model (e.g. `anthropic/claude-sonnet-4-6`)",
   "`/whoami` or `/session` — show the current run id, model, and repo",
@@ -32,6 +35,40 @@ export async function handleCommand(
   const arg = rest.join(" ").trim();
 
   switch (cmd.toLowerCase()) {
+    case "stop":
+    case "cancel":
+    case "abort": {
+      // Interrupt the in-flight turn for this conversation. The /stop message is
+      // dispatched concurrently with the running turn (the agent loop is
+      // fire-and-forget per message), so this aborts the live runner directly —
+      // it doesn't queue behind the turn it's trying to kill.
+      const id = currentRunId(msg.channel, msg.externalId);
+      if (!id) {
+        return { handled: true, reply: "Nothing to stop — no active conversation yet." };
+      }
+      const stopped = runs.interrupt(id);
+      return {
+        handled: true,
+        reply: stopped
+          ? `⏹️ Stopped run #${id}. Send another message to continue, or \`/new\` to start fresh.`
+          : `Nothing to stop — run #${id} isn't working on anything right now.`,
+      };
+    }
+
+    case "status": {
+      const id = currentRunId(msg.channel, msg.externalId);
+      if (!id) {
+        return { handled: true, reply: "No active conversation yet — send a message to start one." };
+      }
+      const model = chat.getChat(id)?.model ?? config.defaultModel;
+      return {
+        handled: true,
+        reply: runs.isLive(id)
+          ? `🟢 Working on run #${id} (model \`${model}\`). Send \`/stop\` to interrupt.`
+          : `⚪ Idle — run #${id}, model \`${model}\`. Send a message to start a turn.`,
+      };
+    }
+
     case "new":
     case "reset": {
       resetThread(msg.channel, msg.externalId);
