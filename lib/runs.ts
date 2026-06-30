@@ -621,6 +621,36 @@ export function cancel(id: number): RunRow {
   return get(id)!;
 }
 
+/**
+ * Soft-stop the in-flight turn of a run and return it to `idle` so the
+ * conversation can keep going. This is the interactive counterpart to cancel():
+ * where cancel() lands the run in the terminal `cancelled` state (revivable only
+ * by forking), interrupt() just halts the current turn while keeping the run —
+ * and its SDK session, worktree, and history — alive. That's what an interactive
+ * `/stop` wants: stop what the agent is doing, then keep talking with full
+ * context.
+ *
+ * Returns true if a turn was actually in flight and got aborted, false if the
+ * run was idle or missing (nothing to stop). The aborted append's own cleanup
+ * returns early without resetting the row from `running` (see the abort branch
+ * in append()), so we flip the status back to `idle` here.
+ */
+export function interrupt(id: number): boolean {
+  const run = get(id);
+  if (!run) return false;
+  const runner = runners.get(id);
+  if (!runner) return false; // nothing in flight
+  runner.abort.abort();
+  // Keep the worktree intact (no cleanupWorktree) so the next message resumes
+  // instantly. Clear completedAt: an idle run is mid-conversation, not finished.
+  db.update(agentSessions)
+    .set({ status: "idle", completedAt: null })
+    .where(eq(agentSessions.id, id))
+    .run();
+  emitStatus(id, "idle");
+  return true;
+}
+
 export function close(id: number): RunRow {
   const run = get(id);
   if (!run) throw new repo.RepoError(`Run ${id} not found`, 404);
