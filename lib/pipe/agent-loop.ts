@@ -9,6 +9,7 @@
 // composer turn: same tools, same persistence, same per-run lock.
 
 import * as chat from "@/lib/chat";
+import { describe } from "@/lib/utils";
 
 import { handleCommand } from "./commands";
 import { TranscriptBuilder, chunkForDiscord } from "./render";
@@ -93,8 +94,4 @@ export class AgentLoop {
       await draft.finalize(`⚠️ ${describe(err)}`).catch(() => {});
     }
   }
-}
-
-function describe(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

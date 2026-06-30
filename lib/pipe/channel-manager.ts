@@ -17,6 +17,9 @@ export class ChannelManager {
   ) {}
 
   async start(): Promise<void> {
+    // Wire message handlers before starting any channel, then connect them
+    // all concurrently — each channel's start() (e.g. a gateway login) is
+    // independent of the others.
     for (const ch of this.channels) {
       const loop = new AgentLoop(ch, this.config);
       ch.onMessage((msg) => {
@@ -27,9 +30,13 @@ export class ChannelManager {
         this.bus.publishInbound(msg);
         void loop.handle(msg).catch((e) => console.error("[pipe] agent-loop error:", e));
       });
-      await ch.start();
-      console.log(`[pipe] channel '${ch.name}' started`);
     }
+    await Promise.all(
+      this.channels.map(async (ch) => {
+        await ch.start();
+        console.log(`[pipe] channel '${ch.name}' started`);
+      })
+    );
   }
 
   async stop(): Promise<void> {
