@@ -50,6 +50,7 @@ function makeRun(overrides: Partial<RunRow> = {}): RunRow {
     planningStage: "gathering",
     startedAt: new Date(),
     completedAt: null,
+    heartbeatAt: null,
     ...overrides,
   };
 }

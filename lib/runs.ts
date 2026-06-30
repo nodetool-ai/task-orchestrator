@@ -151,6 +151,8 @@ export interface RunRow {
   planningStage: string | null;
   startedAt: Date;
   completedAt: Date | null;
+  /** Liveness lease; bumped while a turn runs. Null/stale in an active status = orphan. */
+  heartbeatAt: Date | null;
 }
 
 export interface MessageRow {
@@ -445,6 +447,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     release = res;
     rejectRelease = rej;
   });
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
 
   try {
     let run = get(input.runId);
@@ -452,15 +455,12 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       yield { type: "error", error: `Run ${input.runId} not found` };
       return;
     }
-    if (
-      run.status === "running" ||
-      run.status === "preparing" ||
-      run.status === "pushing" ||
-      run.status === "opening_pr"
-    ) {
-      // The lock guards against the in-process race; this guards against
-      // a different process / a stale row inheriting status from before
-      // this worker started.
+    if (isLeaseLive(run)) {
+      // A live lease (active status + fresh heartbeat) means a turn is genuinely
+      // in flight — here or in another process. The in-process lock covers the
+      // same-process race; this covers cross-process. A run in an active status
+      // with a STALE heartbeat is an orphan (its owner crashed), so we fall
+      // through and take it over instead of rejecting forever.
       yield {
         type: "error",
         error: `Run ${input.runId} is already in flight (status=${run.status}).`,
@@ -489,6 +489,12 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     yield { type: "user_message", message: userMsg };
 
     setStatus(run.id, "running");
+    // Open the liveness lease and keep it fresh for the whole active period
+    // (prepare → turn → push/PR). The interval ticks even while a slow model or
+    // tool call is awaited, so a long-but-alive turn is never mistaken for an
+    // orphan. Cleared in the finally below.
+    touchHeartbeat(input.runId);
+    heartbeat = setInterval(() => touchHeartbeat(input.runId), HEARTBEAT_INTERVAL_MS);
 
     // First turn of a worktree run: create its branch + worktree. On later
     // turns this is a no-op and prepareCwd re-materializes a missing worktree
@@ -596,6 +602,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
 
     yield { type: "done" };
   } finally {
+    if (heartbeat) clearInterval(heartbeat);
     release();
     lock.busy = null;
     // Make eslint happy about unused binder; actually exposed above as fallback.
@@ -1427,6 +1434,65 @@ function setStatus(runId: number, status: SessionStatus) {
   emitStatus(runId, status);
 }
 
+// ──────────────────────────────────────────────────────────
+// Liveness lease (heartbeat) + orphan recovery
+// ──────────────────────────────────────────────────────────
+
+/** Statuses that mean "a turn is in flight"; the only ones a heartbeat covers. */
+const LEASE_STATUSES: SessionStatus[] = ["running", "preparing", "pushing", "opening_pr"];
+
+/** How often a live turn bumps its heartbeat. */
+const HEARTBEAT_INTERVAL_MS = 20_000;
+/**
+ * Age past which an active-status run is considered orphaned. Must comfortably
+ * exceed HEARTBEAT_INTERVAL_MS and any plausible pause between bumps (the
+ * interval keeps ticking even while a slow model/tool call is awaited, so this
+ * only needs slack for scheduling jitter / GC pauses).
+ */
+const HEARTBEAT_STALE_MS = 5 * 60_000;
+
+/** Bump a run's heartbeat to now. Best-effort; a missed bump just risks a reap. */
+function touchHeartbeat(runId: number): void {
+  db.update(agentSessions)
+    .set({ heartbeatAt: new Date() })
+    .where(eq(agentSessions.id, runId))
+    .run();
+}
+
+/** True when this run holds a live lease: active status with a fresh heartbeat. */
+function isLeaseLive(run: { status: string; heartbeatAt: Date | null }, now = Date.now()): boolean {
+  if (!LEASE_STATUSES.includes(run.status as SessionStatus)) return false;
+  return run.heartbeatAt != null && now - run.heartbeatAt.getTime() < HEARTBEAT_STALE_MS;
+}
+
+/**
+ * Demote runs left in an active status by a process that died mid-turn (e.g.
+ * OOM-killed) — identified by a stale/absent heartbeat. Chat runs go back to
+ * `idle` (resumable on the next message); others land `failed`. Safe to call on
+ * every boot and concurrently across processes: a run genuinely live elsewhere
+ * keeps its heartbeat fresh and is skipped. Returns the number reaped.
+ */
+export function reconcileOrphanedRuns(): number {
+  const now = Date.now();
+  const rows = db
+    .select()
+    .from(agentSessions)
+    .where(inArray(agentSessions.status, LEASE_STATUSES))
+    .all();
+  let reaped = 0;
+  for (const row of rows) {
+    if (isLeaseLive(row, now)) continue; // fresh lease → owned by a live process
+    if (row.goal === "<chat>") {
+      setStatus(row.id, "idle");
+    } else {
+      setError(row.id, "Interrupted by a process restart before the turn finished.");
+    }
+    reaped++;
+  }
+  if (reaped > 0) console.log(`[runs] reconciled ${reaped} orphaned run(s) on boot`);
+  return reaped;
+}
+
 function setError(runId: number, error: string) {
   db.update(agentSessions)
     .set({ status: "failed", error, completedAt: new Date() })
@@ -1527,6 +1593,7 @@ function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     planningStage: row.planningStage ?? null,
     startedAt: row.startedAt,
     completedAt: row.completedAt,
+    heartbeatAt: row.heartbeatAt ?? null,
   };
 }
 

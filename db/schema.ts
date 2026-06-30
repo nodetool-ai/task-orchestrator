@@ -201,6 +201,9 @@ export const agentSessions = sqliteTable(
     planningStage: text("planning_stage"),
     startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull().default(NOW),
     completedAt: integer("completed_at", { mode: "timestamp_ms" }),
+    // Liveness lease: bumped periodically while a turn runs. A run in an active
+    // status with a stale/null heartbeat is an orphan (its owner process died).
+    heartbeatAt: integer("heartbeat_at", { mode: "timestamp_ms" }),
   },
   (t) => ({
     taskIdx: index("agent_runs_task_idx").on(t.taskId),
