@@ -9,12 +9,17 @@
 import { config } from "dotenv";
 config({ path: ".env.local" });
 
-import "../db"; // triggers migrations (incl. 0018_channel_threads) on import
+import "../db"; // triggers migrations (incl. 0019_agent_runs_heartbeat) on import
 import { ChannelManager } from "../lib/pipe/channel-manager";
 import { DiscordChannel } from "../lib/pipe/channels/discord";
 import { loadPipeConfig } from "../lib/pipe/config";
+import { reconcileOrphanedRuns } from "../lib/runs";
 
 async function main() {
+  // Self-heal runs left "in flight" by a previous process that died mid-turn
+  // (e.g. OOM-killed): without this they'd stay stuck and reject every message.
+  reconcileOrphanedRuns();
+
   const cfg = loadPipeConfig();
   const discord = new DiscordChannel(cfg.discord);
   const manager = new ChannelManager([discord], cfg);
