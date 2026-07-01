@@ -24,8 +24,8 @@ Read [SCHEMA.md](SCHEMA.md) first; this file describes the workflow.
 ## Doing the work
 
 - Edit code as needed.
-- As you complete acceptance criteria, tick them off (web UI is the
-  easiest — single click), or:
+- Tick off acceptance criteria as you complete them (one click in the
+  web UI), or:
   ```bash
   npm run task -- crit done <criterion-id>
   ```
@@ -45,7 +45,7 @@ npm run task -- transition T-20260511-0001 review    # if reviewed by someone
 npm run task -- transition T-20260511-0001 done      # gated by open criteria
 ```
 
-`done` will be rejected if any acceptance criterion is still open —
+`done` is rejected while any acceptance criterion is open —
 finish those first.
 
 ## If you get stuck
@@ -61,8 +61,8 @@ Then pick a different task.
 
 Each session runs in an isolated git worktree on a fresh branch,
 opens a PR via `gh pr create` when finished, and transitions the
-task to `review` (or `blocked` on failure). Multiple sessions can
-run in parallel against different tasks.
+task to `review` (or `blocked` on failure). Sessions run in
+parallel against different tasks.
 
 ```bash
 npm run task -- agent T-20260511-0001                 # start + tail
@@ -76,11 +76,11 @@ REST: `POST /api/tasks/:id/sessions`. SSE log:
 `GET /api/sessions/:id/events`. Web: "Run agent" button on the
 task detail page → live log at `/sessions/:id`.
 
-A task can only have one active session at a time — start another
-after cancelling or letting the current one finish. To pick up
-where a failed run left off, use the Resume button (or `agent
-resume <id>`): the new session passes the prior SDK session id to
-`query()` so the model has its prior conversation in context.
+A task has one active session at a time — cancel or let it finish
+before starting another. To pick up where a failed run left off,
+use the Resume button (or `agent resume <id>`): the new session
+passes the prior SDK session id to `query()` so the model keeps
+its prior conversation in context.
 
 Requires an authed `gh` CLI, plus agent-backend auth: the default `pi`
 backend's own credentials, or — for `TASK_ORCH_AGENT_BACKEND=claude` —
@@ -98,8 +98,8 @@ returns an image as a viewable block or a text artifact decoded inline.
 The orchestrator runs the SDK with `permissionMode: "bypassPermissions"`
 — the agent has full filesystem and shell access inside its worktree,
 and that worktree shares the host's git config + `gh` credentials.
-Triggering an agent is therefore equivalent to handing somebody a
-local shell in your repo. Implications:
+Triggering an agent is handing somebody a local shell in your repo.
+Implications:
 
 - Don't enable a publicly reachable `/api/tasks/:id/sessions` without
   the auth gate (DB-backed email/password, configured in `auth.ts`)
@@ -120,7 +120,7 @@ intended default for the autonomous loop.
   endpoint).
 - Don't change `id`, `created_at`, or `plan_id`. If you need to re-home
   a task, cancel it and create a new one.
-- Don't mark `done` without genuinely meeting the criteria.
+- Don't mark `done` without meeting the criteria.
 
 ## State cheat sheet
 

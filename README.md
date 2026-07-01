@@ -1,9 +1,9 @@
 # Task Orchestrator
 
-Self-contained SQLite-backed task orchestrator for planning work, tracking tasks,
-and delegating implementation to Claude Agent SDK sessions. The Next.js server
-owns the database; the same code is reused by API routes, dashboard pages, and
-the `npm run task` CLI.
+Plan work, track tasks, and delegate implementation to Claude Agent SDK
+sessions — one self-contained, SQLite-backed system. The Next.js server
+owns the database; API routes, dashboard pages, and the `npm run task` CLI
+share the same code.
 
 - **[SCHEMA.md](SCHEMA.md)** — DB schema, state machines, REST surface
 - **[AGENTS.md](AGENTS.md)** — workflow contract for humans and agents
@@ -104,7 +104,7 @@ The CLI imports `lib/repo.ts` directly — no HTTP server required.
 
 ## REST
 
-Same operations are exposed for external clients (e.g. agents):
+The same operations, exposed for external clients such as agents:
 
 ```
 GET    /api/plans
@@ -140,8 +140,8 @@ POST   /api/sessions/:id/cancel
 
 ## Agent sessions
 
-Trigger an autonomous Claude Agent SDK run on any task — from the web
-("Run agent" button on the task detail page), from REST, or from the CLI:
+Run an autonomous Claude Agent SDK session on any task — from the web
+("Run agent" on the task detail page), from REST, or from the CLI:
 
 ```bash
 npm run task -- agent T-20260511-0001 [--model=claude-sonnet-4-5]
@@ -154,8 +154,8 @@ Each session:
 1. Creates a fresh git worktree at `.worktrees/<sessionId>/` on a new branch
    `claude/agent-<sessionId>`, symlinking `node_modules` and the
    Turbopack/Next.js build cache (`.next`) back to the repo root so every
-   worktree shares one install and one warm build cache. A worktree that needs
-   to change dependencies or wants a clean build can opt out with
+   worktree shares one install and one warm build cache. A worktree that
+   needs its own dependencies or a clean build can opt out with
    `npm run isolate-env`, which swaps the shared symlinks for a private
    `node_modules` and `.next` and reinstalls. To preview the branch in a
    browser, `npm run worktree-dev` starts the Next.js dev server on a stable
@@ -168,15 +168,15 @@ Each session:
 5. Transitions the task to `review` (or `blocked` on failure) and adds
    a note linking the PR
 
-Multiple sessions run in parallel. Live event stream is available at
+Sessions run in parallel. The live event stream is served at
 `GET /api/sessions/[id]/events` (SSE) and rendered on
 `/sessions/[id]`. Cancel via `POST /api/sessions/[id]/cancel`.
 Resume a failed or cancelled session with the same SDK conversation
 via `POST /api/sessions/[id]/resume` (or `npm run task -- agent resume
 <id>`).
 
-While running, the agent has access to an in-process MCP server with
-five tools scoped to its task:
+While running, the agent has an in-process MCP server with tools
+scoped to its task:
 
 ```
 mcp__task_orch__add_note(body)
@@ -190,18 +190,16 @@ mcp__task_orch__add_attachment(filename, text|content_base64)
 mcp__task_orch__delete_attachment(id)
 ```
 
-Images and other files can be attached to any plan or task — from the
-dashboard (upload control on the plan/task page), via REST, or by an
-agent. The agent sees the attachment roster in its prompt and fetches
-the bytes with `get_attachment`: image attachments come back as a
-viewable image block, text-like artifacts (logs, JSON, source, SVG) as
+Attach images and other files to any plan or task — from the dashboard,
+via REST, or by an agent. The agent sees the attachment roster in its
+prompt and fetches the bytes with `get_attachment`: images come back as
+viewable image blocks, text-like artifacts (logs, JSON, source, SVG) as
 decoded text. Bytes live inline in the SQLite BLOB store, capped at 25 MiB
 per file.
 
-Each tool call goes straight to the same `lib/repo.ts` the web UI
-uses, so progress is visible live. The orchestrator also captures
-the SDK's `total_cost_usd` and token counts on every run and surfaces
-them on the session detail page.
+Each tool call hits the same `lib/repo.ts` the web UI uses, so
+progress is visible live. Every run's `total_cost_usd` and token
+counts are captured and surfaced on the session detail page.
 
 Requires:
 - Agent-backend auth. The `claude` backend resolves it like the Claude Code CLI:

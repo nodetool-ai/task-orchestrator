@@ -1,8 +1,8 @@
 # Pi Factory — mobile
 
-An Expo (SDK 56) client for the Task Orchestrator, built to match the
+An Expo (SDK 56) client for the Task Orchestrator, matching the
 **Pi Factory** mobile design prototype. It reuses the existing Next.js REST
-API — no backend changes — and presents the operator surface (the "factory
+API — no backend changes — and puts the operator surface (the "factory
 floor") on a phone.
 
 ## Screens
