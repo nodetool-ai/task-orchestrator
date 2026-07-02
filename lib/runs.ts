@@ -1080,6 +1080,12 @@ async function runReview(
   const worktreeRoot = resolve(root, ".worktrees");
   const branch = `review-${runId}`;
   const worktreePath = resolve(worktreeRoot, `review-${runId}`);
+  // Stable, per-run ref for the fetched PR head. FETCH_HEAD is a single shared
+  // file in the repo's .git, so under concurrent runs another run's `git fetch`
+  // (or a prune/gc) can clobber it between our fetch and the worktree add — the
+  // observed `fatal: invalid reference: FETCH_HEAD` failure. A named ref is
+  // unique per run and immune to that race.
+  const reviewRef = `refs/reviews/${runId}`;
 
   try {
     const parsed = parsePrUrl(prUrl);
@@ -1092,13 +1098,13 @@ async function runReview(
     setStatus(runId, "preparing");
     await mkdir(worktreeRoot, { recursive: true });
 
-    // Fetch the PR head ref into a local ref, then create a worktree on a
-    // throwaway review branch pointing at FETCH_HEAD. Equivalent to
+    // Fetch the PR head into a stable per-run ref, then create a worktree on a
+    // throwaway review branch pointing at that ref. Equivalent to
     // `gh pr checkout` but keeps git as the source of truth (gh's checkout
     // mutates the current working tree which we don't want here).
     try {
       await sh(
-        ["git", "fetch", "origin", `pull/${parsed.number}/head`],
+        ["git", "fetch", "origin", `pull/${parsed.number}/head:${reviewRef}`],
         root
       );
     } catch (err) {
@@ -1110,7 +1116,7 @@ async function runReview(
       return;
     }
     await sh(
-      ["git", "worktree", "add", "-b", branch, worktreePath, "FETCH_HEAD"],
+      ["git", "worktree", "add", "-b", branch, worktreePath, reviewRef],
       root
     );
     await linkSharedWorktreeArtifacts(worktreePath, root);
@@ -1185,7 +1191,11 @@ async function runReview(
     clearInterval(heartbeat);
     closeBus(runId);
     runners.delete(runId);
-    cleanupWorktree(worktreePath, root).catch(() => {});
+    cleanupWorktree(worktreePath, root)
+      // Drop the per-run fetch ref once the worktree is gone so refs/reviews/*
+      // doesn't accumulate. Best-effort: a missing ref is fine.
+      .then(() => sh(["git", "update-ref", "-d", reviewRef], root).catch(() => {}))
+      .catch(() => {});
   }
 }
 
