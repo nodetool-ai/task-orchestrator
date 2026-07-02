@@ -354,30 +354,48 @@ export function create(input: CreateRunInput): RunRow {
     repo.attachRunToTask(input.taskId, run.id, { ifUnset: true });
   }
 
+  // These are create()'s *secondary* launches: a background turn the caller did
+  // not itself stream (kickoff / review / execute). When TASK_ORCH_DETACHED_RUNS
+  // is on, they detach into a per-run worker (dispatchRun) so a web restart can't
+  // kill them; when off, they run in-process exactly as before. The caller's OWN
+  // streaming turn (POST /messages → append()) always stays in-process even under
+  // the flag — that stream IS the caller's turn — so append() is not gated here.
+  // run-dispatch imports from this module, so we import it lazily inside each
+  // (already async) branch to keep module load order free of an import cycle.
+
   // Implement-style kickoff: run the first turn through the unified engine
   // (runs.append → branch create → turn → conditional push/PR). Deferred runs
   // (chat box, bare test runs) skip this and wait for the user's first message.
   if (!input.defer && goal !== "<chat>" && cwdStrategy === "worktree") {
     // taskId presence validated before the insert above.
     const task = repo.getTask(input.taskId!)!;
-    void kickoffFirstTurn(
-      run.id,
-      input.initialPrompt ?? buildImplementPrompt(task),
-      input.baseBranch
-    );
+    const prompt = input.initialPrompt ?? buildImplementPrompt(task);
+    void (async () => {
+      const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
+      if (detachedRunsEnabled()) dispatchRun(run.id);
+      else await kickoffFirstTurn(run.id, prompt, input.baseBranch);
+    })();
   }
 
   // Review-style runs: spin up a worktree at the PR's head ref and run a
   // single agent turn against it. Requires a prUrl on the run (validated above).
   if (!input.defer && cwdStrategy === "worktree_at_pr") {
-    void runReview(run.id, input.prUrl!, input.initialPrompt ?? null);
+    void (async () => {
+      const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
+      if (detachedRunsEnabled()) dispatchRun(run.id);
+      else await runReview(run.id, input.prUrl!, input.initialPrompt ?? null);
+    })();
   }
 
   // Plan-executor runs: a single long-running agent that drives a whole plan
   // (implement → review → merge) by spawning child runs. Operates at the repo
   // root (no worktree of its own); children make their own worktrees.
   if (!input.defer && goal === "<execute>" && input.planId) {
-    void runExecute(run.id, input.planId, input.initialPrompt ?? null);
+    void (async () => {
+      const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
+      if (detachedRunsEnabled()) dispatchRun(run.id);
+      else await runExecute(run.id, input.planId!, input.initialPrompt ?? null);
+    })();
   }
 
   return run;
