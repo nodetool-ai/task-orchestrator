@@ -4,9 +4,31 @@ import { spawn as nodeSpawn, execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { db } from "../db";
 import { agentSessions } from "../db/schema";
-import { get, isLeaseLive } from "./runs";
+import type { RunRow } from "./runs";
 
 export type SpawnFn = (runId: number, scope: string) => number | null;
+
+// Late-bound bridge back into lib/runs. run-dispatch needs get()/isLeaseLive()
+// synchronously, but a *static* `import { get, isLeaseLive } from "./runs"` here
+// forms a runs ↔ run-dispatch import cycle that webpack minification turns into a
+// boot-time TDZ ("Cannot access 'r' before initialization"). runs.ts imports this
+// module (namespace) and injects the two helpers on load, so the only static edge
+// is runs → run-dispatch (no cycle). A function-scoped `require("./runs")` — the
+// plan's original suggestion — would work in the prod bundle but throws under the
+// Vitest ESM loader (native require can't resolve the .ts source), so injection is
+// used instead.
+type RunsApi = {
+  get: (id: number) => RunRow | null;
+  isLeaseLive: (run: { status: string; heartbeatAt: Date | null }, now?: number) => boolean;
+};
+let runsApi: RunsApi | null = null;
+export function __setRunsApi(api: RunsApi): void {
+  runsApi = api;
+}
+function runs(): RunsApi {
+  if (!runsApi) throw new Error("run-dispatch: runs API not initialized");
+  return runsApi;
+}
 
 export function detachedRunsEnabled(): boolean {
   const v = process.env.TASK_ORCH_DETACHED_RUNS;
@@ -25,9 +47,9 @@ export function dispatchRun(
   runId: number,
   opts: { spawn?: SpawnFn } = {}
 ): "spawned" | "already-claimed" | "not-found" {
-  const run = get(runId);
+  const run = runs().get(runId);
   if (!run) return "not-found";
-  if (isLeaseLive(run)) return "already-claimed";
+  if (runs().isLeaseLive(run)) return "already-claimed";
   if (run.workerScope) return "already-claimed";
 
   const scope = `run-${runId}-${nonce()}`;

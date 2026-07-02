@@ -60,12 +60,18 @@ import { personaMemoryFactory } from "./extensions/persona-memory";
 import { abortBridgeFactory } from "./extensions/abort-bridge";
 import { linkSharedWorktreeArtifacts } from "./worktree-env";
 // Namespace import (not `await import`) because reconcileOrphanedRuns() is
-// synchronous. run-dispatch imports get()/isLeaseLive() from here, forming a
-// static cycle — safe because both are hoisted function declarations only ever
-// called at runtime, never during module init. Calling through the namespace
-// (runDispatch.dispatchRun) also keeps vi.spyOn(dispatch, "dispatchRun")
-// observable, matching the dispatch-routing test's spy mechanics.
+// synchronous, and calling through the namespace (runDispatch.dispatchRun) keeps
+// vi.spyOn(dispatch, "dispatchRun") observable for the reconcile/routing tests.
+// run-dispatch does NOT import from this module; instead we inject get()/
+// isLeaseLive() into it below. That keeps the only static edge runs → run-dispatch
+// (no cycle), avoiding the webpack-minified boot TDZ a runs ↔ run-dispatch cycle
+// would otherwise produce.
 import * as runDispatch from "./run-dispatch";
+
+// Inject this module's helpers into run-dispatch (see the comment above). `get`
+// and `isLeaseLive` are hoisted function declarations, so they are safe to
+// reference at module-init time.
+runDispatch.__setRunsApi({ get, isLeaseLive });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");

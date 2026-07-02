@@ -39,6 +39,14 @@ declare global {
   var __agentPrWatcher: NodeJS.Timeout | undefined;
 }
 
+// Declared before the module-init reaper invocation below. reapOrphans() is a
+// hoisted function, but this `const` is not: with the declaration placed after
+// the invocation, reapOrphans' `.filter(... NON_TERMINAL_BUT_DEAD.includes ...)`
+// reads it in the temporal dead zone whenever the boot DB actually has an
+// implement run to filter — a TDZ ReferenceError swallowed as "reaper failed"
+// (empty test DBs never enter the filter callback, so the suite stayed green).
+const NON_TERMINAL_BUT_DEAD = ["pending", "preparing", "running", "pushing", "opening_pr"];
+
 if (!globalThis.__agentReaperRan) {
   globalThis.__agentReaperRan = true;
   try {
@@ -55,8 +63,6 @@ if (!globalThis.__agentPrWatcher && PR_POLL_MS > 0) {
   }, PR_POLL_MS);
   globalThis.__agentPrWatcher.unref?.();
 }
-
-const NON_TERMINAL_BUT_DEAD = ["pending", "preparing", "running", "pushing", "opening_pr"];
 
 function reapOrphans() {
   // Implement-style runs in any in-flight status are suspect after a restart.
