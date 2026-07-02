@@ -69,7 +69,8 @@ function beats(
  * run, follow-up fixes — and surfacing each as its own card floods the panel
  * with duplicates ("6 review cards for 2 tasks"). Keep a single representative
  * run per task: the highest-priority bucket, newest within that bucket. Items
- * without a taskId (none today, since the sidebar is task-scoped) pass through.
+ * without a taskId (plan-executor runs) pass through untouched — each executor
+ * is its own card.
  */
 export function dedupeLiveByTask<
   T extends { taskId: string | null; bucket: LiveBucket; startedAt: number },

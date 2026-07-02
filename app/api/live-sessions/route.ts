@@ -22,10 +22,16 @@ export async function GET() {
       return NextResponse.json({ items: [] satisfies LiveSessionItem[] });
     }
 
-    const runs = runsLib.listRuns().filter((r) => r.origin === "task");
+    // Task-scoped runs plus plan executors: an executor run has a planId but
+    // no taskId (origin "chat"), so the origin filter alone would hide it.
+    const runs = runsLib
+      .listRuns()
+      .filter((r) => r.origin === "task" || r.goal === "<execute>");
     const items: LiveSessionItem[] = [];
     for (const r of runs) {
       const task = r.taskId ? repo.getTask(r.taskId) : null;
+      const plan =
+        r.goal === "<execute>" && r.planId ? repo.getPlan(r.planId) : null;
       const b = bucketFor(r.status, r.prUrl, task?.state);
       if (!b) continue;
       const prMatch = r.prUrl?.match(/\/pull\/(\d+)/);
@@ -43,8 +49,13 @@ export async function GET() {
         runDbId: r.id,
         shortId: shortRunId(r.id, r.startedAt),
         bucket: b,
-        title: task?.title || r.title || "(untitled run)",
+        title:
+          task?.title ||
+          (plan ? `Execute: ${plan.title}` : null) ||
+          r.title ||
+          "(untitled run)",
         taskId: r.taskId,
+        planId: plan?.id ?? null,
         branch: r.branch,
         prNum: prMatch ? parseInt(prMatch[1], 10) : null,
         persona: r.personaId,

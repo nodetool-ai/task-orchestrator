@@ -12,6 +12,8 @@ export type LiveSessionItem = {
   bucket: "running" | "review" | "blocked";
   title: string;
   taskId: string | null;
+  /** Set for plan-executor runs (goal <execute>), which have no taskId. */
+  planId: string | null;
   branch: string | null;
   prNum: number | null;
   persona: string | null;
@@ -391,6 +393,9 @@ function SidebarRow({ item, active }: { item: LiveSessionItem; active: boolean }
         }}
       >
         {item.taskId && <MonoTag style={{ fontSize: 9, padding: "1px 5px" }}>{item.taskId}</MonoTag>}
+        {!item.taskId && item.planId && (
+          <MonoTag style={{ fontSize: 9, padding: "1px 5px" }}>{item.planId}</MonoTag>
+        )}
         {item.prNum != null && (
           <span
             className="pi-mono"
