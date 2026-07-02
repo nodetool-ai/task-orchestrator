@@ -37,12 +37,19 @@ export function readStreamSince(
   const frames: StreamFrame[] = [];
   let terminal = false;
   for (const e of evts) {
-    let data: unknown = {};
+    // The event kind lives in the `type` COLUMN; the payload is just the flat
+    // body (e.g. `{ status, error }`). Fold the column back in so the emitted
+    // frame matches the flat `{ type, ...payload }` contract the run view
+    // consumes (and so terminal detection below can read `data.type`). A payload
+    // that redundantly carries its own `type` (test fixtures) keeps it.
+    let body: Record<string, unknown> = {};
     try {
-      data = JSON.parse(e.payload);
+      const parsed = JSON.parse(e.payload);
+      body = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : { value: parsed };
     } catch {
-      data = { type: "raw", payload: e.payload };
+      body = { payload: e.payload };
     }
+    const data = { type: e.type, ...body };
     const d = data as { type?: string; status?: SessionStatus };
     if (d.type === "status" && d.status && isTerminalStatus(d.status) && d.status !== "idle") {
       terminal = true;

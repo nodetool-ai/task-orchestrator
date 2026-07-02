@@ -34,6 +34,8 @@ interface SidebarRepo {
 interface Props {
   run: RunRow;
   initialMessages: MessageRow[];
+  /** Max message/event ids at server render; seeds the read-only SSE tail. */
+  initialCursor: { msgId: number; evtId: number };
   live: boolean;
   userEmail: string | null;
   repositories: SidebarRepo[];
@@ -79,16 +81,26 @@ let tmpIdCounter = -1;
 const nextTmpId = () => tmpIdCounter--;
 
 interface StreamEventClient {
-  type: "user_message" | "sdk" | "done" | "error" | "status" | "_eos";
+  type:
+    | "user_message"
+    | "sdk"
+    | "message"
+    | "done"
+    | "error"
+    | "status"
+    | "_cursor"
+    | "_eos";
   message?: MessageRow;
   sdk?: SdkMessageEnvelope;
   status?: SessionStatus;
   error?: string;
+  cursor?: { msgId: number; evtId: number };
 }
 
 export function RunView({
   run: initialRun,
   initialMessages,
+  initialCursor,
   live,
   userEmail,
   repositories,
@@ -115,6 +127,10 @@ export function RunView({
   // or clobber in-flight rows on every transition).
   const statusRef = useRef(run.status);
   const sendingRef = useRef(false);
+  // Live tail cursor for the read-only /events SSE. Seeded from the server
+  // snapshot so the stream forwards only rows written after this render, and
+  // advanced by `_cursor` frames so a reconnect can resume without a gap.
+  const streamCursorRef = useRef(initialCursor);
   // The initial `messages` state already reflects the first `initialMessages`,
   // so skip the reconciliation effect's very first run.
   const initialMessagesSyncedRef = useRef(false);
@@ -190,13 +206,20 @@ export function RunView({
   // status.
   useEffect(() => {
     if (isTerminalStatus(statusRef.current) && statusRef.current !== "idle") return;
-    const url = `/api/runs/${run.id}/events`;
+    const { msgId, evtId } = streamCursorRef.current;
+    const url = `/api/runs/${run.id}/events?msgCursor=${msgId}&evtCursor=${evtId}`;
     const es = new EventSource(url);
     es.onmessage = (msg) => {
       let parsed: StreamEventClient;
       try {
         parsed = JSON.parse(msg.data) as StreamEventClient;
       } catch {
+        return;
+      }
+      // Cursor bookkeeping: track the tail position so a reconnect resumes
+      // cleanly. Not a domain event, so it never reaches handleSseEvent.
+      if (parsed.type === "_cursor") {
+        if (parsed.cursor) streamCursorRef.current = parsed.cursor;
         return;
       }
       handleSseEvent(parsed);
@@ -250,6 +273,14 @@ export function RunView({
       // Status transitions show up inline as a compact system row so the
       // user can see "running → idle → running" in the timeline.
       appendSystemEvent("status", { status: event.status });
+      return;
+    }
+    // The read-only tail delivers assistant/tool/system rows as persisted
+    // `agent_messages` (the in-process SDK bus is gone). Append each once,
+    // deduped by its real DB id so a reconnect replay can't double it.
+    if (event.type === "message" && event.message) {
+      const ui = toUiMessage(event.message);
+      setMessages((prev) => (prev.some((m) => m.id === ui.id) ? prev : [...prev, ui]));
       return;
     }
     if (event.type === "sdk" && event.sdk) {

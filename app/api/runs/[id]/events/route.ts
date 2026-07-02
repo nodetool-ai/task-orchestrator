@@ -1,101 +1,104 @@
 import { type NextRequest } from "next/server";
 import * as runs from "@/lib/runs";
-import { isTerminalStatus, type SessionStatus } from "@/lib/types";
+import { readStreamSince, ZERO_CURSOR, type StreamCursor } from "@/lib/run-stream";
 
 export const dynamic = "force-dynamic";
 
-// Live SSE feed for /runs/[id]. Unlike POST /messages (which streams the
-// reply to the caller's own turn), this endpoint is read-only: it forwards
-// in-process bus events for the run so that a viewer who is *not* the one
-// sending the message still sees status transitions, SDK envelopes, and
-// system events as they happen. Closes when the run reaches a terminal,
-// non-resumable status.
+// Live SSE feed for /runs/[id]. Unlike POST /messages (which streams the reply
+// to the caller's own turn), this endpoint is read-only: a viewer who is *not*
+// the one sending the message still sees status transitions, system events, and
+// assistant/tool messages as they happen.
 //
-// NOTE: `runs.subscribe()` attaches to the bus that is alive *right now*.
-// For implement-style runs the bus exists for the lifetime of the worker,
-// so this works. For chat-style idle runs the bus is rebuilt per turn —
-// the caller's own POST /messages SSE is the authoritative stream for
-// that turn; this endpoint is best-effort for secondary viewers.
+// It streams by TAILING the already-incrementally-persisted agent_events /
+// agent_messages tables by monotonic-id cursor (see lib/run-stream) rather than
+// subscribing to an in-process event bus. That makes the stream survive a
+// web-server restart and lets a detached worker's progress reach the client
+// even though the worker runs in a different process.
+//
+// Frame contract (unchanged for the run view):
+//   - event frames are forwarded verbatim, preserving `{ type:"status", status }`
+//   - message frames are wrapped as `{ type:"message", message }`
+//   - a `{ type:"_cursor", cursor }` frame follows each non-empty batch so the
+//     client can resume without gaps
+//   - a terminal, non-idle status closes the stream with `{ type:"_eos" }`
+const POLL_ACTIVE_MS = 150;
+const POLL_IDLE_MS = 1000;
+const IDLE_BACKOFF_AFTER = 20; // empty polls before backing off
+const PING_EVERY_MS = 15_000;
+
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
   const runId = parseInt(id, 10);
-  if (!Number.isFinite(runId)) {
-    return new Response("Bad id", { status: 400 });
-  }
-  const run = runs.get(runId);
-  if (!run) return new Response("Not found", { status: 404 });
+  if (!Number.isFinite(runId)) return new Response("Bad id", { status: 400 });
+  if (!runs.get(runId)) return new Response("Not found", { status: 404 });
+
+  const url = new URL(req.url);
+  let cursor: StreamCursor = {
+    msgId: parseInt(url.searchParams.get("msgCursor") ?? "", 10) || ZERO_CURSOR.msgId,
+    evtId: parseInt(url.searchParams.get("evtCursor") ?? "", 10) || ZERO_CURSOR.evtId,
+  };
 
   const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
+    async start(controller) {
       const encoder = new TextEncoder();
       let closed = false;
-      const send = (event: unknown) => {
+      const send = (o: unknown) => {
         if (closed) return;
         try {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(o)}\n\n`));
+        } catch {
+          closed = true;
+        }
+      };
+      const ping = () => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(`: ping\n\n`));
         } catch {
           closed = true;
         }
       };
 
-      // Tell the client our current status so the UI can reconcile on
-      // reconnect.
-      send({ type: "status", status: run.status });
-
-      // If the run is fully terminal (closed/completed/etc.) and there is
-      // no live worker, close immediately. `idle` runs stay open because
-      // appending a new message will revive the in-process bus.
-      const terminallyClosed =
-        isTerminalStatus(run.status) && run.status !== "idle";
-      const live = runs.isLive(runId);
-      if (terminallyClosed && !live) {
-        send({ type: "_eos" });
-        try {
-          controller.close();
-        } catch {}
-        return;
-      }
-
-      const unsubscribe = runs.subscribe(runId, (event) => {
-        send(event);
-        const ev = event as { type?: string; status?: SessionStatus };
-        if (ev.type === "status" && ev.status) {
-          if (isTerminalStatus(ev.status) && ev.status !== "idle") {
-            send({ type: "_eos" });
-            unsubscribe();
-            try {
-              controller.close();
-            } catch {}
-            closed = true;
-          }
-        }
-      });
-
-      // Keep-alive ping every 15s (some proxies kill quiet streams).
-      const ping = setInterval(() => {
-        if (closed) {
-          clearInterval(ping);
-          return;
-        }
-        try {
-          controller.enqueue(encoder.encode(`: ping\n\n`));
-        } catch {
-          clearInterval(ping);
-          closed = true;
-        }
-      }, 15_000);
-
       req.signal.addEventListener("abort", () => {
-        unsubscribe();
-        clearInterval(ping);
+        closed = true;
         try {
           controller.close();
         } catch {}
-        closed = true;
       });
+
+      let emptyPolls = 0;
+      let sinceLastPing = 0;
+      while (!closed) {
+        const { frames, cursor: next, terminal } = readStreamSince(runId, cursor);
+        cursor = next;
+        if (frames.length) {
+          emptyPolls = 0;
+          for (const f of frames) {
+            if (f.kind === "event") send(f.data);
+            else send({ type: "message", message: f.message });
+          }
+          send({ type: "_cursor", cursor });
+        } else {
+          emptyPolls++;
+        }
+        if (terminal) {
+          send({ type: "_eos" });
+          break;
+        }
+        const wait = emptyPolls >= IDLE_BACKOFF_AFTER ? POLL_IDLE_MS : POLL_ACTIVE_MS;
+        sinceLastPing += wait;
+        if (sinceLastPing >= PING_EVERY_MS) {
+          ping();
+          sinceLastPing = 0;
+        }
+        await new Promise((r) => setTimeout(r, wait));
+      }
+      try {
+        controller.close();
+      } catch {}
     },
   });
 

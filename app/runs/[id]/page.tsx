@@ -20,6 +20,9 @@ export default async function RunPage({
 
   const session = await auth();
   const messages = runs.listMessages(runId);
+  // Seed the read-only SSE tail so it streams only rows written after this
+  // server render — the conversation above is already the snapshot.
+  const initialCursor = runs.streamCursor(runId);
   const repositories = repo.listRepositories().map((r) => ({
     id: r.id,
     name: r.name,
@@ -53,6 +56,7 @@ export default async function RunPage({
       <RunView
         run={run}
         initialMessages={messages}
+        initialCursor={initialCursor}
         live={runs.isLive(runId)}
         userEmail={session?.user?.email ?? null}
         repositories={repositories}

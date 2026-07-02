@@ -430,6 +430,31 @@ export function listMessages(runId: number): MessageRow[] {
     .map(hydrateMessage);
 }
 
+/**
+ * Snapshot the current max agent_messages / agent_events ids for a run. The run
+ * page renders the conversation up to this point, then seeds the read-only SSE
+ * tail (lib/run-stream) with this cursor so the stream forwards only rows
+ * written AFTER the snapshot — no duplicate replay of the already-rendered
+ * history, and no gap either (the tail resumes exactly here).
+ */
+export function streamCursor(runId: number): { msgId: number; evtId: number } {
+  const m = db
+    .select({ id: agentMessages.id })
+    .from(agentMessages)
+    .where(eq(agentMessages.runId, runId))
+    .orderBy(desc(agentMessages.id))
+    .limit(1)
+    .get();
+  const e = db
+    .select({ id: agentEvents.id })
+    .from(agentEvents)
+    .where(eq(agentEvents.sessionId, runId))
+    .orderBy(desc(agentEvents.id))
+    .limit(1)
+    .get();
+  return { msgId: m?.id ?? 0, evtId: e?.id ?? 0 };
+}
+
 // ──────────────────────────────────────────────────────────
 // append / cancel / close
 // ──────────────────────────────────────────────────────────

@@ -15,6 +15,13 @@ function addMessage(runId: number, role: string, text: string) {
     .values({ runId, role, content: JSON.stringify([{ type: "text", text }]), createdAt: new Date() })
     .run();
 }
+// Mirrors how lib/runs.emitStatus actually persists: the event kind lives in the
+// `type` column and the payload is JUST `{ status, ...extra }` (no `type` field).
+function addRealStatus(runId: number, status: string, extra: object = {}) {
+  db.insert(agentEvents)
+    .values({ sessionId: runId, type: "status", payload: JSON.stringify({ status, ...extra }), createdAt: new Date() })
+    .run();
+}
 
 describe("readStreamSince", () => {
   it("returns nothing for an empty run and a non-terminal verdict", () => {
@@ -57,5 +64,27 @@ describe("readStreamSince", () => {
     const run = create({ goal: "<chat>", defer: true });
     addEvent(run.id, { type: "status", status: "idle" });
     expect(readStreamSince(run.id, ZERO_CURSOR).terminal).toBe(false);
+  });
+
+  it("surfaces the row `type` on the event frame for production-shaped payloads", () => {
+    // Real agent_events rows keep the kind in the column and omit it from the
+    // JSON payload. The SSE contract the run view consumes is a flat
+    // `{ type:"status", status }` frame, so readStreamSince must fold the
+    // column back in.
+    const run = create({ goal: "<implement>", defer: true });
+    addRealStatus(run.id, "running");
+    const r = readStreamSince(run.id, ZERO_CURSOR);
+    const data = (r.frames[0] as any).data;
+    expect(data.type).toBe("status");
+    expect(data.status).toBe("running");
+    expect(r.terminal).toBe(false);
+  });
+
+  it("flags terminal on a production-shaped terminal status event", () => {
+    const run = create({ goal: "<implement>", defer: true });
+    addRealStatus(run.id, "failed", { error: "boom" });
+    const r = readStreamSince(run.id, ZERO_CURSOR);
+    expect((r.frames[0] as any).data.type).toBe("status");
+    expect(r.terminal).toBe(true);
   });
 });
