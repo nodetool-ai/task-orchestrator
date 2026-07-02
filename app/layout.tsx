@@ -14,7 +14,7 @@ const mono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono", displ
 
 export const metadata: Metadata = {
   title: "Pi Factory",
-  description: "Agent-first cockpit for autonomous coding agents.",
+  description: "The cockpit for autonomous coding agents.",
 };
 
 export const viewport: Viewport = {

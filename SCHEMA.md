@@ -122,8 +122,8 @@ persona_memories         per-persona cross-session notes
 - **Plans**: `P-YYYY-MM-DD-slug` (slug is auto-derived from the title on create)
 - **Tasks**: `T-YYYYMMDD-NNNN` (NNNN is a per-day counter, assigned by the repo)
 
-You can override the ID on creation, but the format is enforced by the
-zod validator on the API.
+You can override the ID on creation; the API's zod validator enforces
+the format.
 
 ## State machines
 
@@ -135,7 +135,7 @@ draft ──▶ proposed ──▶ accepted ──▶ done
   └───────────┴─────────────┴──▶ cancelled
 ```
 
-A plan is considered "done" when every non-cancelled task is `done`.
+A plan is "done" when every non-cancelled task is `done`.
 The transition is **not** automatic — set it explicitly.
 
 ### Tasks
