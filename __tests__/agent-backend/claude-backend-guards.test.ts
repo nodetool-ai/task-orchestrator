@@ -54,4 +54,58 @@ describe("ClaudeBackend.runTurn guards", () => {
     expect(sdk.captured.options.strictMcpConfig).toBe(true);
     expect(Object.keys(sdk.captured.options.mcpServers)).toEqual(["task_orch"]);
   });
+
+  // Grab the single PreToolUse hook the backend wires from the collected
+  // interceptors (see runTurn: hooks.PreToolUse = [{ hooks: [fn] }]).
+  const preToolUseHook = () => sdk.captured.options.hooks.PreToolUse[0].hooks[0];
+
+  it("fires interceptors for MCP-registered tools despite the SDK's mcp__ prefix", async () => {
+    // Runtime regression (the HIGH finding): the SDK exposes in-process MCP
+    // tools to PreToolUse hooks as `mcp__<server>__<tool>`, so an orchestrator
+    // tool registered as `task_orch__create_plan` arrives DOUBLED as
+    // `mcp__task_orch__task_orch__create_plan`. The interceptor keys on the
+    // neutral name, so the hook must strip the prefix before matching — otherwise
+    // every planning stage gate silently allows everything.
+    sdk.captured = null;
+    const gate = (reg: any) =>
+      reg.interceptToolCall((e: any) =>
+        e.toolName === "task_orch__create_plan" ? { block: true, reason: "use commit_spec_as_plan" } : undefined
+      );
+    await new ClaudeBackend().runTurn(makeArgs({ extensions: [gate] }));
+
+    const decision = await preToolUseHook()({
+      tool_name: "mcp__task_orch__task_orch__create_plan",
+      tool_input: { title: "x" },
+    });
+    expect(decision.hookSpecificOutput).toMatchObject({
+      permissionDecision: "deny",
+      permissionDecisionReason: "use commit_spec_as_plan",
+    });
+  });
+
+  it("maps NotebookEdit notebook_path through the interceptor and denormalizes it back", async () => {
+    // NotebookEdit folds to canonical Edit; the hook must surface notebook_path
+    // as `path` so the interceptor sees it, and write any mutation back to
+    // notebook_path so the tool executes with its native shape.
+    sdk.captured = null;
+    let seenPath: unknown = "UNSET";
+    const rewrite = (reg: any) =>
+      reg.interceptToolCall((e: any) => {
+        seenPath = e.input.path; // interceptor must observe the notebook path
+        return { input: { path: "/rewritten/n.ipynb" } };
+      });
+    await new ClaudeBackend().runTurn(makeArgs({ extensions: [rewrite] }));
+
+    const decision = await preToolUseHook()({
+      tool_name: "NotebookEdit",
+      tool_input: { notebook_path: "/orig/n.ipynb", new_source: "code" },
+    });
+    expect(seenPath).toBe("/orig/n.ipynb");
+    expect(decision.hookSpecificOutput.permissionDecision).toBe("allow");
+    // Mutation must land back on notebook_path (not file_path/path).
+    expect(decision.hookSpecificOutput.updatedInput).toEqual({
+      new_source: "code",
+      notebook_path: "/rewritten/n.ipynb",
+    });
+  });
 });

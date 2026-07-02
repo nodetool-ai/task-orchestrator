@@ -81,21 +81,49 @@ describe("mapPiEvent", () => {
     }]);
   });
 
-  it("agent_end emits a result envelope with last assistant text and tokens", () => {
+  it("agent_end sums per-AssistantMessage usage into the result envelope", () => {
+    // pi never puts a `usage` field on agent_end; usage lives on each assistant
+    // message as pi-ai's Usage shape ({input, output, cacheRead, cacheWrite,
+    // cost:{total}}). We sum input/output tokens and cost.total across the
+    // assistant messages. cacheRead/cacheWrite are deliberately NOT folded into
+    // input_tokens (see sumAssistantUsage) — hence input_tokens is 140, not 145.
     const got = mapPiEvent({
       type: "agent_end",
       messages: [
-        { content: [{ type: "text", text: "first" }] },
-        { content: [{ type: "text", text: "final" }] },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "first" }],
+          usage: { input: 100, output: 20, cacheRead: 5, cacheWrite: 0, cost: { total: 0.5 } },
+        },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "final" }],
+          usage: { input: 40, output: 8, cacheRead: 0, cacheWrite: 0, cost: { total: 0.25 } },
+        },
       ],
-      usage: { input_tokens: 100, output_tokens: 20 },
     }, {}, sm("/x"));
     expect(got).toEqual([{
       type: "result",
       result: "final",
       is_error: false,
+      total_cost_usd: 0.75,
+      usage: { input_tokens: 140, output_tokens: 28 },
+    }]);
+  });
+
+  it("agent_end reports null usage/cost when no assistant message carries usage", () => {
+    // A run with no usage-bearing assistant message keeps the 'unknown' semantics
+    // (usage undefined, cost null) instead of reporting a false 0.
+    const got = mapPiEvent({
+      type: "agent_end",
+      messages: [{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" }],
+    }, {}, sm("/x"));
+    expect(got).toEqual([{
+      type: "result",
+      result: "done",
+      is_error: false,
       total_cost_usd: null,
-      usage: { input_tokens: 100, output_tokens: 20 },
+      usage: undefined,
     }]);
   });
 

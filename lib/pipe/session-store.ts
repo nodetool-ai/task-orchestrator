@@ -11,12 +11,30 @@ import { db } from "@/db";
 import { channelThreads } from "@/db/schema";
 import * as chat from "@/lib/chat";
 import * as repo from "@/lib/repo";
+import * as runs from "@/lib/runs";
+import { isTerminalStatus } from "@/lib/types";
 
 export interface GetOrCreateOptions {
   /** Provider-qualified model ("provider/id") to set on a freshly created run. */
   model?: string;
   /** Title for a freshly created run; defaults to "<channel>:<externalId>". */
   title?: string;
+}
+
+/**
+ * A run the bridge can no longer resume: runs.append would hard-reject it
+ * (closed/cancelled, or any other non-resumable terminal state). Mirrors the
+ * resumability guard in runs.append so getOrCreateRun recreates exactly when a
+ * further message would otherwise fail. `idle` and in-flight/pending runs are
+ * NOT dangling (they resume or queue normally); resumable worktree chats that
+ * landed `completed`/`failed`/`budget_exhausted` are kept too.
+ */
+function isDanglingRun(run: runs.RunRow): boolean {
+  return (
+    isTerminalStatus(run.status) &&
+    run.status !== "idle" &&
+    !runs.isResumableWorktreeRun(run.status, run.cwdStrategy)
+  );
 }
 
 /** Find the existing run for (channel, externalId), or create a fresh chat run. */
@@ -31,11 +49,19 @@ export function getOrCreateRun(
     .where(and(eq(channelThreads.channel, channel), eq(channelThreads.externalId, externalId)))
     .get();
 
-  // Guard against a dangling mapping whose run was deleted out from under us.
-  // ON DELETE CASCADE should prevent this, but a manual delete or a stale row is
-  // possible — drop it and fall through to create a fresh run.
-  if (existing && chat.getChat(existing.runId)) return existing.runId;
-  if (existing) db.delete(channelThreads).where(eq(channelThreads.id, existing.id)).run();
+  // Guard against a dangling mapping. Two ways a mapping goes dangling:
+  //   • the run row was deleted out from under us (ON DELETE CASCADE should
+  //     prevent this, but a manual delete or a stale row is possible), or
+  //   • the run still exists but is non-resumable — a closed/cancelled run that
+  //     runs.append hard-rejects ("is closed; fork it to continue"). Keeping the
+  //     mapping would wedge the thread: every future message would finalize to
+  //     that un-actionable error instead of starting a usable conversation.
+  // In both cases drop the mapping and fall through to create a fresh run.
+  if (existing) {
+    const run = runs.getRun(existing.runId);
+    if (run && !isDanglingRun(run)) return existing.runId;
+    db.delete(channelThreads).where(eq(channelThreads.id, existing.id)).run();
+  }
 
   // Leave the title at createChat's "New chat" default (unless a caller overrides
   // it) so runChat auto-titles the run from the first user message — the web

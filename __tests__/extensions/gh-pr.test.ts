@@ -194,4 +194,22 @@ describe("ghPrExtension", () => {
       "gh_pr__pr_view",
     ]);
   });
+
+  it("pr_merge exposes an OPTIONAL delete_branch param alongside required url+method", () => {
+    // The executor persona's merge step passes delete_branch=true; the tool
+    // schema previously only had {url, method}, so delete_branch was silently
+    // dropped and merged branches piled up on the remote. It must now be a
+    // known (optional) parameter so gh gets --delete-branch.
+    const { calls, pi } = makeStub();
+    ghPrExtension({ cwd: "/tmp" })(pi);
+    const merge = calls.find((c) => c.name === "gh_pr__pr_merge");
+    expect(merge).toBeDefined();
+    const schema = merge!.def.parameters;
+    expect(Object.keys(schema.properties)).toEqual(
+      expect.arrayContaining(["url", "method", "delete_branch"])
+    );
+    // delete_branch is optional; url + method stay required.
+    expect(schema.required).toEqual(expect.arrayContaining(["url", "method"]));
+    expect(schema.required).not.toContain("delete_branch");
+  });
 });

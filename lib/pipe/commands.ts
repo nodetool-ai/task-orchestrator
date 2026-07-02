@@ -16,6 +16,22 @@ export interface CommandResult {
   reply?: string;
 }
 
+// A turn may run either in this (bridge) process — tracked by runs.isLive via the
+// in-process runners map — or in the web server process, which shares the SQLite
+// DB. The web turn is invisible to isLive/interrupt, so /status and /stop also
+// consult the DB liveness lease: an active status with a fresh heartbeat.
+//
+// NOTE: runs.ts keeps isLeaseLive (and these constants) private, so we recompute
+// the lease locally. If runs.ts later exports isLeaseLive, prefer importing it.
+const LEASE_STATUSES = new Set(["running", "preparing", "pushing", "opening_pr"]);
+const HEARTBEAT_STALE_MS = 5 * 60_000;
+
+/** True when the run holds a live DB lease (active status + fresh heartbeat). */
+function leaseLive(run: runs.RunRow | null): boolean {
+  if (!run || !LEASE_STATUSES.has(run.status)) return false;
+  return run.heartbeatAt != null && Date.now() - run.heartbeatAt.getTime() < HEARTBEAT_STALE_MS;
+}
+
 const HELP = [
   "**Commands**",
   "`/stop` — interrupt the agent's current turn (aliases: `/cancel`, `/abort`)",
@@ -47,11 +63,24 @@ export async function handleCommand(
         return { handled: true, reply: "Nothing to stop — no active conversation yet." };
       }
       const stopped = runs.interrupt(id);
+      if (stopped) {
+        return {
+          handled: true,
+          reply: `⏹️ Stopped run #${id}. Send another message to continue, or \`/new\` to start fresh.`,
+        };
+      }
+      // No local runner to abort. If the DB lease is live, the turn is owned by
+      // another process (e.g. the web composer) — say so rather than claiming
+      // nothing is running, which would be plainly wrong to the user.
+      if (leaseLive(runs.getRun(id))) {
+        return {
+          handled: true,
+          reply: `Run #${id} is working in another process (e.g. the web app). \`/stop\` can only interrupt turns started here — stop it from where it was started.`,
+        };
+      }
       return {
         handled: true,
-        reply: stopped
-          ? `⏹️ Stopped run #${id}. Send another message to continue, or \`/new\` to start fresh.`
-          : `Nothing to stop — run #${id} isn't working on anything right now.`,
+        reply: `Nothing to stop — run #${id} isn't working on anything right now.`,
       };
     }
 
@@ -60,12 +89,26 @@ export async function handleCommand(
       if (!id) {
         return { handled: true, reply: "No active conversation yet — send a message to start one." };
       }
-      const model = chat.getChat(id)?.model ?? config.defaultModel;
+      const run = runs.getRun(id);
+      const model = chat.getChat(id)?.model ?? run?.model ?? config.defaultModel;
+      // A turn started here → we can stop it. A turn started in the web process
+      // shows a live DB lease but no local runner → report it, but be honest
+      // that /stop won't reach it. Otherwise the run is idle.
+      if (runs.isLive(id)) {
+        return {
+          handled: true,
+          reply: `🟢 Working on run #${id} (model \`${model}\`). Send \`/stop\` to interrupt.`,
+        };
+      }
+      if (leaseLive(run)) {
+        return {
+          handled: true,
+          reply: `🟢 Working on run #${id} (model \`${model}\`) in another process (e.g. the web app). \`/stop\` can only interrupt turns started here.`,
+        };
+      }
       return {
         handled: true,
-        reply: runs.isLive(id)
-          ? `🟢 Working on run #${id} (model \`${model}\`). Send \`/stop\` to interrupt.`
-          : `⚪ Idle — run #${id}, model \`${model}\`. Send a message to start a turn.`,
+        reply: `⚪ Idle — run #${id}, model \`${model}\`. Send a message to start a turn.`,
       };
     }
 

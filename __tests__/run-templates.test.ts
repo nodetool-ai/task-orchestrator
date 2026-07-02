@@ -312,6 +312,23 @@ describe("extractReviewOutcome", () => {
     // No JSON object found → falls back to first line.
     expect(outcome).toBe('"verdict": "approve" but not really');
   });
+
+  it("extracts the verdict even when prose has an odd number of double-quotes", () => {
+    // An inch mark (27") leaves an unpaired quote in the prose before the JSON
+    // block. The old scanner toggled inString on every quote at depth 0, so it
+    // entered the block "in a string" and swallowed the opening brace, dropping
+    // the verdict and stranding the review (approve → done never fired).
+    const text = [
+      'Renders fine on a 27" display and the layout holds up.',
+      "",
+      "```json",
+      JSON.stringify({ verdict: "approve", summary: "All criteria satisfied." }),
+      "```",
+    ].join("\n");
+    const outcome = extractReviewOutcome(text);
+    expect(outcome).not.toBeNull();
+    expect(parseReviewVerdict(outcome)).toBe("approve");
+  });
 });
 
 describe("parseReviewVerdict", () => {

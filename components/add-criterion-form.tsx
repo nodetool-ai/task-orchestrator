@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Plus } from "lucide-react";
+import { describe } from "@/lib/utils";
 
 export function AddCriterionForm({ taskId }: { taskId: string }) {
   const router = useRouter();
@@ -15,18 +16,22 @@ export function AddCriterionForm({ taskId }: { taskId: string }) {
     if (!text.trim()) return;
     setError(null);
     startTransition(async () => {
-      const res = await fetch(`/api/tasks/${taskId}/criteria`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: text.trim() }),
-      });
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}));
-        setError(e.error ?? `HTTP ${res.status}`);
-        return;
+      try {
+        const res = await fetch(`/api/tasks/${taskId}/criteria`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: text.trim() }),
+        });
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          setError(e.error ?? `HTTP ${res.status}`);
+          return;
+        }
+        setText("");
+        router.refresh();
+      } catch (err) {
+        setError(describe(err));
       }
-      setText("");
-      router.refresh();
     });
   };
 

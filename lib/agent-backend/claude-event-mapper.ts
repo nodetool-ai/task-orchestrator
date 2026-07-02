@@ -18,11 +18,19 @@ export function mapClaudeMessage(msg: any): RunEnvelope[] {
       return [];
     }
     case "assistant": {
+      // Subagent (Task tool) activity is forwarded in the main stream with
+      // parent_tool_use_id set. Don't merge those tool_use blocks into the main
+      // run's transcript — they belong to the nested Task, whose tool_result the
+      // main agent receives separately.
+      if (msg.parent_tool_use_id != null) return [];
       const content = (msg.message?.content as RunEnvelopeContentBlock[] | undefined) ?? [];
       if (!Array.isArray(content) || content.length === 0) return [];
       return [{ type: "assistant", message: { content } }];
     }
     case "user": {
+      // Skip subagent tool_result blocks (parent_tool_use_id set) for the same
+      // reason as above — they'd be misattributed to the main run.
+      if (msg.parent_tool_use_id != null) return [];
       // User messages carry tool_result blocks back from the agent. The user's
       // own prompt is persisted upstream, so only forward tool_result content.
       const content = (msg.message?.content as RunEnvelopeContentBlock[] | undefined) ?? [];

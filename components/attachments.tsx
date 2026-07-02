@@ -4,7 +4,7 @@ import { useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { FileText, Loader2, Paperclip, Trash2, Upload } from "lucide-react";
 import type { AttachmentMeta } from "@/lib/types";
-import { cn, formatBytes, relativeDate } from "@/lib/utils";
+import { cn, describe, formatBytes, relativeDate } from "@/lib/utils";
 
 interface Props {
   scope: "task" | "plan";
@@ -26,18 +26,23 @@ export function Attachments({ scope, ownerId, attachments }: Props) {
     setError(null);
     const list = Array.from(files);
     startTransition(async () => {
-      for (const file of list) {
-        const form = new FormData();
-        form.append("file", file);
-        const res = await fetch(uploadBase, { method: "POST", body: form });
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          setError(body.error ?? `Upload failed (HTTP ${res.status})`);
-          break;
+      try {
+        for (const file of list) {
+          const form = new FormData();
+          form.append("file", file);
+          const res = await fetch(uploadBase, { method: "POST", body: form });
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            setError(body.error ?? `Upload failed (HTTP ${res.status})`);
+            break;
+          }
         }
+      } catch (err) {
+        setError(describe(err));
+      } finally {
+        if (inputRef.current) inputRef.current.value = "";
+        router.refresh();
       }
-      if (inputRef.current) inputRef.current.value = "";
-      router.refresh();
     });
   };
 
@@ -45,13 +50,18 @@ export function Attachments({ scope, ownerId, attachments }: Props) {
     setError(null);
     setDeletingId(id);
     startTransition(async () => {
-      const res = await fetch(`/api/attachments/${id}`, { method: "DELETE" });
-      if (!res.ok && res.status !== 204) {
-        const body = await res.json().catch(() => ({}));
-        setError(body.error ?? `Delete failed (HTTP ${res.status})`);
+      try {
+        const res = await fetch(`/api/attachments/${id}`, { method: "DELETE" });
+        if (!res.ok && res.status !== 204) {
+          const body = await res.json().catch(() => ({}));
+          setError(body.error ?? `Delete failed (HTTP ${res.status})`);
+        }
+      } catch (err) {
+        setError(describe(err));
+      } finally {
+        setDeletingId(null);
+        router.refresh();
       }
-      setDeletingId(null);
-      router.refresh();
     });
   };
 

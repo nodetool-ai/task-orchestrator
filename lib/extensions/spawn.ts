@@ -14,7 +14,10 @@ import { db } from "@/db";
 import { agentSessions, agentMessages } from "@/db/schema";
 import * as repo from "../repo";
 import * as runs from "../runs";
+import { isResumableWorktreeRun } from "../runs";
 import type { RunRow, CwdStrategy } from "../runs";
+import { isTerminalStatus } from "../types";
+import type { SessionStatus } from "../types";
 import { listProfiles } from "../profiles";
 import type { ExtensionFactory } from "./types";
 
@@ -184,19 +187,25 @@ export function checkSpawnStartable(args: {
 
 /**
  * Pure predicate: should an append_message call be refused because the target
- * run is in a state from which it cannot be resumed?
+ * run is in a state from which runs.append could not resume it?
+ *
+ * This mirrors runs.append's real gate (lib/runs.ts) rather than an independent,
+ * stricter rule. runs.append only refuses a terminal status when the run is NOT
+ * a resumable worktree run: implement-style worktree children deliberately land
+ * `completed` after every turn but remain resumable (their branch + worktree
+ * re-materialize on demand via prepareCwd), so the executor persona's
+ * retry/request_changes loop can append to them. `closed` is a hard stop
+ * (archived; must be forked); `cancelled` is never resumable.
  *
  * Returns null if the append is admissible, or an error message otherwise.
  */
-export function checkAppendableStatus(status: string): string | null {
+export function checkAppendableStatus(status: string, cwdStrategy: string): string | null {
   if (status === "closed") {
     return `Run is closed; cannot append. Closed runs are archived and must be forked to continue.`;
   }
   if (
-    status === "completed" ||
-    status === "failed" ||
-    status === "cancelled" ||
-    status === "budget_exhausted"
+    isTerminalStatus(status as SessionStatus) &&
+    !isResumableWorktreeRun(status, cwdStrategy)
   ) {
     return `Run is in terminal status '${status}'; cannot append.`;
   }
@@ -528,13 +537,34 @@ export const spawnExtension =
       name: "spawn__append_message",
       label: "Append Message",
       description:
-        "Send a user message to an existing run, resuming its SDK session. Uses the same per-run lock as the UI composer, so this is safe to call concurrently with the UI. When await=true, blocks until the run returns to idle (or a terminal state) and returns the new agent text. Refuses on runs in a terminal status (closed/completed/failed/cancelled/budget_exhausted). Same tree-budget cap as spawn__spawn_agent.",
+        "Send a user message to an existing run, resuming its SDK session. Uses the same per-run lock as the UI composer, so this is safe to call concurrently with the UI. When await=true, blocks until the run returns to idle (or a terminal state) and returns the new agent text. Refuses on closed/cancelled runs, and on completed/failed/budget_exhausted runs that are NOT resumable worktree (implement-style) children — those can be resumed even after they land 'completed'. Cannot target your own run or a mid-turn ancestor (that would deadlock). Same tree-budget cap as spawn__spawn_agent.",
       parameters: Type.Object({
         run_id: Type.Integer({ minimum: 1 }),
         text: Type.String({ minLength: 1 }),
         await: Type.Optional(Type.Boolean()),
       }),
       execute: async (_id, args) => {
+        // 0. Self / ancestor guard. runs.append grabs the per-run lock BEFORE
+        //    any status/liveness check, and the caller's own in-flight turn
+        //    holds that lock for the whole turn. Appending to self — or to a
+        //    mid-turn ancestor that is waiting on this very child — would block
+        //    forever on that lock (permanent deadlock with await=true; a leaked
+        //    drain promise with await=false). Reject up front instead.
+        if (args.run_id === runId) {
+          return errResult(
+            `Cannot append_message to your own run (${runId}): the per-run lock is held ` +
+              `by your in-flight turn, so this would deadlock. Continue your own work directly ` +
+              `instead of messaging yourself.`
+          );
+        }
+        const ancestorChain = walkParentChain(runRow.parentRunId, MAX_DEPTH + 2);
+        if (ancestorChain.some((a) => a.id === args.run_id)) {
+          return errResult(
+            `Cannot append_message to ancestor run ${args.run_id}: it is mid-turn (it spawned ` +
+              `and is awaiting this run), so appending would deadlock on its per-run lock.`
+          );
+        }
+
         // 1. Tree-budget enforcement based on the *caller's* tree.
         const callerRoot = findRoot(runRow);
         const callerSubtree = collectSubtree(callerRoot.id);
@@ -565,7 +595,7 @@ export const spawnExtension =
         if (!target) {
           return errResult(`Run ${args.run_id} not found.`);
         }
-        const refusal = checkAppendableStatus(target.status);
+        const refusal = checkAppendableStatus(target.status, target.cwdStrategy);
         if (refusal) {
           return errResult(refusal);
         }
@@ -592,11 +622,21 @@ export const spawnExtension =
         })();
 
         if (!awaitIdle) {
-          const racedError = await Promise.race([
-            drain.then(() => null),
-            new Promise<null>((res) => setImmediate(() => res(null))),
+          // Give a synchronously-failing append a chance to record its error
+          // before we report back: race the drain against one setImmediate tick.
+          // runs.append yields its up-front errors (target not found / already
+          // in flight in another process / non-resumable terminal / prepareCwd
+          // failure that rejects immediately) within microtasks, which settle
+          // before the setImmediate macrotask fires — so appendError is
+          // populated for those cases and we surface a real error instead of a
+          // false {status: 'running'}.
+          await Promise.race([
+            drain,
+            new Promise<void>((res) => setImmediate(res)),
           ]);
-          void racedError;
+          if (appendError) {
+            return errResult(`append failed: ${appendError}`);
+          }
           return ok(
             JSON.stringify(
               {

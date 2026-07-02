@@ -88,10 +88,14 @@ export const addCriterionSchema = z.object({
   text: z.string().min(1).max(500),
 });
 
-export const updateCriterionSchema = z.object({
-  done: z.boolean().optional(),
-  text: z.string().min(1).max(500).optional(),
-});
+export const updateCriterionSchema = z
+  .object({
+    done: z.boolean().optional(),
+    text: z.string().min(1).max(500).optional(),
+  })
+  .refine((p) => p.done !== undefined || p.text !== undefined, {
+    message: "Provide at least one of done or text",
+  });
 
 export const startSessionSchema = z.object({
   model: z.string().optional(),

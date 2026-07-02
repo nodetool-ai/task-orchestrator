@@ -184,6 +184,10 @@ export interface AppendInput {
   author?: string;
   /** External abort handle; if omitted the runner makes its own. */
   abort?: AbortController;
+  /** For a worktree run's FIRST turn: the base branch to branch from / open the
+   *  PR against. Ignored once the run's branch exists. Falls back to the repo
+   *  default branch when unset. */
+  baseBranch?: string;
 }
 
 export interface AppendStreamEvent {
@@ -281,6 +285,22 @@ export function create(input: CreateRunInput): RunRow {
       400
     );
   }
+  // Validate the worktree invariants BEFORE inserting the row. Doing this after
+  // the insert (the old behaviour) returned the intended 400 but left an
+  // undriveable 'pending' ghost run behind (kickoff never starts; neither
+  // reaper covers it). Mirror the <execute> planId check above.
+  if (!input.defer && goal !== "<chat>" && cwdStrategy === "worktree" && !input.taskId) {
+    throw new repo.RepoError(
+      "Worktree runs require a taskId (the engine creates a branch and PR for the task).",
+      400
+    );
+  }
+  if (!input.defer && cwdStrategy === "worktree_at_pr" && !input.prUrl) {
+    throw new repo.RepoError(
+      "cwd_strategy=worktree_at_pr requires a prUrl (the worktree is created from the PR's head ref).",
+      400
+    );
+  }
 
   // Resolve the effective model. The model is a per-run choice (the run-agent
   // dialog / chat composers emit a provider-qualified "provider/id"); it is no
@@ -332,26 +352,19 @@ export function create(input: CreateRunInput): RunRow {
   // (runs.append → branch create → turn → conditional push/PR). Deferred runs
   // (chat box, bare test runs) skip this and wait for the user's first message.
   if (!input.defer && goal !== "<chat>" && cwdStrategy === "worktree") {
-    if (!input.taskId) {
-      throw new repo.RepoError(
-        "Worktree runs require a taskId (the engine creates a branch and PR for the task).",
-        400
-      );
-    }
-    const task = repo.getTask(input.taskId)!;
-    void kickoffFirstTurn(run.id, input.initialPrompt ?? buildImplementPrompt(task));
+    // taskId presence validated before the insert above.
+    const task = repo.getTask(input.taskId!)!;
+    void kickoffFirstTurn(
+      run.id,
+      input.initialPrompt ?? buildImplementPrompt(task),
+      input.baseBranch
+    );
   }
 
   // Review-style runs: spin up a worktree at the PR's head ref and run a
-  // single agent turn against it. Requires a prUrl on the run.
+  // single agent turn against it. Requires a prUrl on the run (validated above).
   if (!input.defer && cwdStrategy === "worktree_at_pr") {
-    if (!input.prUrl) {
-      throw new repo.RepoError(
-        "cwd_strategy=worktree_at_pr requires a prUrl (the worktree is created from the PR's head ref).",
-        400
-      );
-    }
-    void runReview(run.id, input.prUrl, input.initialPrompt ?? null);
+    void runReview(run.id, input.prUrl!, input.initialPrompt ?? null);
   }
 
   // Plan-executor runs: a single long-running agent that drives a whole plan
@@ -443,6 +456,10 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     rejectRelease = rej;
   });
   let heartbeat: ReturnType<typeof setInterval> | null = null;
+  // Whether THIS append created the in-process runner. Guards the finally so an
+  // early-return reject path (run missing / already in flight / terminal) never
+  // deletes a runner owned by another worker (runReview/runExecute/followUp).
+  let ownsRunner = false;
 
   try {
     let run = get(input.runId);
@@ -450,12 +467,17 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       yield { type: "error", error: `Run ${input.runId} not found` };
       return;
     }
-    if (isLeaseLive(run)) {
-      // A live lease (active status + fresh heartbeat) means a turn is genuinely
-      // in flight — here or in another process. The in-process lock covers the
-      // same-process race; this covers cross-process. A run in an active status
-      // with a STALE heartbeat is an orphan (its owner crashed), so we fall
-      // through and take it over instead of rejecting forever.
+    if (runners.has(input.runId) || isLeaseLive(run)) {
+      // A live turn is in flight and must not be double-driven:
+      //   • runners.has → an in-process runner exists (append/runReview/
+      //     runExecute/followUp is mid-turn in THIS process). The per-run lock
+      //     covers concurrent appends, but the review/execute/follow-up workers
+      //     don't take that lock, so this guards against them directly.
+      //   • isLeaseLive → an active status with a fresh heartbeat, i.e. a turn
+      //     genuinely in flight in ANOTHER process.
+      // A run in an active status with a STALE heartbeat (and no local runner)
+      // is an orphan whose owner crashed, so we fall through and take it over
+      // instead of rejecting forever.
       yield {
         type: "error",
         error: `Run ${input.runId} is already in flight (status=${run.status}).`,
@@ -488,8 +510,18 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // (prepare → turn → push/PR). The interval ticks even while a slow model or
     // tool call is awaited, so a long-but-alive turn is never mistaken for an
     // orphan. Cleared in the finally below.
-    touchHeartbeat(input.runId);
-    heartbeat = setInterval(() => touchHeartbeat(input.runId), HEARTBEAT_INTERVAL_MS);
+    heartbeat = startHeartbeat(input.runId);
+
+    // Register the abort handle and bus BEFORE the (seconds-long) worktree prep.
+    // If we waited until after prepareCwd (the old behaviour), a cancel()/
+    // interrupt()/close() landing during `git worktree add` would find no runner
+    // and fail to abort — the turn would then run to completion and its final
+    // update would resurrect a row the user already cancelled.
+    const author = input.author ?? authorFor(run);
+    const abort = input.abort ?? new AbortController();
+    const bus = new EventEmitter();
+    runners.set(run.id, { abort, bus });
+    ownsRunner = true;
 
     // First turn of a worktree run: create its branch + worktree. On later
     // turns this is a no-op and prepareCwd re-materializes a missing worktree
@@ -497,19 +529,29 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // survives, so we recreate it).
     let cwd: string;
     try {
-      run = await ensureWorktreeBranch(run);
+      run = await ensureWorktreeBranch(run, input.baseBranch);
       cwd = await prepareCwd(run);
     } catch (err) {
+      if (abort.signal.aborted) {
+        // cancel()/interrupt()/close() fired during prep; respect their row.
+        repairAbortedRun(input.runId);
+        yield { type: "done" };
+        return;
+      }
       const msg = describe(err);
       setError(run.id, msg);
       yield { type: "error", error: msg };
       return;
     }
 
-    const author = input.author ?? authorFor(run);
-    const abort = input.abort ?? new AbortController();
-    const bus = new EventEmitter();
-    runners.set(run.id, { abort, bus });
+    // A cancel()/close() that landed during prep already wrote a terminal row
+    // (and cancel() removed the worktree). Bail before spending a full model
+    // turn on a run the user already stopped.
+    if (abort.signal.aborted) {
+      repairAbortedRun(input.runId);
+      yield { type: "done" };
+      return;
+    }
 
     let result: TurnResult;
     try {
@@ -525,15 +567,26 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
         },
       });
     } catch (err) {
-      runners.delete(run.id);
       if (abort.signal.aborted) {
-        // cancel() already updated the row.
+        // Aborted mid-turn. cancel()/interrupt()/close() rewrote the row; a bare
+        // client-disconnect (req.signal → input.abort) did not — repair the
+        // stranded 'running' row so it doesn't look in-flight forever.
+        repairAbortedRun(input.runId);
         yield { type: "done" };
         return;
       }
       const msg = describe(err);
       setError(run.id, msg);
       yield { type: "error", error: msg };
+      return;
+    }
+
+    // The turn resolved normally but the signal may have aborted right at the
+    // end (backend swallowed it). Respect any terminal row the aborter wrote /
+    // repair a stranded lease instead of overwriting it below.
+    if (abort.signal.aborted) {
+      repairAbortedRun(input.runId);
+      yield { type: "done" };
       return;
     }
 
@@ -550,7 +603,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     let prUrlUpdate = run.prUrl;
     if (isImplementWorktree(run)) {
       try {
-        prUrlUpdate = await gitSyncAfterTurn(run, cwd, result.summary);
+        prUrlUpdate = await gitSyncAfterTurn(run, cwd, result.summary, input.baseBranch);
       } catch (err) {
         persistMessage(run.id, "system", [
           { type: "text", text: `Push/PR sync failed: ${describe(err)}` },
@@ -574,7 +627,10 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       run.goal === "<review>"
         ? extractReviewOutcome(result.summary) ?? run.outcome
         : run.outcome;
-    db.update(agentSessions)
+    // Conditional on the row NOT already being terminal-by-user: a cancel()/
+    // close() that raced in right as the turn ended must win. Without the WHERE
+    // guard this update would resurrect a 'cancelled'/'closed' run.
+    const finalUpdate = db.update(agentSessions)
       .set({
         status: nextStatus,
         sdkSessionId: result.sdkSessionId ?? run.sdkSessionId,
@@ -585,19 +641,26 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
         prUrl: prUrlUpdate,
         completedAt: budgetHit || landsCompleted ? new Date() : null,
       })
-      .where(eq(agentSessions.id, run.id))
+      .where(
+        and(
+          eq(agentSessions.id, run.id),
+          notInArray(agentSessions.status, ["cancelled", "closed"])
+        )
+      )
       .run();
     // Tell live SSE subscribers (the run-view in the browser) that the turn
-    // ended — emit BEFORE dropping the runner so the bus still exists. The
-    // Agent-button kickoff drains this generator with no POST consumer, so the
-    // /events bus is its only live signal. Without it the client's React state
-    // stays at "running" and the composer renders the queue hint forever.
-    emitStatus(run.id, nextStatus);
-    runners.delete(run.id);
+    // ended — emit BEFORE dropping the runner (in the finally) so the bus still
+    // exists. Only emit when we actually wrote the row; if a cancel()/close()
+    // won the race the update was a no-op and the aborter already emitted.
+    if (finalUpdate.changes > 0) emitStatus(run.id, nextStatus);
 
     yield { type: "done" };
   } finally {
     if (heartbeat) clearInterval(heartbeat);
+    // Drop the in-process runner on every exit path (success, error, abort) —
+    // but only if THIS append created it. Leaving it set would make the guard
+    // above reject the next message with a false "already in flight".
+    if (ownsRunner) runners.delete(input.runId);
     release();
     lock.busy = null;
     // Make eslint happy about unused binder; actually exposed above as fallback.
@@ -712,6 +775,9 @@ export async function followUp(
   const abort = new AbortController();
   const bus = new EventEmitter();
   runners.set(runId, { abort, bus });
+  // Keep the liveness lease fresh so this webhook-driven follow-up turn isn't
+  // treated as an orphan by append()/reconcileOrphanedRuns() mid-turn.
+  const heartbeat = startHeartbeat(runId);
 
   try {
     persistMessage(runId, "system", [{ type: "text", text: prompt }]);
@@ -759,6 +825,7 @@ export async function followUp(
   } catch (err) {
     if (!abort.signal.aborted) setError(runId, describe(err));
   } finally {
+    clearInterval(heartbeat);
     closeBus(runId);
     runners.delete(runId);
     cleanupWorktree(run.worktreePath, repoRoot(run)).catch(() => {});
@@ -891,9 +958,9 @@ function repoDefaultBranch(run: { repoId: string | null; taskId: string | null }
  * worktree off the base branch, persist them, and move the task to in_progress.
  * No-op once a branch exists (later turns re-materialize via prepareCwd).
  */
-async function ensureWorktreeBranch(run: RunRow): Promise<RunRow> {
+async function ensureWorktreeBranch(run: RunRow, baseBranch?: string): Promise<RunRow> {
   if (run.cwdStrategy !== "worktree" || run.branch) return run;
-  const base = repoDefaultBranch(run);
+  const base = baseBranch?.trim() || repoDefaultBranch(run);
   const root = repoRoot(run);
   const worktreeRoot = resolve(root, ".worktrees");
   const branch = worktreeBranchName(run);
@@ -932,10 +999,11 @@ async function ensureWorktreeBranch(run: RunRow): Promise<RunRow> {
 async function gitSyncAfterTurn(
   run: RunRow,
   cwd: string,
-  summary: string | null
+  summary: string | null,
+  baseBranch?: string
 ): Promise<string | null> {
   if (!run.branch) return run.prUrl;
-  const base = repoDefaultBranch(run);
+  const base = baseBranch?.trim() || repoDefaultBranch(run);
   // Count the commits this branch added beyond its base. Prefer the
   // remote-tracking base (origin/<base>): it reflects the branch's real PR base
   // and isn't thrown off by a stale local checkout of <base>. Fall back to the
@@ -976,9 +1044,13 @@ async function gitSyncAfterTurn(
 }
 
 /** Fire a worktree run's first turn through the unified engine, server-side. */
-async function kickoffFirstTurn(runId: number, prompt: string): Promise<void> {
+async function kickoffFirstTurn(
+  runId: number,
+  prompt: string,
+  baseBranch?: string
+): Promise<void> {
   try {
-    for await (const ev of append({ runId, role: "user", text: prompt })) {
+    for await (const ev of append({ runId, role: "user", text: prompt, baseBranch })) {
       void ev; // drained; live events reach the run-view via the /events bus
     }
   } catch {
@@ -998,6 +1070,10 @@ async function runReview(
   const abort = new AbortController();
   const bus = new EventEmitter();
   runners.set(runId, { abort, bus });
+  // Keep the liveness lease fresh for the whole worker (prepare → turn), so an
+  // append()/reconcileOrphanedRuns() can't mistake this live review for an
+  // orphan and take it over / mark it failed mid-turn.
+  const heartbeat = startHeartbeat(runId);
 
   let run = get(runId)!;
   const root = repoRoot(run);
@@ -1106,6 +1182,7 @@ async function runReview(
     }
     setError(runId, describe(err));
   } finally {
+    clearInterval(heartbeat);
     closeBus(runId);
     runners.delete(runId);
     cleanupWorktree(worktreePath, root).catch(() => {});
@@ -1124,6 +1201,9 @@ async function runExecute(
   const abort = new AbortController();
   const bus = new EventEmitter();
   runners.set(runId, { abort, bus });
+  // Keep the liveness lease fresh for the whole (long-running) executor turn so
+  // append()/reconcileOrphanedRuns() never treat this live run as an orphan.
+  const heartbeat = startHeartbeat(runId);
 
   let run = get(runId)!;
 
@@ -1193,6 +1273,7 @@ async function runExecute(
     }
     setError(runId, describe(err));
   } finally {
+    clearInterval(heartbeat);
     closeBus(runId);
     runners.delete(runId);
   }
@@ -1388,6 +1469,16 @@ function checkBudget(run: RunRow, result: TurnResult): boolean {
   // result's num_turns), so a given budgetMaxTurns may behave slightly
   // differently across backends.
   if (run.budgetMaxTurns != null && result.turns >= run.budgetMaxTurns) return true;
+  // Wall-clock cap: exhaust the run once the elapsed time since it started meets
+  // or exceeds the configured budget. Checked at turn end (same cadence as
+  // maxTurns), so an in-progress turn finishes and then the run lands
+  // budget_exhausted rather than starting another.
+  if (
+    run.budgetMaxSeconds != null &&
+    Date.now() - run.startedAt.getTime() >= run.budgetMaxSeconds * 1000
+  ) {
+    return true;
+  }
   // budgetMaxUsd is not enforced: pi exposes no cost surface (totalCostUsd is
   // null), and while the Claude backend does report total_cost_usd we keep the
   // cap dormant for parity. Column kept for historical data (see SCHEMA.md).
@@ -1436,7 +1527,7 @@ const HEARTBEAT_INTERVAL_MS = 20_000;
  * interval keeps ticking even while a slow model/tool call is awaited, so this
  * only needs slack for scheduling jitter / GC pauses).
  */
-const HEARTBEAT_STALE_MS = 5 * 60_000;
+export const HEARTBEAT_STALE_MS = 5 * 60_000;
 
 /** Bump a run's heartbeat to now. Best-effort; a missed bump just risks a reap. */
 function touchHeartbeat(runId: number): void {
@@ -1446,10 +1537,50 @@ function touchHeartbeat(runId: number): void {
     .run();
 }
 
+/**
+ * Open the liveness lease and keep it fresh for the whole active period of a
+ * turn/worker (prepare → turn → push/PR). Returns the interval handle; the
+ * caller MUST clear it (in a finally) when the active period ends. The interval
+ * keeps ticking even while a slow model/tool call is awaited, so a long-but-live
+ * turn is never mistaken for an orphan by isLeaseLive()/reconcileOrphanedRuns().
+ */
+function startHeartbeat(runId: number): ReturnType<typeof setInterval> {
+  touchHeartbeat(runId);
+  return setInterval(() => touchHeartbeat(runId), HEARTBEAT_INTERVAL_MS);
+}
+
 /** True when this run holds a live lease: active status with a fresh heartbeat. */
-function isLeaseLive(run: { status: string; heartbeatAt: Date | null }, now = Date.now()): boolean {
+export function isLeaseLive(
+  run: { status: string; heartbeatAt: Date | null },
+  now = Date.now()
+): boolean {
   if (!LEASE_STATUSES.includes(run.status as SessionStatus)) return false;
   return run.heartbeatAt != null && now - run.heartbeatAt.getTime() < HEARTBEAT_STALE_MS;
+}
+
+/**
+ * Repair a run whose in-flight turn was aborted. If cancel()/interrupt()/close()
+ * already rewrote the row out of a lease status, we leave their terminal/idle
+ * result alone. But a bare client-disconnect (req.signal → the append's abort)
+ * aborts the turn with NO status rewrite, stranding the row in an active status
+ * (it looks "in flight" forever and rejects every new message until the lease
+ * goes stale). Repair that: chat/none runs return to `idle` (resumable next
+ * message); everything else lands `failed`.
+ */
+function repairAbortedRun(runId: number): void {
+  const cur = get(runId);
+  if (!cur) return;
+  // Not in a lease status → cancel()/interrupt()/close() already handled it.
+  if (!LEASE_STATUSES.includes(cur.status)) return;
+  if (cur.goal === "<chat>" || cur.cwdStrategy === "none") {
+    db.update(agentSessions)
+      .set({ status: "idle", completedAt: null })
+      .where(eq(agentSessions.id, runId))
+      .run();
+    emitStatus(runId, "idle");
+  } else {
+    setError(runId, "Turn aborted before it finished (client disconnected).");
+  }
 }
 
 /**

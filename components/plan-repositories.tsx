@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FolderGit2, Plus, X } from "lucide-react";
 import type { RepositoryRow } from "@/lib/types";
+import { describe } from "@/lib/utils";
 import { useConfirm } from "@/components/ui/dialog-provider";
 
 interface Props {
@@ -26,18 +27,22 @@ export function PlanRepositories({ planId, repos, allRepositories }: Props) {
   const attach = (repoId: string) => {
     setError(null);
     startTransition(async () => {
-      const res = await fetch(`/api/plans/${planId}/repositories`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repoId }),
-      });
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}));
-        setError(e.error ?? `HTTP ${res.status}`);
-        return;
+      try {
+        const res = await fetch(`/api/plans/${planId}/repositories`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ repoId }),
+        });
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          setError(e.error ?? `HTTP ${res.status}`);
+          return;
+        }
+        setAdding(false);
+        router.refresh();
+      } catch (err) {
+        setError(describe(err));
       }
-      setAdding(false);
-      router.refresh();
     });
   };
 
@@ -52,15 +57,19 @@ export function PlanRepositories({ planId, repos, allRepositories }: Props) {
       return;
     setError(null);
     startTransition(async () => {
-      const res = await fetch(`/api/plans/${planId}/repositories/${repoId}`, {
-        method: "DELETE",
-      });
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}));
-        setError(e.error ?? `HTTP ${res.status}`);
-        return;
+      try {
+        const res = await fetch(`/api/plans/${planId}/repositories/${repoId}`, {
+          method: "DELETE",
+        });
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          setError(e.error ?? `HTTP ${res.status}`);
+          return;
+        }
+        router.refresh();
+      } catch (err) {
+        setError(describe(err));
       }
-      router.refresh();
     });
   };
 

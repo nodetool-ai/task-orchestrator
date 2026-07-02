@@ -112,9 +112,25 @@ export class PiBackend implements AgentBackend {
       extensionFactories: [factory],
     });
 
+    // pi-ai's getModel() returns undefined for a provider/model pair absent from
+    // its registry, and createAgentSession would silently fall back to the default
+    // model (running the turn on the wrong model while the run row still reports the
+    // intended one). Fail loudly instead, mirroring how the Claude backend validates
+    // its provider.
+    const piModel = getModel(model.provider as any, model.id as any) as
+      | ReturnType<typeof getModel>
+      | undefined;
+    if (!piModel) {
+      throw new Error(
+        `Model '${model.provider}/${model.id}' was not found in the pi model registry. ` +
+          `Check the persona's provider/model ids, or set TASK_ORCH_AGENT_BACKEND=claude. ` +
+          `Use listProviders()/@earendil-works/pi-ai to see the available provider/model ids.`
+      );
+    }
+
     const { session } = await createAgentSession({
       cwd,
-      model: getModel(model.provider as any, model.id as any),
+      model: piModel,
       thinkingLevel: thinkingLevel as any,
       authStorage,
       modelRegistry,
@@ -127,6 +143,7 @@ export class PiBackend implements AgentBackend {
     let lastAssistantText: string | null = null;
     let inputTokens: number | null = null;
     let outputTokens: number | null = null;
+    let totalCostUsd: number | null = null;
     let turns = 0;
 
     const stop = session.subscribe((rawEv: any) => {
@@ -152,6 +169,7 @@ export class PiBackend implements AgentBackend {
           if (!env.is_error && typeof env.result === "string") summary = env.result.trim() || null;
           inputTokens = env.usage?.input_tokens ?? inputTokens;
           outputTokens = env.usage?.output_tokens ?? outputTokens;
+          totalCostUsd = env.total_cost_usd ?? totalCostUsd;
         }
       }
     });
@@ -176,7 +194,9 @@ export class PiBackend implements AgentBackend {
       envelopes,
       summary: summary ?? lastAssistantText,
       resumeToken: file ? `${TAG}${file}` : args.resumeToken,
-      totalCostUsd: null, // pi does not surface total_cost_usd
+      // pi surfaces cost per AssistantMessage (usage.cost.total); pi-event-mapper
+      // sums it onto the result envelope, so we forward the real total here.
+      totalCostUsd,
       inputTokens,
       outputTokens,
       turns,

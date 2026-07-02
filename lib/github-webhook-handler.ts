@@ -147,12 +147,20 @@ function handleNeedsFix(
 
   // Pick the newest run that owns a task and a worktree branch — that's the
   // one whose PR this feedback is about and that we can resume in place.
+  //
+  // Require a *resumable* status too: cancel()/close() leave the branch and
+  // worktree_path columns intact (only the on-disk worktree is deleted), so
+  // without this guard CI/review autofix would resurrect a run the user
+  // explicitly cancelled/closed — re-materializing the worktree, spending a
+  // paid turn, and pushing to the abandoned PR branch. isResumableWorktreeRun
+  // excludes cancelled/closed and in-flight states.
   const target = matchedRuns.find(
     (r) =>
       r.taskId &&
       r.branch &&
       r.worktreePath &&
-      r.cwdStrategy === "worktree"
+      r.cwdStrategy === "worktree" &&
+      runs.isResumableWorktreeRun(r.status, r.cwdStrategy)
   );
 
   // Always leave a breadcrumb on the task so it's visible even without autofix.

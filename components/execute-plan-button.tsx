@@ -3,7 +3,7 @@
 import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, PlayCircle, X } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, describe } from "@/lib/utils";
 import { ModelPicker, type ModelOption } from "@/components/chat/model-picker";
 
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
@@ -73,25 +73,29 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
       return;
     }
     startTransition(async () => {
-      const res = await fetch("/api/runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          goal: "<execute>",
-          planId,
-          personaId: "executor",
-          model,
-          initialPrompt: instructions.trim() || undefined,
-          budget: { maxUsd, maxTurns: 200 },
-        }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        setError(body.error ?? `HTTP ${res.status}`);
-        return;
+      try {
+        const res = await fetch("/api/runs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            goal: "<execute>",
+            planId,
+            personaId: "executor",
+            model,
+            initialPrompt: instructions.trim() || undefined,
+            budget: { maxUsd, maxTurns: 200 },
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          setError(body.error ?? `HTTP ${res.status}`);
+          return;
+        }
+        const run = (await res.json()) as { id: number };
+        router.push(`/runs/${run.id}`);
+      } catch (err) {
+        setError(describe(err));
       }
-      const run = (await res.json()) as { id: number };
-      router.push(`/runs/${run.id}`);
     });
   };
 

@@ -28,18 +28,41 @@ const MCP_SERVER_NAME = "task_orch";
 /** Claude names the built-in tools TitleCase (`Read`/`Write`/`Grep`/`Glob`/…) and
  *  passes file paths as `file_path`; pi (and the canonical interceptor seam) use
  *  lowercase names and `path`. Normalize to the shared vocabulary before
- *  interceptors run, and de-normalize file mutations on the way back. */
+ *  interceptors run, and de-normalize file mutations on the way back.
+ *
+ *  Tools registered on the in-process MCP server are additionally exposed to the
+ *  model (and to PreToolUse hooks) under the SDK-namespaced name
+ *  `mcp__<server>__<tool>` — e.g. `mcp__task_orch__task_orch__create_task` and
+ *  `mcp__task_orch__propose_spec`. Interceptors (the planning stage gates, etc.)
+ *  key on the neutral names, so strip that prefix for MATCHING only. The SDK
+ *  still dispatches the tool by its original name; we never rename the call. */
+const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
+
+function stripMcpPrefix(name: string): string {
+  return name.startsWith(MCP_TOOL_PREFIX) ? name.slice(MCP_TOOL_PREFIX.length) : name;
+}
+
 function normalizeToolCall(name: string, input: Record<string, any>): { toolName: string; input: Record<string, any> } {
-  const toolName = interceptorToolName(name);
-  if (isFileTool(name)) {
-    return { toolName, input: { ...input, path: input.file_path ?? input.path } };
+  const neutralName = stripMcpPrefix(name);
+  const toolName = interceptorToolName(neutralName);
+  if (isFileTool(neutralName)) {
+    // NotebookEdit passes `notebook_path` (mapped to canonical Edit); Read/Write/
+    // Edit pass `file_path`. Surface whichever is present as `path` so the
+    // sandbox containment check (which bails on a non-string path) always runs.
+    return { toolName, input: { ...input, path: input.file_path ?? input.notebook_path ?? input.path } };
   }
   return { toolName, input };
 }
 
 function denormalizeToolInput(name: string, original: Record<string, any>, canonical: Record<string, any>): Record<string, any> {
-  if (isFileTool(name)) {
+  if (isFileTool(stripMcpPrefix(name))) {
     const { path, ...rest } = canonical;
+    // Write the (possibly mutated) path back to whichever key the SDK sent so the
+    // tool still executes with its native shape: NotebookEdit→notebook_path,
+    // Read/Write/Edit→file_path.
+    if ("file_path" in original) return { ...rest, file_path: path ?? original.file_path };
+    if ("notebook_path" in original) return { ...rest, notebook_path: path ?? original.notebook_path };
+    if ("path" in original) return { ...rest, path: path ?? original.path };
     return { ...rest, file_path: path ?? original.file_path };
   }
   return canonical;

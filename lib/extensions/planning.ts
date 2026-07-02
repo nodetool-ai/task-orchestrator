@@ -50,11 +50,15 @@ function findLatestSpecMarkdown(runId: number): string | null {
     }
     if (!Array.isArray(blocks)) continue;
     for (const block of blocks) {
+      // On the Claude backend, tool_use blocks are persisted verbatim with the
+      // SDK-namespaced MCP name (`mcp__task_orch__propose_spec`); on pi they use
+      // the bare name. Match either by accepting the `__propose_spec` suffix.
       if (
         block !== null &&
         typeof block === "object" &&
         (block as any).type === "tool_use" &&
-        (block as any).name === "propose_spec"
+        ((block as any).name === "propose_spec" ||
+          String((block as any).name).endsWith("__propose_spec"))
       ) {
         const md = (block as any).input?.spec_markdown;
         if (typeof md === "string") return md;

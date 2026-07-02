@@ -13,6 +13,7 @@ import {
   tasks,
 } from "../db/schema";
 import * as repo from "../lib/repo";
+import * as validators from "../lib/validators";
 
 beforeEach(() => {
   // Reverse-FK order so parent-cascade can't bite us if FKs ever get tightened.
@@ -54,6 +55,22 @@ describe("plans", () => {
   it("preserves tags through round-trip", () => {
     const p = repo.createPlan({ title: "P", date: "2026-01-15", tags: ["a", "b"] });
     expect(repo.getPlan(p.id)!.tags).toEqual(["a", "b"]);
+  });
+
+  it("derives a valid, non-colliding ID for all-non-ASCII titles", () => {
+    // Same regex the API enforces (SCHEMA.md / lib/validators.ts idPlanRe).
+    const idPlanRe = /^P-\d{4}-\d{2}-\d{2}-[a-z0-9-]+$/;
+    const a = repo.createPlan({ title: "日本語のタイトル", date: "2026-01-15" });
+    const b = repo.createPlan({ title: "Кириллица", date: "2026-01-15" });
+    // Neither slugifies to '' (which would be the invalid, colliding P-…-).
+    expect(a.id).toMatch(idPlanRe);
+    expect(b.id).toMatch(idPlanRe);
+    // Distinct titles → distinct ids even though both slugs are empty.
+    expect(a.id).not.toBe(b.id);
+    // Deterministic: same title same day resolves to the same id → 409.
+    expect(() => repo.createPlan({ title: "日本語のタイトル", date: "2026-01-15" })).toThrow(
+      /already/
+    );
   });
 });
 
@@ -100,6 +117,43 @@ describe("tasks", () => {
     repo.createTask({ planId: "P-other", title: "Y", date: "2026-01-15" });
     expect(repo.listTasks({ planId: "P-test" }).map((t) => t.id)).toEqual([inPlan.id]);
     expect(repo.listTasks({ state: "todo" }).length).toBe(2);
+  });
+
+  it("dedupes duplicate dependencies on create", () => {
+    const a = repo.createTask({ planId: "P-test", title: "A", date: "2026-01-15" });
+    const b = repo.createTask({
+      planId: "P-test",
+      title: "B",
+      date: "2026-01-15",
+      dependencies: [a.id, a.id],
+    });
+    expect(b.dependencies).toEqual([a.id]);
+  });
+
+  it("updateTask rejects a missing dependency with a 400, not a raw FK 500", () => {
+    const t = repo.createTask({ planId: "P-test", title: "T", date: "2026-01-15" });
+    expect(() =>
+      repo.updateTask(t.id, { dependencies: ["T-99999999-9999"] })
+    ).toThrow(/Dependencies not found/);
+  });
+
+  it("updateTask rejects a self-dependency", () => {
+    const t = repo.createTask({ planId: "P-test", title: "T", date: "2026-01-15" });
+    expect(() => repo.updateTask(t.id, { dependencies: [t.id] })).toThrow(/itself/);
+  });
+
+  it("updateTask dedupes duplicate dependencies", () => {
+    const a = repo.createTask({ planId: "P-test", title: "A", date: "2026-01-15" });
+    const b = repo.createTask({ planId: "P-test", title: "B", date: "2026-01-15" });
+    const after = repo.updateTask(b.id, { dependencies: [a.id, a.id] });
+    expect(after.dependencies).toEqual([a.id]);
+  });
+
+  it("updateTask persists a valid dependency set", () => {
+    const a = repo.createTask({ planId: "P-test", title: "A", date: "2026-01-15" });
+    const b = repo.createTask({ planId: "P-test", title: "B", date: "2026-01-15" });
+    const after = repo.updateTask(b.id, { dependencies: [a.id] });
+    expect(after.dependencies).toEqual([a.id]);
   });
 });
 
@@ -194,6 +248,22 @@ describe("acceptance criteria", () => {
     expect(repo.getTask(id)!.criteria[0].done).toBe(true);
     repo.updateCriterion(c.id, { done: false });
     expect(repo.getTask(id)!.criteria[0].done).toBe(false);
+  });
+
+  it("empty patch is a no-op, not a drizzle 'No values to set' 500", () => {
+    repo.addCriterion(id, "ship");
+    const c = repo.getTask(id)!.criteria[0];
+    repo.updateCriterion(c.id, { done: true });
+    // {} must neither throw nor clobber existing values.
+    expect(() => repo.updateCriterion(c.id, {})).not.toThrow();
+    const after = repo.getTask(id)!.criteria[0];
+    expect(after.done).toBe(true);
+    expect(after.text).toBe("ship");
+  });
+
+  it("updateCriterionSchema rejects an empty patch at the boundary", () => {
+    const parsed = validators.updateCriterionSchema.safeParse({});
+    expect(parsed.success).toBe(false);
   });
 });
 
@@ -343,6 +413,65 @@ describe("plan ↔ repository M2M", () => {
     // idempotent: re-adding doesn't dup
     const again = repo.addPlanRepository(p.id, b.id);
     expect(again.repos.map((r) => r.id)).toEqual([a.id, b.id]);
+  });
+
+  it("updatePlan unsets task.repoId for tasks pinned to a now-removed repo", () => {
+    const a = repo.createRepository({ name: "A" });
+    const b = repo.createRepository({ name: "B" });
+    const plan = repo.createPlan({
+      title: "P",
+      date: "2026-01-15",
+      repoIds: [a.id, b.id],
+    });
+    const pinnedToB = repo.createTask({
+      planId: plan.id,
+      title: "T",
+      date: "2026-01-15",
+      repoId: b.id,
+    });
+    const pinnedToA = repo.createTask({
+      planId: plan.id,
+      title: "U",
+      date: "2026-01-15",
+      repoId: a.id,
+    });
+    // Narrow the plan to just A; B leaves the plan.
+    repo.updatePlan(plan.id, { repoIds: [a.id] });
+    // Task pinned to the removed repo B is unpinned; the one on A is untouched.
+    expect(repo.getTask(pinnedToB.id)!.repoId).toBeNull();
+    expect(repo.getTask(pinnedToA.id)!.repoId).toBe(a.id);
+  });
+
+  it("updatePlan with an empty repo set unpins every task", () => {
+    const a = repo.createRepository({ name: "A" });
+    const plan = repo.createPlan({ title: "P", date: "2026-01-15", repoIds: [a.id] });
+    const t = repo.createTask({
+      planId: plan.id,
+      title: "T",
+      date: "2026-01-15",
+      repoId: a.id,
+    });
+    repo.updatePlan(plan.id, { repoIds: [] });
+    expect(repo.getTask(t.id)!.repoId).toBeNull();
+  });
+
+  it("addPlanRepository appends after a removal instead of colliding on position", () => {
+    const b = repo.createRepository({ name: "B" });
+    const c = repo.createRepository({ name: "C" });
+    const a = repo.createRepository({ name: "A" }); // id sorts before C
+    const plan = repo.createPlan({
+      title: "P",
+      date: "2026-01-15",
+      repoIds: [b.id, c.id],
+    });
+    // Remove the primary B; C stays at position 1 (positions are not compacted).
+    repo.removePlanRepository(plan.id, b.id);
+    // Re-add A. With the row-count bug it would land at position 1 (== C) and,
+    // since A's id sorts first, jump ahead of C. It must append after C instead.
+    const after = repo.addPlanRepository(plan.id, a.id);
+    expect(after.repos.map((r) => r.id)).toEqual([c.id, a.id]);
+    // C remains the plan's primary (repos[0]) for plan-level runs.
+    expect(after.repos[0].id).toBe(c.id);
   });
 
   it("remove_plan_repository unsets task.repoId for tasks pinned to it", () => {

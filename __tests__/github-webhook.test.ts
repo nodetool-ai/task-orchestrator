@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { and, eq, ne } from "drizzle-orm";
 import {
   autofixEnabledFor,
   canonicalizePrUrl,
@@ -7,7 +8,30 @@ import {
   selectMatchingRunIds,
   verifySignature,
   type CandidateRun,
+  type NormalizedWebhookEvent,
 } from "../lib/github-webhook";
+
+// Stub runs.followUp so a *targeted* autofix never spawns a real agent turn.
+// Everything else in lib/runs (isResumableWorktreeRun, get, isLive,
+// emitRunEvent) stays real, so the handler's actual gating is exercised.
+const { mockFollowUp } = vi.hoisted(() => ({
+  mockFollowUp: vi.fn(async (..._args: unknown[]) => {}),
+}));
+vi.mock("../lib/runs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/runs")>();
+  return { ...actual, followUp: mockFollowUp };
+});
+
+import { db } from "../db";
+import {
+  agentEvents,
+  agentSessions,
+  plans,
+  repositories,
+  taskNotes,
+  tasks,
+} from "../db/schema";
+import { handleWebhookEvent } from "../lib/github-webhook-handler";
 
 function sign(body: string, secret: string): string {
   return "sha256=" + createHmac("sha256", secret).update(body, "utf8").digest("hex");
@@ -235,5 +259,119 @@ describe("autofixEnabledFor", () => {
     for (const v of ["0", "false", "no", "off", "OFF", " false "]) {
       expect(autofixEnabledFor(v)).toBe(false);
     }
+  });
+});
+
+describe("handleWebhookEvent CI-autofix targeting", () => {
+  const PR_URL = "https://github.com/acme/widgets/pull/7";
+
+  beforeEach(() => {
+    mockFollowUp.mockClear();
+    db.delete(agentEvents).run();
+    db.delete(taskNotes).run();
+    db.delete(agentSessions).run();
+    db.delete(tasks).run();
+    db.delete(plans).run();
+    db.delete(repositories).where(ne(repositories.id, "R-default")).run();
+
+    db.insert(repositories)
+      .values({
+        id: "R-acme",
+        name: "widgets",
+        remote: "git@github.com:acme/widgets.git",
+        localPath: "/tmp/acme-widgets",
+        defaultBranch: "main",
+      })
+      .run();
+    db.insert(plans).values({ id: "P-acme", title: "Acme plan" }).run();
+    db.insert(tasks)
+      .values({ id: "T-acme", title: "Do the thing", planId: "P-acme", repoId: "R-acme" })
+      .run();
+  });
+
+  function insertRun(status: string): number {
+    const row = db
+      .insert(agentSessions)
+      .values({
+        taskId: "T-acme",
+        status,
+        goal: "<implement>",
+        toolsProfile: "orchestrator,repo_write",
+        cwdStrategy: "worktree",
+        branch: "feature-x",
+        // cancel()/close() KEEP these columns populated (only the on-disk
+        // worktree is deleted) — that's exactly why a status filter is needed.
+        worktreePath: "/tmp/acme-widgets/.worktrees/1",
+        prUrl: PR_URL,
+        repoId: "R-acme",
+        startedAt: new Date(),
+      })
+      .returning({ id: agentSessions.id })
+      .get();
+    return row!.id;
+  }
+
+  function ciFailure(): NormalizedWebhookEvent {
+    return {
+      kind: "ci",
+      event: "workflow_run",
+      action: "completed",
+      repoFullName: "acme/widgets",
+      prUrls: [PR_URL],
+      branch: "feature-x",
+      headSha: "abc123",
+      ciState: "failure",
+      conclusion: "failure",
+      merged: false,
+      prState: null,
+      workflowName: "CI",
+      actor: "ci-bot",
+      body: null,
+      url: "https://github.com/acme/widgets/actions/runs/1",
+      summary: 'Workflow "CI" failure',
+    };
+  }
+
+  function eventsOfType(runId: number, type: string): number {
+    return db
+      .select({ id: agentEvents.id })
+      .from(agentEvents)
+      .where(and(eq(agentEvents.sessionId, runId), eq(agentEvents.type, type)))
+      .all().length;
+  }
+
+  for (const status of ["cancelled", "closed"]) {
+    it(`does NOT autofix a ${status} run (user abandoned it)`, async () => {
+      const id = insertRun(status);
+
+      const result = await handleWebhookEvent(ciFailure(), "delivery-1");
+
+      // The run still MATCHED the event (so the skip is due to status, not a
+      // failed match): a durable 'github' event is recorded on it.
+      expect(result.matched).toBe(1);
+      expect(eventsOfType(id, "github")).toBe(1);
+
+      // …but autofix was skipped entirely: no follow-up turn, no autofix event,
+      // no status flip, no breadcrumb note.
+      expect(mockFollowUp).not.toHaveBeenCalled();
+      expect(eventsOfType(id, "github_autofix")).toBe(0);
+      expect(result.actions.some((a) => /autofix/.test(a))).toBe(false);
+      expect(db.select().from(agentSessions).where(eq(agentSessions.id, id)).get()?.status).toBe(
+        status
+      );
+      expect(db.select().from(taskNotes).all()).toHaveLength(0);
+    });
+  }
+
+  it("DOES autofix a resumable (idle) worktree run — control for the guard", async () => {
+    const id = insertRun("idle");
+
+    const result = await handleWebhookEvent(ciFailure(), "delivery-2");
+
+    expect(result.matched).toBe(1);
+    expect(mockFollowUp).toHaveBeenCalledTimes(1);
+    expect(mockFollowUp.mock.calls[0]?.[0]).toBe(id);
+    expect(eventsOfType(id, "github_autofix")).toBe(1);
+    expect(result.actions.some((a) => /autofix triggered/.test(a))).toBe(true);
   });
 });
