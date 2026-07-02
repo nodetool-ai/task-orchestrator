@@ -59,6 +59,13 @@ import { personaPromptFactory } from "./extensions/persona-prompt";
 import { personaMemoryFactory } from "./extensions/persona-memory";
 import { abortBridgeFactory } from "./extensions/abort-bridge";
 import { linkSharedWorktreeArtifacts } from "./worktree-env";
+// Namespace import (not `await import`) because reconcileOrphanedRuns() is
+// synchronous. run-dispatch imports get()/isLeaseLive() from here, forming a
+// static cycle — safe because both are hoisted function declarations only ever
+// called at runtime, never during module init. Calling through the namespace
+// (runDispatch.dispatchRun) also keeps vi.spyOn(dispatch, "dispatchRun")
+// observable, matching the dispatch-routing test's spy mechanics.
+import * as runDispatch from "./run-dispatch";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
@@ -1774,6 +1781,29 @@ export function reconcileOrphanedRuns(): number {
   let reaped = 0;
   for (const row of rows) {
     if (isLeaseLive(row, now)) continue; // fresh lease → owned by a live process
+    // Detached mode: a worker that died mid-turn (host reboot / OOM) on a
+    // resumable worktree run is handed to a fresh detached worker instead of
+    // being failed. A worktree run is resumable — its branch/worktree persist
+    // and it has an SDK session to resume from — so this mirrors
+    // isResumableWorktreeRun's cwdStrategy="worktree" predicate (evaluated here
+    // via isImplementWorktree, since the row is still in a *lease* status and
+    // isResumableWorktreeRun only accepts post-reap terminal statuses). Clear
+    // the stale claim first so dispatchRun can re-claim the row.
+    if (
+      runDispatch.detachedRunsEnabled() &&
+      isImplementWorktree(row) &&
+      row.sdkSessionId &&
+      row.worktreePath &&
+      existsSync(row.worktreePath)
+    ) {
+      db.update(agentSessions)
+        .set({ workerScope: null })
+        .where(eq(agentSessions.id, row.id))
+        .run();
+      runDispatch.dispatchRun(row.id);
+      reaped++;
+      continue;
+    }
     if (row.goal === "<chat>") {
       setStatus(row.id, "idle");
     } else {

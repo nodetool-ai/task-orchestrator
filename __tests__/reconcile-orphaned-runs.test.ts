@@ -6,11 +6,12 @@
 // boot using the heartbeat lease: stale heartbeat => orphaned => demote.
 // A run live in ANOTHER process keeps its heartbeat fresh and must be spared.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
 import { agentSessions } from "../db/schema";
 import { create, get, reconcileOrphanedRuns } from "../lib/runs";
+import * as dispatch from "../lib/run-dispatch";
 
 const STALE = new Date(Date.now() - 10 * 60_000); // 10 min ago
 const FRESH = new Date(Date.now() - 5_000); // 5 s ago
@@ -71,5 +72,23 @@ describe("reconcileOrphanedRuns", () => {
 
     expect(get(idle.id)?.status).toBe("idle");
     expect(get(done.id)?.status).toBe("completed");
+  });
+
+  it("re-dispatches a stale resumable worktree run when the flag is on", () => {
+    process.env.TASK_ORCH_DETACHED_RUNS = "1";
+    const spy = vi.spyOn(dispatch, "dispatchRun").mockReturnValue("spawned");
+    const run = create({ goal: "<implement>", defer: true });
+    // Make it look resumable: worktree run, has a session, worktree exists.
+    db.update(agentSessions)
+      .set({ status: "running", heartbeatAt: STALE, sdkSessionId: "sess-1", worktreePath: process.cwd() })
+      .where(eq(agentSessions.id, run.id))
+      .run();
+
+    reconcileOrphanedRuns();
+
+    expect(spy).toHaveBeenCalledWith(run.id);
+    expect(get(run.id)?.status).not.toBe("failed");
+    delete process.env.TASK_ORCH_DETACHED_RUNS;
+    vi.restoreAllMocks();
   });
 });
