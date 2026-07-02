@@ -1225,6 +1225,10 @@ async function runExecute(
     const base = buildExecutePrompt(plan, repo.listTasks({ planId }));
     const extra = initialPrompt?.trim();
     const prompt = extra ? `${base}\n\n## Operator instructions\n\n${extra}` : base;
+    // Persist the kickoff prompt so a page load shows what this executor was
+    // asked to do — the executor is driven server-side, so unlike append()
+    // there is no user message row anchoring the transcript.
+    persistMessage(runId, "system", [{ type: "text", text: prompt }]);
     const result = await runOneTurn({
       run,
       cwd,
@@ -1389,15 +1393,17 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   ];
 
   const envelopes: RunEnvelope[] = [];
-  const assistantBlocks: any[] = [];
   let summary: string | null = null;
   let lastAssistantText: string | null = null;
   let sdkSessionId: string | null = null;
   let inputTokens: number | null = null;
   let outputTokens: number | null = null;
 
-  // Persist/accumulate each mapped envelope as the turn streams. The shape is
-  // identical across backends (RunEnvelope), so downstream is backend-agnostic.
+  // Persist each mapped envelope as the turn streams. The shape is identical
+  // across backends (RunEnvelope), so downstream is backend-agnostic.
+  // Assistant messages are written per-envelope (not batched at end-of-turn) so
+  // a page load mid-turn — hours into a long executor run — replays the full
+  // history from the DB instead of showing only tool results.
   const onEvent = (env: RunEnvelope) => {
     envelopes.push(env);
     onSdk?.(env);
@@ -1411,8 +1417,9 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     }
 
     if (env.type === "assistant" && env.message?.content) {
-      for (const b of env.message.content) assistantBlocks.push(b);
-      const text = assistantText(env.message.content as SdkContentBlock[]);
+      const blocks = env.message.content;
+      if (blocks.length > 0) persistMessage(run.id, "agent", blocks as any);
+      const text = assistantText(blocks as SdkContentBlock[]);
       if (text) lastAssistantText = text;
     }
 
@@ -1446,10 +1453,6 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     prompt,
     onEvent,
   });
-
-  if (assistantBlocks.length > 0) {
-    persistMessage(run.id, "agent", assistantBlocks as any);
-  }
 
   return {
     envelopes: envelopes as any,
