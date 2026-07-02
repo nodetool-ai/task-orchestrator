@@ -51,6 +51,9 @@ function makeRun(overrides: Partial<RunRow> = {}): RunRow {
     startedAt: new Date(),
     completedAt: null,
     heartbeatAt: null,
+    workerScope: null,
+    workerPid: null,
+    cancelRequested: null,
     ...overrides,
   };
 }

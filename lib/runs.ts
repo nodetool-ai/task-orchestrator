@@ -154,6 +154,12 @@ export interface RunRow {
   completedAt: Date | null;
   /** Liveness lease; bumped while a turn runs. Null/stale in an active status = orphan. */
   heartbeatAt: Date | null;
+  /** Detached worker (0020): the transient systemd-run scope owning this run, or null. */
+  workerScope: string | null;
+  /** Detached worker (0020): pid of the child worker process, or null. */
+  workerPid: number | null;
+  /** Detached worker (0020): 1 = cross-process cancel requested; the worker aborts at the next poll. */
+  cancelRequested: number | null;
 }
 
 export interface MessageRow {
@@ -1746,6 +1752,9 @@ function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     startedAt: row.startedAt,
     completedAt: row.completedAt,
     heartbeatAt: row.heartbeatAt ?? null,
+    workerScope: row.workerScope ?? null,
+    workerPid: row.workerPid ?? null,
+    cancelRequested: row.cancelRequested ?? null,
   };
 }
 

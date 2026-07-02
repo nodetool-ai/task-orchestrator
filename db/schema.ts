@@ -204,6 +204,12 @@ export const agentSessions = sqliteTable(
     // Liveness lease: bumped periodically while a turn runs. A run in an active
     // status with a stale/null heartbeat is an orphan (its owner process died).
     heartbeatAt: integer("heartbeat_at", { mode: "timestamp_ms" }),
+    // Detached run workers (0020). Identity of the transient systemd-run scope
+    // that owns this run, the child worker pid, and a cross-process cancel flag
+    // (1 = a redeploy-surviving worker should abort at the next heartbeat poll).
+    workerScope: text("worker_scope"),
+    workerPid: integer("worker_pid"),
+    cancelRequested: integer("cancel_requested"),
   },
   (t) => ({
     taskIdx: index("agent_runs_task_idx").on(t.taskId),
@@ -252,6 +258,10 @@ export const agentEvents = sqliteTable(
   (t) => ({
     sessionIdx: index("agent_events_run_idx").on(t.sessionId),
     createdIdx: index("agent_events_created_idx").on(t.createdAt),
+    // Note: migration 0020 also adds idx_agent_events_run_id on (run_id, id)
+    // to make the DB-tail cursor scan (readStreamSince) a covered lookup.
+    // agent_messages' equivalent is agent_messages_run_id_ord_idx above.
+    runOrdIdx: index("idx_agent_events_run_id").on(t.sessionId, t.id),
   })
 );
 
