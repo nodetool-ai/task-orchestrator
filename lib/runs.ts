@@ -1324,6 +1324,75 @@ async function runExecute(
   }
 }
 
+// ──────────────────────────────────────────────────────────
+// Detached-worker re-entry
+// ──────────────────────────────────────────────────────────
+
+/**
+ * Re-entry point for a detached worker process (scripts/run-worker.ts). Picks
+ * the right worker for an already-created (and claimed) run and drives one turn
+ * to completion, mirroring the in-process launch branches in create()/append().
+ *
+ * runReview / runExecute / kickoffFirstTurn stay module-private — a detached
+ * process only ever enters through here, then exits when the turn lands a
+ * terminal status. A missing run is a no-op (the row may have been reaped).
+ */
+export async function driveDispatchedRun(runId: number): Promise<void> {
+  const run = get(runId);
+  if (!run) return;
+
+  if (run.goal === "<review>") {
+    if (!run.prUrl) {
+      setError(runId, "Dispatched <review> run has no prUrl to review.");
+      return;
+    }
+    await runReview(runId, run.prUrl, null);
+    return;
+  }
+
+  if (run.goal === "<execute>") {
+    if (!run.planId) {
+      setError(runId, "Dispatched <execute> run has no planId to execute.");
+      return;
+    }
+    await runExecute(runId, run.planId, null);
+    return;
+  }
+
+  // implement / chat (worktree or none): drive one append() turn. A fresh
+  // implement run reconstructs the task prompt create() would have passed to
+  // kickoffFirstTurn; a resume (orphan re-dispatch) or chat run replays its
+  // last user message, falling back to a bare continue sentinel.
+  await kickoffFirstTurn(runId, dispatchTurnPrompt(run));
+}
+
+const DISPATCH_RESUME_PROMPT =
+  "Resume this run and continue from where the previous session left off.";
+
+function dispatchTurnPrompt(run: RunRow): string {
+  // First turn of an implement worktree run: rebuild the task prompt.
+  if (!run.sdkSessionId && run.taskId) {
+    const task = repo.getTask(run.taskId);
+    if (task) return buildImplementPrompt(task);
+  }
+  // Otherwise replay the most recent user message (resume / chat), or fall back
+  // to a bare continue sentinel when the run has no prompt of its own yet.
+  const msgs = listMessages(run.id);
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role !== "user") continue;
+    const text = msgs[i].content
+      .map((b) =>
+        b.type === "text" && typeof (b as { text?: unknown }).text === "string"
+          ? (b as { text: string }).text
+          : ""
+      )
+      .join("")
+      .trim();
+    if (text) return text;
+  }
+  return DISPATCH_RESUME_PROMPT;
+}
+
 interface OpenPrArgs {
   task: NonNullable<ReturnType<typeof repo.getTask>>;
   branch: string;
