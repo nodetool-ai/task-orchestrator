@@ -17,6 +17,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_NAME="task-orchestrator"
 PIPE_SERVICE="task-orchestrator-pipe"
+# Account that runs the web + pipe units. The deploy itself runs as this user
+# (the pipe restart below uses `systemctl --user`), so the current login user is
+# the service user.
+SERVICE_USER="$(id -un)"
 HEALTH_TIMEOUT=60
 HEALTH_INTERVAL=2
 
@@ -57,6 +61,16 @@ ensure_nvm_default() {
     . "$HOME/.nvm/nvm.sh"
     nvm alias default node >/dev/null 2>&1 || true
   fi
+}
+
+# Detached run workers (TASK_ORCH_DETACHED_RUNS) launch each run in its own
+# transient `systemd-run --user --scope` unit so a `systemctl restart` of the
+# web service cannot signal it. Those `--user` units require a user systemd
+# manager that outlives the deploying login session, so enable lingering for the
+# service account. Idempotent; a safe no-op when already enabled or when
+# loginctl is unavailable, so it must never fail the deploy.
+ensure_linger() {
+  loginctl enable-linger "$SERVICE_USER" 2>/dev/null || true
 }
 
 ACTION=""
@@ -114,6 +128,10 @@ fi
 # The systemd units source nvm.sh themselves; make sure they can resolve a node
 # version when restarted from a clean environment (see ensure_nvm_default).
 ensure_nvm_default
+
+# Keep the user systemd manager alive across deploys so detached run workers
+# (systemd-run --user) survive a web-service restart (see ensure_linger).
+ensure_linger
 
 echo "node: $(command -v node || echo missing) | npm: $(command -v npm || echo missing)"
 echo ""

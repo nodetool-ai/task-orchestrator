@@ -1,7 +1,7 @@
 # Detached run workers — design
 
 **Date:** 2026-07-02
-**Status:** Approved (design), pending implementation plan
+**Status:** Implemented
 **Goal:** A deploy / `systemctl restart` of the web service must never kill an
 in-flight agent run.
 

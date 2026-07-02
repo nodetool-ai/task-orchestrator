@@ -52,9 +52,14 @@ export function dispatchRun(
 // `systemctl restart` of the web unit cannot signal it. Falls back to a
 // plain detached spawn (dev / no systemd-run). Returns the child pid.
 export const defaultSpawn: SpawnFn = (runId, scope) => {
-  const require = createRequire(import.meta.url);
+  const nodeRequire = createRequire(import.meta.url);
   const node = process.execPath;
-  const tsx = require.resolve("tsx/cli");
+  // Build the specifier at runtime (`.join`) so the Next/webpack bundler can't
+  // constant-fold it into a static module reference. A literal
+  // `require.resolve("tsx/cli")` makes webpack drag tsx's ESM entry + esbuild
+  // .d.ts into the server graph and fail the prod build; this stays a pure
+  // runtime lookup against node_modules.
+  const tsx = nodeRequire.resolve(["tsx", "cli"].join("/"));
   const worker = "scripts/run-worker.ts";
   const useSystemd = process.platform === "linux" && hasSystemdRun();
   const cmd = useSystemd ? "systemd-run" : node;

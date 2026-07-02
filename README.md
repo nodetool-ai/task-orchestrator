@@ -70,6 +70,35 @@ passwordless. The unit sources nvm (`. ~/.nvm/nvm.sh`) before invoking
 Adding a new public hostname to the tunnel is a dashboard action:
 Zero Trust → Networks → Tunnels → `nodetool-deploy` → Public Hostnames.
 
+### Detached run workers (`TASK_ORCH_DETACHED_RUNS`)
+
+By default an agent run executes inside the web-server process, so a
+`systemctl restart` of the service kills every in-flight run. Set
+`TASK_ORCH_DETACHED_RUNS=1` to relocate turn execution into a per-run
+transient `systemd-run --user --scope` unit. The scope is a separate
+cgroup, so restarting (or stopping) the web unit can no longer signal a
+running worker — runs survive a redeploy and keep streaming to the run
+view, which now tails the `agent_messages` / `agent_events` tables by
+cursor rather than an in-process event bus. Cancel is DB-mediated
+(`cancel_requested`), and on boot the web process reconciles orphaned
+runs, re-dispatching resumable ones to fresh workers instead of failing
+them.
+
+Requirements on the host:
+
+- `systemd-run --user` must work, which needs a running user systemd
+  manager for the service account with **lingering** enabled
+  (`loginctl enable-linger <user>`). `deploy.sh` enables this idempotently
+  on every deploy; without a user manager the worker falls back to a plain
+  detached `spawn` (fine for dev, but such a worker is not protected from a
+  web restart).
+
+The flag defaults **off**: unset (or `0` / `false`) keeps today's
+in-process behavior, so rollback is instant. Enable it by adding
+`TASK_ORCH_DETACHED_RUNS=1` to the web unit's environment (e.g. an
+`Environment=` line in the `[Service]` section or `.env.local`) once the
+lingering prerequisite is verified.
+
 ## CLI
 
 `npm run task -- <cmd>` from the repo root:
