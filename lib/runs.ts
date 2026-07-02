@@ -555,11 +555,6 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     yield { type: "user_message", message: userMsg };
 
     setStatus(run.id, "running");
-    // Open the liveness lease and keep it fresh for the whole active period
-    // (prepare → turn → push/PR). The interval ticks even while a slow model or
-    // tool call is awaited, so a long-but-alive turn is never mistaken for an
-    // orphan. Cleared in the finally below.
-    heartbeat = startHeartbeat(input.runId);
 
     // Register the abort handle and bus BEFORE the (seconds-long) worktree prep.
     // If we waited until after prepareCwd (the old behaviour), a cancel()/
@@ -571,6 +566,13 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     const bus = new EventEmitter();
     runners.set(run.id, { abort, bus });
     ownsRunner = true;
+
+    // Open the liveness lease and keep it fresh for the whole active period
+    // (prepare → turn → push/PR). The interval ticks even while a slow model or
+    // tool call is awaited, so a long-but-alive turn is never mistaken for an
+    // orphan. It also polls the cross-process cancel flag so a detached worker
+    // aborts when cancel() flips cancel_requested. Cleared in the finally below.
+    heartbeat = startHeartbeatWithCancel(input.runId, abort);
 
     // First turn of a worktree run: create its branch + worktree. On later
     // turns this is a no-op and prepareCwd re-materializes a missing worktree
@@ -723,8 +725,13 @@ export function cancel(id: number): RunRow {
   if (isTerminalStatus(run.status)) return run;
   const runner = runners.get(id);
   runner?.abort.abort();
+  // Cross-process cancel: a detached worker (TASK_ORCH_DETACHED_RUNS) runs in
+  // its own process and can't see the in-process AbortController above, so we
+  // also signal through the DB. The worker polls isCancelRequested() at
+  // heartbeat cadence and aborts its own turn. Harmless for in-process runs —
+  // they already aborted synchronously, so the poll is a no-op there.
   db.update(agentSessions)
-    .set({ status: "cancelled", completedAt: new Date() })
+    .set({ status: "cancelled", completedAt: new Date(), cancelRequested: 1 })
     .where(eq(agentSessions.id, id))
     .run();
   emitStatus(id, "cancelled");
@@ -1121,8 +1128,9 @@ async function runReview(
   runners.set(runId, { abort, bus });
   // Keep the liveness lease fresh for the whole worker (prepare → turn), so an
   // append()/reconcileOrphanedRuns() can't mistake this live review for an
-  // orphan and take it over / mark it failed mid-turn.
-  const heartbeat = startHeartbeat(runId);
+  // orphan and take it over / mark it failed mid-turn. The same interval polls
+  // the cross-process cancel flag so a detached review aborts on cancel().
+  const heartbeat = startHeartbeatWithCancel(runId, abort);
 
   let run = get(runId)!;
   const root = repoRoot(run);
@@ -1261,8 +1269,10 @@ async function runExecute(
   const bus = new EventEmitter();
   runners.set(runId, { abort, bus });
   // Keep the liveness lease fresh for the whole (long-running) executor turn so
-  // append()/reconcileOrphanedRuns() never treat this live run as an orphan.
-  const heartbeat = startHeartbeat(runId);
+  // append()/reconcileOrphanedRuns() never treat this live run as an orphan. The
+  // same interval polls the cross-process cancel flag so a detached executor
+  // aborts on cancel().
+  const heartbeat = startHeartbeatWithCancel(runId, abort);
 
   let run = get(runId)!;
 
@@ -1678,6 +1688,39 @@ function touchHeartbeat(runId: number): void {
 function startHeartbeat(runId: number): ReturnType<typeof setInterval> {
   touchHeartbeat(runId);
   return setInterval(() => touchHeartbeat(runId), HEARTBEAT_INTERVAL_MS);
+}
+
+/**
+ * Fresh read of the cross-process cancel flag. cancel() sets `cancel_requested`
+ * on the row; a detached worker (which can't see the web process's
+ * AbortController) polls this at heartbeat cadence to abort its own turn.
+ */
+export function isCancelRequested(runId: number): boolean {
+  const row = db
+    .select({ c: agentSessions.cancelRequested })
+    .from(agentSessions)
+    .where(eq(agentSessions.id, runId))
+    .get();
+  return row?.c === 1;
+}
+
+/**
+ * Like startHeartbeat, but the same interval that keeps the liveness lease fresh
+ * also polls the cross-process cancel flag and aborts the turn when it flips.
+ * Used by the workers a detached run process actually executes in
+ * (append/runReview/runExecute) so a UI/`/stop` cancel — which only writes the
+ * DB flag cross-process — still stops the turn within one heartbeat interval.
+ * Callers thread their turn's AbortController through `abort`.
+ */
+function startHeartbeatWithCancel(
+  runId: number,
+  abort: AbortController
+): ReturnType<typeof setInterval> {
+  touchHeartbeat(runId);
+  return setInterval(() => {
+    touchHeartbeat(runId);
+    if (isCancelRequested(runId) && !abort.signal.aborted) abort.abort();
+  }, HEARTBEAT_INTERVAL_MS);
 }
 
 /** True when this run holds a live lease: active status with a fresh heartbeat. */
