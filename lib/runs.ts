@@ -1724,7 +1724,7 @@ function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
   };
 }
 
-function hydrateMessage(row: typeof agentMessages.$inferSelect): MessageRow {
+export function hydrateMessage(row: typeof agentMessages.$inferSelect): MessageRow {
   let content: SdkContentBlock[] = [];
   try {
     const parsed = JSON.parse(row.content);
