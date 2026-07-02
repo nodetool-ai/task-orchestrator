@@ -196,23 +196,52 @@ describe("integration: depth + budget on a fake parent chain", () => {
 });
 
 describe("checkAppendableStatus (append_message refusal predicate)", () => {
-  it("refuses closed runs with a closed-specific message", () => {
-    const msg = checkAppendableStatus("closed");
-    expect(msg).not.toBeNull();
-    expect(msg).toMatch(/closed/i);
+  // The predicate must mirror runs.append's real gate (via isResumableWorktreeRun),
+  // NOT an independent stricter rule. Implement-style worktree children land
+  // 'completed'/'failed'/'budget_exhausted' after a turn yet stay resumable (their
+  // branch + worktree re-materialize on demand), so append must be admitted for
+  // them — that is exactly the executor's retry/request_changes loop. Only 'closed'
+  // and 'cancelled' are hard stops for every strategy.
+  it("refuses closed runs with a closed-specific message (any cwd_strategy)", () => {
+    for (const cwd of ["worktree", "repo", "none"]) {
+      const msg = checkAppendableStatus("closed", cwd);
+      expect(msg, `cwd=${cwd}`).not.toBeNull();
+      expect(msg, `cwd=${cwd}`).toMatch(/closed/i);
+    }
   });
 
-  it("refuses other terminal statuses", () => {
-    for (const s of ["completed", "failed", "cancelled", "budget_exhausted"]) {
-      const msg = checkAppendableStatus(s);
-      expect(msg, `status=${s}`).not.toBeNull();
-      expect(msg, `status=${s}`).toMatch(new RegExp(s));
+  it("refuses cancelled runs even on a worktree run (cancelled is never resumable)", () => {
+    for (const cwd of ["worktree", "repo", "none"]) {
+      const msg = checkAppendableStatus("cancelled", cwd);
+      expect(msg, `cwd=${cwd}`).not.toBeNull();
+      expect(msg, `cwd=${cwd}`).toMatch(/cancelled/);
+    }
+  });
+
+  it("refuses completed/failed/budget_exhausted on NON-worktree runs", () => {
+    for (const s of ["completed", "failed", "budget_exhausted"]) {
+      for (const cwd of ["repo", "none"]) {
+        const msg = checkAppendableStatus(s, cwd);
+        expect(msg, `status=${s} cwd=${cwd}`).not.toBeNull();
+        expect(msg, `status=${s} cwd=${cwd}`).toMatch(new RegExp(s));
+      }
+    }
+  });
+
+  it("ADMITS completed/failed/budget_exhausted on a worktree run (resumable implement child)", () => {
+    // Regression: the old predicate refused these unconditionally, so after any
+    // request_changes review the fix could never be delivered ('Run is in terminal
+    // status completed; cannot append'). runs.append allows resuming them via
+    // isResumableWorktreeRun(status, 'worktree'), so this predicate must too.
+    for (const s of ["completed", "failed", "budget_exhausted"]) {
+      expect(checkAppendableStatus(s, "worktree"), `status=${s}`).toBeNull();
     }
   });
 
   it("admits idle and pending runs", () => {
-    expect(checkAppendableStatus("idle")).toBeNull();
-    expect(checkAppendableStatus("pending")).toBeNull();
+    expect(checkAppendableStatus("idle", "worktree")).toBeNull();
+    expect(checkAppendableStatus("idle", "none")).toBeNull();
+    expect(checkAppendableStatus("pending", "none")).toBeNull();
   });
 
   it("admits in-flight statuses (runs.append guards the race separately)", () => {
@@ -220,9 +249,9 @@ describe("checkAppendableStatus (append_message refusal predicate)", () => {
     // clear error if the target is already running. Keeping the predicate
     // narrow keeps refusal semantics ('this state is non-recoverable')
     // distinct from race semantics ('come back later').
-    expect(checkAppendableStatus("running")).toBeNull();
-    expect(checkAppendableStatus("preparing")).toBeNull();
-    expect(checkAppendableStatus("pushing")).toBeNull();
+    expect(checkAppendableStatus("running", "none")).toBeNull();
+    expect(checkAppendableStatus("preparing", "none")).toBeNull();
+    expect(checkAppendableStatus("pushing", "none")).toBeNull();
   });
 });
 
@@ -232,17 +261,26 @@ describe("append_message + tree-budget interaction", () => {
   function decideAppend(
     callerRoot: { budgetMaxUsd: number | null },
     spent: number,
-    targetStatus: string
+    targetStatus: string,
+    targetCwd = "none"
   ): { ok: true } | { ok: false; reason: "budget" | "status" } {
     const overBudget = checkTreeBudget(callerRoot, spent);
     if (overBudget) return { ok: false, reason: "budget" };
-    const refusal = checkAppendableStatus(targetStatus);
+    const refusal = checkAppendableStatus(targetStatus, targetCwd);
     if (refusal) return { ok: false, reason: "status" };
     return { ok: true };
   }
 
   it("admits an append on idle target with under-budget caller tree", () => {
     expect(decideAppend({ budgetMaxUsd: 10 }, 5, "idle")).toEqual({ ok: true });
+  });
+
+  it("admits an append on a completed worktree target (resumable implement child)", () => {
+    // The executor resumes 'completed' implement children to deliver fixes; the
+    // status gate must not block that when the caller tree is under budget.
+    expect(decideAppend({ budgetMaxUsd: 10 }, 0, "completed", "worktree")).toEqual({
+      ok: true,
+    });
   });
 
   it("admits append on idle target when caller has no budget cap", () => {

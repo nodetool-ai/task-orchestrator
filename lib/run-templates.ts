@@ -585,13 +585,19 @@ function findJsonObjects(s: string): string[] {
   let escape = false;
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
-    if (inString) {
+    // Only track string state while INSIDE an object (depth > 0). Quotes in the
+    // surrounding prose — an inch mark like `27"` or an unpaired quote in a code
+    // fragment — must not flip inString and swallow the JSON block that follows.
+    // The old code toggled inString on every '"' at any depth, so an odd number
+    // of quotes in the prose left inString=true when the verdict block started,
+    // dropping the verdict entirely.
+    if (depth > 0 && inString) {
       if (escape) escape = false;
       else if (c === "\\") escape = true;
       else if (c === '"') inString = false;
       continue;
     }
-    if (c === '"') {
+    if (depth > 0 && c === '"') {
       inString = true;
       continue;
     }
@@ -604,6 +610,10 @@ function findJsonObjects(s: string): string[] {
         if (depth === 0 && start >= 0) {
           out.push(s.slice(start, i + 1));
           start = -1;
+          // Back at prose level — reset string state so stray prose quotes after
+          // this block start clean.
+          inString = false;
+          escape = false;
         }
       }
     }

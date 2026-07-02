@@ -270,7 +270,7 @@ export const ghPrExtension =
       name: "gh_pr__pr_merge",
       label: "PR Merge",
       description:
-        "Merge a PR. method='merge' creates a merge commit, 'squash' squashes commits, 'rebase' rebases.",
+        "Merge a PR. method='merge' creates a merge commit, 'squash' squashes commits, 'rebase' rebases. Set delete_branch=true to also delete the PR's head branch after merging.",
       parameters: Type.Object({
         url: Type.String({ minLength: 1 }),
         method: Type.Union([
@@ -278,21 +278,29 @@ export const ghPrExtension =
           Type.Literal("squash"),
           Type.Literal("rebase"),
         ]),
+        delete_branch: Type.Optional(Type.Boolean()),
       }),
-      execute: async (_id, { url, method }) => {
+      execute: async (_id, { url, method, delete_branch }) => {
         const g = gate(url);
         if (!g.ok) return g.result;
         const args = ["pr", "merge", g.parsed.canonical];
         if (method === "merge") args.push("--merge");
         else if (method === "squash") args.push("--squash");
         else args.push("--rebase");
+        if (delete_branch) args.push("--delete-branch");
         const r = await gh(args, cwd);
         if (r.code !== 0) {
           return errResult(r.stderr.trim() || `gh pr merge failed (exit ${r.code})`);
         }
         return ok(
           JSON.stringify(
-            { ok: true, method, pr: g.parsed.canonical, stdout: r.stdout.trim() },
+            {
+              ok: true,
+              method,
+              delete_branch: delete_branch === true,
+              pr: g.parsed.canonical,
+              stdout: r.stdout.trim(),
+            },
             null,
             2
           )

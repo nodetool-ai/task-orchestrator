@@ -4,12 +4,22 @@
 // explicitly requested with SEED_DEMO=1 (npm run db:seed:demo). The default
 // `db:seed` is persona-only, so running it never writes plans/tasks into a
 // real database.
-import * as repo from "../lib/repo";
-import { seedPersonas } from "../db/seed-personas";
+//
+// Load .env.local FIRST so `npm run db:seed` seeds the same database the
+// deployed service uses (db/index.ts reads process.env.TASK_ORCH_DB at import
+// time). Under this project's ESM runtime a static import is evaluated before
+// this module's body runs, so config() would fire too late; the db-touching
+// modules (../lib/repo, ../db/seed-personas) are therefore imported
+// *dynamically* inside main(), after config() has populated the environment.
+import { config } from "dotenv";
+config({ path: ".env.local" });
 
 const SEED_PLAN_ID = "P-2026-05-11-task-system";
 
-function main() {
+async function main() {
+  const repo = await import("../lib/repo");
+  const { seedPersonas } = await import("../db/seed-personas");
+
   // Personas are FK targets for agent_runs.persona_id; seed them every time so
   // CLI flows (which never boot instrumentation.ts) still find them.
   seedPersonas();
@@ -120,4 +130,7 @@ function main() {
   console.log("Done.");
 }
 
-main();
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

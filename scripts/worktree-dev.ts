@@ -98,39 +98,6 @@ console.log(`Local:   ${localUrl}  (behind NextAuth login)`);
 
 const children: ChildProcess[] = [];
 
-const next = spawn("npx", ["next", "dev", "-H", args.host, "-p", String(port)], {
-  cwd,
-  stdio: "inherit",
-  env: process.env,
-});
-children.push(next);
-
-if (args.tunnel) {
-  try {
-    const cf = await resolveCloudflared();
-    if (cf.source === "download") {
-      console.log("Installed cloudflared into the shared cache.");
-    }
-    console.log("Opening Cloudflare quick tunnel (watch below for the https URL)…");
-    // The tunnel data plane needs outbound egress to Cloudflare's edge
-    // (argotunnel.com): QUIC over UDP/7844, or TCP when forced to HTTP/2. On
-    // networks that block UDP, set CLOUDFLARED_PROTOCOL=http2 to skip QUIC.
-    const cfArgs = ["tunnel", "--url", localUrl, "--no-autoupdate"];
-    if (process.env.CLOUDFLARED_PROTOCOL) {
-      cfArgs.push("--protocol", process.env.CLOUDFLARED_PROTOCOL);
-    }
-    const tunnel = spawn(cf.path, cfArgs, { cwd, stdio: "inherit", env: process.env });
-    children.push(tunnel);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(
-      `⚠ --tunnel requested but cloudflared could not be set up: ${msg}\n` +
-        "  Serving loopback only. Install cloudflared manually, set CLOUDFLARED_PATH,\n" +
-        `  or forward the port yourself: ssh -L ${port}:127.0.0.1:${port} <host>`
-    );
-  }
-}
-
 // Tear the whole group down together: if one child dies, stop the rest, and
 // forward Ctrl-C / termination so nothing is orphaned.
 let shuttingDown = false;
@@ -146,10 +113,50 @@ function shutdown(signal: NodeJS.Signals | null, code: number | null) {
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => shutdown(sig, 0));
 }
-for (const c of children) {
-  c.on("exit", (code) => shutdown(null, code ?? 0));
-  c.on("error", (err) => {
+
+// Register a child for group shutdown and wire its exit/error handlers
+// IMMEDIATELY — not in a trailing loop. `await resolveCloudflared()` below can
+// spend seconds downloading a binary; a child that dies (or fails to spawn:
+// ENOENT emits 'error') during that window must still trigger shutdown rather
+// than being lost or crashing the process on an unhandled 'error'.
+function track(child: ChildProcess): void {
+  children.push(child);
+  child.on("exit", (code) => shutdown(null, code ?? 0));
+  child.on("error", (err) => {
     console.error(`Child process error: ${err.message}`);
     shutdown("SIGTERM", 1);
   });
+}
+
+track(
+  spawn("npx", ["next", "dev", "-H", args.host, "-p", String(port)], {
+    cwd,
+    stdio: "inherit",
+    env: process.env,
+  })
+);
+
+if (args.tunnel) {
+  try {
+    const cf = await resolveCloudflared();
+    if (cf.source === "download") {
+      console.log("Installed cloudflared into the shared cache.");
+    }
+    console.log("Opening Cloudflare quick tunnel (watch below for the https URL)…");
+    // The tunnel data plane needs outbound egress to Cloudflare's edge
+    // (argotunnel.com): QUIC over UDP/7844, or TCP when forced to HTTP/2. On
+    // networks that block UDP, set CLOUDFLARED_PROTOCOL=http2 to skip QUIC.
+    const cfArgs = ["tunnel", "--url", localUrl, "--no-autoupdate"];
+    if (process.env.CLOUDFLARED_PROTOCOL) {
+      cfArgs.push("--protocol", process.env.CLOUDFLARED_PROTOCOL);
+    }
+    track(spawn(cf.path, cfArgs, { cwd, stdio: "inherit", env: process.env }));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `⚠ --tunnel requested but cloudflared could not be set up: ${msg}\n` +
+        "  Serving loopback only. Install cloudflared manually, set CLOUDFLARED_PATH,\n" +
+        `  or forward the port yourself: ssh -L ${port}:127.0.0.1:${port} <host>`
+    );
+  }
 }

@@ -17,7 +17,10 @@ export default function LoginPage() {
 function LoginForm() {
   const sp = useSearchParams();
   const router = useRouter();
-  const next = sp.get("next") || "/";
+  const rawNext = sp.get("next") || "/";
+  // Only allow same-origin relative paths to prevent open-redirect phishing.
+  // Reject absolute ("https://…") and protocol-relative ("//evil.example") URLs.
+  const next = rawNext.startsWith("/") && !rawNext.startsWith("//") ? rawNext : "/";
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(sp.get("error"));

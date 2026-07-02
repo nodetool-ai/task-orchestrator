@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, inArray, isNotNull, like, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNotNull, like, notInArray, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
   acceptanceCriteria,
@@ -49,8 +49,24 @@ export function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+// Deterministic base36 token derived from a string. Non-empty for any input
+// (worst case "0"), and always [a-z0-9]. Used as a slug fallback so distinct
+// titles map to distinct tokens.
+function base36Token(s: string): string {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(36);
+}
+
 function planIdFromTitle(title: string, date: string): string {
-  return `P-${date}-${slugify(title)}`;
+  // An all-non-ASCII title (CJK/Cyrillic/emoji) slugifies to '' → a bare
+  // `P-<date>-` that violates idPlanRe and collides across distinct titles.
+  // Fall back to a deterministic base36 token of the title so distinct titles
+  // yield distinct, valid ids (and the same title stays stable → 409 on dup).
+  const slug = slugify(title) || `t${base36Token(title)}`;
+  return `P-${date}-${slug}`;
 }
 
 function nextTaskId(date: string): string {
@@ -654,6 +670,18 @@ export function updatePlan(id: string, patch: UpdatePlanInput): PlanFull {
           .values(unique.map((r, i) => ({ planId: id, repoId: r, position: i })))
           .run();
       }
+      // Unpin any task of this plan whose repo is no longer in the plan's set,
+      // mirroring removePlanRepository. Otherwise a task stays pinned to a repo
+      // the plan no longer spans (stranding it for resolveRepoForTask). The
+      // empty-set case (unique === []) nulls every pinned task.
+      const stale = unique.length > 0
+        ? and(
+            eq(tasks.planId, id),
+            isNotNull(tasks.repoId),
+            notInArray(tasks.repoId, unique)
+          )
+        : and(eq(tasks.planId, id), isNotNull(tasks.repoId));
+      tx.update(tasks).set({ repoId: null, updatedAt: new Date() }).where(stale).run();
     }
   });
   return getPlan(id)!;
@@ -667,11 +695,22 @@ export function addPlanRepository(planId: string, repoId: string): PlanFull {
   if (!plan) throw new RepoError(`Plan ${planId} not found`, 404);
   if (!getRepository(repoId)) throw new RepoError(`Repository ${repoId} not found`, 404);
   if (plan.repos.some((r) => r.id === repoId)) return plan;
-  const nextPosition = plan.repos.length;
-  db.insert(planRepositories)
-    .values({ planId, repoId, position: nextPosition })
-    .run();
-  db.update(plans).set({ updatedAt: new Date() }).where(eq(plans.id, planId)).run();
+  db.transaction((tx) => {
+    // Derive the next position from MAX(position)+1 rather than the row count:
+    // removePlanRepository doesn't compact positions, so a count would collide
+    // with an existing row after a removal and corrupt append order (which in
+    // turn changes p.repos[0], the primary for plan-level runs).
+    const last = tx
+      .select({ p: sql<number>`COALESCE(MAX(${planRepositories.position}), -1)` })
+      .from(planRepositories)
+      .where(eq(planRepositories.planId, planId))
+      .get();
+    const nextPosition = (last?.p ?? -1) + 1;
+    tx.insert(planRepositories)
+      .values({ planId, repoId, position: nextPosition })
+      .run();
+    tx.update(plans).set({ updatedAt: new Date() }).where(eq(plans.id, planId)).run();
+  });
   return getPlan(planId)!;
 }
 
@@ -756,7 +795,7 @@ export function createTask(input: CreateTaskInput): TaskFull {
   // plan.repos.length === 0 → resolvedRepoId stays null; the agent will
   // refuse to start a session, surfacing a clear escalation.
 
-  const deps = input.dependencies ?? [];
+  const deps = Array.from(new Set(input.dependencies ?? []));
   if (deps.length > 0) {
     const existing = db
       .select({ id: tasks.id })
@@ -831,6 +870,28 @@ export function updateTask(
       );
     }
   }
+  // Validate dependencies up front (createTask does; updateTask historically did
+  // not, so missing ids surfaced as raw FK 500s and self/duplicate deps slipped
+  // through). Dedupe, reject self-dependency, then verify every id exists.
+  let deps: string[] | undefined;
+  if (patch.dependencies !== undefined) {
+    deps = Array.from(new Set(patch.dependencies));
+    if (deps.includes(id)) {
+      throw new RepoError(`Task ${id} cannot depend on itself`, 400);
+    }
+    if (deps.length > 0) {
+      const existingDeps = db
+        .select({ id: tasks.id })
+        .from(tasks)
+        .where(inArray(tasks.id, deps))
+        .all();
+      const found = new Set(existingDeps.map((r) => r.id));
+      const missing = deps.filter((d) => !found.has(d));
+      if (missing.length > 0) {
+        throw new RepoError(`Dependencies not found: ${missing.join(", ")}`, 400);
+      }
+    }
+  }
   const values: Record<string, unknown> = { updatedAt: new Date() };
   if (patch.title !== undefined) values.title = patch.title;
   if (patch.assignee !== undefined) values.assignee = patch.assignee;
@@ -840,11 +901,11 @@ export function updateTask(
   if (patch.repoId !== undefined) values.repoId = patch.repoId;
   db.transaction((tx) => {
     tx.update(tasks).set(values).where(eq(tasks.id, id)).run();
-    if (patch.dependencies !== undefined) {
+    if (deps !== undefined) {
       tx.delete(taskDependencies).where(eq(taskDependencies.taskId, id)).run();
-      if (patch.dependencies.length > 0) {
+      if (deps.length > 0) {
         tx.insert(taskDependencies)
-          .values(patch.dependencies.map((d) => ({ taskId: id, dependsOnId: d })))
+          .values(deps.map((d) => ({ taskId: id, dependsOnId: d })))
           .run();
       }
     }
@@ -948,6 +1009,9 @@ export function updateCriterion(criterionId: number, patch: { done?: boolean; te
   const values: Record<string, unknown> = {};
   if (patch.done !== undefined) values.done = patch.done;
   if (patch.text !== undefined) values.text = patch.text;
+  // An empty patch would make drizzle throw 'No values to set' (→ HTTP 500).
+  // Treat it as a no-op instead. (updateCriterionSchema also refines this away.)
+  if (Object.keys(values).length === 0) return;
   db.update(acceptanceCriteria).set(values).where(eq(acceptanceCriteria.id, criterionId)).run();
   db.update(tasks).set({ updatedAt: new Date() }).where(eq(tasks.id, row.taskId)).run();
 }

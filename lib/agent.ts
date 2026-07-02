@@ -74,7 +74,18 @@ function reapOrphans() {
     .filter((row) => NON_TERMINAL_BUT_DEAD.includes(row.status));
 
   for (const orphan of orphans) {
+    // Never reap a run that is genuinely in flight:
+    //   • runs.isLive → an in-process runner exists here.
+    //   • runs.isLeaseLive → an active status with a FRESH heartbeat, i.e. a
+    //     turn running in ANOTHER process (this reaper fires on every module
+    //     import — Next server boot, but also short-lived cli.ts / pipe
+    //     processes that share the SQLite DB).
+    // Without the lease check, a CLI invocation while the Next server has an
+    // implement run mid-turn would flip it to `failed` AND `git worktree remove
+    // --force` the worktree the live agent is editing, destroying its work.
+    // Mirror runs.reconcileOrphanedRuns(), which uses the same lease guard.
     if (runs.isLive(orphan.id)) continue;
+    if (runs.isLeaseLive(orphan)) continue;
     const now = new Date();
     db.update(agentSessions)
       .set({

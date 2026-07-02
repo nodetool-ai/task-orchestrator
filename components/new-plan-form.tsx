@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Plus } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, describe } from "@/lib/utils";
 import { TagsInput } from "@/components/pickers/tags-input";
 
 export function NewPlanForm() {
@@ -29,25 +29,29 @@ export function NewPlanForm() {
     if (!title.trim()) return;
     setError(null);
     startTransition(async () => {
-      const res = await fetch("/api/plans", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: title.trim(),
-          body: body.trim() || undefined,
-          owner: owner.trim() || undefined,
-          tags,
-        }),
-      });
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}));
-        setError(e.error ?? `HTTP ${res.status}`);
-        return;
+      try {
+        const res = await fetch("/api/plans", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: title.trim(),
+            body: body.trim() || undefined,
+            owner: owner.trim() || undefined,
+            tags,
+          }),
+        });
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          setError(e.error ?? `HTTP ${res.status}`);
+          return;
+        }
+        const created = await res.json();
+        reset();
+        setOpen(false);
+        router.push(`/plans/${created.id}`);
+      } catch (err) {
+        setError(describe(err));
       }
-      const created = await res.json();
-      reset();
-      setOpen(false);
-      router.push(`/plans/${created.id}`);
     });
   };
 

@@ -4,7 +4,7 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Pencil, Save, Trash2 } from "lucide-react";
 import type { RepositoryRow } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, describe } from "@/lib/utils";
 import { useConfirm } from "@/components/ui/dialog-provider";
 
 interface Props {
@@ -27,24 +27,28 @@ export function EditRepositoryForm({ repository }: Props) {
     e.preventDefault();
     setError(null);
     startTransition(async () => {
-      const res = await fetch(`/api/repositories/${repository.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: name.trim(),
-          remote: remote.trim() || null,
-          localPath: localPath.trim() || null,
-          defaultBranch: defaultBranch.trim() || "main",
-          description: description.trim(),
-        }),
-      });
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}));
-        setError(e.error ?? `HTTP ${res.status}`);
-        return;
+      try {
+        const res = await fetch(`/api/repositories/${repository.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: name.trim(),
+            remote: remote.trim() || null,
+            localPath: localPath.trim() || null,
+            defaultBranch: defaultBranch.trim() || "main",
+            description: description.trim(),
+          }),
+        });
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          setError(e.error ?? `HTTP ${res.status}`);
+          return;
+        }
+        setOpen(false);
+        router.refresh();
+      } catch (err) {
+        setError(describe(err));
       }
-      setOpen(false);
-      router.refresh();
     });
   };
 
@@ -58,14 +62,18 @@ export function EditRepositoryForm({ repository }: Props) {
     )
       return;
     startTransition(async () => {
-      const res = await fetch(`/api/repositories/${repository.id}`, { method: "DELETE" });
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}));
-        setError(e.error ?? `HTTP ${res.status}`);
-        return;
+      try {
+        const res = await fetch(`/api/repositories/${repository.id}`, { method: "DELETE" });
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          setError(e.error ?? `HTTP ${res.status}`);
+          return;
+        }
+        router.push("/repositories");
+        router.refresh();
+      } catch (err) {
+        setError(describe(err));
       }
-      router.push("/repositories");
-      router.refresh();
     });
   };
 

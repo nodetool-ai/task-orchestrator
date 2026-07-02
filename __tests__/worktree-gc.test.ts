@@ -1,5 +1,5 @@
 import { ne } from "drizzle-orm";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db";
 import {
   acceptanceCriteria,
@@ -30,6 +30,10 @@ beforeEach(() => {
   db.delete(repositories).where(ne(repositories.id, "R-default")).run();
 });
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 const NOW = new Date("2026-05-13T12:00:00Z");
 const TEN_DAYS_AGO = new Date(NOW.getTime() - 10 * 24 * 60 * 60 * 1000);
 const TWO_DAYS_AGO = new Date(NOW.getTime() - 2 * 24 * 60 * 60 * 1000);
@@ -48,17 +52,50 @@ function makeCandidate(over: Partial<GcCandidate> = {}): GcCandidate {
 }
 
 describe("shouldRemoveWorktree predicate", () => {
-  it("removes when idle >= threshold AND branch has 0 commits ahead", async () => {
+  it("removes when idle >= threshold AND branch has 0 commits ahead AND tree is clean", async () => {
     const decision = await shouldRemoveWorktree({
       candidate: makeCandidate(),
       now: NOW,
       thresholdDays: 7,
       worktreeExists: () => true,
       revListCount: async () => 0,
+      isWorktreeDirty: async () => false,
     });
     expect(decision.remove).toBe(true);
     if (decision.remove) {
       expect(decision.idleDays).toBeCloseTo(10, 1);
+    }
+  });
+
+  it("keeps a DIRTY worktree even when idle and 0 commits ahead (never destroy uncommitted work)", async () => {
+    const decision = await shouldRemoveWorktree({
+      candidate: makeCandidate(),
+      now: NOW,
+      thresholdDays: 7,
+      worktreeExists: () => true,
+      revListCount: async () => 0,
+      isWorktreeDirty: async () => true,
+    });
+    expect(decision.remove).toBe(false);
+    if (!decision.remove) {
+      expect(decision.reason).toMatch(/dirty/i);
+    }
+  });
+
+  it("keeps (fail closed) when the dirty check errors", async () => {
+    const decision = await shouldRemoveWorktree({
+      candidate: makeCandidate(),
+      now: NOW,
+      thresholdDays: 7,
+      worktreeExists: () => true,
+      revListCount: async () => 0,
+      isWorktreeDirty: async () => {
+        throw new Error("git status blew up");
+      },
+    });
+    expect(decision.remove).toBe(false);
+    if (!decision.remove) {
+      expect(decision.reason).toMatch(/status failed/i);
     }
   });
 
@@ -69,6 +106,7 @@ describe("shouldRemoveWorktree predicate", () => {
       thresholdDays: 7,
       worktreeExists: () => true,
       revListCount: async () => 3,
+      isWorktreeDirty: async () => false,
     });
     expect(decision.remove).toBe(false);
     if (!decision.remove) {
@@ -83,6 +121,7 @@ describe("shouldRemoveWorktree predicate", () => {
       thresholdDays: 7,
       worktreeExists: () => true,
       revListCount: async () => 0,
+      isWorktreeDirty: async () => false,
     });
     expect(decision.remove).toBe(false);
     if (!decision.remove) {
@@ -98,6 +137,7 @@ describe("shouldRemoveWorktree predicate", () => {
         thresholdDays: 7,
         worktreeExists: () => true,
         revListCount: async () => 0,
+        isWorktreeDirty: async () => false,
       });
       expect(decision.remove, `status=${status}`).toBe(false);
     }
@@ -110,6 +150,7 @@ describe("shouldRemoveWorktree predicate", () => {
       thresholdDays: 7,
       worktreeExists: () => true,
       revListCount: async () => 0,
+      isWorktreeDirty: async () => false,
     });
     expect(noPath.remove).toBe(false);
 
@@ -119,6 +160,7 @@ describe("shouldRemoveWorktree predicate", () => {
       thresholdDays: 7,
       worktreeExists: () => true,
       revListCount: async () => 0,
+      isWorktreeDirty: async () => false,
     });
     expect(noBranch.remove).toBe(false);
   });
@@ -130,6 +172,9 @@ describe("shouldRemoveWorktree predicate", () => {
       thresholdDays: 7,
       worktreeExists: () => false,
       revListCount: async () => {
+        throw new Error("should not be called");
+      },
+      isWorktreeDirty: async () => {
         throw new Error("should not be called");
       },
     });
@@ -148,6 +193,7 @@ describe("shouldRemoveWorktree predicate", () => {
       revListCount: async () => {
         throw new Error("origin/main does not exist");
       },
+      isWorktreeDirty: async () => false,
     });
     expect(decision.remove).toBe(false);
     if (!decision.remove) {
@@ -162,6 +208,7 @@ describe("shouldRemoveWorktree predicate", () => {
       thresholdDays: 14,
       worktreeExists: () => true,
       revListCount: async () => 0,
+      isWorktreeDirty: async () => false,
     });
     expect(decision.remove).toBe(false);
   });
@@ -193,6 +240,7 @@ describe("runWorktreeGcOnce", () => {
       now: () => NOW,
       worktreeExists: () => true,
       revListCount: async () => 0,
+      isWorktreeDirty: async () => false,
       removeWorktree,
       pruneAdmin,
       resolveRepoRoot: () => "/tmp/repo",
@@ -214,7 +262,46 @@ describe("runWorktreeGcOnce", () => {
     expect(msgs[0]?.content).toMatch(/days idle/);
   });
 
-  it("skips removal but emits a note when KEEP_WORKTREES is set", async () => {
+  it("does NOT remove a dirty worktree (would destroy uncommitted work)", async () => {
+    db.insert(agentSessions)
+      .values({
+        id: 43,
+        taskId: null,
+        status: "idle",
+        goal: "<chat>",
+        toolsProfile: "orchestrator,repo_write",
+        cwdStrategy: "worktree",
+        branch: "claude/t-100-43",
+        worktreePath: "/tmp/repo/.worktrees/43",
+        repoId: "R-default",
+        startedAt: TEN_DAYS_AGO,
+      })
+      .run();
+
+    const removeWorktree = vi.fn(async () => {});
+    const pruneAdmin = vi.fn(async () => {});
+
+    const result = await runWorktreeGcOnce({
+      thresholdDays: 7,
+      now: () => NOW,
+      worktreeExists: () => true,
+      revListCount: async () => 0, // 0 commits ahead — would have passed the old predicate
+      isWorktreeDirty: async () => true, // …but there are uncommitted changes
+      removeWorktree,
+      pruneAdmin,
+      resolveRepoRoot: () => "/tmp/repo",
+    });
+
+    expect(result.scanned).toBe(1);
+    expect(result.removed).toBe(0);
+    expect(removeWorktree).not.toHaveBeenCalled();
+    expect(pruneAdmin).not.toHaveBeenCalled();
+    // No system message either — the run was left completely untouched.
+    const msgs = db.select().from(agentMessages).all();
+    expect(msgs).toHaveLength(0);
+  });
+
+  it("skips removal and logs a preview (no DB write) when KEEP_WORKTREES is set", async () => {
     db.insert(agentSessions)
       .values({
         id: 7,
@@ -230,12 +317,14 @@ describe("runWorktreeGcOnce", () => {
       })
       .run();
 
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const removeWorktree = vi.fn(async () => {});
     const result = await runWorktreeGcOnce({
       thresholdDays: 7,
       now: () => NOW,
       worktreeExists: () => true,
       revListCount: async () => 0,
+      isWorktreeDirty: async () => false,
       removeWorktree,
       keepWorktrees: true,
       resolveRepoRoot: () => "/tmp/repo",
@@ -243,9 +332,68 @@ describe("runWorktreeGcOnce", () => {
 
     expect(result.removed).toBe(0);
     expect(removeWorktree).not.toHaveBeenCalled();
+    // Previously this asserted a 'system' agent_messages row was written. That
+    // WAS the bug (finding #6): the note's created_at became the run's newest
+    // message, and defaultListCandidates derives lastActivityAt from
+    // max(agent_messages.created_at) — so writing it reset the idle clock GC
+    // measures. Keep mode must NOT touch the DB; it logs to the console instead.
     const msgs = db.select().from(agentMessages).all();
-    expect(msgs).toHaveLength(1);
-    expect(msgs[0]?.content).toMatch(/skipped/);
+    expect(msgs).toHaveLength(0);
+    expect(logSpy).toHaveBeenCalledWith(expect.stringMatching(/would remove worktree for run #7/));
+  });
+
+  it("keep-mode preview stays stable across repeated sweeps (no idle-clock drift)", async () => {
+    // Uses the REAL defaultListCandidates (no listCandidates override) so the
+    // lastActivityAt is derived from the DB exactly as in production. The run
+    // has no messages, so its idle clock is anchored on startedAt.
+    db.insert(agentSessions)
+      .values({
+        id: 71,
+        taskId: null,
+        status: "idle",
+        goal: "<chat>",
+        toolsProfile: "orchestrator,repo_write",
+        cwdStrategy: "worktree",
+        branch: "claude/t-100-71",
+        worktreePath: "/tmp/repo/.worktrees/71",
+        repoId: "R-default",
+        startedAt: TEN_DAYS_AGO,
+      })
+      .run();
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const previews: string[] = [];
+
+    async function sweep() {
+      logSpy.mockClear();
+      await runWorktreeGcOnce({
+        thresholdDays: 7,
+        now: () => NOW,
+        worktreeExists: () => true,
+        revListCount: async () => 0,
+        isWorktreeDirty: async () => false,
+        removeWorktree: async () => {},
+        keepWorktrees: true,
+        resolveRepoRoot: () => "/tmp/repo",
+      });
+      const call = logSpy.mock.calls
+        .map((c) => String(c[0]))
+        .find((s) => s.includes("would remove worktree for run #71"));
+      return call;
+    }
+
+    previews.push((await sweep()) ?? "MISSING-1");
+    previews.push((await sweep()) ?? "MISSING-2");
+    previews.push((await sweep()) ?? "MISSING-3");
+
+    // The preview must fire on every sweep and report the SAME idle duration —
+    // if keep mode had written an agent_messages row, sweeps 2+ would compute
+    // idle≈0 and the preview would vanish / change.
+    expect(previews[0]).toContain("10.0 days idle");
+    expect(previews[1]).toBe(previews[0]);
+    expect(previews[2]).toBe(previews[0]);
+    // And no rows were ever written to bump the clock.
+    expect(db.select().from(agentMessages).all()).toHaveLength(0);
   });
 
   it("uses repository.default_branch as the base for rev-list", async () => {
@@ -283,6 +431,7 @@ describe("runWorktreeGcOnce", () => {
         seenBase.push(base);
         return 0;
       },
+      isWorktreeDirty: async () => false,
       removeWorktree: async () => {},
       pruneAdmin: async () => {},
       resolveRepoRoot: () => "/tmp/custom",
@@ -313,6 +462,7 @@ describe("runWorktreeGcOnce", () => {
       now: () => NOW,
       worktreeExists: () => true,
       revListCount: async () => 0,
+      isWorktreeDirty: async () => false,
       removeWorktree: async () => {},
       resolveRepoRoot: () => "/tmp/repo",
     });
@@ -353,6 +503,7 @@ describe("runWorktreeGcOnce", () => {
       now: () => NOW,
       worktreeExists: () => true,
       revListCount: async () => 0,
+      isWorktreeDirty: async () => false,
       removeWorktree,
       resolveRepoRoot: () => "/tmp/repo",
     });
@@ -384,6 +535,7 @@ describe("runWorktreeGcOnce", () => {
       now: () => NOW,
       worktreeExists: () => true,
       revListCount: async () => 4,
+      isWorktreeDirty: async () => false,
       removeWorktree,
       resolveRepoRoot: () => "/tmp/repo",
     });

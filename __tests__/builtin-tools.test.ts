@@ -21,6 +21,13 @@ describe("canonicalToolName", () => {
     expect(canonicalToolName("MultiEdit")).toBe("Edit");
   });
 
+  it("folds NotebookEdit into the Edit family (premise of the notebook write-sandbox fix)", () => {
+    // NotebookEdit must resolve to canonical Edit so the sandbox interceptor
+    // treats its path as a file-write target; the backend then maps
+    // notebook_path → path so containment actually runs.
+    expect(canonicalToolName("NotebookEdit")).toBe("Edit");
+  });
+
   it("collapses both harnesses' search tools to one identity", () => {
     expect(canonicalToolName("find")).toBe(canonicalToolName("Glob"));
     expect(canonicalToolName("grep")).toBe(canonicalToolName("Grep"));
@@ -44,6 +51,10 @@ describe("interceptorToolName", () => {
   it("passes unrecognized tool names through untouched", () => {
     expect(interceptorToolName("task_orch__create_task")).toBe("task_orch__create_task");
     expect(interceptorToolName("mcp__server__thing")).toBe("mcp__server__thing");
+    // The SDK MCP prefix is stripped by the Claude backend (normalizeToolCall)
+    // BEFORE this seam runs, so interceptorToolName itself leaves the fully
+    // namespaced name untouched — it only folds recognized built-ins.
+    expect(interceptorToolName("mcp__task_orch__propose_spec")).toBe("mcp__task_orch__propose_spec");
   });
 });
 
@@ -52,6 +63,7 @@ describe("isFileTool", () => {
     expect(isFileTool("read")).toBe(true);
     expect(isFileTool("Write")).toBe(true);
     expect(isFileTool("MultiEdit")).toBe(true);
+    expect(isFileTool("NotebookEdit")).toBe(true);
     expect(isFileTool("grep")).toBe(false);
     expect(isFileTool("Glob")).toBe(false);
     expect(isFileTool("bash")).toBe(false);

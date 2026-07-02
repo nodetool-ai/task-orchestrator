@@ -43,6 +43,9 @@ export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], class
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // When the browser blocks the run tab we can't recover the popup handle, so
+  // surface a manual link instead of leaving the sent message invisible.
+  const [openRunId, setOpenRunId] = useState<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
@@ -83,7 +86,17 @@ export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], class
     const text = input.trim();
     if (!text || pending) return;
     setError(null);
+    setOpenRunId(null);
     setPending(true);
+
+    // Open the run tab *synchronously* — inside the click/keydown gesture and
+    // before any await — so Safari's popup blocker (which only allows
+    // window.open during a user gesture) doesn't kill it after our fetches.
+    // We can't pass `noopener` here or the handle comes back null; the tab is
+    // same-origin so navigating it after the awaits is safe. If the browser
+    // still blocked it we fall back to an inline "Open run" link.
+    const popup = window.open("", "_blank");
+
     try {
       // 1. Open-or-create the task's single attached run (deferred — no implement
       //    seed; this message is its first turn). The pickers are honored only
@@ -94,6 +107,7 @@ export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], class
         body: JSON.stringify({ seed: false, personaId, model, thinkingLevel: reasoning }),
       });
       if (!createRes.ok) {
+        popup?.close();
         const body = await createRes.json().catch(() => ({}));
         setError(body.error ?? `HTTP ${createRes.status}`);
         return;
@@ -104,24 +118,45 @@ export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], class
       };
 
       // 2. Send the user's message. Prefix the task context only on the first
-      //    message of a fresh run — an existing session already has it.
-      //    Fire-and-forget; the run page surfaces any error and streams the reply.
+      //    message of a fresh run — an existing session already has it. The
+      //    POST streams the turn back; read the first SSE frame so an immediate
+      //    `error` (e.g. the attached run is mid-turn → "already in flight")
+      //    surfaces here instead of being dropped on an unread 200 stream.
       const messageText = created ? `${promptPrefix}\n\n---\n\n${text}` : text;
-      void fetch(`/api/runs/${runId}/messages`, {
+      const msgRes = await fetch(`/api/runs/${runId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: messageText }),
-      }).catch(() => {
-        // The /runs/[id] page surfaces errors; nothing useful to do here.
       });
+      if (!msgRes.ok || !msgRes.body) {
+        popup?.close();
+        setError(`HTTP ${msgRes.status}`);
+        return;
+      }
+      const { event, drain } = await readFirstSseEvent(msgRes.body);
+      // Keep draining the rest in the background so the turn isn't cancelled —
+      // aborting the POST stream would abort the agent's turn. The attached run
+      // (opened in the new tab) renders the reply via its own /events feed.
+      void drain();
+      if (event?.type === "error") {
+        popup?.close();
+        setError(event.error ?? "The agent is busy — try again in a moment.");
+        return; // do not clear the input or navigate as if it succeeded
+      }
 
-      // 3. Side-panel semantics → open the attached run in a new tab.
-      window.open(`/runs/${runId}`, "_blank", "noopener,noreferrer");
+      // 3. Side-panel semantics → reveal the attached run in the new tab, or
+      //    fall back to an inline link when the popup was blocked.
+      if (popup) {
+        popup.location.href = `/runs/${runId}`;
+      } else {
+        setOpenRunId(runId);
+      }
 
       // Reset input on success.
       setInput("");
       if (textareaRef.current) textareaRef.current.style.height = "auto";
     } catch (err) {
+      popup?.close();
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setPending(false);
@@ -181,6 +216,66 @@ export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], class
         </button>
       </div>
       {error && <p className="text-xs text-state-blocked">{error}</p>}
+      {openRunId != null && (
+        <p className="text-xs text-muted-foreground">
+          Message sent.{" "}
+          <a
+            href={`/runs/${openRunId}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline hover:text-foreground"
+          >
+            Open run #{openRunId} ↗
+          </a>
+        </p>
+      )}
     </div>
   );
+}
+
+interface FirstSseEvent {
+  /** The first parsed `data:` frame, or null if the stream ended empty. */
+  event: { type?: string; error?: string } | null;
+  /** Drains the rest of the stream (keeping the turn alive) without aborting. */
+  drain: () => Promise<void>;
+}
+
+// Read just the first SSE `data:` frame from a POST /messages response so the
+// caller can react to an immediate `error` without waiting for the whole turn.
+// The returned `drain` keeps reading the remainder in the background — never
+// abort the stream on success, as that cancels the agent's turn.
+async function readFirstSseEvent(body: ReadableStream<Uint8Array>): Promise<FirstSseEvent> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let event: { type?: string; error?: string } | null = null;
+  outer: while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buffer.indexOf("\n\n")) !== -1) {
+      const frame = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      for (const line of frame.split("\n")) {
+        if (!line.startsWith("data: ")) continue;
+        try {
+          event = JSON.parse(line.slice(6)) as { type?: string; error?: string };
+        } catch {
+          continue;
+        }
+        break outer;
+      }
+    }
+  }
+  const drain = async () => {
+    try {
+      while (!(await reader.read()).done) {
+        /* discard remaining frames */
+      }
+    } catch {
+      /* stream ended / released */
+    }
+  };
+  return { event, drain };
 }

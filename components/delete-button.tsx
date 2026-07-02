@@ -4,6 +4,7 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Trash2 } from "lucide-react";
 import { useConfirm } from "@/components/ui/dialog-provider";
+import { describe } from "@/lib/utils";
 
 interface Props {
   endpoint: string;
@@ -33,14 +34,18 @@ export function DeleteButton({
     if (!(await confirm({ message: confirmMessage, confirmLabel: label, tone: "danger" }))) return;
     setError(null);
     startTransition(async () => {
-      const res = await fetch(endpoint, { method: "DELETE" });
-      if (!res.ok && res.status !== 204) {
-        const body = await res.json().catch(() => ({}));
-        setError(body.error ?? `HTTP ${res.status}`);
-        return;
+      try {
+        const res = await fetch(endpoint, { method: "DELETE" });
+        if (!res.ok && res.status !== 204) {
+          const body = await res.json().catch(() => ({}));
+          setError(body.error ?? `HTTP ${res.status}`);
+          return;
+        }
+        router.push(redirectTo);
+        router.refresh();
+      } catch (err) {
+        setError(describe(err));
       }
-      router.push(redirectTo);
-      router.refresh();
     });
   };
 

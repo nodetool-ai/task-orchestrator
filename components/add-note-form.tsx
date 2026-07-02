@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Plus } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, describe } from "@/lib/utils";
 
 export function AddNoteForm({
   taskId,
@@ -24,19 +24,23 @@ export function AddNoteForm({
     if (!body.trim() || !author.trim()) return;
     setError(null);
     startTransition(async () => {
-      const res = await fetch(`/api/tasks/${taskId}/notes`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ body: body.trim(), author: author.trim() }),
-      });
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}));
-        setError(e.error ?? `HTTP ${res.status}`);
-        return;
+      try {
+        const res = await fetch(`/api/tasks/${taskId}/notes`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ body: body.trim(), author: author.trim() }),
+        });
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          setError(e.error ?? `HTTP ${res.status}`);
+          return;
+        }
+        setBody("");
+        setOpen(false);
+        router.refresh();
+      } catch (err) {
+        setError(describe(err));
       }
-      setBody("");
-      setOpen(false);
-      router.refresh();
     });
   };
 

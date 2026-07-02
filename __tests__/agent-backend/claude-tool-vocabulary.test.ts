@@ -38,10 +38,49 @@ describe("Claude built-in tool vocabulary translation", () => {
     });
   });
 
-  it("passes through unrecognized (MCP / orchestrator) tools unchanged", () => {
+  it("strips the mcp__task_orch__ prefix so interceptors match neutral names", () => {
+    // Runtime contract: the SDK exposes in-process MCP tools to PreToolUse hooks
+    // as `mcp__<server>__<tool>`. Orchestrator tools are themselves registered as
+    // `task_orch__<name>`, so the hook sees a DOUBLED prefix
+    // (`mcp__task_orch__task_orch__create_task`); planning tools are bare
+    // (`mcp__task_orch__propose_spec`). Both must fold to the neutral names the
+    // planning stage gates key on. (Previously this test fed the bare
+    // `task_orch__create_task` — an input that never occurs at runtime.)
+    expect(normalizeToolCall("mcp__task_orch__task_orch__create_task", { title: "x" })).toEqual({
+      toolName: "task_orch__create_task",
+      input: { title: "x" },
+    });
+    expect(normalizeToolCall("mcp__task_orch__propose_spec", { spec_markdown: "# s" })).toEqual({
+      toolName: "propose_spec",
+      input: { spec_markdown: "# s" },
+    });
+  });
+
+  it("passes through a name with no mcp prefix unchanged", () => {
     expect(normalizeToolCall("task_orch__create_task", { title: "x" })).toEqual({
       toolName: "task_orch__create_task",
       input: { title: "x" },
+    });
+  });
+
+  it("maps NotebookEdit notebook_path → path so the write sandbox runs", () => {
+    // NotebookEdit folds to canonical Edit (a file tool), but the SDK passes the
+    // path as `notebook_path`, not `file_path`. Surface it as `path` so the
+    // sandbox containment check (which bails when path isn't a string) executes.
+    expect(
+      normalizeToolCall("NotebookEdit", { notebook_path: "/a/n.ipynb", new_source: "x" })
+    ).toEqual({
+      toolName: "edit",
+      input: { notebook_path: "/a/n.ipynb", new_source: "x", path: "/a/n.ipynb" },
+    });
+  });
+
+  it("de-normalizes a NotebookEdit path mutation back to notebook_path", () => {
+    const original = { notebook_path: "/a/n.ipynb", new_source: "x" };
+    const canonical = { new_source: "x", path: "/safe/n.ipynb" };
+    expect(denormalizeToolInput("NotebookEdit", original, canonical)).toEqual({
+      new_source: "x",
+      notebook_path: "/safe/n.ipynb",
     });
   });
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { ArrowUp, Loader2, MessageCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -13,6 +14,7 @@ import {
 } from "@/components/pickers/repository-picker";
 import { ModelPicker, type ModelOption } from "@/components/chat/model-picker";
 import { ThinkingLevelPicker, type ThinkingLevel } from "@/components/pickers/thinking-level-picker";
+import { stashPendingMessage } from "@/lib/pending-first-message";
 
 export type { PersonaOption };
 
@@ -58,9 +60,8 @@ const QUICK_PROMPTS: Array<{ label: string; prompt: string }> = [
 /**
  * Free-form chat composer pinned to the plan page. Sending creates a
  * plan-scoped `<chat>` run (orchestrator tools default plan_id to this
- * plan) and POSTs the user's message — prepended with the plan context
- * block — as the run's first message. The new run opens in a new tab so
- * the plan page stays put.
+ * plan), hands the user's first message — prepended with the plan context
+ * block — to the run view, then navigates into the new run.
  */
 export function PlanChatBox({
   planId,
@@ -69,6 +70,7 @@ export function PlanChatBox({
   personas = [],
   className,
 }: Props) {
+  const router = useRouter();
   const [input, setInput] = useState("");
   const [personaId, setPersonaId] = useState(personas[0]?.id ?? "implementor");
   const [repoId, setRepoId] = useState<string>(repoOptions[0]?.id ?? "");
@@ -153,19 +155,17 @@ export function PlanChatBox({
       }
       const run = (await createRes.json()) as { id: number };
 
+      // Hand the first message (with the plan context prefix) to RunView rather
+      // than POSTing it here: it sends the turn through its authoritative
+      // optimistic + streaming path, surfacing any error inline. router.push
+      // navigates in-app — no popup blocker to fight and no duplicate run if the
+      // user resends. (window.open here was blocked by Safari after the awaits.)
       const messageText = `${promptPrefix}\n\n---\n\n${text}`;
-      void fetch(`/api/runs/${run.id}/messages`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: messageText }),
-      }).catch(() => {
-        // The /runs/[id] page surfaces stream errors; nothing useful to do here.
-      });
-
-      window.open(`/runs/${run.id}`, "_blank", "noopener,noreferrer");
+      stashPendingMessage(run.id, messageText);
 
       setInput("");
       if (textareaRef.current) textareaRef.current.style.height = "auto";
+      router.push(`/runs/${run.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

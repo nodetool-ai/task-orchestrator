@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Sparkles } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, describe } from "@/lib/utils";
 
 interface Props {
   taskId: string;
@@ -25,18 +25,22 @@ export function TaskAgentButton({ taskId, hasAttachedRun, className }: Props) {
   const go = () => {
     setError(null);
     startTransition(async () => {
-      const res = await fetch(`/api/tasks/${taskId}/attached-run`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ seed: true }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        setError(body.error ?? `HTTP ${res.status}`);
-        return;
+      try {
+        const res = await fetch(`/api/tasks/${taskId}/attached-run`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ seed: true }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          setError(body.error ?? `HTTP ${res.status}`);
+          return;
+        }
+        const { runId } = (await res.json()) as { runId: number };
+        router.push(`/runs/${runId}`);
+      } catch (err) {
+        setError(describe(err));
       }
-      const { runId } = (await res.json()) as { runId: number };
-      router.push(`/runs/${runId}`);
     });
   };
 

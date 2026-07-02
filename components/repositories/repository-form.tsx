@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Plus } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, describe } from "@/lib/utils";
 
 export function NewRepositoryForm() {
   const router = useRouter();
@@ -30,27 +30,31 @@ export function NewRepositoryForm() {
     if (!name.trim()) return;
     setError(null);
     startTransition(async () => {
-      const res = await fetch("/api/repositories", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: name.trim(),
-          remote: remote.trim() || null,
-          localPath: localPath.trim() || null,
-          defaultBranch: defaultBranch.trim() || "main",
-          description: description.trim(),
-        }),
-      });
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}));
-        setError(e.error ?? `HTTP ${res.status}`);
-        return;
+      try {
+        const res = await fetch("/api/repositories", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: name.trim(),
+            remote: remote.trim() || null,
+            localPath: localPath.trim() || null,
+            defaultBranch: defaultBranch.trim() || "main",
+            description: description.trim(),
+          }),
+        });
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          setError(e.error ?? `HTTP ${res.status}`);
+          return;
+        }
+        const created = await res.json();
+        reset();
+        setOpen(false);
+        router.push(`/repositories/${created.id}`);
+        router.refresh();
+      } catch (err) {
+        setError(describe(err));
       }
-      const created = await res.json();
-      reset();
-      setOpen(false);
-      router.push(`/repositories/${created.id}`);
-      router.refresh();
     });
   };
 

@@ -100,17 +100,7 @@ export function RunView({
   const confirm = useConfirm();
   const [run, setRun] = useState<RunRow>(initialRun);
   const [messages, setMessages] = useState<UiMessage[]>(() =>
-    initialMessages.map((m) => ({
-      id: m.id,
-      role: m.role,
-      content: m.content,
-      createdAt: m.createdAt,
-      // Persisted system messages store the event type inside the first
-      // content block (migration 0009 wrote `[{type: <event_type>, ...payload}]`).
-      // Surface it as systemKind so SystemEventRow doesn't fall through to
-      // the JSON fallback for everything.
-      ...(m.role === "system" ? extractSystemMeta(m.content) : {}),
-    }))
+    initialMessages.map(toUiMessage)
   );
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -120,9 +110,19 @@ export function RunView({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const didInitialScrollRef = useRef(false);
   const handoffSentRef = useRef(false);
+  // Mirror live state into refs so effects can read the latest value without
+  // listing it as a dependency (which would tear down long-lived subscriptions
+  // or clobber in-flight rows on every transition).
+  const statusRef = useRef(run.status);
+  const sendingRef = useRef(false);
+  // The initial `messages` state already reflects the first `initialMessages`,
+  // so skip the reconciliation effect's very first run.
+  const initialMessagesSyncedRef = useRef(false);
 
   const status = run.status;
   const terminal = isTerminalStatus(status);
+  statusRef.current = status;
+  sendingRef.current = sending;
   const closed = status === "closed";
   const composerDisabled = closed;
   const canCancel =
@@ -154,13 +154,42 @@ export function RunView({
     el.style.height = Math.min(el.scrollHeight, 200) + "px";
   }, [input]);
 
+  // Reconcile with server props. `messages` is seeded from a useState
+  // initializer, so without this a router.refresh() (after a send, a close, or
+  // a sibling tab posting) would never reach the UI. When a turn is streaming
+  // we keep the live optimistic/streamed rows and only fold in server rows we
+  // don't already have; otherwise the persisted rows are authoritative and
+  // replace the temp rows (swapping tmp negative ids for real ones).
+  useEffect(() => {
+    if (!initialMessagesSyncedRef.current) {
+      initialMessagesSyncedRef.current = true;
+      return;
+    }
+    const serverMsgs = initialMessages.map(toUiMessage);
+    setMessages((prev) => {
+      if (sendingRef.current) {
+        const have = new Set(prev.map((m) => m.id));
+        const additions = serverMsgs.filter((m) => !have.has(m.id));
+        return additions.length ? [...prev, ...additions] : prev;
+      }
+      return serverMsgs;
+    });
+  }, [initialMessages]);
+
   // Live read-only SSE: subscribes to /events for status transitions, system
   // events emitted by the implement worker, and SDK envelopes produced by a
   // turn we did NOT initiate (e.g. another tab posted a message, or the
   // initial implement worker is still running). On terminal status the
   // server sends `_eos` and we close.
+  //
+  // Subscribe once per run.id. The endpoint has no replay cursor, so tearing
+  // the EventSource down on every status transition (as an effect that depends
+  // on `status` would) drops any events emitted during the reconnect gap. We
+  // read the live status from `statusRef` to decide whether to open at all and
+  // rely on the server's `_eos` frame to close a run that reaches a terminal
+  // status.
   useEffect(() => {
-    if (terminal && status !== "idle") return;
+    if (isTerminalStatus(statusRef.current) && statusRef.current !== "idle") return;
     const url = `/api/runs/${run.id}/events`;
     const es = new EventSource(url);
     es.onmessage = (msg) => {
@@ -180,9 +209,10 @@ export function RunView({
       es.close();
     };
     return () => es.close();
-    // We intentionally re-subscribe when `terminal`/`status` flips so a run
-    // that resumes (idle → running) reconnects without a full reload.
-  }, [run.id, terminal, status, router]);
+    // Subscribe once per run; status transitions are tracked via statusRef and
+    // handled by the `_eos` frame instead of re-running this effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run.id, router]);
 
   // First-message handoff: the /chat composer stashes a brand-new run's first
   // message and navigates here. Send it through the normal optimistic + SSE
@@ -276,10 +306,21 @@ export function RunView({
 
     // Optimistic user message — keyed by a temp negative id so the next
     // server refresh can swap it in without flickering.
+    const tmpId = nextTmpId();
     setMessages((prev) => [
       ...prev,
-      { id: nextTmpId(), role: "user", content: [{ type: "text", text }] },
+      { id: tmpId, role: "user", content: [{ type: "text", text }] },
     ]);
+
+    // If the send fails before the server confirms it persisted the message
+    // (`user_message` frame / any streamed reply), drop the optimistic bubble
+    // so it isn't left rendered as if it were sent, and give the text back to
+    // the composer (unless the user has already started a new draft).
+    let delivered = false;
+    const rollback = () => {
+      setMessages((prev) => prev.filter((m) => m.id !== tmpId));
+      setInput((cur) => (cur.length === 0 ? text : cur));
+    };
 
     const abort = new AbortController();
     abortRef.current = abort;
@@ -293,21 +334,30 @@ export function RunView({
       });
       if (!res.ok || !res.body) {
         setErrorMsg(`HTTP ${res.status}`);
+        rollback();
         return;
       }
       await consumeSse(res.body, (event) => {
         if (event.type === "sdk" && event.sdk) {
+          delivered = true;
           mergeSdkEnvelope(event.sdk);
         } else if (event.type === "error") {
           setErrorMsg(event.error ?? "Unknown error");
+          // An error before anything was delivered (e.g. "already in flight")
+          // means the message never landed — roll the optimistic bubble back.
+          if (!delivered) rollback();
         } else if (event.type === "user_message" && event.message) {
-          // Already optimistically rendered. We let the next router.refresh
-          // reconcile id swaps.
+          // The server persisted the message; the reconciliation effect swaps
+          // the tmp id for the real row on the next refresh.
+          delivered = true;
         }
       });
     } catch (err) {
       if ((err as { name?: string })?.name !== "AbortError") {
         setErrorMsg(err instanceof Error ? err.message : String(err));
+        // A network failure (server down, connection reset) never persisted
+        // the message — the AbortError case is a deliberate stop, so keep it.
+        if (!delivered) rollback();
       }
     } finally {
       setSending(false);
@@ -674,6 +724,23 @@ async function consumeSse(
       }
     }
   }
+}
+
+// Map a persisted server row to the UI shape. Kept module-level so both the
+// initial state and the server-prop reconciliation effect produce identical
+// rows.
+function toUiMessage(m: MessageRow): UiMessage {
+  return {
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    createdAt: m.createdAt,
+    // Persisted system messages store the event type inside the first
+    // content block (migration 0009 wrote `[{type: <event_type>, ...payload}]`).
+    // Surface it as systemKind so SystemEventRow doesn't fall through to
+    // the JSON fallback for everything.
+    ...(m.role === "system" ? extractSystemMeta(m.content) : {}),
+  };
 }
 
 // Persisted system messages were written by migration 0009 (and by live

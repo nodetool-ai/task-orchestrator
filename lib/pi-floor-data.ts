@@ -86,8 +86,9 @@ function loadRunsByGroup(): {
     else if (cat === "blocked") groups.blocked.push(wrapped);
     else if (cat === "shipped") groups.shipped.push(wrapped);
   }
-  // shipped: keep most recent 8
-  groups.shipped = groups.shipped.slice(0, 8);
+  // Return the full shipped list (ordered most-recent-first by listRuns). Callers
+  // that render the floor's shipped table truncate to the 8 newest themselves;
+  // per-plan shippedCount must count against the full list, not a global top-8.
   return groups;
 }
 
@@ -176,7 +177,9 @@ export function loadFloorData(): {
     review: groups.review.map((g) => toFloorRun(g, "review")),
     blocked: groups.blocked.map((g) => toFloorRun(g, "blocked")),
     queue,
-    shipped: groups.shipped.map(toShipped),
+    // The floor's shipped table shows only the 8 most-recent shipped runs; truncate
+    // here (not in loadRunsByGroup) so per-plan shippedCount can use the full list.
+    shipped: groups.shipped.slice(0, 8).map(toShipped),
   };
 }
 
@@ -211,19 +214,21 @@ export function loadPlansIndexData(): PlanCardData[] {
     tasksByPlan.set(t.planId, arr);
   }
 
-  function runsForPlanTitle(title: string | null, bucket: RunWithTask[]): RunWithTask[] {
-    if (!title) return [];
-    return bucket.filter((g) => g.planTitle === title);
+  // Match runs to a plan by id, not title: plan titles aren't unique, so filtering
+  // by title double-counts runs across same-titled plans (each RunWithTask already
+  // carries task.planId, which disambiguates).
+  function runsForPlan(planId: string, bucket: RunWithTask[]): RunWithTask[] {
+    return bucket.filter((g) => g.task?.planId === planId);
   }
 
   return plans.map((p) => {
     const prog = progress.get(p.id) ?? { done: 0, total: 0, pct: 0, open: 0 };
     const planTasks = tasksByPlan.get(p.id) || [];
     const queued = planTasks.filter((t) => t.state === "todo").length;
-    const live = runsForPlanTitle(p.title, groups.running);
-    const review = runsForPlanTitle(p.title, groups.review);
-    const blocked = runsForPlanTitle(p.title, groups.blocked);
-    const shipped = runsForPlanTitle(p.title, groups.shipped);
+    const live = runsForPlan(p.id, groups.running);
+    const review = runsForPlan(p.id, groups.review);
+    const blocked = runsForPlan(p.id, groups.blocked);
+    const shipped = runsForPlan(p.id, groups.shipped);
     const personas = Array.from(
       new Set(live.map((w) => w.run.personaId).filter(Boolean) as string[])
     );

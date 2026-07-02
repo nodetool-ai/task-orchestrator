@@ -20,6 +20,7 @@ import {
 } from "./primitives";
 import { openSpawn } from "./overlay-store";
 import { useIsMobile } from "./use-is-mobile";
+import { describe } from "@/lib/utils";
 
 export type PlanCardData = {
   id: string;
@@ -204,25 +205,29 @@ function PlanWithAgentDialog({ repos, onClose }: { repos: RepoOption[]; onClose:
     const text = idea.trim();
     if (!text) { setError("Please describe your idea."); return; }
     startTransition(async () => {
-      const res = await fetch("/api/runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          goal: "<plan>",
-          personaId: "planning-agent",
-          cwdStrategy: repoId ? "repo" : "none",
-          repoId: repoId || null,
-          thinkingLevel: reasoning || null,
-          initialPrompt: text,
-        }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        setError(body.error ?? `HTTP ${res.status}`);
-        return;
+      try {
+        const res = await fetch("/api/runs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            goal: "<plan>",
+            personaId: "planning-agent",
+            cwdStrategy: repoId ? "repo" : "none",
+            repoId: repoId || null,
+            thinkingLevel: reasoning || null,
+            initialPrompt: text,
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          setError(body.error ?? `HTTP ${res.status}`);
+          return;
+        }
+        const run = (await res.json()) as { id: number };
+        router.push(`/runs/${run.id}`);
+      } catch (err) {
+        setError(describe(err));
       }
-      const run = (await res.json()) as { id: number };
-      router.push(`/runs/${run.id}`);
     });
   };
 
@@ -428,22 +433,26 @@ function NewPlanDialog({ repos, onClose }: { repos: RepoOption[]; onClose: () =>
     const t = title.trim();
     if (!t) { setError("Please enter a title."); return; }
     startTransition(async () => {
-      const res = await fetch("/api/plans", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: t,
-          body: body.trim() || undefined,
-          repoIds: repoId ? [repoId] : undefined,
-        }),
-      });
-      if (!res.ok) {
-        const b = await res.json().catch(() => ({}));
-        setError(b.error ?? `HTTP ${res.status}`);
-        return;
+      try {
+        const res = await fetch("/api/plans", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: t,
+            body: body.trim() || undefined,
+            repoIds: repoId ? [repoId] : undefined,
+          }),
+        });
+        if (!res.ok) {
+          const b = await res.json().catch(() => ({}));
+          setError(b.error ?? `HTTP ${res.status}`);
+          return;
+        }
+        const created = (await res.json()) as { id: string };
+        router.push(`/plans/${created.id}`);
+      } catch (err) {
+        setError(describe(err));
       }
-      const created = (await res.json()) as { id: string };
-      router.push(`/plans/${created.id}`);
     });
   };
 

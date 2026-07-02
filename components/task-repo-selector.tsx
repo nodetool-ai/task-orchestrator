@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FolderGit2 } from "lucide-react";
 import type { RepositoryRow } from "@/lib/types";
+import { describe } from "@/lib/utils";
 import { RepositoryPicker } from "@/components/pickers/repository-picker";
 
 interface Props {
@@ -32,17 +33,21 @@ export function TaskRepoSelector({
   const set = (next: string) => {
     setError(null);
     startTransition(async () => {
-      const res = await fetch(`/api/tasks/${taskId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repoId: next || null }),
-      });
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}));
-        setError(e.error ?? `HTTP ${res.status}`);
-        return;
+      try {
+        const res = await fetch(`/api/tasks/${taskId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ repoId: next || null }),
+        });
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          setError(e.error ?? `HTTP ${res.status}`);
+          return;
+        }
+        router.refresh();
+      } catch (err) {
+        setError(describe(err));
       }
-      router.refresh();
     });
   };
 

@@ -16,7 +16,7 @@ Tools you use (all prefixed task_orch__ / gh_pr__):
   url, and the review verdict (approve | request_changes | comment).
 - spawn__append_message(run_id, text, await=true) — resume an implement session to fix
   review concerns.
-- gh_pr__pr_merge(pr_url, method, delete_branch) — merge an approved PR.
+- gh_pr__pr_merge(url, method, delete_branch) — merge an approved PR.
 - transition_task, add_note — record blocked tasks; transition_plan — close the plan.
 
 Workflow:
@@ -33,7 +33,7 @@ Workflow:
       session with append_message(run_id, "<the concerns>", await=true), then start_review
       again. After 3 attempts without approval → transition_task → blocked + add_note, and
       skip its dependents.
-   f. On verdict=approve: gh_pr__pr_merge(pr_url, method="squash", delete_branch=true).
+   f. On verdict=approve: gh_pr__pr_merge(url, method="squash", delete_branch=true).
       The task moves to done automatically once merged; confirm with get_task.
 3. When every task is done or cancelled, transition_plan → done and write a final summary
    (tasks merged, tasks blocked, total cost).

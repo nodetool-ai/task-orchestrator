@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Check, Loader2 } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, describe } from "@/lib/utils";
 
 export function CriterionCheckbox({
   taskId,
@@ -26,17 +26,22 @@ export function CriterionCheckbox({
     setDone(next);
     setError(null);
     startTransition(async () => {
-      const res = await fetch(`/api/tasks/${taskId}/criteria/${criterionId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ done: next }),
-      });
-      if (!res.ok) {
+      try {
+        const res = await fetch(`/api/tasks/${taskId}/criteria/${criterionId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ done: next }),
+        });
+        if (!res.ok) {
+          setDone(!next);
+          setError(`Failed: ${res.status}`);
+          return;
+        }
+        router.refresh();
+      } catch (err) {
         setDone(!next);
-        setError(`Failed: ${res.status}`);
-        return;
+        setError(describe(err));
       }
-      router.refresh();
     });
   };
 

@@ -76,10 +76,17 @@ export function mapPiEvent(
             content?: RunEnvelopeContentBlock[];
             stopReason?: string;
             errorMessage?: string;
+            usage?: PiUsage;
           }>
         | undefined;
       const lastText = extractLastText(messages);
-      const usage = ev.usage as { input_tokens?: number; output_tokens?: number } | undefined;
+      // pi's agent_end is exactly { type:'agent_end', messages } — it carries NO
+      // usage field (see pi-agent-core AgentEvent). The real token/cost data lives
+      // per AssistantMessage as `usage: {input, output, cacheRead, cacheWrite,
+      // cost:{total}}` (pi-ai Usage), so we sum it across the assistant messages
+      // here. Reading ev.usage (as before) always yielded undefined, which is why
+      // the floor showed tok 0/0 and cost stayed null for every pi run.
+      const summed = sumAssistantUsage(messages);
       // pi encodes failures/aborts as an assistant message with stopReason
       // "error"/"aborted" (see pi-agent-core handleRunFailure). Derive is_error
       // from it instead of hard-coding false, which would otherwise report
@@ -93,8 +100,10 @@ export function mapPiEvent(
         type: "result",
         result: isError && lastAssistant?.errorMessage ? lastAssistant.errorMessage : lastText,
         is_error: isError,
-        total_cost_usd: null,
-        usage,
+        total_cost_usd: summed ? summed.total_cost_usd : null,
+        usage: summed
+          ? { input_tokens: summed.input_tokens, output_tokens: summed.output_tokens }
+          : undefined,
       }];
     }
     case "message_update": {
@@ -123,6 +132,45 @@ function normalizeAssistantBlock(block: RunEnvelopeContentBlock): RunEnvelopeCon
     return { ...(rest as RunEnvelopeContentBlock), type: "tool_use", input: args };
   }
   return block;
+}
+
+// Per-AssistantMessage usage as emitted by pi-ai (types.d.ts `Usage`). Fields are
+// typed optional here since we only read what we need off untyped SDK events.
+interface PiUsage {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  cost?: { total?: number };
+}
+
+/**
+ * Sum token usage and cost across the assistant messages of an agent_end event.
+ * Returns null when no assistant message carried usage, so the caller can keep the
+ * "unknown" (null/undefined) envelope semantics rather than reporting a false 0.
+ *
+ * Decision: `input`/`output` are recorded as the run's input/output token counts and
+ * cacheRead/cacheWrite are intentionally NOT folded into them. This mirrors the Claude
+ * backend (whose input_tokens likewise excludes cached tokens), so "tok in/out" means
+ * the same thing on both backends. Cache traffic is still accounted for in cost, since
+ * usage.cost.total already prices cacheRead/cacheWrite.
+ */
+function sumAssistantUsage(
+  messages: Array<{ role?: string; usage?: PiUsage }> | undefined
+): { input_tokens: number; output_tokens: number; total_cost_usd: number } | null {
+  if (!messages) return null;
+  let found = false;
+  let input = 0;
+  let output = 0;
+  let cost = 0;
+  for (const m of messages) {
+    if (m?.role !== "assistant" || !m.usage) continue;
+    found = true;
+    input += m.usage.input ?? 0;
+    output += m.usage.output ?? 0;
+    cost += m.usage.cost?.total ?? 0;
+  }
+  return found ? { input_tokens: input, output_tokens: output, total_cost_usd: cost } : null;
 }
 
 function extractLastText(

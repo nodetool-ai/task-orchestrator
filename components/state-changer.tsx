@@ -11,7 +11,7 @@ import {
   type PlanState,
   type TaskState,
 } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, describe } from "@/lib/utils";
 import { usePrompt } from "@/components/ui/dialog-provider";
 
 type Kind = "task" | "plan";
@@ -86,17 +86,21 @@ export function StateChanger(props: Props) {
     }
 
     startTransition(async () => {
-      const res = await fetch(url, {
-        method,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}));
-        setError(e.error ?? `HTTP ${res.status}`);
-        return;
+      try {
+        const res = await fetch(url, {
+          method,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          setError(e.error ?? `HTTP ${res.status}`);
+          return;
+        }
+        router.refresh();
+      } catch (err) {
+        setError(describe(err));
       }
-      router.refresh();
     });
   };
 

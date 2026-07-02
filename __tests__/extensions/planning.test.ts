@@ -346,6 +346,43 @@ describe("planningExtension tool execution", () => {
     expect(runRow?.planId).toBe(planId);
   });
 
+  it("commit_spec_as_plan finds the spec when persisted with the Claude MCP name", async () => {
+    // On the Claude backend, tool_use blocks are persisted verbatim with the
+    // SDK-namespaced name `mcp__task_orch__propose_spec`. findLatestSpecMarkdown
+    // must still locate the spec body (suffix match), otherwise stage 2 of the
+    // guided planning flow is impossible and no plan can ever be committed.
+    db.update(agentSessions)
+      .set({ planningStage: "building_plan" })
+      .where(eq(agentSessions.id, runId))
+      .run();
+
+    db.insert(agentMessages)
+      .values({
+        runId,
+        role: "agent",
+        content: JSON.stringify([
+          {
+            type: "tool_use",
+            name: "mcp__task_orch__propose_spec",
+            input: { title: "My Spec", spec_markdown: "# Spec\nBuilt on the Claude backend." },
+          },
+        ]),
+        createdAt: new Date(),
+      })
+      .run();
+
+    const run = makeRun({ planningStage: "building_plan", id: runId });
+    const r = makeRegistrar();
+    planningExtension({ runId, run })(r.reg);
+    const result = await r.tools.get("commit_spec_as_plan")!.execute("call-1", {});
+
+    expect(result.isError).toBeFalsy();
+    const text = (result.content[0] as any).text as string;
+    expect(text).toContain("Created draft plan");
+    const planId = text.match(/P-[\w-]+/)![0];
+    expect(repo.getPlan(planId)!.body).toContain("Built on the Claude backend.");
+  });
+
   it("commit_spec_as_plan errors when no propose_spec message found", async () => {
     db.update(agentSessions)
       .set({ planningStage: "building_plan" })

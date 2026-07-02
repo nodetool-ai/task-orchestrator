@@ -3,7 +3,7 @@
 import { useState, useTransition, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Plus } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, describe } from "@/lib/utils";
 import {
   PersonaPicker,
   type PersonaOption,
@@ -62,30 +62,34 @@ export function NewTaskForm({ planId, repoOptions = [] }: NewTaskFormProps) {
     }
     setError(null);
     startTransition(async () => {
-      const res = await fetch("/api/tasks", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          plan: planId,
-          title: title.trim(),
-          assignee: assignee.trim() || undefined,
-          repoId: repoId || undefined,
-          personaId: personaId || undefined,
-          criteria: criteria
-            .split("\n")
-            .map((s) => s.trim())
-            .filter(Boolean),
-          tags,
-        }),
-      });
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}));
-        setError(e.error ?? `HTTP ${res.status}`);
-        return;
+      try {
+        const res = await fetch("/api/tasks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            plan: planId,
+            title: title.trim(),
+            assignee: assignee.trim() || undefined,
+            repoId: repoId || undefined,
+            personaId: personaId || undefined,
+            criteria: criteria
+              .split("\n")
+              .map((s) => s.trim())
+              .filter(Boolean),
+            tags,
+          }),
+        });
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          setError(e.error ?? `HTTP ${res.status}`);
+          return;
+        }
+        reset();
+        setOpen(false);
+        router.refresh();
+      } catch (err) {
+        setError(describe(err));
       }
-      reset();
-      setOpen(false);
-      router.refresh();
     });
   };
 

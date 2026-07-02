@@ -13,6 +13,10 @@
 //      older than TASK_ORCH_WORKTREE_GC_DAYS (default 7)
 //   4. `git -C <worktree> rev-list --count origin/<base>..<branch>` === 0
 //      (no commits ahead of base — branch is fully merged or reset)
+//   5. `git -C <worktree> status --porcelain` is empty (the tree is clean —
+//      removal uses `--force`, which would silently delete a DIRTY worktree
+//      and destroy uncommitted work; chat-goal runs land idle with no commits
+//      ahead and often leave uncommitted files, so this gate is load-bearing)
 //
 // If TASK_ORCH_KEEP_WORKTREES is set we skip the removal step entirely (the
 // predicate is still computed, useful for tests). The hourly sweep is gated
@@ -56,6 +60,13 @@ export interface ShouldRemoveArgs {
    * responsible for shelling out to git in production; tests inject a stub.
    */
   revListCount: (worktree: string, base: string, branch: string) => Promise<number>;
+  /**
+   * Returns true iff the worktree has uncommitted changes
+   * (`git status --porcelain` non-empty). A dirty tree must NEVER be
+   * force-removed — that destroys the agent's uncommitted work. Caller shells
+   * out to git in production; tests inject a stub.
+   */
+  isWorktreeDirty: (worktree: string) => Promise<boolean>;
 }
 
 export type ShouldRemoveResult =
@@ -67,7 +78,7 @@ export type ShouldRemoveResult =
 // ──────────────────────────────────────────────────────────
 
 export async function shouldRemoveWorktree(args: ShouldRemoveArgs): Promise<ShouldRemoveResult> {
-  const { candidate, now, thresholdDays, worktreeExists, revListCount } = args;
+  const { candidate, now, thresholdDays, worktreeExists, revListCount, isWorktreeDirty } = args;
   if (candidate.status !== "idle") {
     return { remove: false, reason: `status=${candidate.status} (need idle)` };
   }
@@ -100,6 +111,20 @@ export async function shouldRemoveWorktree(args: ShouldRemoveArgs): Promise<Shou
   if (ahead > 0) {
     return { remove: false, reason: `${ahead} commits ahead of origin/${candidate.baseBranch}` };
   }
+  // Final safety gate: never force-remove a worktree with uncommitted changes.
+  // Removal shells out to `git worktree remove --force`, which happily deletes
+  // dirty trees — and chat-goal runs routinely land idle with 0 commits ahead
+  // yet uncommitted/untracked files, so this is the difference between GC and
+  // data loss. Fail closed if the status check itself errors.
+  let dirty: boolean;
+  try {
+    dirty = await isWorktreeDirty(candidate.worktreePath);
+  } catch (err) {
+    return { remove: false, reason: `git status failed: ${describe(err)}` };
+  }
+  if (dirty) {
+    return { remove: false, reason: "dirty worktree (uncommitted changes)" };
+  }
   return { remove: true, idleDays };
 }
 
@@ -114,6 +139,8 @@ export interface RunGcOnceOptions {
   listCandidates?: () => GcCandidate[];
   /** Injection point for tests: rev-list count. */
   revListCount?: (worktree: string, base: string, branch: string) => Promise<number>;
+  /** Injection point for tests: `git status --porcelain` dirty check. */
+  isWorktreeDirty?: (worktree: string) => Promise<boolean>;
   /** Injection point for tests: existence check. */
   worktreeExists?: (path: string) => boolean;
   /** Injection point for tests: `git worktree remove --force <path>`. */
@@ -143,6 +170,7 @@ export async function runWorktreeGcOnce(opts: RunGcOnceOptions = {}): Promise<Ru
   const now = (opts.now ?? (() => new Date()))();
   const listCandidates = opts.listCandidates ?? defaultListCandidates;
   const revListCount = opts.revListCount ?? defaultRevListCount;
+  const isWorktreeDirty = opts.isWorktreeDirty ?? defaultWorktreeDirty;
   const worktreeExists = opts.worktreeExists ?? defaultWorktreeExists;
   const removeWorktree = opts.removeWorktree ?? defaultRemoveWorktree;
   const pruneAdmin = opts.pruneAdmin ?? defaultPruneAdmin;
@@ -161,13 +189,21 @@ export async function runWorktreeGcOnce(opts: RunGcOnceOptions = {}): Promise<Ru
       thresholdDays,
       worktreeExists,
       revListCount,
+      isWorktreeDirty,
     });
     if (!decision.remove) continue;
     if (keep) {
-      // Still emit a note so operators can see what *would* be GC'd.
-      appendSystemMessage(
-        c.runId,
-        `worktree garbage-collect skipped (KEEP_WORKTREES) after ${decision.idleDays.toFixed(1)} days idle.`
+      // KEEP_WORKTREES: preview only. Log to the console instead of inserting an
+      // agent_messages row — a 'system' note here would set the run's newest
+      // message timestamp, and defaultListCandidates derives lastActivityAt from
+      // max(agent_messages.created_at). Writing the note would reset the very
+      // idle clock GC measures, so every later sweep would compute idle≈0 and
+      // the preview would go silent (and defer the real removal by a full
+      // threshold once KEEP is unset).
+      console.log(
+        `[worktree-gc] would remove worktree for run #${c.runId} ` +
+          `(${c.worktreePath}) after ${decision.idleDays.toFixed(1)} days idle ` +
+          `— KEEP_WORKTREES set, skipping.`
       );
       continue;
     }
@@ -366,6 +402,27 @@ function defaultRevListCount(
         return;
       }
       resolveP(n);
+    });
+  });
+}
+
+function defaultWorktreeDirty(worktree: string): Promise<boolean> {
+  return new Promise((resolveP, rejectP) => {
+    const child = spawn("git", ["-C", worktree, "status", "--porcelain"], {
+      env: process.env,
+    });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d) => (out += d.toString()));
+    child.stderr.on("data", (d) => (err += d.toString()));
+    child.on("error", rejectP);
+    child.on("close", (code) => {
+      if (code !== 0) {
+        rejectP(new Error(`git status exited ${code}: ${err.trim() || out.trim()}`));
+        return;
+      }
+      // Any porcelain output means modified/untracked (non-ignored) files.
+      resolveP(out.trim().length > 0);
     });
   });
 }

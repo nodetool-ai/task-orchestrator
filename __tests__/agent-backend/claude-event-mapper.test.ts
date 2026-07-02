@@ -58,6 +58,47 @@ describe("mapClaudeMessage", () => {
     ]);
   });
 
+  it("drops subagent (Task) assistant messages carrying parent_tool_use_id", () => {
+    // The SDK forwards subagent tool_use blocks in the main stream with
+    // parent_tool_use_id set. Emitting them here would misattribute the
+    // subagent's Read/Bash/Grep calls to the main run's own transcript.
+    expect(
+      mapClaudeMessage({
+        type: "assistant",
+        parent_tool_use_id: "task-tc-1",
+        message: {
+          content: [{ type: "tool_use", id: "sub-1", name: "Read", input: { file_path: "x.ts" } }],
+        },
+      })
+    ).toEqual([]);
+  });
+
+  it("drops subagent tool_result user messages carrying parent_tool_use_id", () => {
+    expect(
+      mapClaudeMessage({
+        type: "user",
+        parent_tool_use_id: "task-tc-1",
+        message: {
+          content: [
+            { type: "tool_result", tool_use_id: "sub-1", content: [{ type: "text", text: "ok" }], is_error: false },
+          ],
+        },
+      })
+    ).toEqual([]);
+  });
+
+  it("still forwards top-level messages where parent_tool_use_id is null", () => {
+    // Only nested subagent activity is suppressed; the main agent's own messages
+    // (parent_tool_use_id: null, as the SDK sends them) still map through.
+    expect(
+      mapClaudeMessage({
+        type: "assistant",
+        parent_tool_use_id: null,
+        message: { content: [{ type: "text", text: "hi" }] },
+      })
+    ).toEqual([{ type: "assistant", message: { content: [{ type: "text", text: "hi" }] } }]);
+  });
+
   it("maps a success result with usage and cost", () => {
     expect(
       mapClaudeMessage({
