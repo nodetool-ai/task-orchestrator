@@ -25,11 +25,11 @@ describe("driveDispatchedRun", () => {
       },
     } as any);
 
-    const run = create({ goal: "<chat>", defer: true });
+    const run = await create({ goal: "<chat>", defer: true });
     await driveDispatchedRun(run.id);
 
-    expect(["idle", "completed"]).toContain(get(run.id)!.status);
-    expect(listMessages(run.id).some((m) => m.role === "agent")).toBe(true);
+    expect(["idle", "completed"]).toContain((await get(run.id))!.status);
+    expect((await listMessages(run.id)).some((m) => m.role === "agent")).toBe(true);
     vi.restoreAllMocks();
   });
 

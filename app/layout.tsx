@@ -27,12 +27,12 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   const session = await auth();
   const email = session?.user?.email ?? undefined;
 
-  let paletteItems: ReturnType<typeof loadPaletteItems> = [];
+  let paletteItems: Awaited<ReturnType<typeof loadPaletteItems>> = [];
   let personaIds: string[] = [];
   if (email) {
     try {
-      paletteItems = loadPaletteItems();
-      personaIds = repo.listPersonaIds();
+      paletteItems = await loadPaletteItems();
+      personaIds = await repo.listPersonaIds();
     } catch {
       // DB may be uninitialized on first boot — palette/spawn will be empty.
     }

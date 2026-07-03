@@ -7,7 +7,7 @@ import { formatDate, relativeDate } from "@/lib/utils";
 export const dynamic = "force-dynamic";
 
 export default async function RepositoriesPage() {
-  const repositories = repo.listRepositories();
+  const repositories = await repo.listRepositories();
 
   return (
     <div style={{ padding: "20px 20px 80px", maxWidth: 1480, margin: "0 auto" }}>

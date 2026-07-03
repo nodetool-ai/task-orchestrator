@@ -44,11 +44,10 @@ export async function createToken(
   const token = generatePlaintext();
   const tokenHash = await bcrypt.hash(token, BCRYPT_ROUNDS);
   const prefix = token.slice(TOKEN_PREFIX.length, TOKEN_PREFIX.length + PREFIX_DISPLAY_LEN);
-  const inserted = db
+  const inserted = await db
     .insert(apiTokens)
     .values({ userId, name: name.trim(), tokenHash, prefix })
-    .returning()
-    .all();
+    .returning();
   const row = inserted[0];
   return { id: row.id, token, prefix, name: row.name };
 }
@@ -72,7 +71,7 @@ export async function verifyToken(plaintext: string): Promise<VerifiedToken | nu
     TOKEN_PREFIX.length,
     TOKEN_PREFIX.length + PREFIX_DISPLAY_LEN
   );
-  const candidates = db
+  const candidates = await db
     .select({
       id: apiTokens.id,
       userId: apiTokens.userId,
@@ -80,14 +79,12 @@ export async function verifyToken(plaintext: string): Promise<VerifiedToken | nu
       revokedAt: apiTokens.revokedAt,
     })
     .from(apiTokens)
-    .where(and(eq(apiTokens.prefix, prefix), isNull(apiTokens.revokedAt)))
-    .all();
+    .where(and(eq(apiTokens.prefix, prefix), isNull(apiTokens.revokedAt)));
   for (const c of candidates) {
     if (await bcrypt.compare(plaintext, c.hash)) {
-      db.update(apiTokens)
+      await db.update(apiTokens)
         .set({ lastUsedAt: new Date() })
-        .where(eq(apiTokens.id, c.id))
-        .run();
+        .where(eq(apiTokens.id, c.id));
       return { tokenId: c.id, userId: c.userId };
     }
   }
@@ -105,8 +102,8 @@ export interface TokenSummary {
   revokedAt: Date | null;
 }
 
-export function listTokens(userId: number): TokenSummary[] {
-  return db
+export async function listTokens(userId: number): Promise<TokenSummary[]> {
+  return (await db
     .select({
       id: apiTokens.id,
       name: apiTokens.name,
@@ -117,24 +114,22 @@ export function listTokens(userId: number): TokenSummary[] {
     })
     .from(apiTokens)
     .where(eq(apiTokens.userId, userId))
-    .orderBy(desc(apiTokens.createdAt))
-    .all() as TokenSummary[];
+    .orderBy(desc(apiTokens.createdAt))) as TokenSummary[];
 }
 
-export function revokeToken(id: number, userId: number): boolean {
-  const result = db
+export async function revokeToken(id: number, userId: number): Promise<boolean> {
+  const result = await db
     .update(apiTokens)
     .set({ revokedAt: new Date() })
-    .where(and(eq(apiTokens.id, id), eq(apiTokens.userId, userId)))
-    .run();
-  return result.changes > 0;
+    .where(and(eq(apiTokens.id, id), eq(apiTokens.userId, userId)));
+  return result.count > 0;
 }
 
-export function getToken(id: number, userId: number): ApiToken | null {
-  const row = db
+export async function getToken(id: number, userId: number): Promise<ApiToken | null> {
+  const row = (await db
     .select()
     .from(apiTokens)
     .where(and(eq(apiTokens.id, id), eq(apiTokens.userId, userId)))
-    .get();
+  )[0];
   return row ?? null;
 }

@@ -41,34 +41,35 @@ async function params(id: string | number) {
   return Promise.resolve({ id: String(id) });
 }
 
-function insertRun(planningStage: string | null = null): number {
-  const row = db
-    .insert(agentSessions)
-    .values({
-      goal: "<plan>",
-      status: "idle",
-      toolsProfile: "orchestrator,repo_read,planning",
-      cwdStrategy: "none",
-      planningStage,
-      startedAt: new Date(),
-    })
-    .returning({ id: agentSessions.id })
-    .get();
+async function insertRun(planningStage: string | null = null): Promise<number> {
+  const row = (
+    await db
+      .insert(agentSessions)
+      .values({
+        goal: "<plan>",
+        status: "idle",
+        toolsProfile: "orchestrator,repo_read,planning",
+        cwdStrategy: "none",
+        planningStage,
+        startedAt: new Date(),
+      })
+      .returning({ id: agentSessions.id })
+  )[0];
   return row!.id;
 }
 
 // ─── tests ────────────────────────────────────────────────────────────────────
 
 describe("POST /api/runs/[id]/planning", () => {
-  beforeEach(() => {
-    db.delete(agentSessions).run();
+  beforeEach(async () => {
+    await db.delete(agentSessions);
     mockAppend.mockClear();
   });
 
   // ── approve_spec ─────────────────────────────────────────────────────────────
 
   it("approve_spec: spec_review → building_plan, appends proceed message", async () => {
-    const runId = insertRun("spec_review");
+    const runId = await insertRun("spec_review");
     const res = await POST(makeReq({ action: "approve_spec" }) as never, {
       params: params(runId),
     });
@@ -77,10 +78,11 @@ describe("POST /api/runs/[id]/planning", () => {
     expect(body.ok).toBe(true);
     expect(body.planningStage).toBe("building_plan");
 
-    const row = db
-      .select({ planningStage: agentSessions.planningStage })
-      .from(agentSessions)
-      .get();
+    const row = (
+      await db
+        .select({ planningStage: agentSessions.planningStage })
+        .from(agentSessions)
+    )[0];
     expect(row?.planningStage).toBe("building_plan");
 
     // append must be called (background fire)
@@ -97,7 +99,7 @@ describe("POST /api/runs/[id]/planning", () => {
   // ── approve_plan ─────────────────────────────────────────────────────────────
 
   it("approve_plan: plan_review → committing, appends proceed message", async () => {
-    const runId = insertRun("plan_review");
+    const runId = await insertRun("plan_review");
     const res = await POST(makeReq({ action: "approve_plan" }) as never, {
       params: params(runId),
     });
@@ -106,10 +108,11 @@ describe("POST /api/runs/[id]/planning", () => {
     expect(body.ok).toBe(true);
     expect(body.planningStage).toBe("committing");
 
-    const row = db
-      .select({ planningStage: agentSessions.planningStage })
-      .from(agentSessions)
-      .get();
+    const row = (
+      await db
+        .select({ planningStage: agentSessions.planningStage })
+        .from(agentSessions)
+    )[0];
     expect(row?.planningStage).toBe("committing");
 
     await new Promise((r) => setTimeout(r, 10));
@@ -122,16 +125,17 @@ describe("POST /api/runs/[id]/planning", () => {
   // ── 409: wrong prior stage ────────────────────────────────────────────────────
 
   it("approve_spec from wrong stage returns 409 and does not append", async () => {
-    const runId = insertRun("gathering");
+    const runId = await insertRun("gathering");
     const res = await POST(makeReq({ action: "approve_spec" }) as never, {
       params: params(runId),
     });
     expect(res.status).toBe(409);
 
-    const row = db
-      .select({ planningStage: agentSessions.planningStage })
-      .from(agentSessions)
-      .get();
+    const row = (
+      await db
+        .select({ planningStage: agentSessions.planningStage })
+        .from(agentSessions)
+    )[0];
     expect(row?.planningStage).toBe("gathering");
 
     await new Promise((r) => setTimeout(r, 10));
@@ -139,7 +143,7 @@ describe("POST /api/runs/[id]/planning", () => {
   });
 
   it("approve_plan from wrong stage returns 409 and does not append", async () => {
-    const runId = insertRun("building_plan");
+    const runId = await insertRun("building_plan");
     const res = await POST(makeReq({ action: "approve_plan" }) as never, {
       params: params(runId),
     });
@@ -152,7 +156,7 @@ describe("POST /api/runs/[id]/planning", () => {
   // ── 400: bad/missing action ───────────────────────────────────────────────────
 
   it("returns 400 for missing action", async () => {
-    const runId = insertRun("spec_review");
+    const runId = await insertRun("spec_review");
     const res = await POST(makeReq({}) as never, { params: params(runId) });
     expect(res.status).toBe(400);
     await new Promise((r) => setTimeout(r, 10));
@@ -160,7 +164,7 @@ describe("POST /api/runs/[id]/planning", () => {
   });
 
   it("returns 400 for unknown action", async () => {
-    const runId = insertRun("spec_review");
+    const runId = await insertRun("spec_review");
     const res = await POST(makeReq({ action: "approve_everything" }) as never, {
       params: params(runId),
     });

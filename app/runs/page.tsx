@@ -28,10 +28,10 @@ export default async function RunsIndexPage({
   const filterTask = sp.task;
   const hasFilter = Boolean(filterRepo || filterTask);
 
-  const runs = listRuns({ repoId: filterRepo, taskId: filterTask });
-  const repos = repo.listRepositories();
+  const runs = await listRuns({ repoId: filterRepo, taskId: filterTask });
+  const repos = await repo.listRepositories();
   const repoNames = new Map(repos.map((r) => [r.id, r.name]));
-  const taskTitles = new Map(repo.listTasks().map((t) => [t.id, t.title]));
+  const taskTitles = new Map((await repo.listTasks()).map((t) => [t.id, t.title]));
 
   const grouped: Array<{ group: RunGroup; runs: RunRow[] }> = RUN_GROUPS.map((g) => ({
     group: g,

@@ -10,9 +10,9 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const session = agent.getSession(parseInt(id, 10));
+    const session = await agent.getSession(parseInt(id, 10));
     if (!session) return NextResponse.json({ error: "Not found" }, { status: 404 });
-    const events = agent.getSessionEvents(session.id);
+    const events = await agent.getSessionEvents(session.id);
     return NextResponse.json({ ...session, events, live: agent.isLive(session.id) });
   } catch (e) {
     return errorResponse(e);

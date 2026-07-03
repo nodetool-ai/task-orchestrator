@@ -211,7 +211,7 @@ export class ClaudeBackend implements AgentBackend {
           env.session_id = `${TAG}${env.session_id}`;
         }
         envelopes.push(env);
-        onEvent(env);
+        await onEvent(env);
 
         if (env.type === "assistant" && env.message?.content) {
           const text = env.message.content

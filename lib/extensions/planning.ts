@@ -32,13 +32,12 @@ export interface PlanningExtensionOptions {
 
 /** Scan the message log (newest first) for the latest propose_spec tool_use
  *  and return its spec_markdown. Returns null if not found. */
-function findLatestSpecMarkdown(runId: number): string | null {
-  const rows = db
+async function findLatestSpecMarkdown(runId: number): Promise<string | null> {
+  const rows = await db
     .select({ role: agentMessages.role, content: agentMessages.content })
     .from(agentMessages)
     .where(eq(agentMessages.runId, runId))
-    .orderBy(desc(agentMessages.id))
-    .all();
+    .orderBy(desc(agentMessages.id));
 
   for (const row of rows) {
     if (row.role !== "agent") continue;
@@ -75,9 +74,9 @@ export const planningExtension =
     let stage: PlanningStage =
       (opts.run.planningStage as PlanningStage | null) ?? "gathering";
 
-    const setStage = (s: PlanningStage) => {
+    const setStage = async (s: PlanningStage) => {
       stage = s;
-      repo.setPlanningStage(opts.runId, s);
+      await repo.setPlanningStage(opts.runId, s);
     };
 
     // ── propose_spec ─────────────────────────────────────────────────────────
@@ -101,7 +100,7 @@ export const planningExtension =
       }),
       execute: async (_id, _params) => {
         // Advance gathering → spec_review (stays spec_review on re-propose).
-        if (stage === "gathering") setStage("spec_review");
+        if (stage === "gathering") await setStage("spec_review");
         return {
           content: [
             {
@@ -128,7 +127,7 @@ export const planningExtension =
         ),
       }),
       execute: async (_id, params) => {
-        const specMarkdown = findLatestSpecMarkdown(opts.runId);
+        const specMarkdown = await findLatestSpecMarkdown(opts.runId);
         if (!specMarkdown) {
           return {
             content: [
@@ -147,7 +146,7 @@ export const planningExtension =
 
         let plan: PlanFull;
         try {
-          plan = repo.createPlan({ title, body: specMarkdown, state: "draft", repoIds });
+          plan = await repo.createPlan({ title, body: specMarkdown, state: "draft", repoIds });
         } catch (err) {
           return {
             content: [
@@ -161,10 +160,9 @@ export const planningExtension =
         }
 
         // Write the new plan id onto the run row so orchestrator tools default to it.
-        db.update(agentSessions)
+        await db.update(agentSessions)
           .set({ planId: plan.id })
-          .where(eq(agentSessions.id, opts.runId))
-          .run();
+          .where(eq(agentSessions.id, opts.runId));
 
         return {
           content: [
@@ -206,7 +204,7 @@ export const planningExtension =
       }),
       execute: async (_id, _params) => {
         // Advance building_plan → plan_review (stays plan_review on re-propose).
-        if (stage === "building_plan") setStage("plan_review");
+        if (stage === "building_plan") await setStage("plan_review");
         return {
           content: [
             {

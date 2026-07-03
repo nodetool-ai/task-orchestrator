@@ -103,8 +103,8 @@ const resolveAttachmentOwner = (
   return null;
 };
 
-const findCriterion = (taskId: string, needle: string) => {
-  const task = repo.getTask(taskId);
+const findCriterion = async (taskId: string, needle: string) => {
+  const task = await repo.getTask(taskId);
   if (!task) return null;
   const byId = task.criteria.find((c) => String(c.id) === needle);
   if (byId) return byId;
@@ -118,9 +118,9 @@ const findCriterion = (taskId: string, needle: string) => {
 
 const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
 
-function safe<T>(fn: () => T): T | { _error: string } {
+async function safe<T>(fn: () => Promise<T> | T): Promise<T | { _error: string }> {
   try {
-    return fn();
+    return await fn();
   } catch (e) {
     if (e instanceof repo.RepoError) return { _error: e.message };
     return { _error: e instanceof Error ? e.message : String(e) };
@@ -131,8 +131,8 @@ function safe<T>(fn: () => T): T | { _error: string } {
 // Pure helpers
 // ──────────────────────────────────────────────────────
 
-function summarisePlan(p: PlanFull) {
-  const progress = repo.planProgress(p.id);
+async function summarisePlan(p: PlanFull) {
+  const progress = await repo.planProgress(p.id);
   return {
     id: p.id,
     title: p.title,
@@ -223,7 +223,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     parameters: Type.Object({}),
     execute: async (_params, _ctx) => {
       return jsonResult(
-        repo.listRepositories().map((r) => ({
+        (await repo.listRepositories()).map((r) => ({
           id: r.id,
           name: r.name,
           local_path: r.localPath,
@@ -241,7 +241,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     description: "Get a repository's full details.",
     parameters: Type.Object({ id: Type.String({ minLength: 1 }) }),
     execute: async ({ id }, _ctx) => {
-      const r = repo.getRepository(id);
+      const r = await repo.getRepository(id);
       if (!r) return errResult(`Error: Repository ${id} not found`);
       return jsonResult({
         ...r,
@@ -264,7 +264,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       description: Type.Optional(Type.String()),
     }),
     execute: async (input, _ctx) => {
-      const result = safe(() =>
+      const result = await safe(() =>
         repo.createRepository({
           name: input.name,
           localPath: input.local_path,
@@ -292,7 +292,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       description: Type.Optional(Type.String()),
     }),
     execute: async ({ id, ...patch }, _ctx) => {
-      const result = safe(() =>
+      const result = await safe(() =>
         repo.updateRepository(id, {
           name: patch.name,
           localPath: patch.local_path ?? undefined,
@@ -313,7 +313,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       "Delete a repository. Blocked if any plans or chats still reference it; reassign them first.",
     parameters: Type.Object({ id: Type.String({ minLength: 1 }) }),
     execute: async ({ id }, _ctx) => {
-      const result = safe(() => repo.deleteRepository(id));
+      const result = await safe(() => repo.deleteRepository(id));
       if (result && typeof result === "object" && "_error" in result)
         return errResult(`Error: ${(result as { _error: string })._error}`);
       return ok(`Deleted repository ${id}.`);
@@ -332,9 +332,9 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       ),
     }),
     execute: async ({ state }, _ctx) => {
-      const plans = repo.listPlans();
+      const plans = await repo.listPlans();
       const filtered = state ? plans.filter((p) => p.state === (state as PlanState)) : plans;
-      return jsonResult(filtered.map(summarisePlan));
+      return jsonResult(await Promise.all(filtered.map(summarisePlan)));
     },
   },
 
@@ -347,14 +347,14 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     execute: async ({ id }, ctx) => {
       const planId = resolvePlanId(id, ctx);
       if (!planId) return errResult("Error: plan id required (no default plan in this session)");
-      const plan = repo.getPlan(planId);
+      const plan = await repo.getPlan(planId);
       if (!plan) return errResult(`Error: Plan ${planId} not found`);
-      const tasksInPlan = repo.listTasks({ planId }).map(summariseTask);
+      const tasksInPlan = (await repo.listTasks({ planId })).map(summariseTask);
       return jsonResult({
         ...plan,
         createdAt: plan.createdAt.toISOString(),
         updatedAt: plan.updatedAt.toISOString(),
-        progress: repo.planProgress(planId),
+        progress: await repo.planProgress(planId),
         tasks: tasksInPlan,
       });
     },
@@ -376,7 +376,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       repo_ids: Type.Optional(Type.Array(Type.String())),
     }),
     execute: async (input, _ctx) => {
-      const result = safe(() =>
+      const result = await safe(() =>
         repo.createPlan({
           title: input.title,
           body: input.body,
@@ -409,7 +409,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     execute: async ({ id, ...patch }, ctx) => {
       const planId = resolvePlanId(id, ctx);
       if (!planId) return errResult("Error: plan id required");
-      const result = safe(() =>
+      const result = await safe(() =>
         repo.updatePlan(planId, {
           title: patch.title,
           body: patch.body,
@@ -437,7 +437,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     execute: async ({ plan_id, repo_id }, ctx) => {
       const planId = resolvePlanId(plan_id, ctx);
       if (!planId) return errResult("Error: plan_id required");
-      const result = safe(() => repo.addPlanRepository(planId, repo_id));
+      const result = await safe(() => repo.addPlanRepository(planId, repo_id));
       if ("_error" in result) return errResult(`Error: ${result._error}`);
       return ok(`Plan ${result.id} now spans ${result.repos.map((r) => r.id).join(", ")}.`);
     },
@@ -455,7 +455,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     execute: async ({ plan_id, repo_id }, ctx) => {
       const planId = resolvePlanId(plan_id, ctx);
       if (!planId) return errResult("Error: plan_id required");
-      const result = safe(() => repo.removePlanRepository(planId, repo_id));
+      const result = await safe(() => repo.removePlanRepository(planId, repo_id));
       if ("_error" in result) return errResult(`Error: ${result._error}`);
       return ok(
         `Plan ${result.id} now spans ${result.repos.map((r) => r.id).join(", ") || "(no repos)"}.`
@@ -475,7 +475,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     execute: async ({ id, state }, ctx) => {
       const planId = resolvePlanId(id, ctx);
       if (!planId) return errResult("Error: plan id required");
-      const result = safe(() => repo.updatePlan(planId, { state: state as PlanState }));
+      const result = await safe(() => repo.updatePlan(planId, { state: state as PlanState }));
       if ("_error" in result) return errResult(`Error: ${result._error}`);
       return ok(`Plan ${result.id} → ${result.state}.`);
     },
@@ -488,9 +488,9 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       "Delete a plan. CASCADES — destroys all tasks, criteria, notes, and sessions under it. Requires an explicit id (never defaulted) to avoid accidental destruction.",
     parameters: Type.Object({ id: Type.String({ minLength: 1 }) }),
     execute: async ({ id }, _ctx) => {
-      const existing = repo.getPlan(id);
+      const existing = await repo.getPlan(id);
       if (!existing) return errResult(`Error: Plan ${id} not found`);
-      repo.deletePlan(id);
+      await repo.deletePlan(id);
       return ok(`Deleted plan ${id}.`);
     },
   },
@@ -511,7 +511,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     }),
     execute: async ({ state, plan_id, assignee }, ctx) => {
       const planId = plan_id ?? ctx.defaultPlanId ?? undefined;
-      const tasks = repo.listTasks({ state: state as TaskState | undefined, planId, assignee });
+      const tasks = await repo.listTasks({ state: state as TaskState | undefined, planId, assignee });
       return jsonResult(tasks.map(summariseTask));
     },
   },
@@ -525,7 +525,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     execute: async ({ id }, ctx) => {
       const taskId = resolveTaskId(id, ctx);
       if (!taskId) return errResult("Error: task id required (no default task in this session)");
-      const t = repo.getTask(taskId);
+      const t = await repo.getTask(taskId);
       if (!t) return errResult(`Error: Task ${taskId} not found`);
       return jsonResult({
         ...t,
@@ -555,7 +555,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     execute: async (input, ctx) => {
       const planId = resolvePlanId(input.plan_id, ctx);
       if (!planId) return errResult("Error: plan_id required (no default plan in this session)");
-      const result = safe(() =>
+      const result = await safe(() =>
         repo.createTask({
           planId,
           title: input.title,
@@ -593,7 +593,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     execute: async ({ id, ...patch }, ctx) => {
       const taskId = resolveTaskId(id, ctx);
       if (!taskId) return errResult("Error: task id required");
-      const result = safe(() =>
+      const result = await safe(() =>
         repo.updateTask(taskId, {
           title: patch.title,
           body: patch.body,
@@ -623,7 +623,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     execute: async ({ id, state, assignee, note }, ctx) => {
       const taskId = resolveTaskId(id, ctx);
       if (!taskId) return errResult("Error: task id required");
-      const result = safe(() =>
+      const result = await safe(() =>
         repo.transitionTask(taskId, { state: state as TaskState, assignee, note })
       );
       if ("_error" in result) return errResult(`Error: ${result._error}`);
@@ -637,9 +637,9 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     description: "Delete a task. CASCADES to its notes, criteria, dependencies, and sessions.",
     parameters: Type.Object({ id: Type.String({ minLength: 1 }) }),
     execute: async ({ id }, _ctx) => {
-      const existing = repo.getTask(id);
+      const existing = await repo.getTask(id);
       if (!existing) return errResult(`Error: Task ${id} not found`);
-      repo.deleteTask(id);
+      await repo.deleteTask(id);
       return ok(`Deleted task ${id}.`);
     },
   },
@@ -657,7 +657,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     execute: async ({ body, task_id }, ctx) => {
       const taskId = resolveTaskId(task_id, ctx);
       if (!taskId) return errResult("Error: task id required");
-      const result = safe(() => repo.addNote(taskId, ctx.author, body));
+      const result = await safe(() => repo.addNote(taskId, ctx.author, body));
       if (result && typeof result === "object" && "_error" in result)
         return errResult(`Error: ${(result as { _error: string })._error}`);
       return ok(`Note added to ${taskId}.`);
@@ -672,7 +672,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     execute: async ({ task_id }, ctx) => {
       const taskId = resolveTaskId(task_id, ctx);
       if (!taskId) return errResult("Error: task id required");
-      const t = repo.getTask(taskId);
+      const t = await repo.getTask(taskId);
       if (!t) return errResult(`Error: Task ${taskId} not found`);
       return jsonResult(
         t.notes.map((n) => ({
@@ -695,7 +695,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     execute: async ({ task_id }, ctx) => {
       const taskId = resolveTaskId(task_id, ctx);
       if (!taskId) return errResult("Error: task id required");
-      const t = repo.getTask(taskId);
+      const t = await repo.getTask(taskId);
       if (!t) return errResult(`Error: Task ${taskId} not found`);
       if (t.criteria.length === 0) return ok("No criteria.");
       return ok(t.criteria.map((c) => `${c.id}. [${c.done ? "x" : " "}] ${c.text}`).join("\n"));
@@ -713,7 +713,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     execute: async ({ text, task_id }, ctx) => {
       const taskId = resolveTaskId(task_id, ctx);
       if (!taskId) return errResult("Error: task id required");
-      const result = safe(() => repo.addCriterion(taskId, text));
+      const result = await safe(() => repo.addCriterion(taskId, text));
       if (result && typeof result === "object" && "_error" in result)
         return errResult(`Error: ${(result as { _error: string })._error}`);
       return ok(`Added: ${text}`);
@@ -732,9 +732,9 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     execute: async ({ criterion, task_id }, ctx) => {
       const taskId = resolveTaskId(task_id, ctx);
       if (!taskId) return errResult("Error: task id required");
-      const target = findCriterion(taskId, criterion);
+      const target = await findCriterion(taskId, criterion);
       if (!target) return errResult(`Error: No criterion matching "${criterion}" on ${taskId}.`);
-      repo.updateCriterion(target.id, { done: true });
+      await repo.updateCriterion(target.id, { done: true });
       return ok(`Checked: ${target.text}`);
     },
   },
@@ -750,9 +750,9 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     execute: async ({ criterion, task_id }, ctx) => {
       const taskId = resolveTaskId(task_id, ctx);
       if (!taskId) return errResult("Error: task id required");
-      const target = findCriterion(taskId, criterion);
+      const target = await findCriterion(taskId, criterion);
       if (!target) return errResult(`Error: No criterion matching "${criterion}" on ${taskId}.`);
-      repo.updateCriterion(target.id, { done: false });
+      await repo.updateCriterion(target.id, { done: false });
       return ok(`Unchecked: ${target.text}`);
     },
   },
@@ -767,7 +767,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       done: Type.Optional(Type.Boolean()),
     }),
     execute: async ({ criterion_id, text, done }, _ctx) => {
-      const result = safe(() => repo.updateCriterion(criterion_id, { text, done }));
+      const result = await safe(() => repo.updateCriterion(criterion_id, { text, done }));
       if (result && typeof result === "object" && "_error" in result)
         return errResult(`Error: ${(result as { _error: string })._error}`);
       return ok(`Criterion ${criterion_id} updated.`);
@@ -780,7 +780,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     description: "Delete a criterion by id.",
     parameters: Type.Object({ criterion_id: Type.Integer() }),
     execute: async ({ criterion_id }, _ctx) => {
-      repo.deleteCriterion(criterion_id);
+      await repo.deleteCriterion(criterion_id);
       return ok(`Criterion ${criterion_id} deleted.`);
     },
   },
@@ -799,7 +799,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     execute: async ({ task_id, plan_id }, ctx) => {
       const owner = resolveAttachmentOwner(task_id, plan_id, ctx);
       if (!owner) return errResult("Error: task_id or plan_id required");
-      const list = repo.listAttachments(owner);
+      const list = await repo.listAttachments(owner);
       return jsonResult(list.map(summariseAttachment));
     },
   },
@@ -811,7 +811,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       "Fetch an attachment's content by numeric id. Images come back as a viewable image block; text-like artifacts (logs, json, source, svg) as decoded text; other binaries as metadata with a note to download them. Large blobs are truncated or summarised.",
     parameters: Type.Object({ id: Type.Integer() }),
     execute: async ({ id }, _ctx) => {
-      const att = repo.getAttachment(id);
+      const att = await repo.getAttachment(id);
       if (!att) return errResult(`Error: Attachment ${id} not found`);
       const header = `${att.filename} (${att.mimeType}, ${att.sizeBytes} bytes, attachment #${att.id})`;
       if (att.kind === "image") {
@@ -866,7 +866,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       const mimeType =
         mime_type?.trim() ||
         (text != null ? "text/plain" : "application/octet-stream");
-      const result = safe(() =>
+      const result = await safe(() =>
         repo.addAttachment({
           planId: owner.planId ?? null,
           taskId: owner.taskId ?? null,
@@ -889,9 +889,9 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     description: "Delete an attachment by numeric id.",
     parameters: Type.Object({ id: Type.Integer() }),
     execute: async ({ id }, _ctx) => {
-      const existing = repo.getAttachmentMeta(id);
+      const existing = await repo.getAttachmentMeta(id);
       if (!existing) return errResult(`Error: Attachment ${id} not found`);
-      repo.deleteAttachment(id);
+      await repo.deleteAttachment(id);
       return ok(`Deleted attachment ${id}.`);
     },
   },
@@ -908,8 +908,8 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     }),
     execute: async ({ task_id, active_only }, _ctx) => {
       const all = active_only
-        ? agentLib.listActiveSessions(task_id)
-        : agentLib.listSessions(task_id);
+        ? await agentLib.listActiveSessions(task_id)
+        : await agentLib.listSessions(task_id);
       return jsonResult(all.map(summariseSession));
     },
   },
@@ -923,9 +923,9 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       tail: Type.Optional(Type.Integer()),
     }),
     execute: async ({ session_id, tail }, _ctx) => {
-      const s = agentLib.getSession(session_id);
+      const s = await agentLib.getSession(session_id);
       if (!s) return errResult(`Error: Session ${session_id} not found`);
-      const events = agentLib.getSessionEvents(session_id, 0, tail ?? 50);
+      const events = await agentLib.getSessionEvents(session_id, 0, tail ?? 50);
       return jsonResult({
         ...summariseSession(s),
         recent_events: events.map((e) => ({
@@ -954,7 +954,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       base_branch: Type.Optional(Type.String()),
     }),
     execute: async ({ task_id, model, reasoning, base_branch }, ctx) => {
-      const result = safe(() =>
+      const result = await safe(() =>
         agentLib.startSession({
           taskId: task_id,
           model,
@@ -986,9 +986,9 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       ),
     }),
     execute: async ({ task_id, pr_url, model, reasoning }, ctx) => {
-      const task = repo.getTask(task_id);
+      const task = await repo.getTask(task_id);
       if (!task) return errResult(`Error: Task ${task_id} not found`);
-      const result = safe(() =>
+      const result = await safe(() =>
         runs.create({
           goal: "<review>",
           cwdStrategy: "worktree_at_pr",
@@ -1023,7 +1023,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       const timeoutMs = (timeout_seconds ?? 1800) * 1000;
       const intervalMs = 1500;
       const startedAt = Date.now();
-      let run = runs.get(session_id);
+      let run = await runs.get(session_id);
       if (!run) return errResult(`Error: Session ${session_id} not found`);
       while (!isTerminalStatus(run.status)) {
         if (Date.now() - startedAt > timeoutMs) {
@@ -1035,7 +1035,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
           });
         }
         await sleep(intervalMs);
-        run = runs.get(session_id);
+        run = await runs.get(session_id);
         if (!run) return errResult(`Error: Session ${session_id} disappeared`);
       }
       return jsonResult({
@@ -1056,7 +1056,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     description: "Cancel a running agent session.",
     parameters: Type.Object({ session_id: Type.Integer() }),
     execute: async ({ session_id }, _ctx) => {
-      const result = safe(() => agentLib.cancelSession(session_id));
+      const result = await safe(() => agentLib.cancelSession(session_id));
       if ("_error" in result) return errResult(`Error: ${result._error}`);
       return ok(`Session #${result.id} status: ${result.status}.`);
     },

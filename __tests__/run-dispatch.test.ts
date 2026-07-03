@@ -7,61 +7,60 @@ import { create, get } from "../lib/runs";
 import { dispatchRun, runtimeEnv } from "../lib/run-dispatch";
 
 describe("dispatchRun", () => {
-  it("claims an unclaimed run and calls spawn once", () => {
-    const run = create({ goal: "<implement>", taskId: null as any, defer: true });
+  it("claims an unclaimed run and calls spawn once", async () => {
+    const run = await create({ goal: "<implement>", taskId: null as any, defer: true });
     const spawn = vi.fn(() => 5555);
-    const result = dispatchRun(run.id, { spawn });
+    const result = await dispatchRun(run.id, { spawn });
     expect(result).toBe("spawned");
     expect(spawn).toHaveBeenCalledTimes(1);
-    const row = get(run.id)!;
+    const row = (await get(run.id))!;
     expect(row.status).toBe("preparing");
     expect(row.workerScope).toMatch(/^run-\d+-/);
     expect(row.workerPid).toBe(5555);
   });
 
-  it("is idempotent — a second dispatch does not spawn again", () => {
-    const run = create({ goal: "<implement>", defer: true });
-    dispatchRun(run.id, { spawn: () => 1 });
+  it("is idempotent — a second dispatch does not spawn again", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
+    await dispatchRun(run.id, { spawn: () => 1 });
     const spawn2 = vi.fn(() => 2);
-    expect(dispatchRun(run.id, { spawn: spawn2 })).toBe("already-claimed");
+    expect(await dispatchRun(run.id, { spawn: spawn2 })).toBe("already-claimed");
     expect(spawn2).not.toHaveBeenCalled();
   });
 
-  it("returns not-found for a missing run", () => {
-    expect(dispatchRun(999999, { spawn: () => 1 })).toBe("not-found");
+  it("returns not-found for a missing run", async () => {
+    expect(await dispatchRun(999999, { spawn: () => 1 })).toBe("not-found");
   });
 
-  it("does not dispatch a run holding a live lease", () => {
-    const run = create({ goal: "<implement>", defer: true });
-    db.update(agentSessions)
+  it("does not dispatch a run holding a live lease", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
+    await db.update(agentSessions)
       .set({ status: "running", heartbeatAt: new Date() })
-      .where(eq(agentSessions.id, run.id))
-      .run();
-    expect(dispatchRun(run.id, { spawn: () => 1 })).toBe("already-claimed");
+      .where(eq(agentSessions.id, run.id));
+    expect(await dispatchRun(run.id, { spawn: () => 1 })).toBe("already-claimed");
   });
 
   // Regression: a spawn that throws (bad module resolution in the prod bundle —
   // the 'Cannot find module tsx/cli' incident) must fail the run, not wedge it
   // in 'preparing' with no error and no worker.
-  it("marks the run failed (not wedged in preparing) when spawn throws", () => {
-    const run = create({ goal: "<implement>", defer: true });
-    const result = dispatchRun(run.id, {
+  it("marks the run failed (not wedged in preparing) when spawn throws", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
+    const result = await dispatchRun(run.id, {
       spawn: () => {
         throw new Error("boom-tsx");
       },
     });
     expect(result).toBe("spawn-failed");
-    const row = get(run.id)!;
+    const row = (await get(run.id))!;
     expect(row.status).toBe("failed");
     expect(row.error).toMatch(/boom-tsx/);
     expect(row.workerScope).toBeNull(); // claim released for retry
   });
 
-  it("marks the run failed when spawn returns no pid (executable not found)", () => {
-    const run = create({ goal: "<implement>", defer: true });
-    const result = dispatchRun(run.id, { spawn: () => null });
+  it("marks the run failed when spawn returns no pid (executable not found)", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
+    const result = await dispatchRun(run.id, { spawn: () => null });
     expect(result).toBe("spawn-failed");
-    const row = get(run.id)!;
+    const row = (await get(run.id))!;
     expect(row.status).toBe("failed");
     expect(row.error).toMatch(/did not start/);
   });

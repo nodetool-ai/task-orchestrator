@@ -53,10 +53,11 @@ export const ghPrExtension =
   (reg) => {
     const cwd = opts.cwd;
 
-    function gate(url: string):
+    async function gate(url: string): Promise<
       | { ok: true; parsed: ParsedPrUrl; matched: { id: string; name: string } }
-      | { ok: false; result: ReturnType<typeof errResult> } {
-      const v = validatePrUrl(url);
+      | { ok: false; result: ReturnType<typeof errResult> }
+    > {
+      const v = await validatePrUrl(url);
       if ("error" in v) return { ok: false, result: errResult(v.error) };
       return { ok: true, parsed: v.parsed, matched: v.matched };
     }
@@ -68,7 +69,7 @@ export const ghPrExtension =
         "Fetch a PR's metadata: state, mergeable, CI status, title, body, files. Pass the PR URL (https://github.com/<owner>/<repo>/pull/<n>) or short form (owner/repo#n).",
       parameters: Type.Object({ url: Type.String({ minLength: 1 }) }),
       execute: async (_id, { url }) => {
-        const g = gate(url);
+        const g = await gate(url);
         if (!g.ok) return g.result;
         const fields =
           "state,mergeable,mergeStateStatus,title,body,url,number,headRefName,baseRefName,author,createdAt,updatedAt,mergedAt,files,statusCheckRollup,isDraft,additions,deletions,changedFiles";
@@ -120,7 +121,7 @@ export const ghPrExtension =
         file: Type.Optional(Type.String()),
       }),
       execute: async (_id, { url, file }) => {
-        const g = gate(url);
+        const g = await gate(url);
         if (!g.ok) return g.result;
         const r = await gh(["pr", "diff", g.parsed.canonical], cwd);
         if (r.code !== 0) {
@@ -150,7 +151,7 @@ export const ghPrExtension =
         body: Type.Optional(Type.String()),
       }),
       execute: async (_id, { url, verdict, body }) => {
-        const g = gate(url);
+        const g = await gate(url);
         if (!g.ok) return g.result;
         if ((verdict === "comment" || verdict === "request_changes") && !body?.trim()) {
           return errResult(`verdict='${verdict}' requires a non-empty body.`);
@@ -191,7 +192,7 @@ export const ghPrExtension =
         file: Type.Optional(Type.String()),
       }),
       execute: async (_id, { url, body, line, file }) => {
-        const g = gate(url);
+        const g = await gate(url);
         if (!g.ok) return g.result;
         const inline = line !== undefined && file !== undefined && file.length > 0;
         if ((line !== undefined) !== (file !== undefined && file.length > 0)) {
@@ -281,7 +282,7 @@ export const ghPrExtension =
         delete_branch: Type.Optional(Type.Boolean()),
       }),
       execute: async (_id, { url, method, delete_branch }) => {
-        const g = gate(url);
+        const g = await gate(url);
         if (!g.ok) return g.result;
         const args = ["pr", "merge", g.parsed.canonical];
         if (method === "merge") args.push("--merge");

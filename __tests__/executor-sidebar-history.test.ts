@@ -20,7 +20,7 @@ const h = vi.hoisted(() => ({
   // Message rows read from the DB *mid-turn*, between two streamed assistant
   // envelopes — what a page load during a long executor run would see.
   midTurn: null as null | Array<{ role: string }>,
-  snapshot: null as null | (() => Array<{ role: string }>),
+  snapshot: null as null | (() => Promise<Array<{ role: string }>>),
 }));
 
 vi.mock("../lib/agent-backend", () => ({
@@ -28,26 +28,26 @@ vi.mock("../lib/agent-backend", () => ({
     id: "pi",
     listProviders: () => [],
     runTurn: async (args: {
-      onEvent: (env: Record<string, unknown>) => void;
+      onEvent: (env: Record<string, unknown>) => void | Promise<void>;
     }) => {
-      args.onEvent({ type: "system", subtype: "init", session_id: "sess-1" });
-      args.onEvent({
+      await args.onEvent({ type: "system", subtype: "init", session_id: "sess-1" });
+      await args.onEvent({
         type: "assistant",
         message: { content: [{ type: "text", text: "starting task A" }] },
       });
       // Simulate a page load while the turn is still streaming.
-      if (h.snapshot) h.midTurn = h.snapshot();
-      args.onEvent({
+      if (h.snapshot) h.midTurn = await h.snapshot();
+      await args.onEvent({
         type: "user",
         message: {
           content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }],
         },
       });
-      args.onEvent({
+      await args.onEvent({
         type: "assistant",
         message: { content: [{ type: "text", text: "task A merged" }] },
       });
-      args.onEvent({
+      await args.onEvent({
         type: "result",
         is_error: false,
         result: "plan done",
@@ -74,17 +74,17 @@ import * as repo from "../lib/repo";
 import * as runs from "../lib/runs";
 import { GET as getLiveSessions } from "../app/api/live-sessions/route";
 
-beforeEach(() => {
-  seedPersonas();
-  db.delete(agentMessages).run();
-  db.delete(agentEvents).run();
-  db.delete(agentSessions).run();
-  db.delete(acceptanceCriteria).run();
-  db.delete(taskNotes).run();
-  db.delete(taskDependencies).run();
-  db.delete(tasks).run();
-  db.delete(plans).run();
-  db.delete(repositories).where(ne(repositories.id, "R-default")).run();
+beforeEach(async () => {
+  await seedPersonas();
+  await db.delete(agentMessages);
+  await db.delete(agentEvents);
+  await db.delete(agentSessions);
+  await db.delete(acceptanceCriteria);
+  await db.delete(taskNotes);
+  await db.delete(taskDependencies);
+  await db.delete(tasks);
+  await db.delete(plans);
+  await db.delete(repositories).where(ne(repositories.id, "R-default"));
   h.midTurn = null;
   h.snapshot = null;
 });
@@ -92,7 +92,7 @@ beforeEach(() => {
 async function waitForTerminal(runId: number, timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const r = runs.get(runId);
+    const r = await runs.get(runId);
     if (r && ["completed", "failed", "budget_exhausted", "cancelled", "closed", "idle"].includes(r.status)) {
       if (r.status !== "idle") return;
     }
@@ -103,13 +103,13 @@ async function waitForTerminal(runId: number, timeoutMs = 5000): Promise<void> {
 
 describe("plan-executor run history", () => {
   it("persists the kickoff prompt and each streamed message so a page load mid-turn sees history", async () => {
-    const plan = repo.createPlan({ title: "Ship Sidebar", date: "2026-07-02" });
-    h.snapshot = () => {
-      const r = runs.list({ goal: "<execute>" })[0];
-      return r ? runs.listMessages(r.id).map((m) => ({ role: m.role })) : [];
+    const plan = await repo.createPlan({ title: "Ship Sidebar", date: "2026-07-02" });
+    h.snapshot = async () => {
+      const r = (await runs.list({ goal: "<execute>" }))[0];
+      return r ? (await runs.listMessages(r.id)).map((m) => ({ role: m.role })) : [];
     };
 
-    const run = runs.create({ goal: "<execute>", planId: plan.id });
+    const run = await runs.create({ goal: "<execute>", planId: plan.id });
     await waitForTerminal(run.id);
 
     // Mid-turn (between the two assistant envelopes) the DB already held the
@@ -118,24 +118,25 @@ describe("plan-executor run history", () => {
     expect(h.midTurn).not.toBeNull();
     expect(h.midTurn!.map((m) => m.role)).toEqual(["system", "agent"]);
 
-    const msgs = runs.listMessages(run.id);
+    const msgs = await runs.listMessages(run.id);
     expect(msgs.map((m) => m.role)).toEqual(["system", "agent", "tool", "agent"]);
     // The kickoff prompt anchors the transcript.
     expect(JSON.stringify(msgs[0].content)).toContain(plan.id);
-    expect(runs.get(run.id)!.status).toBe("completed");
+    expect((await runs.get(run.id))!.status).toBe("completed");
   });
 });
 
 describe("GET /api/live-sessions", () => {
   it("includes a running plan-executor run, titled after its plan", async () => {
-    const plan = repo.createPlan({ title: "Big Migration", date: "2026-07-02" });
-    const execId = db
-      .insert(agentSessions)
-      .values({ goal: "<execute>", status: "running", planId: plan.id })
-      .returning()
-      .all()[0].id;
+    const plan = await repo.createPlan({ title: "Big Migration", date: "2026-07-02" });
+    const execId = (
+      await db
+        .insert(agentSessions)
+        .values({ goal: "<execute>", status: "running", planId: plan.id })
+        .returning()
+    )[0].id;
     // A plain chat run must stay hidden.
-    db.insert(agentSessions).values({ goal: "<chat>", status: "running" }).run();
+    await db.insert(agentSessions).values({ goal: "<chat>", status: "running" });
 
     const res = await getLiveSessions();
     const body = (await res.json()) as { items: Array<Record<string, unknown>> };
@@ -150,15 +151,16 @@ describe("GET /api/live-sessions", () => {
   });
 
   it("drops completed executor runs (not live) but keeps failed ones as blocked", async () => {
-    const plan = repo.createPlan({ title: "Two Runs", date: "2026-07-02" });
-    db.insert(agentSessions)
-      .values({ goal: "<execute>", status: "completed", planId: plan.id })
-      .run();
-    const failedId = db
+    const plan = await repo.createPlan({ title: "Two Runs", date: "2026-07-02" });
+    await db
       .insert(agentSessions)
-      .values({ goal: "<execute>", status: "failed", planId: plan.id, error: "boom" })
-      .returning()
-      .all()[0].id;
+      .values({ goal: "<execute>", status: "completed", planId: plan.id });
+    const failedId = (
+      await db
+        .insert(agentSessions)
+        .values({ goal: "<execute>", status: "failed", planId: plan.id, error: "boom" })
+        .returning()
+    )[0].id;
 
     const res = await getLiveSessions();
     const body = (await res.json()) as { items: Array<Record<string, unknown>> };

@@ -213,25 +213,26 @@ describe("planningExtension interceptor — unrelated tools are not blocked", ()
 describe("planningExtension tool execution", () => {
   let runId: number;
 
-  beforeEach(() => {
-    db.delete(agentMessages).run();
-    db.delete(agentSessions).run();
-    db.delete(plans).run();
-    db.delete(repositories).where(ne(repositories.id, "R-default")).run();
+  beforeEach(async () => {
+    await db.delete(agentMessages);
+    await db.delete(agentSessions);
+    await db.delete(plans);
+    await db.delete(repositories).where(ne(repositories.id, "R-default"));
 
     // Insert a real agent_runs row so the extension can UPDATE it.
-    const row = db
-      .insert(agentSessions)
-      .values({
-        goal: "<chat>",
-        status: "idle",
-        toolsProfile: "orchestrator,repo_read,planning",
-        cwdStrategy: "none",
-        planningStage: "gathering",
-        startedAt: new Date(),
-      })
-      .returning({ id: agentSessions.id })
-      .get();
+    const row = (
+      await db
+        .insert(agentSessions)
+        .values({
+          goal: "<chat>",
+          status: "idle",
+          toolsProfile: "orchestrator,repo_read,planning",
+          cwdStrategy: "none",
+          planningStage: "gathering",
+          startedAt: new Date(),
+        })
+        .returning({ id: agentSessions.id })
+    )[0];
     runId = row!.id;
   });
 
@@ -250,35 +251,34 @@ describe("planningExtension tool execution", () => {
     expect((result.content[0] as any).text).toContain("Stop now");
 
     // Stage should have changed in DB.
-    const row = db
-      .select({ planningStage: agentSessions.planningStage })
-      .from(agentSessions)
-      .where(eq(agentSessions.id, runId))
-      .get();
+    const row = (
+      await db
+        .select({ planningStage: agentSessions.planningStage })
+        .from(agentSessions)
+        .where(eq(agentSessions.id, runId))
+    )[0];
     expect(row?.planningStage).toBe("spec_review");
   });
 
   it("propose_spec stays spec_review when already in spec_review", async () => {
     const run = makeRun({ planningStage: "spec_review", id: runId });
-    db.update(agentSessions)
+    await db.update(agentSessions)
       .set({ planningStage: "spec_review" })
-      .where(eq(agentSessions.id, runId))
-      .run();
+      .where(eq(agentSessions.id, runId));
 
     const r = makeRegistrar();
     planningExtension({ runId, run })(r.reg);
     const tool = r.tools.get("propose_spec")!;
     await tool.execute("call-1", { title: "Revised", spec_markdown: "# v2" });
 
-    const row = db.select().from(agentSessions).all().find((r) => r.id === runId);
+    const row = (await db.select().from(agentSessions)).find((r) => r.id === runId);
     expect(row?.planningStage).toBe("spec_review");
   });
 
   it("propose_implementation_plan advances stage from building_plan to plan_review", async () => {
-    db.update(agentSessions)
+    await db.update(agentSessions)
       .set({ planningStage: "building_plan" })
-      .where(eq(agentSessions.id, runId))
-      .run();
+      .where(eq(agentSessions.id, runId));
 
     const run = makeRun({ planningStage: "building_plan", id: runId });
     const r = makeRegistrar();
@@ -294,18 +294,17 @@ describe("planningExtension tool execution", () => {
     expect(result.isError).toBeFalsy();
     expect((result.content[0] as any).text).toContain("Stop now");
 
-    const row = db.select().from(agentSessions).all().find((r) => r.id === runId);
+    const row = (await db.select().from(agentSessions)).find((r) => r.id === runId);
     expect(row?.planningStage).toBe("plan_review");
   });
 
   it("commit_spec_as_plan creates a draft plan with the spec body and writes planId", async () => {
-    db.update(agentSessions)
+    await db.update(agentSessions)
       .set({ planningStage: "building_plan" })
-      .where(eq(agentSessions.id, runId))
-      .run();
+      .where(eq(agentSessions.id, runId));
 
     // Seed a propose_spec message into the agent_messages table.
-    db.insert(agentMessages)
+    await db.insert(agentMessages)
       .values({
         runId,
         role: "agent",
@@ -320,8 +319,7 @@ describe("planningExtension tool execution", () => {
           },
         ]),
         createdAt: new Date(),
-      })
-      .run();
+      });
 
     const run = makeRun({ planningStage: "building_plan", id: runId, title: "My Planning Run" });
     const r = makeRegistrar();
@@ -339,13 +337,13 @@ describe("planningExtension tool execution", () => {
     const planId = match![0];
 
     // Plan should exist in DB with correct body and state.
-    const plan = repo.getPlan(planId);
+    const plan = await repo.getPlan(planId);
     expect(plan).toBeTruthy();
     expect(plan!.state).toBe("draft");
     expect(plan!.body).toContain("We will build something amazing.");
 
     // Run should have planId set.
-    const runRow = db.select().from(agentSessions).all().find((r) => r.id === runId);
+    const runRow = (await db.select().from(agentSessions)).find((r) => r.id === runId);
     expect(runRow?.planId).toBe(planId);
   });
 
@@ -354,12 +352,11 @@ describe("planningExtension tool execution", () => {
     // SDK-namespaced name `mcp__task_orch__propose_spec`. findLatestSpecMarkdown
     // must still locate the spec body (suffix match), otherwise stage 2 of the
     // guided planning flow is impossible and no plan can ever be committed.
-    db.update(agentSessions)
+    await db.update(agentSessions)
       .set({ planningStage: "building_plan" })
-      .where(eq(agentSessions.id, runId))
-      .run();
+      .where(eq(agentSessions.id, runId));
 
-    db.insert(agentMessages)
+    await db.insert(agentMessages)
       .values({
         runId,
         role: "agent",
@@ -371,8 +368,7 @@ describe("planningExtension tool execution", () => {
           },
         ]),
         createdAt: new Date(),
-      })
-      .run();
+      });
 
     const run = makeRun({ planningStage: "building_plan", id: runId });
     const r = makeRegistrar();
@@ -383,14 +379,13 @@ describe("planningExtension tool execution", () => {
     const text = (result.content[0] as any).text as string;
     expect(text).toContain("Created draft plan");
     const planId = text.match(/P-[\w-]+/)![0];
-    expect(repo.getPlan(planId)!.body).toContain("Built on the Claude backend.");
+    expect((await repo.getPlan(planId))!.body).toContain("Built on the Claude backend.");
   });
 
   it("commit_spec_as_plan errors when no propose_spec message found", async () => {
-    db.update(agentSessions)
+    await db.update(agentSessions)
       .set({ planningStage: "building_plan" })
-      .where(eq(agentSessions.id, runId))
-      .run();
+      .where(eq(agentSessions.id, runId));
 
     const run = makeRun({ planningStage: "building_plan", id: runId });
     const r = makeRegistrar();
@@ -403,12 +398,11 @@ describe("planningExtension tool execution", () => {
   });
 
   it("commit_spec_as_plan uses custom title when provided", async () => {
-    db.update(agentSessions)
+    await db.update(agentSessions)
       .set({ planningStage: "building_plan" })
-      .where(eq(agentSessions.id, runId))
-      .run();
+      .where(eq(agentSessions.id, runId));
 
-    db.insert(agentMessages)
+    await db.insert(agentMessages)
       .values({
         runId,
         role: "agent",
@@ -420,8 +414,7 @@ describe("planningExtension tool execution", () => {
           },
         ]),
         createdAt: new Date(),
-      })
-      .run();
+      });
 
     const run = makeRun({ planningStage: "building_plan", id: runId });
     const r = makeRegistrar();
@@ -464,31 +457,32 @@ describe("planningExtension tool execution", () => {
 describe("repo.setPlanningStage", () => {
   let runId: number;
 
-  beforeEach(() => {
-    db.delete(agentMessages).run();
-    db.delete(agentSessions).run();
-    const row = db
-      .insert(agentSessions)
-      .values({
-        goal: "<chat>",
-        status: "idle",
-        toolsProfile: "orchestrator,repo_read,planning",
-        cwdStrategy: "none",
-        planningStage: "gathering",
-        startedAt: new Date(),
-      })
-      .returning({ id: agentSessions.id })
-      .get();
+  beforeEach(async () => {
+    await db.delete(agentMessages);
+    await db.delete(agentSessions);
+    const row = (
+      await db
+        .insert(agentSessions)
+        .values({
+          goal: "<chat>",
+          status: "idle",
+          toolsProfile: "orchestrator,repo_read,planning",
+          cwdStrategy: "none",
+          planningStage: "gathering",
+          startedAt: new Date(),
+        })
+        .returning({ id: agentSessions.id })
+    )[0];
     runId = row!.id;
   });
 
-  it("updates planning_stage in the DB", () => {
-    repo.setPlanningStage(runId, "spec_review");
-    const row = db.select().from(agentSessions).all().find((r) => r.id === runId);
+  it("updates planning_stage in the DB", async () => {
+    await repo.setPlanningStage(runId, "spec_review");
+    const row = (await db.select().from(agentSessions)).find((r) => r.id === runId);
     expect(row?.planningStage).toBe("spec_review");
   });
 
-  it("can advance through the full stage sequence", () => {
+  it("can advance through the full stage sequence", async () => {
     const stages: repo.PlanningStage[] = [
       "spec_review",
       "building_plan",
@@ -497,8 +491,8 @@ describe("repo.setPlanningStage", () => {
       "done",
     ];
     for (const s of stages) {
-      repo.setPlanningStage(runId, s);
-      const row = db.select().from(agentSessions).all().find((r) => r.id === runId);
+      await repo.setPlanningStage(runId, s);
+      const row = (await db.select().from(agentSessions)).find((r) => r.id === runId);
       expect(row?.planningStage).toBe(s);
     }
   });

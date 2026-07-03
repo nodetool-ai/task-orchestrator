@@ -24,14 +24,14 @@ export async function GET() {
 
     // Task-scoped runs plus plan executors: an executor run has a planId but
     // no taskId (origin "chat"), so the origin filter alone would hide it.
-    const runs = runsLib
-      .listRuns()
-      .filter((r) => r.origin === "task" || r.goal === "<execute>");
+    const runs = (await runsLib.listRuns()).filter(
+      (r) => r.origin === "task" || r.goal === "<execute>",
+    );
     const items: LiveSessionItem[] = [];
     for (const r of runs) {
-      const task = r.taskId ? repo.getTask(r.taskId) : null;
+      const task = r.taskId ? await repo.getTask(r.taskId) : null;
       const plan =
-        r.goal === "<execute>" && r.planId ? repo.getPlan(r.planId) : null;
+        r.goal === "<execute>" && r.planId ? await repo.getPlan(r.planId) : null;
       const b = bucketFor(r.status, r.prUrl, task?.state);
       if (!b) continue;
       const prMatch = r.prUrl?.match(/\/pull\/(\d+)/);

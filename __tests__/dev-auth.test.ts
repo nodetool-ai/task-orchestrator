@@ -26,21 +26,21 @@ describe("isAuthDisabled", () => {
 });
 
 describe("ensureDevUser", () => {
-  beforeEach(() => {
-    db.delete(users).run();
+  beforeEach(async () => {
+    await db.delete(users);
   });
 
-  it("creates the local dev user when none exists", () => {
-    const user = ensureDevUser();
+  it("creates the local dev user when none exists", async () => {
+    const user = await ensureDevUser();
     expect(user.email).toBe(DEV_USER_EMAIL);
     expect(user.id).toBeTypeOf("number");
-    expect(db.select().from(users).all()).toHaveLength(1);
+    expect(await db.select().from(users)).toHaveLength(1);
   });
 
-  it("is idempotent — returns the same user without duplicating", () => {
-    const first = ensureDevUser();
-    const second = ensureDevUser();
+  it("is idempotent — returns the same user without duplicating", async () => {
+    const first = await ensureDevUser();
+    const second = await ensureDevUser();
     expect(second.id).toBe(first.id);
-    expect(db.select().from(users).all()).toHaveLength(1);
+    expect(await db.select().from(users)).toHaveLength(1);
   });
 });

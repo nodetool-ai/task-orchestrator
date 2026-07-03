@@ -6,21 +6,21 @@ import { create, get } from "../lib/runs";
 // back to the persona when omitted.
 
 describe("per-run reasoning (thinkingLevel)", () => {
-  it("persists the level passed on create", () => {
-    const run = create({ goal: "<implement>", thinkingLevel: "high", defer: true });
+  it("persists the level passed on create", async () => {
+    const run = await create({ goal: "<implement>", thinkingLevel: "high", defer: true });
     expect(run.thinkingLevel).toBe("high");
-    expect(get(run.id)?.thinkingLevel).toBe("high");
+    expect((await get(run.id))?.thinkingLevel).toBe("high");
   });
 
-  it("defaults to null (inherit persona) when omitted", () => {
-    const run = create({ goal: "<implement>", defer: true });
+  it("defaults to null (inherit persona) when omitted", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
     expect(run.thinkingLevel).toBeNull();
-    expect(get(run.id)?.thinkingLevel).toBeNull();
+    expect((await get(run.id))?.thinkingLevel).toBeNull();
   });
 
-  it("accepts each level", () => {
+  it("accepts each level", async () => {
     for (const level of ["low", "medium", "high", "xhigh"] as const) {
-      const run = create({ goal: "<implement>", thinkingLevel: level, defer: true });
+      const run = await create({ goal: "<implement>", thinkingLevel: level, defer: true });
       expect(run.thinkingLevel).toBe(level);
     }
   });

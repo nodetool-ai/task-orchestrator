@@ -6,8 +6,8 @@ export const dynamic = "force-dynamic";
 // Distinct assignees + persona ids — used by <AssigneePicker> to populate
 // its autocomplete suggestions.
 export async function GET() {
-  const assignees = repo.listAssignees();
-  const personas = repo.listPersonaIds();
+  const assignees = await repo.listAssignees();
+  const personas = await repo.listPersonaIds();
   // Personas first (canonical names), then any other historic assignees.
   const seen = new Set<string>();
   const out: string[] = [];

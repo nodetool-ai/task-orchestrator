@@ -19,10 +19,10 @@ export type SpawnFn = (runId: number, scope: string) => number | null;
 // Vitest ESM loader (native require can't resolve the .ts source), so injection is
 // used instead.
 type RunsApi = {
-  get: (id: number) => RunRow | null;
+  get: (id: number) => Promise<RunRow | null>;
   isLeaseLive: (run: { status: string; heartbeatAt: Date | null }, now?: number) => boolean;
   /** Mark a run failed with an error (updates status + emits a status event). */
-  failRun: (runId: number, error: string) => void;
+  failRun: (runId: number, error: string) => Promise<void>;
 };
 let runsApi: RunsApi | null = null;
 export function __setRunsApi(api: RunsApi): void {
@@ -46,11 +46,11 @@ function nonce(): string {
   return `${process.pid}-${nonceCounter}`;
 }
 
-export function dispatchRun(
+export async function dispatchRun(
   runId: number,
   opts: { spawn?: SpawnFn } = {}
-): "spawned" | "already-claimed" | "not-found" | "spawn-failed" {
-  const run = runs().get(runId);
+): Promise<"spawned" | "already-claimed" | "not-found" | "spawn-failed"> {
+  const run = await runs().get(runId);
   if (!run) return "not-found";
   if (runs().isLeaseLive(run)) return "already-claimed";
   if (run.workerScope) return "already-claimed";
@@ -58,12 +58,11 @@ export function dispatchRun(
   const scope = `run-${runId}-${nonce()}`;
   // Atomic claim: only succeeds if worker_scope is still NULL. A concurrent
   // claimer that wins flips it non-null, so our WHERE matches 0 rows and we bail.
-  const claimed = db
+  const claimed = await db
     .update(agentSessions)
     .set({ status: "preparing", workerScope: scope, cancelRequested: 0, heartbeatAt: new Date() })
-    .where(and(eq(agentSessions.id, runId), isNull(agentSessions.workerScope)))
-    .run();
-  if (claimed.changes === 0) return "already-claimed";
+    .where(and(eq(agentSessions.id, runId), isNull(agentSessions.workerScope)));
+  if (claimed.count === 0) return "already-claimed";
 
   // Spawn the detached worker. A spawn that throws (bad module resolution in the
   // prod bundle) OR returns no pid (executable not found) must NOT leave the run
@@ -74,19 +73,19 @@ export function dispatchRun(
   try {
     pid = spawn(runId, scope);
   } catch (err) {
-    return failSpawn(runId, `run worker failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
+    return await failSpawn(runId, `run worker failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
   }
   if (pid == null) {
-    return failSpawn(runId, "run worker did not start (spawn returned no pid — is the worker runtime installed?)");
+    return await failSpawn(runId, "run worker did not start (spawn returned no pid — is the worker runtime installed?)");
   }
-  db.update(agentSessions).set({ workerPid: pid }).where(eq(agentSessions.id, runId)).run();
+  await db.update(agentSessions).set({ workerPid: pid }).where(eq(agentSessions.id, runId));
   return "spawned";
 }
 
-function failSpawn(runId: number, message: string): "spawn-failed" {
+async function failSpawn(runId: number, message: string): Promise<"spawn-failed"> {
   // Release the claim so a later dispatch/retry can re-acquire it, then fail.
-  db.update(agentSessions).set({ workerScope: null, workerPid: null }).where(eq(agentSessions.id, runId)).run();
-  runs().failRun(runId, message);
+  await db.update(agentSessions).set({ workerScope: null, workerPid: null }).where(eq(agentSessions.id, runId));
+  await runs().failRun(runId, message);
   return "spawn-failed";
 }
 
@@ -130,12 +129,12 @@ export const defaultSpawn: SpawnFn = (runId, scope) => {
   // If the launcher exits non-zero while the run is still 'preparing' — i.e. the
   // worker never took over (a healthy worker moves it to 'running' first) — fail
   // the run so the failure is visible. A normal completion exits 0 and no-ops.
-  child.on("exit", (code) => {
+  child.on("exit", async (code) => {
     if (!code) return;
     try {
-      const cur = runs().get(runId);
+      const cur = await runs().get(runId);
       if (cur && cur.status === "preparing") {
-        runs().failRun(runId, `run worker launcher exited ${code} before starting (systemd-run/user-bus issue?)`);
+        await runs().failRun(runId, `run worker launcher exited ${code} before starting (systemd-run/user-bus issue?)`);
       }
     } catch {
       // runs API unavailable (e.g. process shutting down) — nothing to do.

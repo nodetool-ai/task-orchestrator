@@ -19,18 +19,18 @@ import { buildExecutePrompt } from "../lib/run-templates";
 import { PERSONAS } from "../lib/personas";
 import { seedPersonas } from "../db/seed-personas";
 
-beforeEach(() => {
+beforeEach(async () => {
   // Personas back the agent_runs.persona_id FK; seed before any run insert.
-  seedPersonas();
-  db.delete(agentMessages).run();
-  db.delete(agentEvents).run();
-  db.delete(agentSessions).run();
-  db.delete(acceptanceCriteria).run();
-  db.delete(taskNotes).run();
-  db.delete(taskDependencies).run();
-  db.delete(tasks).run();
-  db.delete(plans).run();
-  db.delete(repositories).where(ne(repositories.id, "R-default")).run();
+  await seedPersonas();
+  await db.delete(agentMessages);
+  await db.delete(agentEvents);
+  await db.delete(agentSessions);
+  await db.delete(acceptanceCriteria);
+  await db.delete(taskNotes);
+  await db.delete(taskDependencies);
+  await db.delete(tasks);
+  await db.delete(plans);
+  await db.delete(repositories).where(ne(repositories.id, "R-default"));
 });
 
 function tool(name: string) {
@@ -42,12 +42,13 @@ function tool(name: string) {
 const ctx = { author: "test" as const };
 
 // Insert an agent_runs row directly, bypassing the worker kickoff.
-function insertRun(values: Partial<typeof agentSessions.$inferInsert>): number {
-  const row = db
+async function insertRun(
+  values: Partial<typeof agentSessions.$inferInsert>
+): Promise<number> {
+  const row = await db
     .insert(agentSessions)
     .values({ goal: "<review>", status: "running", ...values })
-    .returning()
-    .all();
+    .returning();
   return row[0].id;
 }
 
@@ -62,16 +63,19 @@ describe("executor persona", () => {
 });
 
 describe("buildExecutePrompt", () => {
-  it("lists tasks with state and dependencies", () => {
-    const plan = repo.createPlan({ title: "Ship It", date: "2026-06-18" });
-    const a = repo.createTask({ planId: plan.id, title: "First", date: "2026-06-18" });
-    const b = repo.createTask({
+  it("lists tasks with state and dependencies", async () => {
+    const plan = await repo.createPlan({ title: "Ship It", date: "2026-06-18" });
+    const a = await repo.createTask({ planId: plan.id, title: "First", date: "2026-06-18" });
+    const b = await repo.createTask({
       planId: plan.id,
       title: "Second",
       date: "2026-06-18",
       dependencies: [a.id],
     });
-    const prompt = buildExecutePrompt(repo.getPlan(plan.id)!, repo.listTasks({ planId: plan.id }));
+    const prompt = buildExecutePrompt(
+      (await repo.getPlan(plan.id))!,
+      await repo.listTasks({ planId: plan.id })
+    );
     expect(prompt).toContain(plan.id);
     expect(prompt).toContain(a.id);
     expect(prompt).toContain(b.id);
@@ -82,13 +86,13 @@ describe("buildExecutePrompt", () => {
 });
 
 describe("create({ goal: '<execute>' })", () => {
-  it("requires a planId", () => {
-    expect(() => runs.create({ goal: "<execute>" })).toThrow(/planId/);
+  it("requires a planId", async () => {
+    await expect(runs.create({ goal: "<execute>" })).rejects.toThrow(/planId/);
   });
 
-  it("defers cleanly with repo cwd and the spawn-enabled default profile", () => {
-    const plan = repo.createPlan({ title: "Deferred", date: "2026-06-18" });
-    const run = runs.create({ goal: "<execute>", planId: plan.id, defer: true });
+  it("defers cleanly with repo cwd and the spawn-enabled default profile", async () => {
+    const plan = await repo.createPlan({ title: "Deferred", date: "2026-06-18" });
+    const run = await runs.create({ goal: "<execute>", planId: plan.id, defer: true });
     expect(run.goal).toBe("<execute>");
     expect(run.cwdStrategy).toBe("repo");
     expect(run.toolsProfile).toContain("spawn");
@@ -104,7 +108,7 @@ describe("await_session", () => {
   });
 
   it("returns immediately for an already-terminal run and parses the verdict", async () => {
-    const id = insertRun({
+    const id = await insertRun({
       status: "completed",
       outcome: JSON.stringify({ verdict: "approve", summary: "LGTM" }),
       prUrl: "https://github.com/x/y/pull/1",
@@ -118,13 +122,13 @@ describe("await_session", () => {
   });
 
   it("resolves once a running session reaches a terminal status", async () => {
-    const id = insertRun({ status: "running" });
+    const id = await insertRun({ status: "running" });
     // Flip to completed shortly after the poll loop starts.
-    setTimeout(() => {
-      db.update(agentSessions)
+    setTimeout(async () => {
+      await db
+        .update(agentSessions)
         .set({ status: "completed", outcome: JSON.stringify({ verdict: "request_changes" }) })
-        .where(eq(agentSessions.id, id))
-        .run();
+        .where(eq(agentSessions.id, id));
     }, 100);
     const res = await tool("await_session").execute({ session_id: id }, ctx);
     const out = JSON.parse((res.content[0] as { text: string }).text);

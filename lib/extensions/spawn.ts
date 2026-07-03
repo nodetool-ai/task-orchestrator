@@ -227,22 +227,21 @@ interface ChainRow {
  * ancestors (immediate parent first, root last). The starting run itself is
  * NOT included. Stops after `maxSteps` to bound work even on a cycle.
  */
-function walkParentChain(startParentId: number | null, maxSteps = MAX_DEPTH + 2): ChainRow[] {
+async function walkParentChain(startParentId: number | null, maxSteps = MAX_DEPTH + 2): Promise<ChainRow[]> {
   const chain: ChainRow[] = [];
   let cursor: number | null = startParentId;
   const seen = new Set<number>();
   while (cursor != null && chain.length < maxSteps) {
     if (seen.has(cursor)) break; // cycle guard (should never happen)
     seen.add(cursor);
-    const row = db
+    const row = (await db
       .select({
         id: agentSessions.id,
         parentRunId: agentSessions.parentRunId,
         budgetMaxUsd: agentSessions.budgetMaxUsd,
       })
       .from(agentSessions)
-      .where(eq(agentSessions.id, cursor))
-      .get();
+      .where(eq(agentSessions.id, cursor)))[0];
     if (!row) break;
     chain.push(row);
     cursor = row.parentRunId;
@@ -251,7 +250,7 @@ function walkParentChain(startParentId: number | null, maxSteps = MAX_DEPTH + 2)
 }
 
 /** Find the root (topmost ancestor) of a tree, given a run row. */
-function findRoot(run: RunRow): ChainRow {
+async function findRoot(run: RunRow): Promise<ChainRow> {
   if (run.parentRunId == null) {
     return {
       id: run.id,
@@ -259,7 +258,7 @@ function findRoot(run: RunRow): ChainRow {
       budgetMaxUsd: run.budgetMaxUsd,
     };
   }
-  const chain = walkParentChain(run.parentRunId, 64);
+  const chain = await walkParentChain(run.parentRunId, 64);
   if (chain.length === 0) {
     // Parent vanished; treat self as root.
     return {
@@ -276,19 +275,18 @@ function findRoot(run: RunRow): ChainRow {
  * Iterative BFS via parent_run_id; cheap because we only need (id, parentRunId,
  * totalCostUsd).
  */
-function collectSubtree(
+async function collectSubtree(
   rootId: number
-): Array<{ id: number; parentRunId: number | null; totalCostUsd: number | null }> {
+): Promise<Array<{ id: number; parentRunId: number | null; totalCostUsd: number | null }>> {
   const out: Array<{ id: number; parentRunId: number | null; totalCostUsd: number | null }> = [];
-  const rootRow = db
+  const rootRow = (await db
     .select({
       id: agentSessions.id,
       parentRunId: agentSessions.parentRunId,
       totalCostUsd: agentSessions.totalCostUsd,
     })
     .from(agentSessions)
-    .where(eq(agentSessions.id, rootId))
-    .get();
+    .where(eq(agentSessions.id, rootId)))[0];
   if (!rootRow) return out;
   out.push(rootRow);
 
@@ -297,15 +295,14 @@ function collectSubtree(
   while (frontier.length > 0) {
     const next: number[] = [];
     for (const parentId of frontier) {
-      const children = db
+      const children = await db
         .select({
           id: agentSessions.id,
           parentRunId: agentSessions.parentRunId,
           totalCostUsd: agentSessions.totalCostUsd,
         })
         .from(agentSessions)
-        .where(eq(agentSessions.parentRunId, parentId))
-        .all();
+        .where(eq(agentSessions.parentRunId, parentId));
       for (const c of children) {
         if (seen.has(c.id)) continue;
         seen.add(c.id);
@@ -322,12 +319,11 @@ function collectSubtree(
  * Find the last agent text emitted on a run, by scanning agentMessages in
  * reverse. Returns null if no agent text is present.
  */
-function lastAgentText(runId: number): string | null {
-  const rows = db
+async function lastAgentText(runId: number): Promise<string | null> {
+  const rows = await db
     .select({ role: agentMessages.role, content: agentMessages.content })
     .from(agentMessages)
-    .where(eq(agentMessages.runId, runId))
-    .all();
+    .where(eq(agentMessages.runId, runId));
   return extractLatestAssistantText(rows);
 }
 
@@ -387,7 +383,7 @@ export const spawnExtension =
       }),
       execute: async (_id, args) => {
         // 1. Persona validation BEFORE the depth/budget checks (cheap fail first).
-        const validIds = repo.listPersonaIds();
+        const validIds = await repo.listPersonaIds();
         if (!validIds.includes(args.persona)) {
           return errResult(
             `Unknown persona '${args.persona}'. Valid: ${validIds.join(", ")}`
@@ -416,7 +412,7 @@ export const spawnExtension =
         }
 
         // 2. Depth check.
-        const parentChain = walkParentChain(runRow.parentRunId, MAX_DEPTH + 2);
+        const parentChain = await walkParentChain(runRow.parentRunId, MAX_DEPTH + 2);
         const newChildDepth = computeDepth(parentChain) + 1;
         if (newChildDepth > MAX_DEPTH) {
           return errResult(
@@ -426,8 +422,8 @@ export const spawnExtension =
         }
 
         // 3. Tree-budget check.
-        const root = findRoot(runRow);
-        const subtree = collectSubtree(root.id);
+        const root = await findRoot(runRow);
+        const subtree = await collectSubtree(root.id);
         const spent = sumTreeCost(subtree);
         const exceeded = checkTreeBudget(root, spent, treeBudgetMult());
         if (exceeded) {
@@ -455,7 +451,7 @@ export const spawnExtension =
         // 5. Create the run with the persona id.
         let newRun: RunRow;
         try {
-          newRun = runs.create({
+          newRun = await runs.create({
             goal: args.goal,
             personaId: args.persona,
             thinkingLevel: args.reasoning ?? null,
@@ -507,11 +503,11 @@ export const spawnExtension =
         "Look up a run by id and return its current status, outcome, and last agent text. Used to poll a previously spawned child.",
       parameters: Type.Object({ id: Type.Integer({ minimum: 1 }) }),
       execute: async (_id, { id }) => {
-        const run = runs.get(id);
+        const run = await runs.get(id);
         if (!run) {
           return errResult(`Run ${id} not found.`);
         }
-        const lastText = lastAgentText(id);
+        const lastText = await lastAgentText(id);
         return ok(
           JSON.stringify(
             {
@@ -557,7 +553,7 @@ export const spawnExtension =
               `instead of messaging yourself.`
           );
         }
-        const ancestorChain = walkParentChain(runRow.parentRunId, MAX_DEPTH + 2);
+        const ancestorChain = await walkParentChain(runRow.parentRunId, MAX_DEPTH + 2);
         if (ancestorChain.some((a) => a.id === args.run_id)) {
           return errResult(
             `Cannot append_message to ancestor run ${args.run_id}: it is mid-turn (it spawned ` +
@@ -566,8 +562,8 @@ export const spawnExtension =
         }
 
         // 1. Tree-budget enforcement based on the *caller's* tree.
-        const callerRoot = findRoot(runRow);
-        const callerSubtree = collectSubtree(callerRoot.id);
+        const callerRoot = await findRoot(runRow);
+        const callerSubtree = await collectSubtree(callerRoot.id);
         const spent = sumTreeCost(callerSubtree);
         const exceeded = checkTreeBudget(callerRoot, spent, treeBudgetMult());
         if (exceeded) {
@@ -591,7 +587,7 @@ export const spawnExtension =
 
         // 2. Look up the target run; refuse on closed / terminal BEFORE
         //    grabbing the per-run lock.
-        const target = runs.get(args.run_id);
+        const target = await runs.get(args.run_id);
         if (!target) {
           return errResult(`Run ${args.run_id} not found.`);
         }
@@ -668,8 +664,8 @@ export const spawnExtension =
           return errResult(`append failed: ${appendError}`);
         }
 
-        const after = runs.get(args.run_id);
-        const latestText = lastAgentText(args.run_id);
+        const after = await runs.get(args.run_id);
+        const latestText = await lastAgentText(args.run_id);
         return ok(
           JSON.stringify(
             {

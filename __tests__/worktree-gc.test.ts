@@ -18,16 +18,16 @@ import {
   shouldRemoveWorktree,
 } from "../lib/worktree-gc";
 
-beforeEach(() => {
-  db.delete(agentMessages).run();
-  db.delete(agentEvents).run();
-  db.delete(agentSessions).run();
-  db.delete(acceptanceCriteria).run();
-  db.delete(taskNotes).run();
-  db.delete(taskDependencies).run();
-  db.delete(tasks).run();
-  db.delete(plans).run();
-  db.delete(repositories).where(ne(repositories.id, "R-default")).run();
+beforeEach(async () => {
+  await db.delete(agentMessages);
+  await db.delete(agentEvents);
+  await db.delete(agentSessions);
+  await db.delete(acceptanceCriteria);
+  await db.delete(taskNotes);
+  await db.delete(taskDependencies);
+  await db.delete(tasks);
+  await db.delete(plans);
+  await db.delete(repositories).where(ne(repositories.id, "R-default"));
 });
 
 afterEach(() => {
@@ -217,7 +217,7 @@ describe("shouldRemoveWorktree predicate", () => {
 describe("runWorktreeGcOnce", () => {
   it("removes eligible worktrees, prunes admin, and appends a system message", async () => {
     // Insert an idle run with a worktree.
-    db.insert(agentSessions)
+    await db.insert(agentSessions)
       .values({
         id: 42,
         taskId: null,
@@ -229,8 +229,7 @@ describe("runWorktreeGcOnce", () => {
         worktreePath: "/tmp/repo/.worktrees/42",
         repoId: "R-default",
         startedAt: TEN_DAYS_AGO,
-      })
-      .run();
+      });
 
     const removeWorktree = vi.fn(async () => {});
     const pruneAdmin = vi.fn(async () => {});
@@ -254,7 +253,7 @@ describe("runWorktreeGcOnce", () => {
     expect(pruneAdmin).toHaveBeenCalledWith("/tmp/repo");
 
     // System message should have been appended to agent_messages.
-    const msgs = db.select().from(agentMessages).all();
+    const msgs = await db.select().from(agentMessages);
     expect(msgs).toHaveLength(1);
     expect(msgs[0]?.runId).toBe(42);
     expect(msgs[0]?.role).toBe("system");
@@ -263,7 +262,7 @@ describe("runWorktreeGcOnce", () => {
   });
 
   it("does NOT remove a dirty worktree (would destroy uncommitted work)", async () => {
-    db.insert(agentSessions)
+    await db.insert(agentSessions)
       .values({
         id: 43,
         taskId: null,
@@ -275,8 +274,7 @@ describe("runWorktreeGcOnce", () => {
         worktreePath: "/tmp/repo/.worktrees/43",
         repoId: "R-default",
         startedAt: TEN_DAYS_AGO,
-      })
-      .run();
+      });
 
     const removeWorktree = vi.fn(async () => {});
     const pruneAdmin = vi.fn(async () => {});
@@ -297,12 +295,12 @@ describe("runWorktreeGcOnce", () => {
     expect(removeWorktree).not.toHaveBeenCalled();
     expect(pruneAdmin).not.toHaveBeenCalled();
     // No system message either — the run was left completely untouched.
-    const msgs = db.select().from(agentMessages).all();
+    const msgs = await db.select().from(agentMessages);
     expect(msgs).toHaveLength(0);
   });
 
   it("skips removal and logs a preview (no DB write) when KEEP_WORKTREES is set", async () => {
-    db.insert(agentSessions)
+    await db.insert(agentSessions)
       .values({
         id: 7,
         taskId: null,
@@ -314,8 +312,7 @@ describe("runWorktreeGcOnce", () => {
         worktreePath: "/tmp/repo/.worktrees/7",
         repoId: "R-default",
         startedAt: TEN_DAYS_AGO,
-      })
-      .run();
+      });
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const removeWorktree = vi.fn(async () => {});
@@ -337,7 +334,7 @@ describe("runWorktreeGcOnce", () => {
     // message, and defaultListCandidates derives lastActivityAt from
     // max(agent_messages.created_at) — so writing it reset the idle clock GC
     // measures. Keep mode must NOT touch the DB; it logs to the console instead.
-    const msgs = db.select().from(agentMessages).all();
+    const msgs = await db.select().from(agentMessages);
     expect(msgs).toHaveLength(0);
     expect(logSpy).toHaveBeenCalledWith(expect.stringMatching(/would remove worktree for run #7/));
   });
@@ -346,7 +343,7 @@ describe("runWorktreeGcOnce", () => {
     // Uses the REAL defaultListCandidates (no listCandidates override) so the
     // lastActivityAt is derived from the DB exactly as in production. The run
     // has no messages, so its idle clock is anchored on startedAt.
-    db.insert(agentSessions)
+    await db.insert(agentSessions)
       .values({
         id: 71,
         taskId: null,
@@ -358,8 +355,7 @@ describe("runWorktreeGcOnce", () => {
         worktreePath: "/tmp/repo/.worktrees/71",
         repoId: "R-default",
         startedAt: TEN_DAYS_AGO,
-      })
-      .run();
+      });
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const previews: string[] = [];
@@ -393,21 +389,20 @@ describe("runWorktreeGcOnce", () => {
     expect(previews[1]).toBe(previews[0]);
     expect(previews[2]).toBe(previews[0]);
     // And no rows were ever written to bump the clock.
-    expect(db.select().from(agentMessages).all()).toHaveLength(0);
+    expect(await db.select().from(agentMessages)).toHaveLength(0);
   });
 
   it("uses repository.default_branch as the base for rev-list", async () => {
-    db.insert(repositories)
+    await db.insert(repositories)
       .values({
         id: "R-custom",
         name: "Custom",
         remote: "git@example.com:org/repo.git",
         localPath: "/tmp/custom",
         defaultBranch: "develop",
-      })
-      .run();
+      });
 
-    db.insert(agentSessions)
+    await db.insert(agentSessions)
       .values({
         id: 99,
         taskId: null,
@@ -419,8 +414,7 @@ describe("runWorktreeGcOnce", () => {
         worktreePath: "/tmp/custom/.worktrees/99",
         repoId: "R-custom",
         startedAt: TEN_DAYS_AGO,
-      })
-      .run();
+      });
 
     const seenBase: string[] = [];
     const result = await runWorktreeGcOnce({
@@ -442,7 +436,7 @@ describe("runWorktreeGcOnce", () => {
   });
 
   it("does not scan non-idle runs", async () => {
-    db.insert(agentSessions)
+    await db.insert(agentSessions)
       .values({
         id: 3,
         taskId: null,
@@ -454,8 +448,7 @@ describe("runWorktreeGcOnce", () => {
         worktreePath: "/tmp/repo/.worktrees/3",
         repoId: "R-default",
         startedAt: TEN_DAYS_AGO,
-      })
-      .run();
+      });
 
     const result = await runWorktreeGcOnce({
       thresholdDays: 7,
@@ -474,7 +467,7 @@ describe("runWorktreeGcOnce", () => {
   it("respects last agent_messages.created_at over startedAt for idle clock", async () => {
     // Run was started 30 days ago but had a fresh message 2 days ago →
     // should NOT be GC'd despite a stale startedAt.
-    db.insert(agentSessions)
+    await db.insert(agentSessions)
       .values({
         id: 11,
         taskId: null,
@@ -486,16 +479,14 @@ describe("runWorktreeGcOnce", () => {
         worktreePath: "/tmp/repo/.worktrees/11",
         repoId: "R-default",
         startedAt: new Date(NOW.getTime() - 30 * 24 * 60 * 60 * 1000),
-      })
-      .run();
-    db.insert(agentMessages)
+      });
+    await db.insert(agentMessages)
       .values({
         runId: 11,
         role: "user",
         content: JSON.stringify([{ type: "text", text: "hi" }]),
         createdAt: TWO_DAYS_AGO,
-      })
-      .run();
+      });
 
     const removeWorktree = vi.fn(async () => {});
     const result = await runWorktreeGcOnce({
@@ -514,7 +505,7 @@ describe("runWorktreeGcOnce", () => {
   });
 
   it("keeps worktrees with commits ahead of base", async () => {
-    db.insert(agentSessions)
+    await db.insert(agentSessions)
       .values({
         id: 55,
         taskId: null,
@@ -526,8 +517,7 @@ describe("runWorktreeGcOnce", () => {
         worktreePath: "/tmp/repo/.worktrees/55",
         repoId: "R-default",
         startedAt: TEN_DAYS_AGO,
-      })
-      .run();
+      });
 
     const removeWorktree = vi.fn(async () => {});
     const result = await runWorktreeGcOnce({
@@ -544,7 +534,7 @@ describe("runWorktreeGcOnce", () => {
     expect(result.removed).toBe(0);
     expect(removeWorktree).not.toHaveBeenCalled();
     // No system message either.
-    const msgs = db.select().from(agentMessages).all();
+    const msgs = await db.select().from(agentMessages);
     expect(msgs).toHaveLength(0);
   });
 });

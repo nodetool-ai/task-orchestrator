@@ -38,7 +38,7 @@ export class AgentLoop {
     }
 
     // 2. Resolve or create the chat run for this conversation.
-    const runId = getOrCreateRun(msg.channel, msg.externalId, { model: this.config.defaultModel });
+    const runId = await getOrCreateRun(msg.channel, msg.externalId, { model: this.config.defaultModel });
 
     // 3. Open the streaming draft and run the turn.
     let draft;

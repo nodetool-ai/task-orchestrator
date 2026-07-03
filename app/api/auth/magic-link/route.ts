@@ -29,7 +29,7 @@ export async function POST(req: NextRequest) {
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return NextResponse.json({ error: "Invalid email" }, { status: 400 });
   }
-  const user = findUser(email);
+  const user = await findUser(email);
   // Only mint + return a token as a dev convenience: development (login gate
   // already off) and only for an existing user. Production never returns it.
   if (isAuthDisabled() && user) {

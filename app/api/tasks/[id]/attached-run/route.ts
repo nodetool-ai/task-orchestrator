@@ -28,10 +28,10 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
-    const task = repo.getTask(id);
+    const task = await repo.getTask(id);
     if (!task) return errorResponse(new repo.RepoError(`Task ${id} not found`, 404));
 
-    const existing = repo.resolveAttachedRun(id);
+    const existing = await repo.resolveAttachedRun(id);
     if (existing) return NextResponse.json({ runId: existing.id, created: false });
 
     const raw = req.headers.get("content-length") === "0" ? {} : await req.json().catch(() => ({}));
@@ -40,7 +40,7 @@ export async function POST(
     const session = await auth();
     const uid = session?.user?.id ? Number(session.user.id) : null;
 
-    const run = runs.create({
+    const run = await runs.create({
       goal: "<implement>",
       toolsProfile: "orchestrator,repo_write",
       cwdStrategy: "worktree",
@@ -52,7 +52,7 @@ export async function POST(
       budget: { maxUsd: IMPLEMENT_DEFAULT_BUDGET_USD },
       // Agent button seeds the implement prompt and kicks the first turn; the
       // chat box defers so the user's own message becomes turn 1.
-      initialPrompt: seed ? buildImplementPrompt(task) : undefined,
+      initialPrompt: seed ? await buildImplementPrompt(task) : undefined,
       defer: !seed,
     });
     return NextResponse.json({ runId: run.id, created: true }, { status: 201 });

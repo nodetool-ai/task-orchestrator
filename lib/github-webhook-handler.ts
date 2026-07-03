@@ -47,7 +47,7 @@ export async function handleWebhookEvent(
 
   // Candidates: any run carrying a PR url or a branch. Small in practice; the
   // pure matcher narrows by PR url / branch + repo.
-  const candidateRows = db
+  const candidateRows = (await db
     .select({
       id: agentSessions.id,
       prUrl: agentSessions.prUrl,
@@ -55,25 +55,25 @@ export async function handleWebhookEvent(
       repoId: agentSessions.repoId,
     })
     .from(agentSessions)
-    .where(or(isNotNull(agentSessions.prUrl), isNotNull(agentSessions.branch)))
-    .all() as CandidateRun[];
+    .where(
+      or(isNotNull(agentSessions.prUrl), isNotNull(agentSessions.branch))
+    )) as CandidateRun[];
 
-  const repoMap = buildRepoOwnerMap(candidateRows);
+  const repoMap = await buildRepoOwnerMap(candidateRows);
   const matchedIds = selectMatchingRunIds(event, candidateRows, repoMap);
   if (matchedIds.length === 0) return { matched: 0, actions };
 
   // Record the event on every matched run (durable log + best-effort live push).
-  for (const id of matchedIds) recordEvent(id, event, deliveryId);
+  for (const id of matchedIds) await recordEvent(id, event, deliveryId);
 
   // Side effects operate on full run rows; fetch them newest-first so "the
   // latest run for a task" is easy to pick.
-  const matchedRuns = matchedIds
-    .map((id) => runs.get(id))
+  const matchedRuns = (await Promise.all(matchedIds.map((id) => runs.get(id))))
     .filter((r): r is NonNullable<typeof r> => r != null)
     .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
 
   if (event.merged) {
-    actions.push(...applyMerge(matchedRuns, event));
+    actions.push(...(await applyMerge(matchedRuns, event)));
     return { matched: matchedIds.length, actions };
   }
 
@@ -83,7 +83,7 @@ export async function handleWebhookEvent(
 
   if (isCiFailure || isChangesRequested) {
     actions.push(
-      ...handleNeedsFix(matchedRuns, event, isCiFailure ? "ci" : "review")
+      ...(await handleNeedsFix(matchedRuns, event, isCiFailure ? "ci" : "review"))
     );
   }
 
@@ -94,38 +94,38 @@ export async function handleWebhookEvent(
 // Side effects
 // ──────────────────────────────────────────────────────────
 
-function applyMerge(
+async function applyMerge(
   matchedRuns: runs.RunRow[],
   event: NormalizedWebhookEvent
-): string[] {
+): Promise<string[]> {
   const actions: string[] = [];
   const seenTasks = new Set<string>();
   for (const run of matchedRuns) {
     if (!run.taskId || seenTasks.has(run.taskId)) continue;
     seenTasks.add(run.taskId);
-    const task = repo.getTask(run.taskId);
+    const task = await repo.getTask(run.taskId);
     if (!task) continue;
     if (task.state !== "in_progress" && task.state !== "review") continue;
     try {
-      repo.transitionTask(run.taskId, {
+      await repo.transitionTask(run.taskId, {
         state: "done",
         note: `PR merged: ${event.prUrls[0] ?? run.prUrl ?? "(unknown)"}`,
         // A merged PR is authoritative — close it even if criteria were never
         // ticked, matching the merge poller's behavior.
         bypassCriteria: true,
       });
-      db.insert(agentEvents)
+      await db
+        .insert(agentEvents)
         .values({
           sessionId: run.id,
           type: "pr_merged",
           payload: JSON.stringify({ url: event.prUrls[0] ?? run.prUrl }),
           createdAt: new Date(),
-        })
-        .run();
+        });
       actions.push(`task ${run.taskId} → done (merged)`);
     } catch (err) {
       try {
-        repo.addNote(
+        await repo.addNote(
           run.taskId,
           "github-webhook",
           `PR merged but could not transition to done: ${describe(err)}`
@@ -138,11 +138,11 @@ function applyMerge(
   return actions;
 }
 
-function handleNeedsFix(
+async function handleNeedsFix(
   matchedRuns: runs.RunRow[],
   event: NormalizedWebhookEvent,
   reason: "ci" | "review"
-): string[] {
+): Promise<string[]> {
   const actions: string[] = [];
 
   // Pick the newest run that owns a task and a worktree branch — that's the
@@ -166,7 +166,7 @@ function handleNeedsFix(
   // Always leave a breadcrumb on the task so it's visible even without autofix.
   if (target?.taskId) {
     try {
-      repo.addNote(target.taskId, "github-webhook", noteFor(event, reason));
+      await repo.addNote(target.taskId, "github-webhook", noteFor(event, reason));
     } catch {
       // ignore
     }
@@ -181,11 +181,11 @@ function handleNeedsFix(
     actions.push(`autofix skipped: run #${target.id} already in flight`);
     return actions;
   }
-  if (countAutofixAttempts(target.id) >= AUTOFIX_MAX) {
+  if ((await countAutofixAttempts(target.id)) >= AUTOFIX_MAX) {
     actions.push(`autofix skipped: run #${target.id} hit attempt cap (${AUTOFIX_MAX})`);
     return actions;
   }
-  if (recentlyAutofixed(target.id)) {
+  if (await recentlyAutofixed(target.id)) {
     actions.push(`autofix debounced: run #${target.id}`);
     return actions;
   }
@@ -193,7 +193,8 @@ function handleNeedsFix(
   // Record the attempt up front (also powers the cap + debounce checks) then
   // kick the follow-up turn in the background — we don't block the webhook
   // response on a full agent turn.
-  db.insert(agentEvents)
+  await db
+    .insert(agentEvents)
     .values({
       sessionId: target.id,
       type: "github_autofix",
@@ -204,8 +205,7 @@ function handleNeedsFix(
         workflow: event.workflowName,
       }),
       createdAt: new Date(),
-    })
-    .run();
+    });
 
   const prompt = autofixPrompt(event, reason, target.prUrl ?? event.prUrls[0] ?? null);
   void runs
@@ -223,11 +223,11 @@ function handleNeedsFix(
 // Helpers
 // ──────────────────────────────────────────────────────────
 
-function recordEvent(
+async function recordEvent(
   runId: number,
   event: NormalizedWebhookEvent,
   deliveryId: string | null
-): void {
+): Promise<void> {
   const payload = {
     kind: event.kind,
     event: event.event,
@@ -245,14 +245,14 @@ function recordEvent(
     delivery_id: deliveryId,
   };
   try {
-    db.insert(agentEvents)
+    await db
+      .insert(agentEvents)
       .values({
         sessionId: runId,
         type: "github",
         payload: JSON.stringify(payload),
         createdAt: new Date(),
-      })
-      .run();
+      });
   } catch (err) {
     console.error("github-webhook: failed to persist event:", err);
   }
@@ -261,38 +261,38 @@ function recordEvent(
   runs.emitRunEvent(runId, "github", payload);
 }
 
-function buildRepoOwnerMap(candidates: CandidateRun[]): Map<string, string> {
+async function buildRepoOwnerMap(
+  candidates: CandidateRun[]
+): Promise<Map<string, string>> {
   const map = new Map<string, string>();
   const seen = new Set<string>();
   for (const c of candidates) {
     if (!c.repoId || seen.has(c.repoId)) continue;
     seen.add(c.repoId);
-    const r = repo.getRepository(c.repoId);
+    const r = await repo.getRepository(c.repoId);
     const or2 = ownerRepoFromRemote(r?.remote ?? null);
     if (or2) map.set(c.repoId, `${or2.owner}/${or2.repo}`);
   }
   return map;
 }
 
-function countAutofixAttempts(runId: number): number {
-  return db
+async function countAutofixAttempts(runId: number): Promise<number> {
+  return (await db
     .select({ id: agentEvents.id })
     .from(agentEvents)
     .where(
       and(eq(agentEvents.sessionId, runId), eq(agentEvents.type, "github_autofix"))
-    )
-    .all().length;
+    )).length;
 }
 
-function recentlyAutofixed(runId: number): boolean {
+async function recentlyAutofixed(runId: number): Promise<boolean> {
   if (AUTOFIX_DEBOUNCE_MS <= 0) return false;
   const cutoff = Date.now() - AUTOFIX_DEBOUNCE_MS;
-  const last = db
+  const last = (await db
     .select({ type: agentEvents.type, createdAt: agentEvents.createdAt })
     .from(agentEvents)
     .where(eq(agentEvents.sessionId, runId))
-    .orderBy(desc(agentEvents.id))
-    .all()
+    .orderBy(desc(agentEvents.id)))
     .find((r) => r.type === "github_autofix");
   return !!last && last.createdAt.getTime() >= cutoff;
 }

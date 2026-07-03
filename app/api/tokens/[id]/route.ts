@@ -13,7 +13,7 @@ export async function DELETE(
   const session = await auth();
   const email = session?.user?.email;
   if (!email) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const u = findUser(email);
+  const u = await findUser(email);
   if (!u) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const { id } = await params;
@@ -21,7 +21,7 @@ export async function DELETE(
   if (!Number.isFinite(tokenId)) {
     return NextResponse.json({ error: "Bad id" }, { status: 400 });
   }
-  const ok = revokeToken(tokenId, u.id);
+  const ok = await revokeToken(tokenId, u.id);
   if (!ok) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json({ ok: true });
 }

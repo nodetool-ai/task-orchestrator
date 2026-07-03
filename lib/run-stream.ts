@@ -17,22 +17,20 @@ export type StreamFrame =
   | { kind: "event"; id: number; at: number; data: unknown }
   | { kind: "message"; id: number; at: number; message: MessageRow };
 
-export function readStreamSince(
+export async function readStreamSince(
   runId: number,
   cursor: StreamCursor
-): { frames: StreamFrame[]; cursor: StreamCursor; terminal: boolean } {
-  const evts = db
+): Promise<{ frames: StreamFrame[]; cursor: StreamCursor; terminal: boolean }> {
+  const evts = await db
     .select()
     .from(agentEvents)
     .where(and(eq(agentEvents.sessionId, runId), gt(agentEvents.id, cursor.evtId)))
-    .orderBy(asc(agentEvents.id))
-    .all();
-  const msgs = db
+    .orderBy(asc(agentEvents.id));
+  const msgs = await db
     .select()
     .from(agentMessages)
     .where(and(eq(agentMessages.runId, runId), gt(agentMessages.id, cursor.msgId)))
-    .orderBy(asc(agentMessages.id))
-    .all();
+    .orderBy(asc(agentMessages.id));
 
   const frames: StreamFrame[] = [];
   let terminal = false;

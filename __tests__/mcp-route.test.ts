@@ -16,13 +16,14 @@ describe("POST /api/mcp", () => {
   let token: string;
 
   beforeEach(async () => {
-    db.delete(apiTokens).run();
-    db.delete(users).run();
-    const u = db
-      .insert(users)
-      .values({ email: "mcp@test.local", passwordHash: "x" })
-      .returning()
-      .all()[0];
+    await db.delete(apiTokens);
+    await db.delete(users);
+    const u = (
+      await db
+        .insert(users)
+        .values({ email: "mcp@test.local", passwordHash: "x" })
+        .returning()
+    )[0];
     const t = await createToken(u.id, "test");
     token = t.token;
   });

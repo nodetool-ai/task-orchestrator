@@ -29,10 +29,14 @@ export async function register(): Promise<void> {
     // no-op'ing the reconcile in production. The try/catch keeps a reconcile
     // *runtime* error from crashing server boot.
     try {
+      // Postgres: migrations + seeding no longer run at import time (the client
+      // connects lazily), so apply them here before anything touches the DB.
+      const dbMod = await import("./db");
+      await dbMod.initDb();
       const runsMod = await import("./lib/runs");
-      runsMod.reconcileOrphanedRuns();
+      await runsMod.reconcileOrphanedRuns();
     } catch (err) {
-      console.error("[instrumentation] boot reconcile failed:", err);
+      console.error("[instrumentation] boot init/reconcile failed:", err);
     }
 
     // Optional hourly worktree-GC sweep. Kept behind the env flag AND a

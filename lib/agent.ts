@@ -49,11 +49,9 @@ const NON_TERMINAL_BUT_DEAD = ["pending", "preparing", "running", "pushing", "op
 
 if (!globalThis.__agentReaperRan) {
   globalThis.__agentReaperRan = true;
-  try {
-    reapOrphans();
-  } catch (err) {
+  reapOrphans().catch((err) => {
     console.error("agent: reaper failed:", err);
-  }
+  });
 }
 
 const PR_POLL_MS = Number(process.env.TASK_ORCH_PR_POLL_MS ?? 60_000);
@@ -64,20 +62,20 @@ if (!globalThis.__agentPrWatcher && PR_POLL_MS > 0) {
   globalThis.__agentPrWatcher.unref?.();
 }
 
-function reapOrphans() {
+async function reapOrphans() {
   // Implement-style runs in any in-flight status are suspect after a restart.
   // Idle/closed/budget_exhausted/completed/failed/cancelled rows are left alone.
-  const orphans = db
-    .select()
-    .from(agentSessions)
-    .where(
-      and(
-        eq(agentSessions.goal, "<implement>"),
-        isNotNull(agentSessions.taskId)
+  const orphans = (
+    await db
+      .select()
+      .from(agentSessions)
+      .where(
+        and(
+          eq(agentSessions.goal, "<implement>"),
+          isNotNull(agentSessions.taskId)
+        )
       )
-    )
-    .all()
-    .filter((row) => NON_TERMINAL_BUT_DEAD.includes(row.status));
+  ).filter((row) => NON_TERMINAL_BUT_DEAD.includes(row.status));
 
   for (const orphan of orphans) {
     // Never reap a run that is genuinely in flight:
@@ -93,31 +91,29 @@ function reapOrphans() {
     if (runs.isLive(orphan.id)) continue;
     if (runs.isLeaseLive(orphan)) continue;
     const now = new Date();
-    db.update(agentSessions)
+    await db.update(agentSessions)
       .set({
         status: "failed",
         error: orphan.error ?? "Orphaned by server restart",
         completedAt: now,
       })
-      .where(eq(agentSessions.id, orphan.id))
-      .run();
-    db.insert(agentEvents)
+      .where(eq(agentSessions.id, orphan.id));
+    await db.insert(agentEvents)
       .values({
         sessionId: orphan.id,
         type: "status",
         payload: JSON.stringify({ status: "failed", error: "Orphaned by server restart" }),
         createdAt: now,
-      })
-      .run();
+      });
     if (orphan.worktreePath && orphan.taskId) {
-      const root = repoRootForSession(orphan.taskId);
+      const root = await repoRootForSession(orphan.taskId);
       cleanupWorktree(orphan.worktreePath, root).catch(() => {});
     }
   }
 }
 
 async function pollMergedPrs(): Promise<void> {
-  const rows = db
+  const rows = await db
     .select({
       sessionId: agentSessions.id,
       taskId: agentSessions.taskId,
@@ -129,8 +125,7 @@ async function pollMergedPrs(): Promise<void> {
     // `review` is the happy path; `in_progress` catches tasks whose
     // review-transition failed or whose PR a human merged early. Both states
     // can transition directly to `done`.
-    .where(and(isNotNull(agentSessions.prUrl), inArray(tasks.state, ["in_progress", "review"])))
-    .all();
+    .where(and(isNotNull(agentSessions.prUrl), inArray(tasks.state, ["in_progress", "review"])));
 
   // Group every PR-bearing run by task. A task can have more than one run with
   // a PR (e.g. a stale run plus a follow-up that opened a different PR), and the
@@ -153,24 +148,23 @@ async function pollMergedPrs(): Promise<void> {
       const info = await ghPrState(r.prUrl);
       if (!info || info.state !== "MERGED") continue;
       try {
-        repo.transitionTask(taskId, {
+        await repo.transitionTask(taskId, {
           state: "done",
           note: `PR merged: ${r.prUrl}`,
           // A merged PR is authoritative — close the task even if acceptance
           // criteria were never checked off, rather than stranding it open.
           bypassCriteria: true,
         });
-        db.insert(agentEvents)
+        await db.insert(agentEvents)
           .values({
             sessionId: r.sessionId,
             type: "pr_merged",
             payload: JSON.stringify({ url: r.prUrl, mergedAt: info.mergedAt }),
             createdAt: new Date(),
-          })
-          .run();
+          });
       } catch (err) {
         try {
-          repo.addNote(
+          await repo.addNote(
             taskId,
             "claude-agent",
             `PR merged but could not transition to done: ${describe(err)}`
@@ -232,10 +226,10 @@ export interface StartSessionInput {
   parentRunId?: number | null;
 }
 
-export function startSession(input: StartSessionInput): AgentSessionFull {
-  const task = repo.getTask(input.taskId);
+export async function startSession(input: StartSessionInput): Promise<AgentSessionFull> {
+  const task = await repo.getTask(input.taskId);
   if (!task) throw new repo.RepoError(`Task ${input.taskId} not found`, 404);
-  const active = listActiveSessions(input.taskId);
+  const active = await listActiveSessions(input.taskId);
   if (active.length > 0) {
     throw new repo.RepoError(
       `Task ${input.taskId} already has an active session (#${active[0].id})`,
@@ -243,7 +237,7 @@ export function startSession(input: StartSessionInput): AgentSessionFull {
     );
   }
   if (input.resumeOf) {
-    const prior = runs.get(input.resumeOf);
+    const prior = await runs.get(input.resumeOf);
     if (!prior) throw new repo.RepoError(`Prior session #${input.resumeOf} not found`, 404);
     if (prior.taskId !== input.taskId) {
       throw new repo.RepoError(`Session #${input.resumeOf} belongs to a different task`, 400);
@@ -256,7 +250,7 @@ export function startSession(input: StartSessionInput): AgentSessionFull {
     }
   }
 
-  const created = runs.create({
+  const created = await runs.create({
     goal: "<implement>",
     cwdStrategy: "worktree",
     // gh_pr/gh_ci let the agent inspect its own PR and fetch CI results
@@ -273,16 +267,16 @@ export function startSession(input: StartSessionInput): AgentSessionFull {
   return runs.toAgentSessionFull(created);
 }
 
-export function listSessions(taskId?: string): AgentSessionFull[] {
-  const rows = runs.list({
+export async function listSessions(taskId?: string): Promise<AgentSessionFull[]> {
+  const rows = await runs.list({
     goal: "<implement>",
     taskId: taskId ?? undefined,
   });
   return rows.filter((r) => r.taskId != null).map((r) => runs.toAgentSessionFull(r));
 }
 
-export function listActiveSessions(taskId?: string): AgentSessionFull[] {
-  const rows = runs.list({
+export async function listActiveSessions(taskId?: string): Promise<AgentSessionFull[]> {
+  const rows = await runs.list({
     goal: "<implement>",
     taskId: taskId ?? undefined,
     activeOnly: true,
@@ -290,39 +284,38 @@ export function listActiveSessions(taskId?: string): AgentSessionFull[] {
   return rows.filter((r) => r.taskId != null).map((r) => runs.toAgentSessionFull(r));
 }
 
-export function getSession(id: number): AgentSessionFull | null {
-  const r = runs.get(id);
+export async function getSession(id: number): Promise<AgentSessionFull | null> {
+  const r = await runs.get(id);
   if (!r || r.taskId == null) return null;
   return runs.toAgentSessionFull(r);
 }
 
-export function getSessionEvents(
+export async function getSessionEvents(
   sessionId: number,
   sinceId = 0,
   limit?: number
-): AgentEventRow[] {
+): Promise<AgentEventRow[]> {
   const where =
     sinceId > 0
       ? and(eq(agentEvents.sessionId, sessionId), gt(agentEvents.id, sinceId))
       : eq(agentEvents.sessionId, sessionId);
   if (limit && limit > 0) {
-    const tail = db
+    const tail = await db
       .select()
       .from(agentEvents)
       .where(where)
       .orderBy(desc(agentEvents.id))
-      .limit(limit)
-      .all();
+      .limit(limit);
     tail.reverse();
     return tail.map(toEventRow);
   }
-  return db
-    .select()
-    .from(agentEvents)
-    .where(where)
-    .orderBy(asc(agentEvents.id))
-    .all()
-    .map(toEventRow);
+  return (
+    await db
+      .select()
+      .from(agentEvents)
+      .where(where)
+      .orderBy(asc(agentEvents.id))
+  ).map(toEventRow);
 }
 
 function toEventRow(e: typeof agentEvents.$inferSelect): AgentEventRow {
@@ -377,11 +370,11 @@ export function isLive(sessionId: number): boolean {
   return runs.isLive(sessionId);
 }
 
-export function cancelSession(sessionId: number): AgentSessionFull {
-  const session = getSession(sessionId);
+export async function cancelSession(sessionId: number): Promise<AgentSessionFull> {
+  const session = await getSession(sessionId);
   if (!session) throw new repo.RepoError(`Session ${sessionId} not found`, 404);
   if (isTerminalStatus(session.status)) return session;
-  const cancelled = runs.cancel(sessionId);
+  const cancelled = await runs.cancel(sessionId);
   return runs.toAgentSessionFull(cancelled);
 }
 
@@ -389,8 +382,8 @@ export function cancelSession(sessionId: number): AgentSessionFull {
 // Helpers retained for cleanup paths
 // ──────────────────────────────────────────────────────────
 
-function repoRootForSession(taskId: string): string {
-  const repoRow = repo.resolveRepoForTask(taskId);
+async function repoRootForSession(taskId: string): Promise<string> {
+  const repoRow = await repo.resolveRepoForTask(taskId);
   if (repoRow?.localPath) return resolve(repoRow.localPath);
   return ORCHESTRATOR_ROOT;
 }

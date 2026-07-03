@@ -10,8 +10,8 @@ import { SessionStatusPill } from "@/components/session-status-pill";
 export const dynamic = "force-dynamic";
 
 export default async function ChatPage() {
-  const repositories = repo.listRepositories().map((r) => ({ id: r.id, name: r.name }));
-  const chatRuns = listRuns({}).filter((r) => r.goal === "<chat>").slice(0, 30);
+  const repositories = (await repo.listRepositories()).map((r) => ({ id: r.id, name: r.name }));
+  const chatRuns = (await listRuns({})).filter((r) => r.goal === "<chat>").slice(0, 30);
   const defaultModel = getDefaultModel();
 
   return (

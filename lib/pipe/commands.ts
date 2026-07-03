@@ -58,11 +58,11 @@ export async function handleCommand(
       // dispatched concurrently with the running turn (the agent loop is
       // fire-and-forget per message), so this aborts the live runner directly —
       // it doesn't queue behind the turn it's trying to kill.
-      const id = currentRunId(msg.channel, msg.externalId);
+      const id = await currentRunId(msg.channel, msg.externalId);
       if (!id) {
         return { handled: true, reply: "Nothing to stop — no active conversation yet." };
       }
-      const stopped = runs.interrupt(id);
+      const stopped = await runs.interrupt(id);
       if (stopped) {
         return {
           handled: true,
@@ -72,7 +72,7 @@ export async function handleCommand(
       // No local runner to abort. If the DB lease is live, the turn is owned by
       // another process (e.g. the web composer) — say so rather than claiming
       // nothing is running, which would be plainly wrong to the user.
-      if (leaseLive(runs.getRun(id))) {
+      if (leaseLive(await runs.getRun(id))) {
         return {
           handled: true,
           reply: `Run #${id} is working in another process (e.g. the web app). \`/stop\` can only interrupt turns started here — stop it from where it was started.`,
@@ -85,12 +85,12 @@ export async function handleCommand(
     }
 
     case "status": {
-      const id = currentRunId(msg.channel, msg.externalId);
+      const id = await currentRunId(msg.channel, msg.externalId);
       if (!id) {
         return { handled: true, reply: "No active conversation yet — send a message to start one." };
       }
-      const run = runs.getRun(id);
-      const model = chat.getChat(id)?.model ?? run?.model ?? config.defaultModel;
+      const run = await runs.getRun(id);
+      const model = (await chat.getChat(id))?.model ?? run?.model ?? config.defaultModel;
       // A turn started here → we can stop it. A turn started in the web process
       // shows a live DB lease but no local runner → report it, but be honest
       // that /stop won't reach it. Otherwise the run is idle.
@@ -114,32 +114,32 @@ export async function handleCommand(
 
     case "new":
     case "reset": {
-      resetThread(msg.channel, msg.externalId);
-      const runId = getOrCreateRun(msg.channel, msg.externalId, { model: config.defaultModel });
+      await resetThread(msg.channel, msg.externalId);
+      const runId = await getOrCreateRun(msg.channel, msg.externalId, { model: config.defaultModel });
       return { handled: true, reply: `Started a fresh conversation (run #${runId}).` };
     }
 
     case "model": {
       if (!arg) {
-        const id = currentRunId(msg.channel, msg.externalId);
-        const m = (id && chat.getChat(id)?.model) || config.defaultModel;
+        const id = await currentRunId(msg.channel, msg.externalId);
+        const m = (id && (await chat.getChat(id))?.model) || config.defaultModel;
         return {
           handled: true,
           reply: `Current model: \`${m}\`. Usage: \`/model provider/id\``,
         };
       }
-      const runId = getOrCreateRun(msg.channel, msg.externalId, { model: config.defaultModel });
-      chat.updateChatSettings(runId, { model: arg }); // expects a provider-qualified id
+      const runId = await getOrCreateRun(msg.channel, msg.externalId, { model: config.defaultModel });
+      await chat.updateChatSettings(runId, { model: arg }); // expects a provider-qualified id
       return { handled: true, reply: `Model set to \`${arg}\` for run #${runId}.` };
     }
 
     case "whoami":
     case "session": {
-      const id = currentRunId(msg.channel, msg.externalId);
+      const id = await currentRunId(msg.channel, msg.externalId);
       if (!id) {
         return { handled: true, reply: "No active conversation yet — just send a message." };
       }
-      const c = chat.getChat(id);
+      const c = await chat.getChat(id);
       return {
         handled: true,
         reply:

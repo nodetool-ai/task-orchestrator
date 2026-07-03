@@ -10,14 +10,14 @@ async function userId(): Promise<number | null> {
   const session = await auth();
   const email = session?.user?.email;
   if (!email) return null;
-  const u = findUser(email);
+  const u = await findUser(email);
   return u?.id ?? null;
 }
 
 export async function GET() {
   const id = await userId();
   if (id === null) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  return NextResponse.json({ tokens: listTokens(id) });
+  return NextResponse.json({ tokens: await listTokens(id) });
 }
 
 export async function POST(req: NextRequest) {

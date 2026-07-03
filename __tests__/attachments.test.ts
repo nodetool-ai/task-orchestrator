@@ -26,27 +26,27 @@ function findTool(name: string, ctx?: { defaultTaskId?: string; defaultPlanId?: 
     tool.execute(params, { author: "tester", ...ctx });
 }
 
-beforeEach(() => {
-  db.delete(agentMessages).run();
-  db.delete(agentSessions).run();
-  db.delete(attachments).run();
-  db.delete(acceptanceCriteria).run();
-  db.delete(taskNotes).run();
-  db.delete(tasks).run();
-  db.delete(plans).run();
-  db.delete(repositories).where(ne(repositories.id, "R-default")).run();
+beforeEach(async () => {
+  await db.delete(agentMessages);
+  await db.delete(agentSessions);
+  await db.delete(attachments);
+  await db.delete(acceptanceCriteria);
+  await db.delete(taskNotes);
+  await db.delete(tasks);
+  await db.delete(plans);
+  await db.delete(repositories).where(ne(repositories.id, "R-default"));
 });
 
-function makeTask() {
-  const plan = repo.createPlan({ title: "Attach Plan", date: "2026-05-28" });
-  const task = repo.createTask({ planId: plan.id, title: "Attach Task" });
+async function makeTask() {
+  const plan = await repo.createPlan({ title: "Attach Plan", date: "2026-05-28" });
+  const task = await repo.createTask({ planId: plan.id, title: "Attach Task" });
   return { plan, task };
 }
 
 describe("repo attachments", () => {
-  it("adds an image attachment to a task and derives kind", () => {
-    const { task } = makeTask();
-    const meta = repo.addAttachment({
+  it("adds an image attachment to a task and derives kind", async () => {
+    const { task } = await makeTask();
+    const meta = await repo.addAttachment({
       taskId: task.id,
       filename: "shot.png",
       mimeType: "image/png",
@@ -57,12 +57,12 @@ describe("repo attachments", () => {
     expect(meta.sizeBytes).toBe(PNG.length);
     expect(meta.taskId).toBe(task.id);
     expect(meta.planId).toBeNull();
-    expect(repo.getTask(task.id)!.attachments).toHaveLength(1);
+    expect((await repo.getTask(task.id))!.attachments).toHaveLength(1);
   });
 
-  it("derives 'artifact' kind for non-image mime types", () => {
-    const { task } = makeTask();
-    const meta = repo.addAttachment({
+  it("derives 'artifact' kind for non-image mime types", async () => {
+    const { task } = await makeTask();
+    const meta = await repo.addAttachment({
       taskId: task.id,
       filename: "log.txt",
       mimeType: "text/plain",
@@ -72,35 +72,35 @@ describe("repo attachments", () => {
     expect(meta.kind).toBe("artifact");
   });
 
-  it("attaches to a plan and hydrates onto PlanFull", () => {
-    const { plan } = makeTask();
-    repo.addAttachment({
+  it("attaches to a plan and hydrates onto PlanFull", async () => {
+    const { plan } = await makeTask();
+    await repo.addAttachment({
       planId: plan.id,
       filename: "spec.md",
       mimeType: "text/markdown",
       content: Buffer.from("# spec"),
       author: "alice",
     });
-    expect(repo.getPlan(plan.id)!.attachments).toHaveLength(1);
-    expect(repo.listPlans().find((p) => p.id === plan.id)!.attachments).toHaveLength(1);
+    expect((await repo.getPlan(plan.id))!.attachments).toHaveLength(1);
+    expect((await repo.listPlans()).find((p) => p.id === plan.id)!.attachments).toHaveLength(1);
   });
 
-  it("hydrates attachments via the batched listTasks path", () => {
-    const { task } = makeTask();
-    repo.addAttachment({
+  it("hydrates attachments via the batched listTasks path", async () => {
+    const { task } = await makeTask();
+    await repo.addAttachment({
       taskId: task.id,
       filename: "a.png",
       mimeType: "image/png",
       content: PNG,
       author: "alice",
     });
-    const listed = repo.listTasks({ planId: task.planId });
+    const listed = await repo.listTasks({ planId: task.planId });
     expect(listed[0].attachments).toHaveLength(1);
   });
 
-  it("rejects an attachment bound to both a plan and a task", () => {
-    const { plan, task } = makeTask();
-    expect(() =>
+  it("rejects an attachment bound to both a plan and a task", async () => {
+    const { plan, task } = await makeTask();
+    await expect(
       repo.addAttachment({
         planId: plan.id,
         taskId: task.id,
@@ -109,23 +109,23 @@ describe("repo attachments", () => {
         content: Buffer.from("x"),
         author: "a",
       })
-    ).toThrow(/exactly one/);
+    ).rejects.toThrow(/exactly one/);
   });
 
-  it("rejects an attachment bound to neither", () => {
-    expect(() =>
+  it("rejects an attachment bound to neither", async () => {
+    await expect(
       repo.addAttachment({
         filename: "x",
         mimeType: "text/plain",
         content: Buffer.from("x"),
         author: "a",
       })
-    ).toThrow(/exactly one/);
+    ).rejects.toThrow(/exactly one/);
   });
 
-  it("rejects empty content and unknown owner", () => {
-    const { task } = makeTask();
-    expect(() =>
+  it("rejects empty content and unknown owner", async () => {
+    const { task } = await makeTask();
+    await expect(
       repo.addAttachment({
         taskId: task.id,
         filename: "x",
@@ -133,8 +133,8 @@ describe("repo attachments", () => {
         content: Buffer.alloc(0),
         author: "a",
       })
-    ).toThrow(/empty/);
-    expect(() =>
+    ).rejects.toThrow(/empty/);
+    await expect(
       repo.addAttachment({
         taskId: "T-20260101-9999",
         filename: "x",
@@ -142,13 +142,13 @@ describe("repo attachments", () => {
         content: Buffer.from("x"),
         author: "a",
       })
-    ).toThrow(/not found/);
+    ).rejects.toThrow(/not found/);
   });
 
-  it("enforces the size cap", () => {
-    const { task } = makeTask();
+  it("enforces the size cap", async () => {
+    const { task } = await makeTask();
     const tooBig = Buffer.alloc(repo.MAX_ATTACHMENT_BYTES + 1);
-    expect(() =>
+    await expect(
       repo.addAttachment({
         taskId: task.id,
         filename: "big.bin",
@@ -156,52 +156,51 @@ describe("repo attachments", () => {
         content: tooBig,
         author: "a",
       })
-    ).toThrow(/too large/);
+    ).rejects.toThrow(/too large/);
   });
 
-  it("returns content via getAttachment and meta-only via getAttachmentMeta", () => {
-    const { task } = makeTask();
-    const meta = repo.addAttachment({
+  it("returns content via getAttachment and meta-only via getAttachmentMeta", async () => {
+    const { task } = await makeTask();
+    const meta = await repo.addAttachment({
       taskId: task.id,
       filename: "a.png",
       mimeType: "image/png",
       content: PNG,
       author: "alice",
     });
-    const full = repo.getAttachment(meta.id)!;
+    const full = (await repo.getAttachment(meta.id))!;
     expect(Buffer.compare(full.content, PNG)).toBe(0);
-    const metaOnly = repo.getAttachmentMeta(meta.id)!;
+    const metaOnly = (await repo.getAttachmentMeta(meta.id))!;
     expect((metaOnly as unknown as Record<string, unknown>).content).toBeUndefined();
   });
 
-  it("deletes an attachment", () => {
-    const { task } = makeTask();
-    const meta = repo.addAttachment({
+  it("deletes an attachment", async () => {
+    const { task } = await makeTask();
+    const meta = await repo.addAttachment({
       taskId: task.id,
       filename: "a.png",
       mimeType: "image/png",
       content: PNG,
       author: "alice",
     });
-    repo.deleteAttachment(meta.id);
-    expect(repo.getAttachment(meta.id)).toBeNull();
+    await repo.deleteAttachment(meta.id);
+    expect(await repo.getAttachment(meta.id)).toBeNull();
   });
 
-  it("cascades attachment deletion when the task is deleted", () => {
-    const { task } = makeTask();
-    repo.addAttachment({
+  it("cascades attachment deletion when the task is deleted", async () => {
+    const { task } = await makeTask();
+    await repo.addAttachment({
       taskId: task.id,
       filename: "a.png",
       mimeType: "image/png",
       content: PNG,
       author: "alice",
     });
-    repo.deleteTask(task.id);
-    const remaining = db
+    await repo.deleteTask(task.id);
+    const remaining = await db
       .select()
       .from(attachments)
-      .where(eq(attachments.taskId, task.id))
-      .all();
+      .where(eq(attachments.taskId, task.id));
     expect(remaining).toHaveLength(0);
   });
 });
@@ -245,8 +244,8 @@ describe("parseAttachmentUpload", () => {
 
 describe("attachment download route", () => {
   it("serves the raw bytes with the right headers", async () => {
-    const { task } = makeTask();
-    const meta = repo.addAttachment({
+    const { task } = await makeTask();
+    const meta = await repo.addAttachment({
       taskId: task.id,
       filename: "shot.png",
       mimeType: "image/png",
@@ -265,8 +264,8 @@ describe("attachment download route", () => {
   });
 
   it("forces download with ?download=1", async () => {
-    const { task } = makeTask();
-    const meta = repo.addAttachment({
+    const { task } = await makeTask();
+    const meta = await repo.addAttachment({
       taskId: task.id,
       filename: "shot.png",
       mimeType: "image/png",
@@ -291,8 +290,8 @@ describe("attachment download route", () => {
 
 describe("orchestrator attachment tools", () => {
   it("get_attachment returns a viewable image block", async () => {
-    const { task } = makeTask();
-    const meta = repo.addAttachment({
+    const { task } = await makeTask();
+    const meta = await repo.addAttachment({
       taskId: task.id,
       filename: "shot.png",
       mimeType: "image/png",
@@ -310,8 +309,8 @@ describe("orchestrator attachment tools", () => {
   });
 
   it("get_attachment decodes textual artifacts as text", async () => {
-    const { task } = makeTask();
-    const meta = repo.addAttachment({
+    const { task } = await makeTask();
+    const meta = await repo.addAttachment({
       taskId: task.id,
       filename: "log.txt",
       mimeType: "text/plain",
@@ -325,20 +324,20 @@ describe("orchestrator attachment tools", () => {
   });
 
   it("add_attachment with text creates an artifact on the scoped task", async () => {
-    const { task } = makeTask();
+    const { task } = await makeTask();
     const result = await findTool("add_attachment", { defaultTaskId: task.id })({
       filename: "report.md",
       text: "# Report\nall good",
     });
     expect(result.isError).toBeFalsy();
-    const list = repo.listAttachments({ taskId: task.id });
+    const list = await repo.listAttachments({ taskId: task.id });
     expect(list).toHaveLength(1);
     expect(list[0].filename).toBe("report.md");
     expect(list[0].kind).toBe("artifact");
   });
 
   it("add_attachment rejects both text and content_base64", async () => {
-    const { task } = makeTask();
+    const { task } = await makeTask();
     const result = await findTool("add_attachment", { defaultTaskId: task.id })({
       filename: "x",
       text: "a",
@@ -348,8 +347,8 @@ describe("orchestrator attachment tools", () => {
   });
 
   it("list_attachments defaults to the scoped task", async () => {
-    const { task } = makeTask();
-    repo.addAttachment({
+    const { task } = await makeTask();
+    await repo.addAttachment({
       taskId: task.id,
       filename: "a.png",
       mimeType: "image/png",
@@ -365,8 +364,8 @@ describe("orchestrator attachment tools", () => {
   });
 
   it("delete_attachment removes it", async () => {
-    const { task } = makeTask();
-    const meta = repo.addAttachment({
+    const { task } = await makeTask();
+    const meta = await repo.addAttachment({
       taskId: task.id,
       filename: "a.png",
       mimeType: "image/png",
@@ -375,6 +374,6 @@ describe("orchestrator attachment tools", () => {
     });
     const result = await findTool("delete_attachment")({ id: meta.id });
     expect(result.isError).toBeFalsy();
-    expect(repo.getAttachmentMeta(meta.id)).toBeNull();
+    expect(await repo.getAttachmentMeta(meta.id)).toBeNull();
   });
 });

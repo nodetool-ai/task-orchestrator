@@ -79,25 +79,25 @@ describe("buildReviewPrompt", () => {
 });
 
 describe("buildImplementPrompt", () => {
-  it("describes the worktree working environment", () => {
-    const prompt = buildImplementPrompt(fakeTask());
+  it("describes the worktree working environment", async () => {
+    const prompt = await buildImplementPrompt(fakeTask());
     expect(prompt).toContain("isolated git worktree");
   });
 
-  it("flags the shared node_modules / build cache across worktrees", () => {
-    const prompt = buildImplementPrompt(fakeTask());
+  it("flags the shared node_modules / build cache across worktrees", async () => {
+    const prompt = await buildImplementPrompt(fakeTask());
     expect(prompt).toContain("SHARED across all worktrees");
     expect(prompt).toContain("node_modules");
     expect(prompt).toContain("Turbopack");
   });
 
-  it("tells the agent how to get a private/isolated environment", () => {
-    const prompt = buildImplementPrompt(fakeTask());
+  it("tells the agent how to get a private/isolated environment", async () => {
+    const prompt = await buildImplementPrompt(fakeTask());
     expect(prompt).toContain("npm run isolate-env");
   });
 
-  it("tells the agent how to start a securely-exposed dev server", () => {
-    const prompt = buildImplementPrompt(fakeTask());
+  it("tells the agent how to start a securely-exposed dev server", async () => {
+    const prompt = await buildImplementPrompt(fakeTask());
     expect(prompt).toContain("npm run worktree-dev");
     expect(prompt).toContain("loopback");
   });

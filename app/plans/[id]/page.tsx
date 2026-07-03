@@ -23,14 +23,14 @@ export const dynamic = "force-dynamic";
 
 export default async function PlanPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const plan = repo.getPlan(id);
+  const plan = await repo.getPlan(id);
   if (!plan) notFound();
 
-  const tasks = repo.listTasks({ planId: plan.id });
-  const { done, total, pct } = repo.planProgress(plan.id);
-  const allRepositories = repo.listRepositories();
-  const personas = repo.listPersonas();
-  const planChats = listRuns({ planId: plan.id }).slice(0, 8);
+  const tasks = await repo.listTasks({ planId: plan.id });
+  const { done, total, pct } = await repo.planProgress(plan.id);
+  const allRepositories = await repo.listRepositories();
+  const personas = await repo.listPersonas();
+  const planChats = (await listRuns({ planId: plan.id })).slice(0, 8);
   const chatPromptPrefix = buildPlanChatPromptPrefix(plan, tasks);
 
   const groupOrder: TaskState[] = [...TASK_BOARD_STATES, "cancelled"];

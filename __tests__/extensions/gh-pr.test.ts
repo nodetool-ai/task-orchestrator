@@ -99,10 +99,10 @@ describe("validatePrUrl", () => {
     },
   ];
 
-  it("accepts a PR url whose owner/repo matches a registered remote", () => {
-    const v = validatePrUrl(
+  it("accepts a PR url whose owner/repo matches a registered remote", async () => {
+    const v = await validatePrUrl(
       "https://github.com/nodetool-ai/nodetool/pull/42",
-      () => repos
+      async () => repos
     );
     expect("error" in v).toBe(false);
     if (!("error" in v)) {
@@ -111,31 +111,31 @@ describe("validatePrUrl", () => {
     }
   });
 
-  it("matches case-insensitively", () => {
-    const v = validatePrUrl("ACME/Widgets#9", () => repos);
+  it("matches case-insensitively", async () => {
+    const v = await validatePrUrl("ACME/Widgets#9", async () => repos);
     expect("error" in v).toBe(false);
     if (!("error" in v)) expect(v.matched.id).toBe("R-other");
   });
 
-  it("rejects a PR url in an unregistered repo", () => {
-    const v = validatePrUrl(
+  it("rejects a PR url in an unregistered repo", async () => {
+    const v = await validatePrUrl(
       "https://github.com/some-other-org/some-other-repo/pull/1",
-      () => repos
+      async () => repos
     );
     expect("error" in v).toBe(true);
     if ("error" in v) expect(v.error).toMatch(/not in a repository registered/);
   });
 
-  it("rejects when the URL doesn't parse", () => {
-    const v = validatePrUrl("hello world", () => repos);
+  it("rejects when the URL doesn't parse", async () => {
+    const v = await validatePrUrl("hello world", async () => repos);
     expect("error" in v).toBe(true);
     if ("error" in v) expect(v.error).toMatch(/Could not parse/);
   });
 
-  it("rejects when no repos are registered", () => {
-    const v = validatePrUrl(
+  it("rejects when no repos are registered", async () => {
+    const v = await validatePrUrl(
       "https://github.com/anything/anything/pull/1",
-      () => []
+      async () => []
     );
     expect("error" in v).toBe(true);
   });

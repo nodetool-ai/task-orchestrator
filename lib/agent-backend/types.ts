@@ -90,8 +90,10 @@ export interface RunTurnArgs {
   /** Extra env for tool subprocesses (optional; the sandbox bash hook also
    *  injects TASK_ORCH_DB, so this is belt-and-suspenders). */
   env?: Record<string, string>;
-  /** Called for every mapped RunEnvelope as the turn streams. */
-  onEvent: (env: RunEnvelope) => void;
+  /** Called for every mapped RunEnvelope as the turn streams. May be async (it
+   *  persists the envelope to the DB); backends MUST await it so per-envelope
+   *  persistence stays in stream order. */
+  onEvent: (env: RunEnvelope) => void | Promise<void>;
 }
 
 export interface TurnOutcome {

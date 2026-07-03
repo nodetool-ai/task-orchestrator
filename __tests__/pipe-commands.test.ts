@@ -36,10 +36,10 @@ function runnerRegistry(): Map<number, { abort: AbortController; bus: EventEmitt
 }
 
 /** Pretend a turn is in flight for `runId`: register a runner + flip to running. */
-function markLive(runId: number): AbortController {
+async function markLive(runId: number): Promise<AbortController> {
   const abort = new AbortController();
   runnerRegistry().set(runId, { abort, bus: new EventEmitter() });
-  db.update(agentSessions).set({ status: "running" }).where(eq(agentSessions.id, runId)).run();
+  await db.update(agentSessions).set({ status: "running" }).where(eq(agentSessions.id, runId));
   return abort;
 }
 
@@ -48,20 +48,20 @@ function markLive(runId: number): AbortController {
  * lease — active status + fresh heartbeat — but no runner in *this* process's
  * registry. This is exactly what /status and /stop see for a web-composer turn.
  */
-function markLeaseLive(runId: number): void {
-  db.update(agentSessions)
+async function markLeaseLive(runId: number): Promise<void> {
+  await db
+    .update(agentSessions)
     .set({ status: "running", heartbeatAt: new Date() })
-    .where(eq(agentSessions.id, runId))
-    .run();
+    .where(eq(agentSessions.id, runId));
 }
 
-beforeEach(() => {
-  seedPersonas();
+beforeEach(async () => {
+  await seedPersonas();
   runnerRegistry().clear();
-  db.delete(channelThreads).run();
-  db.delete(agentSessions).run();
-  db.delete(tasks).run();
-  db.delete(plans).run();
+  await db.delete(channelThreads);
+  await db.delete(agentSessions);
+  await db.delete(tasks);
+  await db.delete(plans);
 });
 
 describe("/help", () => {
@@ -90,30 +90,30 @@ describe("/stop", () => {
   });
 
   it("reports nothing to stop when the run is idle", async () => {
-    const runId = getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
+    const runId = await getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
     const r = await handleCommand(msg("/stop"), config);
     expect(r.reply).toContain(`#${runId}`);
     expect(r.reply).toMatch(/isn't working/i);
   });
 
   it("aborts the in-flight turn and returns the run to idle", async () => {
-    const runId = getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
-    const abort = markLive(runId);
+    const runId = await getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
+    const abort = await markLive(runId);
 
     const r = await handleCommand(msg("/stop"), config);
 
     expect(r.handled).toBe(true);
     expect(r.reply).toMatch(/stopped/i);
     expect(abort.signal.aborted).toBe(true);
-    const row = db.select().from(agentSessions).where(eq(agentSessions.id, runId)).get();
+    const row = (await db.select().from(agentSessions).where(eq(agentSessions.id, runId)))[0];
     expect(row?.status).toBe("idle"); // resumable, not terminal 'cancelled'
   });
 
   it("reports the turn is owned by another process when only the DB lease is live", async () => {
     // A turn started from the web composer: live lease, no local runner. /stop
     // used to claim "isn't working" here; it must now say it's owned elsewhere.
-    const runId = getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
-    markLeaseLive(runId);
+    const runId = await getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
+    await markLeaseLive(runId);
     const r = await handleCommand(msg("/stop"), config);
     expect(r.handled).toBe(true);
     expect(r.reply).toMatch(/another process/i);
@@ -121,12 +121,12 @@ describe("/stop", () => {
   });
 
   it("is reachable via the /cancel and /abort aliases", async () => {
-    const runId = getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
-    const a1 = markLive(runId);
+    const runId = await getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
+    const a1 = await markLive(runId);
     expect((await handleCommand(msg("/cancel"), config)).reply).toMatch(/stopped/i);
     expect(a1.signal.aborted).toBe(true);
 
-    const a2 = markLive(runId);
+    const a2 = await markLive(runId);
     expect((await handleCommand(msg("/abort"), config)).reply).toMatch(/stopped/i);
     expect(a2.signal.aborted).toBe(true);
   });
@@ -139,15 +139,15 @@ describe("/status", () => {
   });
 
   it("reports idle for a mapped run with no turn in flight", async () => {
-    const runId = getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
+    const runId = await getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
     const r = await handleCommand(msg("/status"), config);
     expect(r.reply).toMatch(/idle/i);
     expect(r.reply).toContain(`#${runId}`);
   });
 
   it("reports working while a turn is in flight", async () => {
-    const runId = getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
-    markLive(runId);
+    const runId = await getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
+    await markLive(runId);
     const r = await handleCommand(msg("/status"), config);
     expect(r.reply).toMatch(/working/i);
     expect(r.reply).toContain(`#${runId}`);
@@ -156,8 +156,8 @@ describe("/status", () => {
   it("reports working in another process when only the DB lease is live", async () => {
     // Web-composer turn: live lease, no local runner. /status used to say
     // "Idle" here despite a turn genuinely in flight in the other process.
-    const runId = getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
-    markLeaseLive(runId);
+    const runId = await getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
+    await markLeaseLive(runId);
     const r = await handleCommand(msg("/status"), config);
     expect(r.reply).toMatch(/working/i);
     expect(r.reply).toMatch(/another process/i);
@@ -167,29 +167,29 @@ describe("/status", () => {
 });
 
 describe("getOrCreateRun dangling-mapping recovery", () => {
-  it("recreates the run when the mapped run has been closed", () => {
-    const first = getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
+  it("recreates the run when the mapped run has been closed", async () => {
+    const first = await getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
     // Simulate closing the run from the web /runs UI: closed runs are
     // non-resumable, so runs.append would reject every future message.
-    db.update(agentSessions).set({ status: "closed" }).where(eq(agentSessions.id, first)).run();
+    await db.update(agentSessions).set({ status: "closed" }).where(eq(agentSessions.id, first));
 
-    const second = getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
+    const second = await getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
     expect(second).not.toBe(first);
     // The mapping now points at the fresh run, not the wedged closed one.
-    expect(currentRunId("discord", "chan-1")).toBe(second);
+    expect(await currentRunId("discord", "chan-1")).toBe(second);
   });
 
-  it("recreates the run when the mapped run was cancelled", () => {
-    const first = getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
-    db.update(agentSessions).set({ status: "cancelled" }).where(eq(agentSessions.id, first)).run();
-    const second = getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
+  it("recreates the run when the mapped run was cancelled", async () => {
+    const first = await getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
+    await db.update(agentSessions).set({ status: "cancelled" }).where(eq(agentSessions.id, first));
+    const second = await getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
     expect(second).not.toBe(first);
   });
 
-  it("keeps the mapping for a resumable run (idle / completed)", () => {
-    const first = getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
+  it("keeps the mapping for a resumable run (idle / completed)", async () => {
+    const first = await getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
     // A chat worktree run that landed 'completed' is still resumable.
-    db.update(agentSessions).set({ status: "completed" }).where(eq(agentSessions.id, first)).run();
-    expect(getOrCreateRun("discord", "chan-1", { model: config.defaultModel })).toBe(first);
+    await db.update(agentSessions).set({ status: "completed" }).where(eq(agentSessions.id, first));
+    expect(await getOrCreateRun("discord", "chan-1", { model: config.defaultModel })).toBe(first);
   });
 });

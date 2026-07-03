@@ -14,10 +14,10 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const task = repo.getTask(id);
+    const task = await repo.getTask(id);
     if (!task) return errorResponse(new repo.RepoError(`Task ${id} not found`, 404));
 
-    const attached = repo.resolveAttachedRun(id);
+    const attached = await repo.resolveAttachedRun(id);
     if (!task.prUrl) {
       return NextResponse.json({
         mergeable: "UNKNOWN",

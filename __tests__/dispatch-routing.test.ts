@@ -17,18 +17,18 @@ afterEach(() => {
 describe("create() routing under the flag", () => {
   it("dispatches instead of running in-process when the flag is on", async () => {
     process.env.TASK_ORCH_DETACHED_RUNS = "1";
-    const plan = repo.createPlan({ title: "Dispatch On", date: "2026-07-02" });
-    const spy = vi.spyOn(dispatch, "dispatchRun").mockReturnValue("spawned");
-    create({ goal: "<execute>", planId: plan.id, defer: false } as any);
+    const plan = await repo.createPlan({ title: "Dispatch On", date: "2026-07-02" });
+    const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
+    await create({ goal: "<execute>", planId: plan.id, defer: false } as any);
     await new Promise((r) => setTimeout(r, 20)); // allow the async launch branch to run
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
   it("does NOT dispatch when the flag is off", async () => {
-    const plan = repo.createPlan({ title: "Dispatch Off", date: "2026-07-02" });
-    const spy = vi.spyOn(dispatch, "dispatchRun").mockReturnValue("spawned");
+    const plan = await repo.createPlan({ title: "Dispatch Off", date: "2026-07-02" });
+    const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
     // defer:true so no real in-process worker starts
-    create({ goal: "<execute>", planId: plan.id, defer: true } as any);
+    await create({ goal: "<execute>", planId: plan.id, defer: true } as any);
     await new Promise((r) => setTimeout(r, 20));
     expect(spy).not.toHaveBeenCalled();
   });

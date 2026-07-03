@@ -65,10 +65,10 @@ export interface UrlValidation {
 // Validates that `input` resolves to a PR in a repository the orchestrator
 // knows about. Returns either the parsed URL + the matched repo, or a string
 // error explaining the rejection.
-export function validatePrUrl(
+export async function validatePrUrl(
   input: string,
-  listRepos: () => Array<{ id: string; name: string; remote: string | null }> = listRepositories
-): UrlValidation | { error: string } {
+  listRepos: () => Promise<Array<{ id: string; name: string; remote: string | null }>> = listRepositories
+): Promise<UrlValidation | { error: string }> {
   const parsed = parsePrUrl(input);
   if (!parsed) {
     return {
@@ -77,7 +77,7 @@ export function validatePrUrl(
   }
   const wantOwner = parsed.owner.toLowerCase();
   const wantRepo = parsed.repo.toLowerCase();
-  const known = listRepos();
+  const known = await listRepos();
   for (const r of known) {
     const or = ownerRepoFromRemote(r.remote);
     if (!or) continue;

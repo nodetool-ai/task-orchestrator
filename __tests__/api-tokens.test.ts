@@ -9,13 +9,12 @@ import {
 } from "../lib/api-tokens";
 
 async function freshUser(email = "tokens@test.local"): Promise<number> {
-  db.delete(apiTokens).run();
-  db.delete(users).where(undefined as never).run().changes; // no-op (TS shape guard)
-  const inserted = db
+  await db.delete(apiTokens);
+  (await db.delete(users).where(undefined as never)).count; // no-op (TS shape guard)
+  const inserted = await db
     .insert(users)
     .values({ email, passwordHash: "x" })
-    .returning()
-    .all();
+    .returning();
   return inserted[0].id;
 }
 
@@ -23,13 +22,12 @@ describe("api tokens", () => {
   let userId: number;
 
   beforeEach(async () => {
-    db.delete(apiTokens).run();
-    db.delete(users).run();
-    const inserted = db
+    await db.delete(apiTokens);
+    await db.delete(users);
+    const inserted = await db
       .insert(users)
       .values({ email: "tokens@test.local", passwordHash: "x" })
-      .returning()
-      .all();
+      .returning();
     userId = inserted[0].id;
   });
 
@@ -58,22 +56,22 @@ describe("api tokens", () => {
 
   it("verifyToken rejects revoked tokens", async () => {
     const t = await createToken(userId, "revoked");
-    revokeToken(t.id, userId);
+    await revokeToken(t.id, userId);
     expect(await verifyToken(t.token)).toBeNull();
   });
 
   it("verifyToken bumps last_used_at", async () => {
     const t = await createToken(userId, "trace");
-    expect(listTokens(userId)[0].lastUsedAt).toBeNull();
+    expect((await listTokens(userId))[0].lastUsedAt).toBeNull();
     await verifyToken(t.token);
-    const after = listTokens(userId)[0];
+    const after = (await listTokens(userId))[0];
     expect(after.lastUsedAt).toBeInstanceOf(Date);
   });
 
   it("listTokens shows metadata only, no plaintext", async () => {
     await createToken(userId, "alpha");
     await createToken(userId, "beta");
-    const list = listTokens(userId);
+    const list = await listTokens(userId);
     expect(list.length).toBe(2);
     expect(list[0].name).toBeDefined();
     expect(list[0].prefix.length).toBe(8);
@@ -83,13 +81,12 @@ describe("api tokens", () => {
   });
 
   it("revokeToken only works for the owning user", async () => {
-    const otherUser = db
+    const otherUser = (await db
       .insert(users)
       .values({ email: "other@test.local", passwordHash: "x" })
-      .returning()
-      .all()[0].id;
+      .returning())[0].id;
     const t = await createToken(userId, "mine");
-    expect(revokeToken(t.id, otherUser)).toBe(false);
+    expect(await revokeToken(t.id, otherUser)).toBe(false);
     const v = await verifyToken(t.token);
     expect(v).not.toBeNull();
   });

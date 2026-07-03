@@ -4,11 +4,11 @@ import * as repo from "@/lib/repo";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const personas = repo.listPersonas().map(serialize);
+  const personas = (await repo.listPersonas()).map(serialize);
   return NextResponse.json({ personas });
 }
 
-function serialize(p: ReturnType<typeof repo.listPersonas>[number]) {
+function serialize(p: Awaited<ReturnType<typeof repo.listPersonas>>[number]) {
   return {
     id: p.id,
     name: p.name,

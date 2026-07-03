@@ -33,7 +33,7 @@ export async function GET(
   const { id } = await params;
   const runId = parseInt(id, 10);
   if (!Number.isFinite(runId)) return new Response("Bad id", { status: 400 });
-  if (!runs.get(runId)) return new Response("Not found", { status: 404 });
+  if (!(await runs.get(runId))) return new Response("Not found", { status: 404 });
 
   const url = new URL(req.url);
   let cursor: StreamCursor = {
@@ -72,7 +72,7 @@ export async function GET(
       let emptyPolls = 0;
       let sinceLastPing = 0;
       while (!closed) {
-        const { frames, cursor: next, terminal } = readStreamSince(runId, cursor);
+        const { frames, cursor: next, terminal } = await readStreamSince(runId, cursor);
         cursor = next;
         if (frames.length) {
           emptyPolls = 0;

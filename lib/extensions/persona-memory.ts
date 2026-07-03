@@ -15,9 +15,9 @@ interface RunLite {
 }
 
 interface MemoryRepo {
-  getPersonaMemory: (personaId: string, scope: string) => string | null;
-  appendPersonaMemory: (personaId: string, scope: string, note: string) => void;
-  removePersonaMemoryLine: (personaId: string, scope: string, match: string) => number;
+  getPersonaMemory: (personaId: string, scope: string) => Promise<string | null>;
+  appendPersonaMemory: (personaId: string, scope: string, note: string) => Promise<void>;
+  removePersonaMemoryLine: (personaId: string, scope: string, match: string) => Promise<number>;
 }
 
 function memorySkillDescription(persona: Persona): string {
@@ -40,13 +40,13 @@ const errResult = (text: string) => ({ content: [{ type: "text" as const, text }
 
 export const personaMemoryFactory =
   (persona: Persona, run: RunLite, repo: MemoryRepo, _cwd: string): ExtensionFactory =>
-  (reg) => {
+  async (reg) => {
     const scopeKeys = ["global", run.repoId, run.taskId].filter(
       (s): s is string => typeof s === "string" && s.length > 0
     );
     const blocks: Array<{ scope: string; body: string }> = [];
     for (const s of scopeKeys) {
-      const body = repo.getPersonaMemory(persona.id, s);
+      const body = await repo.getPersonaMemory(persona.id, s);
       if (body && body.trim().length > 0) blocks.push({ scope: s, body });
     }
     reg.addAmbientSkill({
@@ -75,7 +75,7 @@ export const personaMemoryFactory =
         if (!scopeKey) {
           return errResult(`No ${scope} scope on this run; cannot remember at that scope.`);
         }
-        repo.appendPersonaMemory(persona.id, scopeKey, note);
+        await repo.appendPersonaMemory(persona.id, scopeKey, note);
         return ok(`Remembered (${scope}).`);
       },
     });
@@ -97,7 +97,7 @@ export const personaMemoryFactory =
         if (!scopeKey) {
           return errResult(`No such scope on this run.`);
         }
-        const removed = repo.removePersonaMemoryLine(persona.id, scopeKey, match);
+        const removed = await repo.removePersonaMemoryLine(persona.id, scopeKey, match);
         return ok(`Removed ${removed} entry/entries.`);
       },
     });
