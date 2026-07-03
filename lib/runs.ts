@@ -1130,6 +1130,38 @@ async function containerCheckout(
   return work;
 }
 
+// Review-run container checkout: clone the repo from the repo-cache mirror into
+// /work/<id>, fetch the PR head into a stable per-run ref, and check it out on a
+// throwaway review branch. Auth for the clone/fetch comes from the worker image's
+// git credential helper (GH_TOKEN). Returns the container-local worktree path.
+async function containerReviewCheckout(
+  run: RunRow,
+  prNumber: number,
+  branch: string,
+  reviewRef: string
+): Promise<string> {
+  const cache = process.env.REPO_CACHE_DIR!;
+  const repoRow = await resolveRepo(run);
+  const parsed = ownerRepoFromRemote(repoRow?.remote ?? null);
+  if (!parsed) {
+    throw new Error(
+      `repository '${run.repoId ?? "(default)"}' has no GitHub remote to clone for the review container.`
+    );
+  }
+  if (!process.env.GH_TOKEN) {
+    throw new Error("GH_TOKEN is required for in-container review checkout.");
+  }
+  const mirror = resolve(cache, `${parsed.owner}_${parsed.repo}.git`);
+  const url = `https://github.com/${parsed.owner}/${parsed.repo}`;
+  const work = `/work/${run.id}`;
+  await mkdir("/work", { recursive: true });
+  const reference = existsSync(mirror) ? ["--reference", mirror, "--dissociate"] : [];
+  await sh(["git", "clone", ...reference, url, work], "/");
+  await sh(["git", "-C", work, "fetch", "origin", `pull/${prNumber}/head:${reviewRef}`], "/");
+  await sh(["git", "-C", work, "checkout", "-B", branch, reviewRef], "/");
+  return work;
+}
+
 async function ensureWorktreeBranch(run: RunRow, baseBranch?: string): Promise<RunRow> {
   if (run.cwdStrategy !== "worktree" || run.branch) return run;
   const base = baseBranch?.trim() || (await repoDefaultBranch(run));
@@ -1259,16 +1291,17 @@ async function runReview(
   const heartbeat = startHeartbeatWithCancel(runId, abort);
 
   let run = (await get(runId))!;
-  const root = await repoRoot(run);
-  const worktreeRoot = resolve(root, ".worktrees");
   const branch = `review-${runId}`;
-  const worktreePath = resolve(worktreeRoot, `review-${runId}`);
   // Stable, per-run ref for the fetched PR head. FETCH_HEAD is a single shared
   // file in the repo's .git, so under concurrent runs another run's `git fetch`
   // (or a prune/gc) can clobber it between our fetch and the worktree add — the
   // observed `fatal: invalid reference: FETCH_HEAD` failure. A named ref is
   // unique per run and immune to that race.
   const reviewRef = `refs/reviews/${runId}`;
+  // Resolved during prep (container clone vs host worktree). Declared here for the
+  // finally's best-effort cleanup.
+  let root = "";
+  let worktreePath = "";
 
   try {
     const parsed = parsePrUrl(prUrl);
@@ -1279,30 +1312,43 @@ async function runReview(
     }
 
     await setStatus(runId, "preparing");
-    await mkdir(worktreeRoot, { recursive: true });
 
-    // Fetch the PR head into a stable per-run ref, then create a worktree on a
-    // throwaway review branch pointing at that ref. Equivalent to
-    // `gh pr checkout` but keeps git as the source of truth (gh's checkout
-    // mutates the current working tree which we don't want here).
-    try {
-      await sh(
-        ["git", "fetch", "origin", `pull/${parsed.number}/head:${reviewRef}`],
-        root
-      );
-    } catch (err) {
-      await setError(
-        runId,
-        `git fetch failed for ${prUrl}: ${describe(err)}. Is the PR's origin remote configured?`
-      );
-      runners.delete(runId);
-      return;
+    if (process.env.REPO_CACHE_DIR) {
+      // Worker container: clone the repo from the repo-cache mirror into
+      // /work/<id>, fetch the PR head, and check it out there. The host
+      // localPath and shared `.worktrees/` don't exist in the container (and
+      // `mkdir /home/claude/...` fails as the non-root worker user) — this is
+      // the review-run equivalent of prepareCwd's container checkout.
+      try {
+        worktreePath = await containerReviewCheckout(run, parsed.number, branch, reviewRef);
+      } catch (err) {
+        await setError(runId, `Could not check out PR ${prUrl} for review: ${describe(err)}`);
+        runners.delete(runId);
+        return;
+      }
+      root = worktreePath; // git commands run inside the clone
+    } else {
+      // Host/dev mode: worktree off the repo's local checkout. Fetch the PR head
+      // into a stable per-run ref, then create a worktree on a throwaway review
+      // branch pointing at that ref.
+      root = await repoRoot(run);
+      const worktreeRoot = resolve(root, ".worktrees");
+      worktreePath = resolve(worktreeRoot, `review-${runId}`);
+      await mkdir(worktreeRoot, { recursive: true });
+      try {
+        await sh(["git", "fetch", "origin", `pull/${parsed.number}/head:${reviewRef}`], root);
+      } catch (err) {
+        await setError(
+          runId,
+          `git fetch failed for ${prUrl}: ${describe(err)}. Is the PR's origin remote configured?`
+        );
+        runners.delete(runId);
+        return;
+      }
+      await sh(["git", "worktree", "add", "-b", branch, worktreePath, reviewRef], root);
+      await linkSharedWorktreeArtifacts(worktreePath, root);
     }
-    await sh(
-      ["git", "worktree", "add", "-b", branch, worktreePath, reviewRef],
-      root
-    );
-    await linkSharedWorktreeArtifacts(worktreePath, root);
+
     await db.update(agentSessions)
       .set({ branch, worktreePath })
       .where(eq(agentSessions.id, runId));
