@@ -17,6 +17,10 @@ declare global {
   var __runStreamSubs: Map<number, Set<Callback>> | undefined;
   // eslint-disable-next-line no-var
   var __runStreamListen: Promise<void> | undefined;
+  // eslint-disable-next-line no-var
+  var __runInputSubs: Map<number, Set<() => void>> | undefined;
+  // eslint-disable-next-line no-var
+  var __runInputListen: Promise<void> | undefined;
 }
 
 const subscribers: Map<number, Set<Callback>> =
@@ -74,5 +78,58 @@ export async function subscribeRunStream(runId: number, cb: Callback): Promise<(
     if (!s) return;
     s.delete(cb);
     if (s.size === 0) subscribers.delete(runId);
+  };
+}
+
+// ── Inbound channel (server -> worker) ─────────────────────────────────────
+// Mirrors the outbound run_stream fan-out, but on the 'run_input' channel fired
+// by migration 0002's trigger when a new user message is inserted. The payload
+// is the bare run_id (a pure wakeup); a long-lived chat worker LISTENs here to
+// learn a new message arrived and runs the next turn.
+const inputSubscribers: Map<number, Set<() => void>> =
+  globalThis.__runInputSubs ?? (globalThis.__runInputSubs = new Map());
+
+function ensureListeningInput(): Promise<void> {
+  if (globalThis.__runInputListen) return globalThis.__runInputListen;
+  const started = (async () => {
+    await sql.listen("run_input", (payload: string) => {
+      const runId = parseInt(payload, 10);
+      if (!Number.isFinite(runId)) return; // ignore malformed payloads
+      const set = inputSubscribers.get(runId);
+      if (!set) return;
+      for (const cb of set) {
+        try {
+          cb();
+        } catch {
+          // a subscriber throwing must not break fan-out to the others
+        }
+      }
+    });
+  })();
+  started.catch(() => {
+    if (globalThis.__runInputListen === started) globalThis.__runInputListen = undefined;
+  });
+  globalThis.__runInputListen = started;
+  return started;
+}
+
+/**
+ * Subscribe to run_input notifications for a single run (new user message).
+ * Awaiting ensures the LISTEN is established before the first notify can be
+ * missed. Returns an unsubscribe fn.
+ */
+export async function subscribeRunInput(runId: number, cb: () => void): Promise<() => void> {
+  await ensureListeningInput();
+  let set = inputSubscribers.get(runId);
+  if (!set) {
+    set = new Set();
+    inputSubscribers.set(runId, set);
+  }
+  set.add(cb);
+  return () => {
+    const s = inputSubscribers.get(runId);
+    if (!s) return;
+    s.delete(cb);
+    if (s.size === 0) inputSubscribers.delete(runId);
   };
 }
