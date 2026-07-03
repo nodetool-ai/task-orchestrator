@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Wrench } from "lucide-react";
 import { renderMarkdown } from "@/lib/markdown";
+import { humanizeToolName } from "@/lib/builtin-tools";
 import type { SdkContentBlock } from "@/lib/sdk-message";
 import type { MessageRow } from "@/lib/runs";
 
@@ -67,7 +68,7 @@ function ContentBlock({
   return null;
 }
 
-function ToolUseBlock({ block }: { block: SdkContentBlock }) {
+export function ToolUseBlock({ block }: { block: SdkContentBlock }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="rounded-md border border-border/60 bg-background/40 text-xs">
@@ -82,7 +83,7 @@ function ToolUseBlock({ block }: { block: SdkContentBlock }) {
           <ChevronRight className="size-3" />
         )}
         <Wrench className="size-3" />
-        <code className="font-mono text-foreground/90">{block.name}</code>
+        <span className="text-foreground/90">{humanizeToolName(block.name)}</span>
       </button>
       {open && (
         <pre className="px-2 pb-2 text-[11px] leading-5 font-mono whitespace-pre-wrap text-muted-foreground overflow-x-auto">
