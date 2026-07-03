@@ -1,19 +1,20 @@
 import { type NextRequest } from "next/server";
 import * as runs from "@/lib/runs";
 import { readStreamSince, ZERO_CURSOR, type StreamCursor } from "@/lib/run-stream";
+import { subscribeRunStream } from "@/lib/run-stream-listener";
 
 export const dynamic = "force-dynamic";
 
-// Live SSE feed for /runs/[id]. Unlike POST /messages (which streams the reply
-// to the caller's own turn), this endpoint is read-only: a viewer who is *not*
-// the one sending the message still sees status transitions, system events, and
-// assistant/tool messages as they happen.
+// Live SSE feed for /runs/[id]. Read-only: a viewer who is *not* the one sending
+// the message still sees status transitions, system events, and assistant/tool
+// messages as they happen.
 //
 // It streams by TAILING the already-incrementally-persisted agent_events /
-// agent_messages tables by monotonic-id cursor (see lib/run-stream) rather than
-// subscribing to an in-process event bus. That makes the stream survive a
-// web-server restart and lets a detached worker's progress reach the client
-// even though the worker runs in a different process.
+// agent_messages tables by monotonic-id cursor (see lib/run-stream), woken by a
+// Postgres LISTEN/NOTIFY (migration 0001 fires 'run_stream' on every insert) via
+// lib/run-stream-listener. No in-process event bus and no fixed-interval poll, so
+// the stream survives a web-server restart and a detached worker's progress
+// reaches the client from another process, at push (sub-second) latency.
 //
 // Frame contract (unchanged for the run view):
 //   - event frames are forwarded verbatim, preserving `{ type:"status", status }`
@@ -21,10 +22,10 @@ export const dynamic = "force-dynamic";
 //   - a `{ type:"_cursor", cursor }` frame follows each non-empty batch so the
 //     client can resume without gaps
 //   - a terminal, non-idle status closes the stream with `{ type:"_eos" }`
-const POLL_ACTIVE_MS = 150;
-const POLL_IDLE_MS = 1000;
-const IDLE_BACKOFF_AFTER = 20; // empty polls before backing off
 const PING_EVERY_MS = 15_000;
+// Belt-and-suspenders: re-drain on this cadence even without a NOTIFY, in case
+// one is missed (e.g. the listen connection briefly dropped and reconnected).
+const SAFETY_DRAIN_MS = 5_000;
 
 export async function GET(
   req: NextRequest,
@@ -62,43 +63,76 @@ export async function GET(
         }
       };
 
-      req.signal.addEventListener("abort", () => {
+      let unsubscribe: (() => void) | null = null;
+      let safety: ReturnType<typeof setInterval> | null = null;
+      let keepalive: ReturnType<typeof setInterval> | null = null;
+      const shutdown = () => {
+        if (closed) return;
         closed = true;
+        unsubscribe?.();
+        if (safety) clearInterval(safety);
+        if (keepalive) clearInterval(keepalive);
         try {
           controller.close();
         } catch {}
-      });
+      };
 
-      let emptyPolls = 0;
-      let sinceLastPing = 0;
-      while (!closed) {
+      req.signal.addEventListener("abort", shutdown);
+
+      // Drain every row after the cursor; on a terminal non-idle status, close.
+      // Coalesces concurrent wake-ups so a burst of NOTIFYs collapses into one
+      // catch-up read.
+      let draining = false;
+      let pending = false;
+      const drainOnce = async (): Promise<boolean> => {
         const { frames, cursor: next, terminal } = await readStreamSince(runId, cursor);
         cursor = next;
         if (frames.length) {
-          emptyPolls = 0;
           for (const f of frames) {
             if (f.kind === "event") send(f.data);
             else send({ type: "message", message: f.message });
           }
           send({ type: "_cursor", cursor });
-        } else {
-          emptyPolls++;
         }
-        if (terminal) {
-          send({ type: "_eos" });
-          break;
+        return terminal;
+      };
+      const drain = async () => {
+        if (closed) return;
+        if (draining) {
+          pending = true;
+          return;
         }
-        const wait = emptyPolls >= IDLE_BACKOFF_AFTER ? POLL_IDLE_MS : POLL_ACTIVE_MS;
-        sinceLastPing += wait;
-        if (sinceLastPing >= PING_EVERY_MS) {
-          ping();
-          sinceLastPing = 0;
+        draining = true;
+        try {
+          do {
+            pending = false;
+            if (await drainOnce()) {
+              send({ type: "_eos" });
+              shutdown();
+              return;
+            }
+          } while (pending && !closed);
+        } catch {
+          // transient read error — the safety interval will retry
+        } finally {
+          draining = false;
         }
-        await new Promise((r) => setTimeout(r, wait));
-      }
+      };
+
+      // Subscribe BEFORE the initial drain so no insert between the first read
+      // and the subscription is lost.
       try {
-        controller.close();
-      } catch {}
+        unsubscribe = await subscribeRunStream(runId, () => void drain());
+      } catch {
+        // If LISTEN can't be established, the safety interval still delivers.
+      }
+      if (closed) return; // client bailed during setup
+
+      await drain();
+      if (closed) return;
+
+      safety = setInterval(() => void drain(), SAFETY_DRAIN_MS);
+      keepalive = setInterval(ping, PING_EVERY_MS);
     },
   });
 
