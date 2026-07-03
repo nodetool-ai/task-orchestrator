@@ -29,14 +29,14 @@ describe("orchestratorExtension", () => {
 });
 
 describe("orchestrator plan defaulting", () => {
-  beforeEach(() => {
-    db.delete(agentMessages).run();
-    db.delete(agentSessions).run();
-    db.delete(acceptanceCriteria).run();
-    db.delete(taskNotes).run();
-    db.delete(tasks).run();
-    db.delete(plans).run();
-    db.delete(repositories).where(ne(repositories.id, "R-default")).run();
+  beforeEach(async () => {
+    await db.delete(agentMessages);
+    await db.delete(agentSessions);
+    await db.delete(acceptanceCriteria);
+    await db.delete(taskNotes);
+    await db.delete(tasks);
+    await db.delete(plans);
+    await db.delete(repositories).where(ne(repositories.id, "R-default"));
   });
 
   function findTool(name: string) {
@@ -48,7 +48,7 @@ describe("orchestrator plan defaulting", () => {
   }
 
   it("defaults plan_id on get_plan when scoped to a plan", async () => {
-    const p = repo.createPlan({ title: "Test", date: "2026-05-27" });
+    const p = await repo.createPlan({ title: "Test", date: "2026-05-27" });
     expect(p.id).toBe("P-2026-05-27-test");
     const def = findTool("get_plan");
     const result = await def.execute("call-1", {});
@@ -57,23 +57,23 @@ describe("orchestrator plan defaulting", () => {
   });
 
   it("defaults plan_id on create_task when scoped to a plan", async () => {
-    const p = repo.createPlan({ title: "Test", date: "2026-05-27" });
+    const p = await repo.createPlan({ title: "Test", date: "2026-05-27" });
     expect(p.id).toBe("P-2026-05-27-test");
     const def = findTool("create_task");
     const result = await def.execute("call-1", { title: "added by agent" });
     expect(result.isError).toBeFalsy();
-    const created = repo.listTasks({ planId: p.id });
+    const created = await repo.listTasks({ planId: p.id });
     expect(created.length).toBe(1);
     expect(created[0].title).toBe("added by agent");
   });
 
   it("defaults plan_id on transition_plan when scoped to a plan", async () => {
-    const p = repo.createPlan({ title: "Test", date: "2026-05-27" });
+    const p = await repo.createPlan({ title: "Test", date: "2026-05-27" });
     expect(p.id).toBe("P-2026-05-27-test");
     const def = findTool("transition_plan");
     const result = await def.execute("call-1", { state: "proposed" });
     expect(result.isError).toBeFalsy();
-    expect(repo.getPlan(p.id)?.state).toBe("proposed");
+    expect((await repo.getPlan(p.id))?.state).toBe("proposed");
   });
 
   it("errors when no plan id is provided and none is scoped", async () => {

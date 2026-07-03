@@ -108,10 +108,11 @@ export const ghCiExtension =
   (reg) => {
     const cwd = opts.cwd;
 
-    function gate(url: string):
+    async function gate(url: string): Promise<
       | { ok: true; parsed: ParsedPrUrl; matched: { id: string; name: string } }
-      | { ok: false; result: ReturnType<typeof errResult> } {
-      const v = validatePrUrl(url);
+      | { ok: false; result: ReturnType<typeof errResult> }
+    > {
+      const v = await validatePrUrl(url);
       if ("error" in v) return { ok: false, result: errResult(v.error) };
       return { ok: true, parsed: v.parsed, matched: v.matched };
     }
@@ -126,7 +127,7 @@ export const ghCiExtension =
         limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
       }),
       execute: async (_id, { url, limit }) => {
-        const g = gate(url);
+        const g = await gate(url);
         if (!g.ok) return g.result;
 
         // 1. Resolve the head ref via gh pr view.
@@ -226,7 +227,7 @@ export const ghCiExtension =
         ),
       }),
       execute: async (_id, { url, run_id, job, mode }) => {
-        const g = gate(url);
+        const g = await gate(url);
         if (!g.ok) return g.result;
 
         const effectiveMode = mode ?? "failed";
@@ -287,7 +288,7 @@ export const ghCiExtension =
         failed_only: Type.Optional(Type.Boolean()),
       }),
       execute: async (_id, { url, run_id, failed_only }) => {
-        const g = gate(url);
+        const g = await gate(url);
         if (!g.ok) return g.result;
 
         const repoFlag = ["--repo", `${g.parsed.owner}/${g.parsed.repo}`];

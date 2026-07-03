@@ -24,30 +24,30 @@ export const dynamic = "force-dynamic";
 
 export default async function TaskPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const task = repo.getTask(id);
+  const task = await repo.getTask(id);
   if (!task) notFound();
 
-  const plan = repo.getPlan(task.planId);
-  const deps = task.dependencies
-    .map((depId) => repo.getTask(depId))
-    .filter((t): t is NonNullable<typeof t> => Boolean(t));
+  const plan = await repo.getPlan(task.planId);
+  const deps = (await Promise.all(task.dependencies.map((depId) => repo.getTask(depId)))).filter(
+    (t): t is NonNullable<typeof t> => Boolean(t)
+  );
   // The task's single attached run (one canonical session), if any.
-  const attachedRun = repo.resolveAttachedRun(task.id);
+  const attachedRun = await repo.resolveAttachedRun(task.id);
   // Inbox: every run scoped to this task (chat + implement + review),
   // newest first, capped at the 10 most recent so the page doesn't grow
   // unbounded. listRuns already orders by startedAt desc. Pin the attached
   // run to the top so a return visit lands on it in one click.
-  const allRuns = runs.listRuns({ taskId: task.id });
+  const allRuns = await runs.listRuns({ taskId: task.id });
   const inbox = [
     ...allRuns.filter((r) => r.id === attachedRun?.id),
     ...allRuns.filter((r) => r.id !== attachedRun?.id),
   ].slice(0, 10);
   // The task's latest PR (denormalised onto TaskFull from its most recent run).
   const latestPr = task.prUrl;
-  const repository = task.repoId ? repo.getRepository(task.repoId) : null;
+  const repository = task.repoId ? await repo.getRepository(task.repoId) : null;
   const planRepoOptions = plan?.repos ?? [];
   const chatPromptPrefix = buildChatPromptPrefix(task, latestPr);
-  const personas = repo.listPersonas();
+  const personas = await repo.listPersonas();
 
   return (
     <article className="mx-auto max-w-3xl">

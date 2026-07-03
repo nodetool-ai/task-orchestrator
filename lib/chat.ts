@@ -41,13 +41,15 @@ function isChatRunPredicate() {
   return or(eq(agentSessions.goal, "<chat>"), isNotNull(agentSessions.legacyChatId));
 }
 
-export function resolveChatCwd(chat: ChatRow): { cwd: string; repoId: string | null } {
+export async function resolveChatCwd(
+  chat: ChatRow
+): Promise<{ cwd: string; repoId: string | null }> {
   if (chat.repoId) {
-    const r = repo.getRepository(chat.repoId);
+    const r = await repo.getRepository(chat.repoId);
     if (r?.localPath) return { cwd: resolve(r.localPath), repoId: r.id };
     if (r) return { cwd: ORCHESTRATOR_ROOT, repoId: r.id };
   }
-  const fallback = repo.defaultRepo();
+  const fallback = await repo.defaultRepo();
   if (fallback?.localPath) return { cwd: resolve(fallback.localPath), repoId: fallback.id };
   return { cwd: ORCHESTRATOR_ROOT, repoId: fallback?.id ?? null };
 }
@@ -56,44 +58,44 @@ export function resolveChatCwd(chat: ChatRow): { cwd: string; repoId: string | n
 // CRUD (queries the unified table)
 // ──────────────────────────────────────────────────────────
 
-export function listChats(userId?: number | null): ChatRow[] {
+export async function listChats(userId?: number | null): Promise<ChatRow[]> {
   const isChatRun = isChatRunPredicate();
   const where =
     userId == null ? isChatRun : and(isChatRun, eq(agentSessions.userId, userId));
-  const rows = db
+  const rows = await db
     .select()
     .from(agentSessions)
     .where(where)
-    .orderBy(desc(agentSessions.startedAt))
-    .all();
+    .orderBy(desc(agentSessions.startedAt));
   return rows.map(hydrateChat);
 }
 
-export function getChat(id: number, userId?: number | null): ChatRow | null {
+export async function getChat(id: number, userId?: number | null): Promise<ChatRow | null> {
   const isChatRun = isChatRunPredicate();
   const where =
     userId == null
       ? and(eq(agentSessions.id, id), isChatRun)
       : and(eq(agentSessions.id, id), isChatRun, eq(agentSessions.userId, userId));
-  const row = db.select().from(agentSessions).where(where).get();
+  const row = (await db.select().from(agentSessions).where(where))[0];
   return row ? hydrateChat(row) : null;
 }
 
-export function createChat(
+export async function createChat(
   userId: number | null,
   title = "New chat",
-  repoId: string | null = repo.defaultRepoId(),
+  repoId?: string | null,
   // Every chat runs in its own git worktree so concurrent conversations never
   // share (and clobber) the repo's working tree. Callers can override, but both
   // the web composer and the Discord pipe take the default.
   cwdStrategy: CwdStrategy = "worktree"
-): ChatRow {
-  if (repoId && !repo.getRepository(repoId)) {
+): Promise<ChatRow> {
+  if (repoId === undefined) repoId = await repo.defaultRepoId();
+  if (repoId && !(await repo.getRepository(repoId))) {
     throw new repo.RepoError(`Repository ${repoId} not found`, 404);
   }
   // Delegate to runs.create so the row gets goal/cwdStrategy/profile in one
   // place. goal='<chat>' lands the run at status='idle' awaiting first append.
-  const created = runs.create({
+  const created = await runs.create({
     goal: "<chat>",
     cwdStrategy,
     toolsProfile: "orchestrator,repo_write",
@@ -102,25 +104,29 @@ export function createChat(
     title,
     model: DEFAULT_MODEL,
   });
-  return getChat(created.id, userId)!;
+  return (await getChat(created.id, userId))!;
 }
 
-export function deleteChat(id: number, userId?: number | null): void {
+export async function deleteChat(id: number, userId?: number | null): Promise<void> {
   const isChatRun = isChatRunPredicate();
   const where =
     userId == null
       ? and(eq(agentSessions.id, id), isChatRun)
       : and(eq(agentSessions.id, id), isChatRun, eq(agentSessions.userId, userId));
-  db.delete(agentSessions).where(where).run();
+  await db.delete(agentSessions).where(where);
 }
 
-export function renameChat(id: number, title: string, userId?: number | null): void {
+export async function renameChat(
+  id: number,
+  title: string,
+  userId?: number | null
+): Promise<void> {
   const isChatRun = isChatRunPredicate();
   const where =
     userId == null
       ? and(eq(agentSessions.id, id), isChatRun)
       : and(eq(agentSessions.id, id), isChatRun, eq(agentSessions.userId, userId));
-  db.update(agentSessions).set({ title }).where(where).run();
+  await db.update(agentSessions).set({ title }).where(where);
 }
 
 export interface UpdateChatSettings {
@@ -129,13 +135,13 @@ export interface UpdateChatSettings {
   repoId?: string | null;
 }
 
-export function updateChatSettings(
+export async function updateChatSettings(
   id: number,
   patch: UpdateChatSettings,
   userId?: number | null
-): void {
+): Promise<void> {
   if (patch.repoId !== undefined && patch.repoId !== null) {
-    if (!repo.getRepository(patch.repoId)) {
+    if (!(await repo.getRepository(patch.repoId))) {
       throw new repo.RepoError(`Repository ${patch.repoId} not found`, 404);
     }
   }
@@ -149,19 +155,20 @@ export function updateChatSettings(
     userId == null
       ? and(eq(agentSessions.id, id), isChatRun)
       : and(eq(agentSessions.id, id), isChatRun, eq(agentSessions.userId, userId));
-  db.update(agentSessions).set(values).where(where).run();
+  await db.update(agentSessions).set(values).where(where);
 }
 
-export function listMessages(chatId: number): ChatMessageRow[] {
+export async function listMessages(chatId: number): Promise<ChatMessageRow[]> {
   // Only surface "conversational" roles (user/agent/tool) here; the legacy
   // /chat UI was designed for chat_messages-shaped rows. System messages
   // backfilled from agent_events are rendered by the new /runs UI.
-  return db
-    .select()
-    .from(agentMessages)
-    .where(eq(agentMessages.runId, chatId))
-    .orderBy(asc(agentMessages.id))
-    .all()
+  return (
+    await db
+      .select()
+      .from(agentMessages)
+      .where(eq(agentMessages.runId, chatId))
+      .orderBy(asc(agentMessages.id))
+  )
     .filter((row) => row.role !== "system")
     .map(hydrateMessage);
 }
@@ -191,7 +198,7 @@ export async function* runChat({
   abort,
   author,
 }: RunChatArgs): AsyncGenerator<ChatStreamEvent> {
-  const chat = getChat(chatId);
+  const chat = await getChat(chatId);
   if (!chat) {
     yield { type: "error", error: `Chat ${chatId} not found` };
     return;
@@ -200,7 +207,7 @@ export async function* runChat({
   // Auto-title the chat from the first user message.
   if (chat.title === "New chat") {
     const title = userText.trim().slice(0, 60).replace(/\s+/g, " ");
-    if (title) renameChat(chatId, title);
+    if (title) await renameChat(chatId, title);
   }
 
   for await (const event of runs.append({

@@ -178,7 +178,7 @@ export async function runWorktreeGcOnce(opts: RunGcOnceOptions = {}): Promise<Ru
   const appendSystemMessage = opts.appendSystemMessage ?? defaultAppendSystemMessage;
   const keep = opts.keepWorktrees ?? !!process.env.TASK_ORCH_KEEP_WORKTREES;
 
-  const candidates = listCandidates();
+  const candidates = await listCandidates();
   const result: RunGcOnceResult = { scanned: candidates.length, removed: 0, errors: 0, removals: [] };
   const rootsTouched = new Set<string>();
 
@@ -207,7 +207,7 @@ export async function runWorktreeGcOnce(opts: RunGcOnceOptions = {}): Promise<Ru
       );
       continue;
     }
-    const root = resolveRepoRoot(c);
+    const root = await resolveRepoRoot(c);
     if (!root) {
       result.errors++;
       continue;
@@ -215,7 +215,7 @@ export async function runWorktreeGcOnce(opts: RunGcOnceOptions = {}): Promise<Ru
     try {
       await removeWorktree(c.worktreePath!, root);
       const days = Math.round(decision.idleDays);
-      appendSystemMessage(
+      await appendSystemMessage(
         c.runId,
         `worktree garbage-collected after ${days} days idle.`
       );
@@ -300,7 +300,7 @@ function readThresholdDaysFromEnv(): number | null {
 // Default implementations (DB + shell)
 // ──────────────────────────────────────────────────────────
 
-function defaultListCandidates(): GcCandidate[] {
+async function defaultListCandidates(): Promise<GcCandidate[]> {
   // Pull every idle run with a worktree_path. Compute lastActivityAt as
   // max(agent_messages.created_at) per run, falling back to the run's
   // startedAt when the run has no messages yet (rare for idle runs).
@@ -313,7 +313,7 @@ function defaultListCandidates(): GcCandidate[] {
     .groupBy(agentMessages.runId)
     .as("last_msg");
 
-  const rows = db
+  const rows = await db
     .select({
       id: agentSessions.id,
       status: agentSessions.status,
@@ -328,8 +328,7 @@ function defaultListCandidates(): GcCandidate[] {
     .leftJoin(lastMsg, eq(lastMsg.runId, agentSessions.id))
     .leftJoin(repositories, eq(repositories.id, agentSessions.repoId))
     .where(eq(agentSessions.status, "idle"))
-    .orderBy(desc(agentSessions.id))
-    .all();
+    .orderBy(desc(agentSessions.id));
 
   return rows
     .filter((r) => r.worktreePath && r.branch)
@@ -451,13 +450,12 @@ function defaultPruneAdmin(repoRoot: string): Promise<void> {
   });
 }
 
-function defaultResolveRepoRoot(c: GcCandidate): string | null {
+async function defaultResolveRepoRoot(c: GcCandidate): Promise<string | null> {
   if (c.repoId) {
-    const row = db
+    const row = (await db
       .select({ localPath: repositories.localPath })
       .from(repositories)
-      .where(eq(repositories.id, c.repoId))
-      .get();
+      .where(eq(repositories.id, c.repoId)))[0];
     if (row?.localPath) return resolve(row.localPath);
   }
   // Fall back to the parent of the worktree (.worktrees/<id> → repo root).
@@ -470,16 +468,15 @@ function defaultResolveRepoRoot(c: GcCandidate): string | null {
   return null;
 }
 
-function defaultAppendSystemMessage(runId: number, text: string): void {
+async function defaultAppendSystemMessage(runId: number, text: string): Promise<void> {
   try {
-    db.insert(agentMessages)
+    await db.insert(agentMessages)
       .values({
         runId,
         role: "system",
         content: JSON.stringify([{ type: "text", text }]),
         createdAt: new Date(),
-      })
-      .run();
+      });
   } catch (err) {
     console.warn(`[worktree-gc] failed to append system message for run ${runId}: ${describe(err)}`);
   }

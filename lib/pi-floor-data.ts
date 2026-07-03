@@ -50,26 +50,26 @@ type RunWithTask = {
   planTitle: string | null;
 };
 
-function loadRunsByGroup(): {
+async function loadRunsByGroup(): Promise<{
   running: RunWithTask[];
   review: RunWithTask[];
   blocked: RunWithTask[];
   shipped: RunWithTask[];
-} {
-  const allRuns = runsLib.listRuns().filter((r) => r.origin === "task");
+}> {
+  const allRuns = (await runsLib.listRuns()).filter((r) => r.origin === "task");
   const taskCache = new Map<string, TaskFull | null>();
   const planCache = new Map<string, string | null>();
-  function joinTask(taskId: string | null): TaskFull | null {
+  async function joinTask(taskId: string | null): Promise<TaskFull | null> {
     if (!taskId) return null;
     if (taskCache.has(taskId)) return taskCache.get(taskId)!;
-    const t = repo.getTask(taskId);
+    const t = await repo.getTask(taskId);
     taskCache.set(taskId, t);
     return t;
   }
-  function planTitle(planId: string | null): string | null {
+  async function planTitle(planId: string | null): Promise<string | null> {
     if (!planId) return null;
     if (planCache.has(planId)) return planCache.get(planId)!;
-    const p = repo.getPlan(planId);
+    const p = await repo.getPlan(planId);
     const title = p?.title ?? null;
     planCache.set(planId, title);
     return title;
@@ -77,8 +77,8 @@ function loadRunsByGroup(): {
 
   const groups = { running: [] as RunWithTask[], review: [] as RunWithTask[], blocked: [] as RunWithTask[], shipped: [] as RunWithTask[] };
   for (const run of allRuns) {
-    const task = joinTask(run.taskId);
-    const plan = planTitle(task?.planId ?? null);
+    const task = await joinTask(run.taskId);
+    const plan = await planTitle(task?.planId ?? null);
     const wrapped = { run, task, planTitle: plan };
     const cat = classifyRun(run.status, run.prUrl, task?.state);
     if (cat === "running") groups.running.push(wrapped);
@@ -151,16 +151,16 @@ function toShipped(w: RunWithTask): ShippedRow {
   };
 }
 
-export function loadFloorData(): {
+export async function loadFloorData(): Promise<{
   running: FloorRun[];
   review: FloorRun[];
   blocked: FloorRun[];
   queue: QueueRow[];
   shipped: ShippedRow[];
-} {
-  const groups = loadRunsByGroup();
-  const todoTasks = repo.listTasks({ state: "todo" }).slice(0, 12);
-  const plans = repo.listPlans();
+}> {
+  const groups = await loadRunsByGroup();
+  const todoTasks = (await repo.listTasks({ state: "todo" })).slice(0, 12);
+  const plans = await repo.listPlans();
   const planTitleById = new Map(plans.map((p) => [p.id, p.title]));
 
   const queue: QueueRow[] = todoTasks.map((t) => ({
@@ -200,11 +200,11 @@ const TASK_STATE_TO_PI: Record<TaskState, PiState> = {
   cancelled: "cancelled",
 };
 
-export function loadPlansIndexData(): PlanCardData[] {
-  const plans = repo.listPlans();
-  const progress = repo.planProgressBatch(plans.map((p) => p.id));
-  const tasks = repo.listTasks();
-  const groups = loadRunsByGroup();
+export async function loadPlansIndexData(): Promise<PlanCardData[]> {
+  const plans = await repo.listPlans();
+  const progress = await repo.planProgressBatch(plans.map((p) => p.id));
+  const tasks = await repo.listTasks();
+  const groups = await loadRunsByGroup();
   const planTitleById = new Map(plans.map((p) => [p.id, p.title]));
 
   const tasksByPlan = new Map<string, TaskFull[]>();
@@ -268,16 +268,16 @@ function extractFirstParagraph(body: string): string {
   return para.join(" ").slice(0, 300);
 }
 
-export function loadTasksIndexData(): {
+export async function loadTasksIndexData(): Promise<{
   rows: TaskRowData[];
   plans: { id: string; title: string }[];
-} {
-  const tasks = repo.listTasks();
-  const plans = repo.listPlans();
+}> {
+  const tasks = await repo.listTasks();
+  const plans = await repo.listPlans();
   const planTitleById = new Map(plans.map((p) => [p.id, p.title]));
 
   // Map taskId → most recent active/review/blocked run for quick "Open" jump.
-  const allRuns = runsLib.listRuns();
+  const allRuns = await runsLib.listRuns();
   const liveRunByTask = new Map<string, number>();
   for (const r of allRuns) {
     if (!r.taskId) continue;
@@ -318,10 +318,10 @@ export type PaletteItem = {
   href?: string;
 };
 
-export function loadPaletteItems(): PaletteItem[] {
-  const plans = repo.listPlans();
-  const tasks = repo.listTasks().slice(0, 40);
-  const runs = runsLib.listRuns().slice(0, 30);
+export async function loadPaletteItems(): Promise<PaletteItem[]> {
+  const plans = await repo.listPlans();
+  const tasks = (await repo.listTasks()).slice(0, 40);
+  const runs = (await runsLib.listRuns()).slice(0, 30);
   const planTitleById = new Map(plans.map((p) => [p.id, p.title]));
 
   const planItems: PaletteItem[] = plans.map((p) => ({

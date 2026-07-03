@@ -21,7 +21,7 @@ export async function GET(req: NextRequest) {
     if (plan) filters.planId = plan;
     const assignee = sp.get("assignee");
     if (assignee) filters.assignee = assignee;
-    return NextResponse.json(repo.listTasks(filters));
+    return NextResponse.json(await repo.listTasks(filters));
   } catch (e) {
     return errorResponse(e);
   }
@@ -30,7 +30,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const input = createTaskSchema.parse(await req.json());
-    const task = repo.createTask({
+    const task = await repo.createTask({
       id: input.id,
       planId: input.plan,
       title: input.title,

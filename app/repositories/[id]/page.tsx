@@ -17,11 +17,11 @@ export default async function RepositoryPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const r = repo.getRepository(id);
+  const r = await repo.getRepository(id);
   if (!r) notFound();
 
-  const allPlans = repo.listPlans().filter((p) => p.repos.some((r) => r.id === id));
-  const allSessions = agent.listSessions().filter((s) => s.repoId === id);
+  const allPlans = (await repo.listPlans()).filter((p) => p.repos.some((r) => r.id === id));
+  const allSessions = (await agent.listSessions()).filter((s) => s.repoId === id);
 
   return (
     <article className="mx-auto max-w-3xl space-y-6">

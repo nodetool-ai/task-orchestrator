@@ -15,14 +15,14 @@ export default async function ChatDetailRedirect({
   const numeric = Number(id);
   if (!Number.isFinite(numeric)) notFound();
 
-  const fromLegacy = resolveLegacyChatId(numeric);
+  const fromLegacy = await resolveLegacyChatId(numeric);
   if (fromLegacy !== null) {
     redirect(`/runs/${fromLegacy}`);
   }
   // No legacy mapping: assume the URL already carries the new run id.
   // (Chats created after 0009 work this way.) 404 if there's no such run
   // rather than silently sending the user to a missing /runs/<id>.
-  const run = getRun(numeric);
+  const run = await getRun(numeric);
   if (!run) notFound();
   redirect(`/runs/${numeric}`);
 }

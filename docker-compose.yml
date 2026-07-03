@@ -1,0 +1,139 @@
+name: task-orchestrator
+
+# Env comes from a compose .env file (see .env.docker.example). CLAUDE_HOME is the
+# host ~/.claude dir (auth + Claude Code session store; mounted RW so resume works
+# across ephemeral worker containers).
+
+x-app-env: &app-env
+  DATABASE_URL: postgres://taskorch:${POSTGRES_PASSWORD}@postgres:5432/taskorch
+  AUTH_SECRET: ${AUTH_SECRET}
+  NEXTAUTH_URL: ${NEXTAUTH_URL}
+  AUTH_TRUST_HOST: "true"
+  TASK_ORCH_AGENT_BACKEND: ${TASK_ORCH_AGENT_BACKEND:-claude}
+  TASK_ORCH_CHAT_MODEL: ${TASK_ORCH_CHAT_MODEL:-anthropic/claude-opus-4-8}
+  TASK_ORCH_AGENT_MODEL: ${TASK_ORCH_AGENT_MODEL:-anthropic/claude-opus-4-8}
+  GH_TOKEN: ${GH_TOKEN}
+  CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: taskorch
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: taskorch
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taskorch -d taskorch"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # One-shot: clone/refresh the target repos into the repo-cache volume as bare
+  # mirrors so each worker derives a fast local clone instead of a full network
+  # clone per run. TARGET_REPOS is a space-separated list of owner/repo.
+  repo-cache-init:
+    image: alpine/git
+    environment:
+      GH_TOKEN: ${GH_TOKEN}
+      TARGET_REPOS: ${TARGET_REPOS}
+    volumes:
+      - repo-cache:/repo-cache
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        # Ephemeral auth header (git -c, not persisted) so the token never lands
+        # in the mirror's stored remote URL / .git/config on the repo-cache volume.
+        AUTH="AUTHORIZATION: basic $$(printf 'x-access-token:%s' "$$GH_TOKEN" | base64 | tr -d '\n')"
+        for r in $$TARGET_REPOS; do
+          d="/repo-cache/$$(echo "$$r" | tr '/' '_').git"
+          if [ -d "$$d" ]; then
+            echo "refresh $$r"; git -c http.extraHeader="$$AUTH" -C "$$d" fetch --prune origin '+refs/heads/*:refs/heads/*'
+          else
+            echo "clone $$r"; git -c http.extraHeader="$$AUTH" clone --mirror "https://github.com/$$r" "$$d"
+          fi
+        done
+    restart: "no"
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: task-orchestrator-server:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      TASK_ORCH_DETACHED_RUNS: "1"
+      # DooD: the server spawns worker containers on this network/image. The
+      # network + repo-cache volume are namespaced by the compose project, so
+      # derive them from COMPOSE_PROJECT_NAME (default "task-orchestrator") — this
+      # keeps worker spawn correct under a distinct test project name.
+      TASK_ORCH_WORKER_IMAGE: task-orchestrator-worker:latest
+      TASK_ORCH_DOCKER_NETWORK: ${COMPOSE_PROJECT_NAME:-task-orchestrator}_default
+      TASK_ORCH_REPO_CACHE_HOST_VOLUME: ${COMPOSE_PROJECT_NAME:-task-orchestrator}_repo-cache
+      TASK_ORCH_CLAUDE_HOME_HOST: ${CLAUDE_HOME}
+      # ── Worker resource limits + memory-aware admission ──────────────────
+      # Hard per-worker cgroup caps (bound one runaway worker) + an admission gate
+      # that reads remaining host memory and defers over-capacity runs to 'pending'
+      # (bounds the aggregate across concurrent workers). Defaults sized for an
+      # 8 GB / 4-CPU host → ~2 concurrent workers; raise on bigger hosts. NOTE: do
+      # NOT give the server its own mem_limit — /proc/meminfo must stay host-wide
+      # for the gate's live-memory read.
+      TASK_ORCH_WORKER_MEMORY_MB: ${TASK_ORCH_WORKER_MEMORY_MB:-3072}
+      TASK_ORCH_WORKER_CPUS: ${TASK_ORCH_WORKER_CPUS:-2}
+      TASK_ORCH_WORKER_PIDS_LIMIT: ${TASK_ORCH_WORKER_PIDS_LIMIT:-512}
+      TASK_ORCH_HOST_MEMORY_RESERVE_MB: ${TASK_ORCH_HOST_MEMORY_RESERVE_MB:-2048}
+      TASK_ORCH_MAX_WORKERS: ${TASK_ORCH_MAX_WORKERS:-2}
+      TASK_ORCH_PENDING_PUMP_MS: ${TASK_ORCH_PENDING_PUMP_MS:-15000}
+      TASK_ORCH_MAX_DEFER_MS: ${TASK_ORCH_MAX_DEFER_MS:-1800000}
+    ports:
+      - "${SERVER_PORT:-3000}:3000"
+    volumes:
+      # SECURITY: mounting the raw docker socket grants the server host-root-
+      # equivalent control (it can start privileged containers, mount the host
+      # FS, etc.). Accepted for the ad-hoc-worker (DooD) model, but before public
+      # exposure put a least-privilege socket proxy (e.g. tecnativa/docker-socket-
+      # proxy) in front, allowing only container create/start/stop/remove, and
+      # point TASK_ORCH_DOCKER_HOST at it. Tracked as a hardening follow-up.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${CLAUDE_HOME}:/root/.claude
+      - repo-cache:/repo-cache
+    restart: unless-stopped
+
+  pipe:
+    image: task-orchestrator-server:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      server:
+        condition: service_started
+    environment:
+      <<: *app-env
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      DISCORD_ALLOWED_USERS: ${DISCORD_ALLOWED_USERS:-}
+      DISCORD_ALLOWED_CHANNELS: ${DISCORD_ALLOWED_CHANNELS:-}
+    command: ["npm", "run", "pipe"]
+    volumes:
+      - ${CLAUDE_HOME}:/root/.claude
+      - repo-cache:/repo-cache
+    restart: unless-stopped
+
+  # Build-only: the worker image is run ad-hoc by the server, not started here.
+  # `docker compose --profile build build worker` (or the deploy script) builds it.
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: task-orchestrator-worker:latest
+    profiles: ["build"]
+    command: ["--version"]
+
+volumes:
+  pgdata:
+  repo-cache:

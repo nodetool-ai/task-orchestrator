@@ -5,9 +5,9 @@ import { personas as personasTable } from "../db/schema";
 import { seedPersonas } from "../db/seed-personas";
 
 describe("GET /api/personas", () => {
-  beforeEach(() => {
-    db.delete(personasTable).run();
-    seedPersonas();
+  beforeEach(async () => {
+    await db.delete(personasTable);
+    await seedPersonas();
   });
 
   it("returns all seeded personas with the expected shape", async () => {

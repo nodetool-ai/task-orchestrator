@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    return NextResponse.json(repo.listRepositories());
+    return NextResponse.json(await repo.listRepositories());
   } catch (e) {
     return errorResponse(e);
   }
@@ -16,7 +16,7 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   try {
     const input = createRepositorySchema.parse(await req.json());
-    const r = repo.createRepository({
+    const r = await repo.createRepository({
       id: input.id,
       name: input.name,
       remote: input.remote ?? undefined,

@@ -3,8 +3,8 @@ import { PersonaEditor, type PersonaDto } from "@/components/persona-editor";
 
 export const dynamic = "force-dynamic";
 
-export default function PersonasPage() {
-  const personas: PersonaDto[] = repo.listPersonas().map((p) => ({
+export default async function PersonasPage() {
+  const personas: PersonaDto[] = (await repo.listPersonas()).map((p) => ({
     id: p.id,
     name: p.name,
     description: p.description,

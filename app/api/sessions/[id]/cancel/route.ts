@@ -10,7 +10,7 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
-    return NextResponse.json(agent.cancelSession(parseInt(id, 10)));
+    return NextResponse.json(await agent.cancelSession(parseInt(id, 10)));
   } catch (e) {
     return errorResponse(e);
   }

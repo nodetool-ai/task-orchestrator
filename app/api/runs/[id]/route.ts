@@ -14,9 +14,9 @@ export async function GET(
     if (!Number.isFinite(runId)) {
       return NextResponse.json({ error: "Bad id" }, { status: 400 });
     }
-    const run = runs.get(runId);
+    const run = await runs.get(runId);
     if (!run) return NextResponse.json({ error: "Not found" }, { status: 404 });
-    const messages = runs.listMessages(runId);
+    const messages = await runs.listMessages(runId);
     return NextResponse.json({ ...run, messages, live: runs.isLive(runId) });
   } catch (e) {
     return errorResponse(e);
@@ -47,11 +47,11 @@ export async function PATCH(
       return NextResponse.json({ error: "Bad JSON" }, { status: 400 });
     }
     if (body.action === "close") {
-      const updated = runs.close(runId);
+      const updated = await runs.close(runId);
       return NextResponse.json(updated);
     }
     if (body.action === "cancel") {
-      const updated = runs.cancel(runId);
+      const updated = await runs.cancel(runId);
       return NextResponse.json(updated);
     }
     return NextResponse.json({ error: "Unknown action" }, { status: 400 });

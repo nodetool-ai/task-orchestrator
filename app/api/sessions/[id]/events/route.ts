@@ -11,7 +11,7 @@ export async function GET(
 ) {
   const { id } = await params;
   const sessionId = parseInt(id, 10);
-  const session = agent.getSession(sessionId);
+  const session = await agent.getSession(sessionId);
   if (!session) {
     return new Response("Not found", { status: 404 });
   }
@@ -24,7 +24,7 @@ export async function GET(
   const limit = limitParam ? Math.max(1, Math.min(2000, parseInt(limitParam, 10))) : 500;
 
   const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
+    async start(controller) {
       const encoder = new TextEncoder();
       let closed = false;
       const send = (event: unknown) => {
@@ -38,7 +38,7 @@ export async function GET(
 
       // Replay buffered events, capped to the requested limit so long
       // sessions don't blow up the initial frame.
-      for (const e of agent.getSessionEvents(sessionId, since, limit)) send(e);
+      for (const e of await agent.getSessionEvents(sessionId, since, limit)) send(e);
 
       const live = agent.isLive(sessionId);
       if (!live) {

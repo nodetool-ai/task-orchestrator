@@ -31,10 +31,10 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/bcryptjs": "^2.4.6",
     "bcryptjs": "^3.0.3",
-    "better-sqlite3": "^11.5.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "discord.js": "^14.26.4",
+    "dockerode": "^4.0.12",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.36.3",
     "isomorphic-dompurify": "^2.20.0",
@@ -42,6 +42,7 @@
     "marked": "^15.0.0",
     "next": "^15.0.0",
     "next-auth": "^5.0.0-beta.31",
+    "postgres": "^3.4.9",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwind-merge": "^2.5.4",
@@ -51,6 +52,7 @@
   "devDependencies": {
     "@tailwindcss/typography": "^0.5.15",
     "@types/better-sqlite3": "^7.6.11",
+    "@types/dockerode": "^4.0.1",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
@@ -62,5 +64,8 @@
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",
     "vitest": "^2.1.5"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.5.0"
   }
 }

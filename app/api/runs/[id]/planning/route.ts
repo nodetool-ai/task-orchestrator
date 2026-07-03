@@ -33,7 +33,7 @@ export async function POST(
       return NextResponse.json({ error: "Bad id" }, { status: 400 });
     }
 
-    const run = runs.get(runId);
+    const run = await runs.get(runId);
     if (!run) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
     let body: { action?: unknown };
@@ -61,7 +61,7 @@ export async function POST(
       );
     }
 
-    repo.setPlanningStage(runId, NEXT_STAGE[action]);
+    await repo.setPlanningStage(runId, NEXT_STAGE[action]);
 
     const session = await auth();
     const author = session?.user?.email ?? "user";

@@ -14,7 +14,7 @@ async function userId(): Promise<number | null> {
 export async function GET() {
   try {
     const uid = await userId();
-    return NextResponse.json(chat.listChats(uid));
+    return NextResponse.json(await chat.listChats(uid));
   } catch (e) {
     return errorResponse(e);
   }
@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
     } catch {
       // Empty body is fine — fall back to default repo.
     }
-    const created = chat.createChat(uid, "New chat", repoId);
+    const created = await chat.createChat(uid, "New chat", repoId);
     return NextResponse.json(created, { status: 201 });
   } catch (e) {
     return errorResponse(e);

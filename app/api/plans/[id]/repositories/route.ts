@@ -13,7 +13,7 @@ export async function POST(
   try {
     const { id } = await params;
     const { repoId } = planRepositorySchema.parse(await req.json());
-    const plan = repo.addPlanRepository(id, repoId);
+    const plan = await repo.addPlanRepository(id, repoId);
     return NextResponse.json(plan);
   } catch (e) {
     return errorResponse(e);

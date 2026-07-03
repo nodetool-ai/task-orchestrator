@@ -19,7 +19,7 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const existing = repo.getPersona(id);
+  const existing = await repo.getPersona(id);
   if (!existing) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
@@ -63,8 +63,8 @@ export async function PATCH(
         ? parsed.data.budgetMaxSeconds
         : existing.budgetMaxSeconds,
   };
-  repo.upsertPersona(merged);
-  const next = repo.getPersona(id)!;
+  await repo.upsertPersona(merged);
+  const next = (await repo.getPersona(id))!;
   return NextResponse.json({
     persona: {
       id: next.id,

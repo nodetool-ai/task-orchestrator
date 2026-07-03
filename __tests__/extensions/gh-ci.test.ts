@@ -51,10 +51,10 @@ describe("gh_ci: URL validation gate", () => {
     },
   ];
 
-  it("accepts a PR url whose owner/repo matches a registered remote", () => {
-    const v = validatePrUrl(
+  it("accepts a PR url whose owner/repo matches a registered remote", async () => {
+    const v = await validatePrUrl(
       "https://github.com/nodetool-ai/nodetool/pull/42",
-      () => repos
+      async () => repos
     );
     expect("error" in v).toBe(false);
     if (!("error" in v)) {
@@ -63,25 +63,25 @@ describe("gh_ci: URL validation gate", () => {
     }
   });
 
-  it("rejects a PR url in an unknown repo", () => {
-    const v = validatePrUrl(
+  it("rejects a PR url in an unknown repo", async () => {
+    const v = await validatePrUrl(
       "https://github.com/some-other-org/some-other-repo/pull/1",
-      () => repos
+      async () => repos
     );
     expect("error" in v).toBe(true);
     if ("error" in v) expect(v.error).toMatch(/not in a repository registered/);
   });
 
-  it("rejects garbage URLs", () => {
-    const v = validatePrUrl("hello world", () => repos);
+  it("rejects garbage URLs", async () => {
+    const v = await validatePrUrl("hello world", async () => repos);
     expect("error" in v).toBe(true);
     if ("error" in v) expect(v.error).toMatch(/Could not parse/);
   });
 
-  it("rejects when no repos are registered", () => {
-    const v = validatePrUrl(
+  it("rejects when no repos are registered", async () => {
+    const v = await validatePrUrl(
       "https://github.com/anything/anything/pull/1",
-      () => []
+      async () => []
     );
     expect("error" in v).toBe(true);
   });

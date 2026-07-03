@@ -13,7 +13,7 @@ export async function POST(
     const { id } = await params;
     const input = transitionTaskSchema.parse(await req.json());
     return NextResponse.json(
-      repo.transitionTask(id, {
+      await repo.transitionTask(id, {
         state: input.state as repo.TransitionInput["state"],
         assignee: input.assignee,
         note: input.note,

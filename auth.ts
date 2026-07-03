@@ -25,7 +25,7 @@ const nextAuth = NextAuth({
         if (token) {
           const verifiedEmail = await verifyMagicToken(token);
           if (!verifiedEmail || verifiedEmail.toLowerCase() !== email.toLowerCase()) return null;
-          const user = findUser(email);
+          const user = await findUser(email);
           if (!user) return null;
           return { id: String(user.id), email: user.email };
         }
@@ -64,9 +64,9 @@ export const { handlers, signIn, signOut } = nextAuth;
 // the layout and every API route see a logged-in user with a real users.id.
 // Any other call form (middleware/route-handler wrappers) delegates to the
 // real NextAuth handler unchanged.
-export const auth = ((...args: unknown[]) => {
+export const auth = (async (...args: unknown[]) => {
   if (args.length === 0 && isAuthDisabled()) {
-    const user = ensureDevUser();
+    const user = await ensureDevUser();
     const session: Session = {
       user: { id: String(user.id), email: user.email } as Session["user"],
       expires: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),

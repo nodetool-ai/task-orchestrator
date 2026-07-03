@@ -12,8 +12,8 @@ export async function PATCH(
   try {
     const { id, cid } = await params;
     const input = updateCriterionSchema.parse(await req.json());
-    repo.updateCriterion(parseInt(cid, 10), input);
-    return NextResponse.json(repo.getTask(id));
+    await repo.updateCriterion(parseInt(cid, 10), input);
+    return NextResponse.json(await repo.getTask(id));
   } catch (e) {
     return errorResponse(e);
   }
@@ -25,8 +25,8 @@ export async function DELETE(
 ) {
   try {
     const { id, cid } = await params;
-    repo.deleteCriterion(parseInt(cid, 10));
-    return NextResponse.json(repo.getTask(id));
+    await repo.deleteCriterion(parseInt(cid, 10));
+    return NextResponse.json(await repo.getTask(id));
   } catch (e) {
     return errorResponse(e);
   }

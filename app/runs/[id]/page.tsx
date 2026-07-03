@@ -15,15 +15,15 @@ export default async function RunPage({
   const runId = Number(id);
   if (!Number.isFinite(runId)) notFound();
 
-  const run = runs.get(runId);
+  const run = await runs.get(runId);
   if (!run) notFound();
 
   const session = await auth();
-  const messages = runs.listMessages(runId);
+  const messages = await runs.listMessages(runId);
   // Seed the read-only SSE tail so it streams only rows written after this
   // server render — the conversation above is already the snapshot.
-  const initialCursor = runs.streamCursor(runId);
-  const repositories = repo.listRepositories().map((r) => ({
+  const initialCursor = await runs.streamCursor(runId);
+  const repositories = (await repo.listRepositories()).map((r) => ({
     id: r.id,
     name: r.name,
     localPath: r.localPath,
@@ -33,7 +33,7 @@ export default async function RunPage({
   // lookup; we only need the title (or fallback to "#id").
   let parent: { id: number; title: string } | null = null;
   if (run.parentRunId != null) {
-    const p = runs.get(run.parentRunId);
+    const p = await runs.get(run.parentRunId);
     if (p) {
       parent = { id: p.id, title: p.title ?? `Run #${p.id}` };
     } else {
@@ -42,10 +42,10 @@ export default async function RunPage({
   }
 
   // Task info used by the implement-run header (PR link, branch, task id).
-  const task = run.taskId ? repo.getTask(run.taskId) : null;
+  const task = run.taskId ? await repo.getTask(run.taskId) : null;
 
   // Persona for the header display.
-  const persona = run.personaId ? repo.getPersona(run.personaId) : null;
+  const persona = run.personaId ? await repo.getPersona(run.personaId) : null;
 
   // Bound the run view to the viewport (minus the 48px top nav) so its internal
   // flex column scrolls the message stream while the composer stays pinned to

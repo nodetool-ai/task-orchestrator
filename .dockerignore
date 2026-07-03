@@ -1,0 +1,17 @@
+.git
+node_modules
+.next
+.next.prev
+.worktrees
+data.db
+data.db-wal
+data.db-shm
+*.log
+.env.local
+.env
+docs
+mobile
+__tests__
+.impeccable
+.claude
+.env.test

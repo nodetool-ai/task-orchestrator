@@ -17,7 +17,7 @@ export async function GET(
     if (!Number.isInteger(attachmentId)) {
       return NextResponse.json({ error: "Invalid attachment id" }, { status: 400 });
     }
-    const att = repo.getAttachment(attachmentId);
+    const att = await repo.getAttachment(attachmentId);
     if (!att) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
@@ -50,7 +50,7 @@ export async function DELETE(
     if (!Number.isInteger(attachmentId)) {
       return NextResponse.json({ error: "Invalid attachment id" }, { status: 400 });
     }
-    repo.deleteAttachment(attachmentId);
+    await repo.deleteAttachment(attachmentId);
     return new NextResponse(null, { status: 204 });
   } catch (e) {
     return errorResponse(e);

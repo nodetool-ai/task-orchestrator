@@ -1,29 +1,47 @@
 import { sql } from "drizzle-orm";
 import {
-  sqliteTable,
+  pgTable,
   text,
   integer,
   real,
-  blob,
+  serial,
+  boolean,
+  timestamp,
+  customType,
   primaryKey,
   index,
   uniqueIndex,
-} from "drizzle-orm/sqlite-core";
+  check,
+} from "drizzle-orm/pg-core";
 
-const NOW = sql`(unixepoch('subsec') * 1000)`;
+// Millisecond-epoch timestamps became Postgres `timestamptz` (Date semantics
+// preserved: mode:"date" round-trips JS Date). Ordering/cursors key on the
+// serial `id`, not timestamps, so microsecond precision is irrelevant.
+const ts = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
 
-export const repositories = sqliteTable("repositories", {
+// Raw bytes for attachment content. postgres.js returns bytea as a Uint8Array;
+// normalize to Buffer so callers keep the previous better-sqlite3 blob shape.
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType() {
+    return "bytea";
+  },
+  fromDriver(value) {
+    return Buffer.isBuffer(value) ? value : Buffer.from(value as Uint8Array);
+  },
+});
+
+export const repositories = pgTable("repositories", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   remote: text("remote"),
   localPath: text("local_path"),
   defaultBranch: text("default_branch").notNull().default("main"),
   description: text("description").notNull().default(""),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
-  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+  createdAt: ts("created_at").notNull().defaultNow(),
+  updatedAt: ts("updated_at").notNull().defaultNow(),
 });
 
-export const plans = sqliteTable(
+export const plans = pgTable(
   "plans",
   {
     id: text("id").primaryKey(),
@@ -32,15 +50,15 @@ export const plans = sqliteTable(
     owner: text("owner"),
     body: text("body").notNull().default(""),
     tags: text("tags").notNull().default("[]"),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
   },
   (t) => ({
     stateIdx: index("plans_state_idx").on(t.state),
   })
 );
 
-export const planRepositories = sqliteTable(
+export const planRepositories = pgTable(
   "plan_repositories",
   {
     planId: text("plan_id")
@@ -57,7 +75,7 @@ export const planRepositories = sqliteTable(
   })
 );
 
-export const tasks = sqliteTable(
+export const tasks = pgTable(
   "tasks",
   {
     id: text("id").primaryKey(),
@@ -72,12 +90,12 @@ export const tasks = sqliteTable(
     tags: text("tags").notNull().default("[]"),
     repoId: text("repo_id").references(() => repositories.id, { onDelete: "set null" }),
     // The task's single canonical "attached run" — the worktree session that
-    // carries implement / chat / merge turns. NULL until first interaction.
-    // The FK (→ agent_runs.id ON DELETE SET NULL) lives in migration 0017; we
-    // omit `.references()` here to avoid a tasks↔agent_runs type-inference cycle.
+    // carries implement / chat / merge turns. NULL until first interaction. FK to
+    // agent_runs.id ON DELETE SET NULL is applied in a migration; omitted here to
+    // avoid a tasks↔agent_runs type-inference cycle.
     attachedRunId: integer("attached_run_id"),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
   },
   (t) => ({
     planIdx: index("tasks_plan_idx").on(t.planId),
@@ -87,7 +105,7 @@ export const tasks = sqliteTable(
   })
 );
 
-export const taskDependencies = sqliteTable(
+export const taskDependencies = pgTable(
   "task_dependencies",
   {
     taskId: text("task_id")
@@ -103,31 +121,31 @@ export const taskDependencies = sqliteTable(
   })
 );
 
-export const taskNotes = sqliteTable(
+export const taskNotes = pgTable(
   "task_notes",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: serial("id").primaryKey(),
     taskId: text("task_id")
       .notNull()
       .references(() => tasks.id, { onDelete: "cascade" }),
     author: text("author").notNull(),
     body: text("body").notNull(),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+    createdAt: ts("created_at").notNull().defaultNow(),
   },
   (t) => ({
     taskIdx: index("task_notes_task_idx").on(t.taskId),
   })
 );
 
-export const acceptanceCriteria = sqliteTable(
+export const acceptanceCriteria = pgTable(
   "acceptance_criteria",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: serial("id").primaryKey(),
     taskId: text("task_id")
       .notNull()
       .references(() => tasks.id, { onDelete: "cascade" }),
     text: text("text").notNull(),
-    done: integer("done", { mode: "boolean" }).notNull().default(false),
+    done: boolean("done").notNull().default(false),
     position: integer("position").notNull(),
   },
   (t) => ({
@@ -135,12 +153,12 @@ export const acceptanceCriteria = sqliteTable(
   })
 );
 
-export const attachments = sqliteTable(
+export const attachments = pgTable(
   "attachments",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    // Exactly one of planId / taskId is set (XOR enforced by the migration's
-    // CHECK constraint). Both FKs cascade on owner delete.
+    id: serial("id").primaryKey(),
+    // Exactly one of planId / taskId is set (XOR enforced by a CHECK constraint).
+    // Both FKs cascade on owner delete.
     planId: text("plan_id").references(() => plans.id, { onDelete: "cascade" }),
     taskId: text("task_id").references(() => tasks.id, { onDelete: "cascade" }),
     filename: text("filename").notNull(),
@@ -148,24 +166,29 @@ export const attachments = sqliteTable(
     // 'image' for image/* mime types, 'artifact' otherwise. Derived at insert.
     kind: text("kind").notNull(),
     sizeBytes: integer("size_bytes").notNull(),
-    content: blob("content", { mode: "buffer" }).notNull(),
+    content: bytea("content").notNull(),
     author: text("author").notNull(),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+    createdAt: ts("created_at").notNull().defaultNow(),
   },
   (t) => ({
     planIdx: index("attachments_plan_idx").on(t.planId),
     taskIdx: index("attachments_task_idx").on(t.taskId),
+    // Exactly one owner: plan XOR task.
+    ownerXor: check(
+      "attachments_owner_xor",
+      sql`(${t.planId} IS NOT NULL) <> (${t.taskId} IS NOT NULL)`
+    ),
   })
 );
 
-export const agentSessions = sqliteTable(
+export const agentSessions = pgTable(
   "agent_runs",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    // Nullable since 0009: chat-derived runs have no task.
+    id: serial("id").primaryKey(),
+    // Nullable: chat-derived runs have no task.
     taskId: text("task_id").references(() => tasks.id, { onDelete: "cascade" }),
-    // Nullable, since 0012: chat-derived runs that target a plan as a
-    // whole carry the plan_id here so the agent can scope task CRUD to it.
+    // Nullable: chat-derived runs that target a plan as a whole carry the
+    // plan_id here so the agent can scope task CRUD to it.
     planId: text("plan_id").references(() => plans.id, { onDelete: "set null" }),
     status: text("status").notNull().default("pending"),
     model: text("model"),
@@ -180,8 +203,8 @@ export const agentSessions = sqliteTable(
     resumeOf: integer("resume_of"),
     repoId: text("repo_id").references(() => repositories.id, { onDelete: "set null" }),
     goal: text("goal").notNull().default("<implement>"),
-    // Reasoning level for this run: low | medium | high | xhigh. NULL inherits the
-    // persona's level (which may itself be NULL = model default).
+    // Reasoning level: low | medium | high | xhigh. NULL inherits the persona's
+    // level (which may itself be NULL = model default).
     thinkingLevel: text("thinking_level"),
     toolsProfile: text("tools_profile").notNull().default("orchestrator,repo_write"),
     cwdStrategy: text("cwd_strategy").notNull().default("worktree"),
@@ -193,20 +216,20 @@ export const agentSessions = sqliteTable(
     title: text("title"),
     userId: integer("user_id").references(() => users.id, { onDelete: "set null" }),
     personaId: text("persona_id").references(() => personas.id, { onDelete: "set null" }),
-    // Old chats.id for rows backfilled from chats by 0009. Lets the
-    // future /chat/[id] redirect resolve the new run.
+    // Old chats.id for rows backfilled from chats. Lets the /chat/[id] redirect
+    // resolve the new run.
     legacyChatId: integer("legacy_chat_id"),
     // Null for ordinary runs. Non-null for planning-agent runs:
     // gathering | spec_review | building_plan | plan_review | committing | done
     planningStage: text("planning_stage"),
-    startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull().default(NOW),
-    completedAt: integer("completed_at", { mode: "timestamp_ms" }),
+    startedAt: ts("started_at").notNull().defaultNow(),
+    completedAt: ts("completed_at"),
     // Liveness lease: bumped periodically while a turn runs. A run in an active
     // status with a stale/null heartbeat is an orphan (its owner process died).
-    heartbeatAt: integer("heartbeat_at", { mode: "timestamp_ms" }),
-    // Detached run workers (0020). Identity of the transient systemd-run scope
-    // that owns this run, the child worker pid, and a cross-process cancel flag
-    // (1 = a redeploy-surviving worker should abort at the next heartbeat poll).
+    heartbeatAt: ts("heartbeat_at"),
+    // Detached run workers: identity of the transient worker scope/container that
+    // owns this run, the worker pid, and a cross-process cancel flag (1 = a
+    // redeploy-surviving worker should abort at the next heartbeat poll).
     workerScope: text("worker_scope"),
     workerPid: integer("worker_pid"),
     cancelRequested: integer("cancel_requested"),
@@ -223,20 +246,19 @@ export const agentSessions = sqliteTable(
   })
 );
 
-export const agentMessages = sqliteTable(
+export const agentMessages = pgTable(
   "agent_messages",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: serial("id").primaryKey(),
     runId: integer("run_id")
       .notNull()
       .references(() => agentSessions.id, { onDelete: "cascade" }),
     // 'user' | 'agent' | 'tool' | 'system'.
     role: text("role").notNull(),
-    // JSON array of SDK content blocks for user/agent/tool messages;
-    // single-element array carrying {type,...payload} for system messages
-    // backfilled from agent_events.
+    // JSON array of SDK content blocks for user/agent/tool messages; single-
+    // element array carrying {type,...payload} for system messages.
     content: text("content").notNull().default("[]"),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+    createdAt: ts("created_at").notNull().defaultNow(),
   },
   (t) => ({
     runIdx: index("agent_messages_run_idx").on(t.runId),
@@ -244,23 +266,22 @@ export const agentMessages = sqliteTable(
   })
 );
 
-export const agentEvents = sqliteTable(
+export const agentEvents = pgTable(
   "agent_events",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: serial("id").primaryKey(),
     sessionId: integer("run_id")
       .notNull()
       .references(() => agentSessions.id, { onDelete: "cascade" }),
     type: text("type").notNull(),
     payload: text("payload").notNull().default("{}"),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+    createdAt: ts("created_at").notNull().defaultNow(),
   },
   (t) => ({
     sessionIdx: index("agent_events_run_idx").on(t.sessionId),
     createdIdx: index("agent_events_created_idx").on(t.createdAt),
-    // Note: migration 0020 also adds idx_agent_events_run_id on (run_id, id)
-    // to make the DB-tail cursor scan (readStreamSince) a covered lookup.
-    // agent_messages' equivalent is agent_messages_run_id_ord_idx above.
+    // (run_id, id) makes the DB-tail cursor scan (readStreamSince) a covered
+    // lookup; agent_messages' equivalent is agent_messages_run_id_ord_idx above.
     runOrdIdx: index("idx_agent_events_run_id").on(t.sessionId, t.id),
   })
 );
@@ -270,19 +291,16 @@ export const agentEvents = sqliteTable(
 // external_id) so the channel bridge (lib/pipe) can resume the same conversation
 // across restarts. ON DELETE CASCADE: deleting the run drops the mapping and the
 // bridge lazily creates a fresh run on the next message.
-export const channelThreads = sqliteTable(
+export const channelThreads = pgTable(
   "channel_threads",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    // Channel name, e.g. "discord".
+    id: serial("id").primaryKey(),
     channel: text("channel").notNull(),
-    // Conversation key within the channel: DM channel id or guild channel/thread id.
     externalId: text("external_id").notNull(),
-    // The chat run this conversation maps to (agent_runs.id, goal='<chat>').
     runId: integer("run_id")
       .notNull()
       .references(() => agentSessions.id, { onDelete: "cascade" }),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+    createdAt: ts("created_at").notNull().defaultNow(),
   },
   (t) => ({
     uniq: uniqueIndex("channel_threads_channel_external_uniq").on(t.channel, t.externalId),
@@ -290,20 +308,20 @@ export const channelThreads = sqliteTable(
   })
 );
 
-export const users = sqliteTable(
+export const users = pgTable(
   "users",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: serial("id").primaryKey(),
     email: text("email").notNull().unique(),
     passwordHash: text("password_hash").notNull(),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+    createdAt: ts("created_at").notNull().defaultNow(),
   },
   (t) => ({
     emailIdx: index("users_email_idx").on(t.email),
   })
 );
 
-export const personas = sqliteTable("personas", {
+export const personas = pgTable("personas", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   description: text("description"),
@@ -313,20 +331,20 @@ export const personas = sqliteTable("personas", {
   skillPaths: text("skill_paths").notNull().default("[]"),
   budgetMaxTurns: integer("budget_max_turns"),
   budgetMaxSeconds: integer("budget_max_seconds"),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
-  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+  createdAt: ts("created_at").notNull().defaultNow(),
+  updatedAt: ts("updated_at").notNull().defaultNow(),
 });
 
-export const personaMemories = sqliteTable(
+export const personaMemories = pgTable(
   "persona_memories",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: serial("id").primaryKey(),
     personaId: text("persona_id")
       .notNull()
       .references(() => personas.id, { onDelete: "cascade" }),
     scope: text("scope").notNull(),
     body: text("body").notNull().default(""),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().default(NOW),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
   },
   (t) => ({
     personaIdx: index("persona_memories_persona_idx").on(t.personaId),
@@ -334,19 +352,19 @@ export const personaMemories = sqliteTable(
   })
 );
 
-export const apiTokens = sqliteTable(
+export const apiTokens = pgTable(
   "api_tokens",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: serial("id").primaryKey(),
     userId: integer("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     tokenHash: text("token_hash").notNull(),
     prefix: text("prefix").notNull(),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().default(NOW),
-    lastUsedAt: integer("last_used_at", { mode: "timestamp_ms" }),
-    revokedAt: integer("revoked_at", { mode: "timestamp_ms" }),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    lastUsedAt: ts("last_used_at"),
+    revokedAt: ts("revoked_at"),
   },
   (t) => ({
     userIdx: index("api_tokens_user_idx").on(t.userId),

@@ -69,14 +69,13 @@ function planIdFromTitle(title: string, date: string): string {
   return `P-${date}-${slug}`;
 }
 
-function nextTaskId(date: string): string {
+async function nextTaskId(date: string): Promise<string> {
   const datePart = date.replace(/-/g, "");
   const prefix = `T-${datePart}-`;
-  const rows = db
+  const rows = await db
     .select({ id: tasks.id })
     .from(tasks)
-    .where(like(tasks.id, `${prefix}%`))
-    .all();
+    .where(like(tasks.id, `${prefix}%`));
   let max = 0;
   for (const r of rows) {
     const n = parseInt(r.id.slice(prefix.length), 10);
@@ -108,8 +107,8 @@ function hydratePlan(
   };
 }
 
-function reposForPlan(planId: string): RepositoryRow[] {
-  return db
+async function reposForPlan(planId: string): Promise<RepositoryRow[]> {
+  return await db
     .select({
       id: repositories.id,
       name: repositories.name,
@@ -123,15 +122,14 @@ function reposForPlan(planId: string): RepositoryRow[] {
     .from(planRepositories)
     .innerJoin(repositories, eq(repositories.id, planRepositories.repoId))
     .where(eq(planRepositories.planId, planId))
-    .orderBy(asc(planRepositories.position), asc(repositories.id))
-    .all();
+    .orderBy(asc(planRepositories.position), asc(repositories.id));
 }
 
-function reposForPlans(planIds: string[]): Map<string, RepositoryRow[]> {
+async function reposForPlans(planIds: string[]): Promise<Map<string, RepositoryRow[]>> {
   const out = new Map<string, RepositoryRow[]>();
   for (const id of planIds) out.set(id, []);
   if (planIds.length === 0) return out;
-  const rows = db
+  const rows = await db
     .select({
       planId: planRepositories.planId,
       position: planRepositories.position,
@@ -147,8 +145,7 @@ function reposForPlans(planIds: string[]): Map<string, RepositoryRow[]> {
     .from(planRepositories)
     .innerJoin(repositories, eq(repositories.id, planRepositories.repoId))
     .where(inArray(planRepositories.planId, planIds))
-    .orderBy(asc(planRepositories.position), asc(repositories.id))
-    .all();
+    .orderBy(asc(planRepositories.position), asc(repositories.id));
   for (const r of rows) {
     const list = out.get(r.planId);
     if (!list) continue;
@@ -202,15 +199,14 @@ function hydrateTask(
 }
 
 /** Map of taskId → latest (highest run id) PR url, for a set of tasks. */
-function latestPrUrlByTask(taskIds: string[]): Map<string, string> {
+async function latestPrUrlByTask(taskIds: string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (taskIds.length === 0) return out;
-  const rows = db
+  const rows = await db
     .select({ taskId: agentSessions.taskId, prUrl: agentSessions.prUrl })
     .from(agentSessions)
     .where(and(inArray(agentSessions.taskId, taskIds), isNotNull(agentSessions.prUrl)))
-    .orderBy(asc(agentSessions.id))
-    .all();
+    .orderBy(asc(agentSessions.id));
   // Ascending by id → the last write per task wins, i.e. the most recent run.
   for (const r of rows) {
     if (r.taskId && r.prUrl) out.set(r.taskId, r.prUrl);
@@ -261,36 +257,33 @@ function toAttachmentMeta(row: {
   };
 }
 
-function attachmentsForTask(taskId: string): AttachmentMeta[] {
-  return db
+async function attachmentsForTask(taskId: string): Promise<AttachmentMeta[]> {
+  return (await db
     .select(ATTACHMENT_META_COLUMNS)
     .from(attachments)
     .where(eq(attachments.taskId, taskId))
-    .orderBy(asc(attachments.id))
-    .all()
+    .orderBy(asc(attachments.id)))
     .map(toAttachmentMeta);
 }
 
-function attachmentsForPlan(planId: string): AttachmentMeta[] {
-  return db
+async function attachmentsForPlan(planId: string): Promise<AttachmentMeta[]> {
+  return (await db
     .select(ATTACHMENT_META_COLUMNS)
     .from(attachments)
     .where(eq(attachments.planId, planId))
-    .orderBy(asc(attachments.id))
-    .all()
+    .orderBy(asc(attachments.id)))
     .map(toAttachmentMeta);
 }
 
-function attachmentsForTasks(taskIds: string[]): Map<string, AttachmentMeta[]> {
+async function attachmentsForTasks(taskIds: string[]): Promise<Map<string, AttachmentMeta[]>> {
   const out = new Map<string, AttachmentMeta[]>();
   for (const id of taskIds) out.set(id, []);
   if (taskIds.length === 0) return out;
-  const rows = db
+  const rows = await db
     .select(ATTACHMENT_META_COLUMNS)
     .from(attachments)
     .where(inArray(attachments.taskId, taskIds))
-    .orderBy(asc(attachments.id))
-    .all();
+    .orderBy(asc(attachments.id));
   for (const r of rows) {
     if (!r.taskId) continue;
     out.get(r.taskId)?.push(toAttachmentMeta(r));
@@ -298,16 +291,15 @@ function attachmentsForTasks(taskIds: string[]): Map<string, AttachmentMeta[]> {
   return out;
 }
 
-function attachmentsForPlans(planIds: string[]): Map<string, AttachmentMeta[]> {
+async function attachmentsForPlans(planIds: string[]): Promise<Map<string, AttachmentMeta[]>> {
   const out = new Map<string, AttachmentMeta[]>();
   for (const id of planIds) out.set(id, []);
   if (planIds.length === 0) return out;
-  const rows = db
+  const rows = await db
     .select(ATTACHMENT_META_COLUMNS)
     .from(attachments)
     .where(inArray(attachments.planId, planIds))
-    .orderBy(asc(attachments.id))
-    .all();
+    .orderBy(asc(attachments.id));
   for (const r of rows) {
     if (!r.planId) continue;
     out.get(r.planId)?.push(toAttachmentMeta(r));
@@ -328,28 +320,27 @@ function safeJsonArray(s: string): string[] {
 // Plan queries
 // ──────────────────────────────────────────────────────────
 
-export function listPlans(): PlanFull[] {
-  const rows = db.select().from(plans).orderBy(asc(plans.id)).all();
+export async function listPlans(): Promise<PlanFull[]> {
+  const rows = await db.select().from(plans).orderBy(asc(plans.id));
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.id);
-  const byPlan = reposForPlans(ids);
-  const attByPlan = attachmentsForPlans(ids);
+  const byPlan = await reposForPlans(ids);
+  const attByPlan = await attachmentsForPlans(ids);
   return rows.map((r) =>
     hydratePlan(r, byPlan.get(r.id) ?? [], attByPlan.get(r.id) ?? [])
   );
 }
 
-export function getPlan(id: string): PlanFull | null {
-  const row = db.select().from(plans).where(eq(plans.id, id)).get();
-  return row ? hydratePlan(row, reposForPlan(id), attachmentsForPlan(id)) : null;
+export async function getPlan(id: string): Promise<PlanFull | null> {
+  const row = (await db.select().from(plans).where(eq(plans.id, id)))[0];
+  return row ? hydratePlan(row, await reposForPlan(id), await attachmentsForPlan(id)) : null;
 }
 
-export function planProgress(planId: string): PlanProgress {
-  const all = db
+export async function planProgress(planId: string): Promise<PlanProgress> {
+  const all = await db
     .select({ state: tasks.state })
     .from(tasks)
-    .where(eq(tasks.planId, planId))
-    .all();
+    .where(eq(tasks.planId, planId));
   const active = all.filter((t) => t.state !== "cancelled");
   const total = active.length;
   const done = active.filter((t) => t.state === "done").length;
@@ -361,16 +352,15 @@ export function planProgress(planId: string): PlanProgress {
 // Batched planProgress for N plans in a single GROUP BY query. Returns
 // a Map keyed by plan id; plans with no tasks are still present with
 // zeroed counts so callers can index unconditionally.
-export function planProgressBatch(planIds: string[]): Map<string, PlanProgress> {
+export async function planProgressBatch(planIds: string[]): Promise<Map<string, PlanProgress>> {
   const out = new Map<string, PlanProgress>();
   for (const id of planIds) out.set(id, { total: 0, done: 0, pct: 0, open: 0 });
   if (planIds.length === 0) return out;
-  const rows = db
+  const rows = await db
     .select({ planId: tasks.planId, state: tasks.state, n: count() })
     .from(tasks)
     .where(inArray(tasks.planId, planIds))
-    .groupBy(tasks.planId, tasks.state)
-    .all();
+    .groupBy(tasks.planId, tasks.state);
   // First pass: accumulate totals and done.
   for (const r of rows) {
     if (r.state === "cancelled") continue;
@@ -395,39 +385,36 @@ export interface TaskFilters {
   assignee?: string;
 }
 
-export function listTasks(filters: TaskFilters = {}): TaskFull[] {
+export async function listTasks(filters: TaskFilters = {}): Promise<TaskFull[]> {
   const wheres = [];
   if (filters.state) wheres.push(eq(tasks.state, filters.state));
   if (filters.planId) wheres.push(eq(tasks.planId, filters.planId));
   if (filters.assignee) wheres.push(eq(tasks.assignee, filters.assignee));
   const where = wheres.length ? and(...wheres) : undefined;
   const rows = where
-    ? db.select().from(tasks).where(where).orderBy(asc(tasks.id)).all()
-    : db.select().from(tasks).orderBy(asc(tasks.id)).all();
+    ? await db.select().from(tasks).where(where).orderBy(asc(tasks.id))
+    : await db.select().from(tasks).orderBy(asc(tasks.id));
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.id);
-  const depRows = db
+  const depRows = await db
     .select()
     .from(taskDependencies)
-    .where(inArray(taskDependencies.taskId, ids))
-    .all();
-  const noteRows = db
+    .where(inArray(taskDependencies.taskId, ids));
+  const noteRows = await db
     .select()
     .from(taskNotes)
     .where(inArray(taskNotes.taskId, ids))
-    .orderBy(asc(taskNotes.createdAt))
-    .all();
-  const critRows = db
+    .orderBy(asc(taskNotes.createdAt));
+  const critRows = await db
     .select()
     .from(acceptanceCriteria)
     .where(inArray(acceptanceCriteria.taskId, ids))
-    .orderBy(asc(acceptanceCriteria.position))
-    .all();
+    .orderBy(asc(acceptanceCriteria.position));
   const depsByTask = groupBy(depRows, (r) => r.taskId);
   const notesByTask = groupBy(noteRows, (r) => r.taskId);
   const critsByTask = groupBy(critRows, (r) => r.taskId);
-  const attByTask = attachmentsForTasks(ids);
-  const prByTask = latestPrUrlByTask(ids);
+  const attByTask = await attachmentsForTasks(ids);
+  const prByTask = await latestPrUrlByTask(ids);
   return rows.map((r) =>
     hydrateTask(
       r,
@@ -450,36 +437,33 @@ export function listTasks(filters: TaskFilters = {}): TaskFull[] {
   );
 }
 
-export function getTask(id: string): TaskFull | null {
-  const row = db.select().from(tasks).where(eq(tasks.id, id)).get();
+export async function getTask(id: string): Promise<TaskFull | null> {
+  const row = (await db.select().from(tasks).where(eq(tasks.id, id)))[0];
   if (!row) return null;
-  const deps = db
+  const deps = (await db
     .select({ dependsOnId: taskDependencies.dependsOnId })
     .from(taskDependencies)
-    .where(eq(taskDependencies.taskId, id))
-    .all()
+    .where(eq(taskDependencies.taskId, id)))
     .map((r) => r.dependsOnId);
-  const notes = db
+  const notes = (await db
     .select()
     .from(taskNotes)
     .where(eq(taskNotes.taskId, id))
-    .orderBy(asc(taskNotes.createdAt))
-    .all()
+    .orderBy(asc(taskNotes.createdAt)))
     .map((n) => ({ id: n.id, author: n.author, body: n.body, createdAt: n.createdAt }));
-  const criteria = db
+  const criteria = (await db
     .select()
     .from(acceptanceCriteria)
     .where(eq(acceptanceCriteria.taskId, id))
-    .orderBy(asc(acceptanceCriteria.position))
-    .all()
+    .orderBy(asc(acceptanceCriteria.position)))
     .map((c) => ({ id: c.id, text: c.text, done: c.done, position: c.position }));
   return hydrateTask(
     row,
     deps,
     notes,
     criteria,
-    attachmentsForTask(id),
-    latestPrUrlByTask([id]).get(id) ?? null
+    await attachmentsForTask(id),
+    (await latestPrUrlByTask([id])).get(id) ?? null
   );
 }
 
@@ -506,14 +490,13 @@ export function isUsableAttachedRun(status: string): boolean {
  * Resolve a task's attached run, or null when unset, deleted, or `closed`.
  * Does not import lib/runs (avoids a cycle) — reads the agent_runs row directly.
  */
-export function resolveAttachedRun(taskId: string): AttachedRunRef | null {
-  const t = db
+export async function resolveAttachedRun(taskId: string): Promise<AttachedRunRef | null> {
+  const t = (await db
     .select({ rid: tasks.attachedRunId })
     .from(tasks)
-    .where(eq(tasks.id, taskId))
-    .get();
+    .where(eq(tasks.id, taskId)))[0];
   if (!t?.rid) return null;
-  const r = db
+  const r = (await db
     .select({
       id: agentSessions.id,
       status: agentSessions.status,
@@ -522,8 +505,7 @@ export function resolveAttachedRun(taskId: string): AttachedRunRef | null {
       branch: agentSessions.branch,
     })
     .from(agentSessions)
-    .where(eq(agentSessions.id, t.rid))
-    .get();
+    .where(eq(agentSessions.id, t.rid)))[0];
   if (!r) return null;
   if (!isUsableAttachedRun(r.status)) return null;
   return r;
@@ -533,32 +515,30 @@ export function resolveAttachedRun(taskId: string): AttachedRunRef | null {
  * Point a task at its attached run. With `ifUnset`, no-ops when the task already
  * has a usable attached run (so executor-spawned runs only adopt an empty slot).
  */
-export function attachRunToTask(
+export async function attachRunToTask(
   taskId: string,
   runId: number,
   opts: { ifUnset?: boolean } = {}
-): void {
-  if (opts.ifUnset && resolveAttachedRun(taskId)) return;
-  db.update(tasks).set({ attachedRunId: runId }).where(eq(tasks.id, taskId)).run();
+): Promise<void> {
+  if (opts.ifUnset && (await resolveAttachedRun(taskId))) return;
+  await db.update(tasks).set({ attachedRunId: runId }).where(eq(tasks.id, taskId));
 }
 
 /** Distinct non-null assignees observed across all tasks, alphabetical. */
-export function listAssignees(): string[] {
-  const rows = db
+export async function listAssignees(): Promise<string[]> {
+  const rows = await db
     .selectDistinct({ assignee: tasks.assignee })
     .from(tasks)
     .where(sql`${tasks.assignee} IS NOT NULL AND ${tasks.assignee} != ''`)
-    .orderBy(asc(tasks.assignee))
-    .all();
+    .orderBy(asc(tasks.assignee));
   return rows.map((r) => r.assignee!).filter(Boolean);
 }
 
-export function taskCountsByState(): Record<TaskState, number> {
-  const rows = db
+export async function taskCountsByState(): Promise<Record<TaskState, number>> {
+  const rows = await db
     .select({ state: tasks.state, n: count() })
     .from(tasks)
-    .groupBy(tasks.state)
-    .all();
+    .groupBy(tasks.state);
   const out: Record<TaskState, number> = {
     todo: 0,
     in_progress: 0,
@@ -587,26 +567,26 @@ export interface CreatePlanInput {
   repoIds?: string[];
 }
 
-export function createPlan(input: CreatePlanInput): PlanFull {
+export async function createPlan(input: CreatePlanInput): Promise<PlanFull> {
   const date = input.date ?? today();
   const id = input.id ?? planIdFromTitle(input.title, date);
-  if (db.select().from(plans).where(eq(plans.id, id)).get()) {
+  if ((await db.select().from(plans).where(eq(plans.id, id)))[0]) {
     throw new RepoError(`Plan ${id} already exists`, 409);
   }
   const explicitRepos = input.repoIds;
   const repoIds = explicitRepos
     ? Array.from(new Set(explicitRepos.filter((r): r is string => Boolean(r))))
-    : (() => {
-        const fallback = defaultRepoId();
+    : await (async () => {
+        const fallback = await defaultRepoId();
         return fallback ? [fallback] : [];
       })();
   // Validate each before any insert so the plan isn't created half-attached.
   for (const rid of repoIds) {
-    if (!getRepository(rid)) throw new RepoError(`Repository ${rid} not found`, 404);
+    if (!(await getRepository(rid))) throw new RepoError(`Repository ${rid} not found`, 404);
   }
   const now = new Date();
-  db.transaction((tx) => {
-    tx.insert(plans)
+  await db.transaction(async (tx) => {
+    await tx.insert(plans)
       .values({
         id,
         title: input.title,
@@ -616,15 +596,13 @@ export function createPlan(input: CreatePlanInput): PlanFull {
         tags: JSON.stringify(input.tags ?? []),
         createdAt: now,
         updatedAt: now,
-      })
-      .run();
+      });
     if (repoIds.length > 0) {
-      tx.insert(planRepositories)
-        .values(repoIds.map((r, i) => ({ planId: id, repoId: r, position: i })))
-        .run();
+      await tx.insert(planRepositories)
+        .values(repoIds.map((r, i) => ({ planId: id, repoId: r, position: i })));
     }
   });
-  return getPlan(id)!;
+  return (await getPlan(id))!;
 }
 
 export interface UpdatePlanInput {
@@ -637,8 +615,8 @@ export interface UpdatePlanInput {
   repoIds?: string[];
 }
 
-export function updatePlan(id: string, patch: UpdatePlanInput): PlanFull {
-  const existing = getPlan(id);
+export async function updatePlan(id: string, patch: UpdatePlanInput): Promise<PlanFull> {
+  const existing = await getPlan(id);
   if (!existing) throw new RepoError(`Plan ${id} not found`, 404);
   if (patch.state && patch.state !== existing.state) {
     const allowed = PLAN_TRANSITIONS[existing.state];
@@ -651,7 +629,7 @@ export function updatePlan(id: string, patch: UpdatePlanInput): PlanFull {
   }
   if (patch.repoIds) {
     for (const rid of patch.repoIds) {
-      if (!getRepository(rid)) throw new RepoError(`Repository ${rid} not found`, 404);
+      if (!(await getRepository(rid))) throw new RepoError(`Repository ${rid} not found`, 404);
     }
   }
   const values: Record<string, unknown> = { updatedAt: new Date() };
@@ -660,15 +638,14 @@ export function updatePlan(id: string, patch: UpdatePlanInput): PlanFull {
   if (patch.owner !== undefined) values.owner = patch.owner;
   if (patch.body !== undefined) values.body = patch.body;
   if (patch.tags !== undefined) values.tags = JSON.stringify(patch.tags);
-  db.transaction((tx) => {
-    tx.update(plans).set(values).where(eq(plans.id, id)).run();
+  await db.transaction(async (tx) => {
+    await tx.update(plans).set(values).where(eq(plans.id, id));
     if (patch.repoIds !== undefined) {
-      tx.delete(planRepositories).where(eq(planRepositories.planId, id)).run();
+      await tx.delete(planRepositories).where(eq(planRepositories.planId, id));
       const unique = Array.from(new Set(patch.repoIds));
       if (unique.length > 0) {
-        tx.insert(planRepositories)
-          .values(unique.map((r, i) => ({ planId: id, repoId: r, position: i })))
-          .run();
+        await tx.insert(planRepositories)
+          .values(unique.map((r, i) => ({ planId: id, repoId: r, position: i })));
       }
       // Unpin any task of this plan whose repo is no longer in the plan's set,
       // mirroring removePlanRepository. Otherwise a task stays pinned to a repo
@@ -681,61 +658,57 @@ export function updatePlan(id: string, patch: UpdatePlanInput): PlanFull {
             notInArray(tasks.repoId, unique)
           )
         : and(eq(tasks.planId, id), isNotNull(tasks.repoId));
-      tx.update(tasks).set({ repoId: null, updatedAt: new Date() }).where(stale).run();
+      await tx.update(tasks).set({ repoId: null, updatedAt: new Date() }).where(stale);
     }
   });
-  return getPlan(id)!;
+  return (await getPlan(id))!;
 }
 
 // Granular helpers — preferred over `updatePlan({ repoIds })` for adding /
 // removing a single repo from a plan because they don't disturb position
 // ordering of the unaffected repos.
-export function addPlanRepository(planId: string, repoId: string): PlanFull {
-  const plan = getPlan(planId);
+export async function addPlanRepository(planId: string, repoId: string): Promise<PlanFull> {
+  const plan = await getPlan(planId);
   if (!plan) throw new RepoError(`Plan ${planId} not found`, 404);
-  if (!getRepository(repoId)) throw new RepoError(`Repository ${repoId} not found`, 404);
+  if (!(await getRepository(repoId))) throw new RepoError(`Repository ${repoId} not found`, 404);
   if (plan.repos.some((r) => r.id === repoId)) return plan;
-  db.transaction((tx) => {
+  await db.transaction(async (tx) => {
     // Derive the next position from MAX(position)+1 rather than the row count:
     // removePlanRepository doesn't compact positions, so a count would collide
     // with an existing row after a removal and corrupt append order (which in
     // turn changes p.repos[0], the primary for plan-level runs).
-    const last = tx
+    const last = (await tx
       .select({ p: sql<number>`COALESCE(MAX(${planRepositories.position}), -1)` })
       .from(planRepositories)
-      .where(eq(planRepositories.planId, planId))
-      .get();
+      .where(eq(planRepositories.planId, planId)))[0];
     const nextPosition = (last?.p ?? -1) + 1;
-    tx.insert(planRepositories)
-      .values({ planId, repoId, position: nextPosition })
-      .run();
-    tx.update(plans).set({ updatedAt: new Date() }).where(eq(plans.id, planId)).run();
+    await tx.insert(planRepositories)
+      .values({ planId, repoId, position: nextPosition });
+    await tx.update(plans).set({ updatedAt: new Date() }).where(eq(plans.id, planId));
   });
-  return getPlan(planId)!;
+  return (await getPlan(planId))!;
 }
 
-export function removePlanRepository(planId: string, repoId: string): PlanFull {
-  const plan = getPlan(planId);
+export async function removePlanRepository(planId: string, repoId: string): Promise<PlanFull> {
+  const plan = await getPlan(planId);
   if (!plan) throw new RepoError(`Plan ${planId} not found`, 404);
   // Clear repoId on any task pinned to the repo being removed so we don't
   // leave dangling references that the resolver can't satisfy.
-  db.transaction((tx) => {
-    tx.delete(planRepositories)
+  await db.transaction(async (tx) => {
+    await tx.delete(planRepositories)
       .where(
         and(eq(planRepositories.planId, planId), eq(planRepositories.repoId, repoId))
-      )
-      .run();
-    tx.update(tasks)
+      );
+    await tx.update(tasks)
       .set({ repoId: null, updatedAt: new Date() })
-      .where(and(eq(tasks.planId, planId), eq(tasks.repoId, repoId)))
-      .run();
-    tx.update(plans).set({ updatedAt: new Date() }).where(eq(plans.id, planId)).run();
+      .where(and(eq(tasks.planId, planId), eq(tasks.repoId, repoId)));
+    await tx.update(plans).set({ updatedAt: new Date() }).where(eq(plans.id, planId));
   });
-  return getPlan(planId)!;
+  return (await getPlan(planId))!;
 }
 
-export function deletePlan(id: string) {
-  db.delete(plans).where(eq(plans.id, id)).run();
+export async function deletePlan(id: string) {
+  await db.delete(plans).where(eq(plans.id, id));
 }
 
 // ──────────────────────────────────────────────────────────
@@ -761,14 +734,14 @@ export interface CreateTaskInput {
   repoId?: string | null;
 }
 
-export function createTask(input: CreateTaskInput): TaskFull {
-  const plan = getPlan(input.planId);
+export async function createTask(input: CreateTaskInput): Promise<TaskFull> {
+  const plan = await getPlan(input.planId);
   if (!plan) {
     throw new RepoError(`Plan ${input.planId} not found`, 404);
   }
   const date = input.date ?? today();
-  const id = input.id ?? nextTaskId(date);
-  if (db.select().from(tasks).where(eq(tasks.id, id)).get()) {
+  const id = input.id ?? await nextTaskId(date);
+  if ((await db.select().from(tasks).where(eq(tasks.id, id)))[0]) {
     throw new RepoError(`Task ${id} already exists`, 409);
   }
 
@@ -797,11 +770,10 @@ export function createTask(input: CreateTaskInput): TaskFull {
 
   const deps = Array.from(new Set(input.dependencies ?? []));
   if (deps.length > 0) {
-    const existing = db
+    const existing = await db
       .select({ id: tasks.id })
       .from(tasks)
-      .where(inArray(tasks.id, deps))
-      .all();
+      .where(inArray(tasks.id, deps));
     const found = new Set(existing.map((r) => r.id));
     const missing = deps.filter((d) => !found.has(d));
     if (missing.length > 0) {
@@ -809,8 +781,8 @@ export function createTask(input: CreateTaskInput): TaskFull {
     }
   }
   const now = new Date();
-  db.transaction((tx) => {
-    tx.insert(tasks)
+  await db.transaction(async (tx) => {
+    await tx.insert(tasks)
       .values({
         id,
         title: input.title,
@@ -823,15 +795,13 @@ export function createTask(input: CreateTaskInput): TaskFull {
         repoId: resolvedRepoId,
         createdAt: now,
         updatedAt: now,
-      })
-      .run();
+      });
     if (deps.length > 0) {
-      tx.insert(taskDependencies)
-        .values(deps.map((d) => ({ taskId: id, dependsOnId: d })))
-        .run();
+      await tx.insert(taskDependencies)
+        .values(deps.map((d) => ({ taskId: id, dependsOnId: d })));
     }
     if (input.criteria?.length) {
-      tx.insert(acceptanceCriteria)
+      await tx.insert(acceptanceCriteria)
         .values(
           input.criteria.map((text, i) => ({
             taskId: id,
@@ -839,14 +809,13 @@ export function createTask(input: CreateTaskInput): TaskFull {
             done: false,
             position: i,
           }))
-        )
-        .run();
+        );
     }
   });
-  return getTask(id)!;
+  return (await getTask(id))!;
 }
 
-export function updateTask(
+export async function updateTask(
   id: string,
   patch: Partial<{
     title: string;
@@ -857,11 +826,11 @@ export function updateTask(
     dependencies: string[];
     repoId: string | null;
   }>
-): TaskFull {
-  const existing = getTask(id);
+): Promise<TaskFull> {
+  const existing = await getTask(id);
   if (!existing) throw new RepoError(`Task ${id} not found`, 404);
   if (patch.repoId !== undefined && patch.repoId !== null) {
-    const plan = getPlan(existing.planId);
+    const plan = await getPlan(existing.planId);
     const planRepoIds = plan?.repos.map((r) => r.id) ?? [];
     if (!planRepoIds.includes(patch.repoId)) {
       throw new RepoError(
@@ -880,11 +849,10 @@ export function updateTask(
       throw new RepoError(`Task ${id} cannot depend on itself`, 400);
     }
     if (deps.length > 0) {
-      const existingDeps = db
+      const existingDeps = await db
         .select({ id: tasks.id })
         .from(tasks)
-        .where(inArray(tasks.id, deps))
-        .all();
+        .where(inArray(tasks.id, deps));
       const found = new Set(existingDeps.map((r) => r.id));
       const missing = deps.filter((d) => !found.has(d));
       if (missing.length > 0) {
@@ -899,18 +867,17 @@ export function updateTask(
   if (patch.estimate !== undefined) values.estimate = patch.estimate;
   if (patch.tags !== undefined) values.tags = JSON.stringify(patch.tags);
   if (patch.repoId !== undefined) values.repoId = patch.repoId;
-  db.transaction((tx) => {
-    tx.update(tasks).set(values).where(eq(tasks.id, id)).run();
+  await db.transaction(async (tx) => {
+    await tx.update(tasks).set(values).where(eq(tasks.id, id));
     if (deps !== undefined) {
-      tx.delete(taskDependencies).where(eq(taskDependencies.taskId, id)).run();
+      await tx.delete(taskDependencies).where(eq(taskDependencies.taskId, id));
       if (deps.length > 0) {
-        tx.insert(taskDependencies)
-          .values(deps.map((d) => ({ taskId: id, dependsOnId: d })))
-          .run();
+        await tx.insert(taskDependencies)
+          .values(deps.map((d) => ({ taskId: id, dependsOnId: d })));
       }
     }
   });
-  return getTask(id)!;
+  return (await getTask(id))!;
 }
 
 export interface TransitionInput {
@@ -923,8 +890,8 @@ export interface TransitionInput {
   bypassCriteria?: boolean;
 }
 
-export function transitionTask(id: string, input: TransitionInput): TaskFull {
-  const existing = getTask(id);
+export async function transitionTask(id: string, input: TransitionInput): Promise<TaskFull> {
+  const existing = await getTask(id);
   if (!existing) throw new RepoError(`Task ${id} not found`, 404);
   const prev = existing.state;
   if (input.state !== prev) {
@@ -950,61 +917,55 @@ export function transitionTask(id: string, input: TransitionInput): TaskFull {
     }
   }
   const now = new Date();
-  db.transaction((tx) => {
-    tx.update(tasks)
+  await db.transaction(async (tx) => {
+    await tx.update(tasks)
       .set({ state: input.state, assignee: assignee ?? null, updatedAt: now })
-      .where(eq(tasks.id, id))
-      .run();
+      .where(eq(tasks.id, id));
     if (input.note || input.state !== prev) {
       const body = input.note ?? `→ ${input.state}`;
-      tx.insert(taskNotes)
-        .values({ taskId: id, author: assignee ?? "system", body, createdAt: now })
-        .run();
+      await tx.insert(taskNotes)
+        .values({ taskId: id, author: assignee ?? "system", body, createdAt: now });
     }
   });
-  return getTask(id)!;
+  return (await getTask(id))!;
 }
 
-export function deleteTask(id: string) {
-  db.delete(tasks).where(eq(tasks.id, id)).run();
+export async function deleteTask(id: string) {
+  await db.delete(tasks).where(eq(tasks.id, id));
 }
 
 // ──────────────────────────────────────────────────────────
 // Notes
 // ──────────────────────────────────────────────────────────
 
-export function addNote(taskId: string, author: string, body: string) {
-  if (!getTask(taskId)) throw new RepoError(`Task ${taskId} not found`, 404);
-  db.insert(taskNotes)
-    .values({ taskId, author, body, createdAt: new Date() })
-    .run();
-  db.update(tasks).set({ updatedAt: new Date() }).where(eq(tasks.id, taskId)).run();
+export async function addNote(taskId: string, author: string, body: string) {
+  if (!(await getTask(taskId))) throw new RepoError(`Task ${taskId} not found`, 404);
+  await db.insert(taskNotes)
+    .values({ taskId, author, body, createdAt: new Date() });
+  await db.update(tasks).set({ updatedAt: new Date() }).where(eq(tasks.id, taskId));
 }
 
 // ──────────────────────────────────────────────────────────
 // Acceptance criteria
 // ──────────────────────────────────────────────────────────
 
-export function addCriterion(taskId: string, text: string) {
-  if (!getTask(taskId)) throw new RepoError(`Task ${taskId} not found`, 404);
-  const lastPos = db
+export async function addCriterion(taskId: string, text: string) {
+  if (!(await getTask(taskId))) throw new RepoError(`Task ${taskId} not found`, 404);
+  const lastPos = (await db
     .select({ p: sql<number>`COALESCE(MAX(${acceptanceCriteria.position}), -1)` })
     .from(acceptanceCriteria)
-    .where(eq(acceptanceCriteria.taskId, taskId))
-    .get();
+    .where(eq(acceptanceCriteria.taskId, taskId)))[0];
   const pos = (lastPos?.p ?? -1) + 1;
-  db.insert(acceptanceCriteria)
-    .values({ taskId, text, done: false, position: pos })
-    .run();
-  db.update(tasks).set({ updatedAt: new Date() }).where(eq(tasks.id, taskId)).run();
+  await db.insert(acceptanceCriteria)
+    .values({ taskId, text, done: false, position: pos });
+  await db.update(tasks).set({ updatedAt: new Date() }).where(eq(tasks.id, taskId));
 }
 
-export function updateCriterion(criterionId: number, patch: { done?: boolean; text?: string }) {
-  const row = db
+export async function updateCriterion(criterionId: number, patch: { done?: boolean; text?: string }) {
+  const row = (await db
     .select()
     .from(acceptanceCriteria)
-    .where(eq(acceptanceCriteria.id, criterionId))
-    .get();
+    .where(eq(acceptanceCriteria.id, criterionId)))[0];
   if (!row) throw new RepoError(`Criterion ${criterionId} not found`, 404);
   const values: Record<string, unknown> = {};
   if (patch.done !== undefined) values.done = patch.done;
@@ -1012,19 +973,18 @@ export function updateCriterion(criterionId: number, patch: { done?: boolean; te
   // An empty patch would make drizzle throw 'No values to set' (→ HTTP 500).
   // Treat it as a no-op instead. (updateCriterionSchema also refines this away.)
   if (Object.keys(values).length === 0) return;
-  db.update(acceptanceCriteria).set(values).where(eq(acceptanceCriteria.id, criterionId)).run();
-  db.update(tasks).set({ updatedAt: new Date() }).where(eq(tasks.id, row.taskId)).run();
+  await db.update(acceptanceCriteria).set(values).where(eq(acceptanceCriteria.id, criterionId));
+  await db.update(tasks).set({ updatedAt: new Date() }).where(eq(tasks.id, row.taskId));
 }
 
-export function deleteCriterion(criterionId: number) {
-  const row = db
+export async function deleteCriterion(criterionId: number) {
+  const row = (await db
     .select()
     .from(acceptanceCriteria)
-    .where(eq(acceptanceCriteria.id, criterionId))
-    .get();
+    .where(eq(acceptanceCriteria.id, criterionId)))[0];
   if (!row) return;
-  db.delete(acceptanceCriteria).where(eq(acceptanceCriteria.id, criterionId)).run();
-  db.update(tasks).set({ updatedAt: new Date() }).where(eq(tasks.id, row.taskId)).run();
+  await db.delete(acceptanceCriteria).where(eq(acceptanceCriteria.id, criterionId));
+  await db.update(tasks).set({ updatedAt: new Date() }).where(eq(tasks.id, row.taskId));
 }
 
 // ──────────────────────────────────────────────────────────
@@ -1051,7 +1011,7 @@ export interface AddAttachmentInput {
   author: string;
 }
 
-export function addAttachment(input: AddAttachmentInput): AttachmentMeta {
+export async function addAttachment(input: AddAttachmentInput): Promise<AttachmentMeta> {
   const planId = input.planId ?? null;
   const taskId = input.taskId ?? null;
   if ((planId === null) === (taskId === null)) {
@@ -1060,10 +1020,10 @@ export function addAttachment(input: AddAttachmentInput): AttachmentMeta {
       400
     );
   }
-  if (planId !== null && !getPlan(planId)) {
+  if (planId !== null && !(await getPlan(planId))) {
     throw new RepoError(`Plan ${planId} not found`, 404);
   }
-  if (taskId !== null && !getTask(taskId)) {
+  if (taskId !== null && !(await getTask(taskId))) {
     throw new RepoError(`Task ${taskId} not found`, 404);
   }
   const filename = input.filename.trim() || "attachment";
@@ -1078,7 +1038,7 @@ export function addAttachment(input: AddAttachmentInput): AttachmentMeta {
     );
   }
   const now = new Date();
-  const inserted = db
+  const inserted = await db
     .insert(attachments)
     .values({
       planId,
@@ -1101,13 +1061,12 @@ export function addAttachment(input: AddAttachmentInput): AttachmentMeta {
       sizeBytes: attachments.sizeBytes,
       author: attachments.author,
       createdAt: attachments.createdAt,
-    })
-    .all();
+    });
   // Touch the owner's updated_at so list views re-sort and SSR re-renders.
   if (planId !== null) {
-    db.update(plans).set({ updatedAt: now }).where(eq(plans.id, planId)).run();
+    await db.update(plans).set({ updatedAt: now }).where(eq(plans.id, planId));
   } else if (taskId !== null) {
-    db.update(tasks).set({ updatedAt: now }).where(eq(tasks.id, taskId)).run();
+    await db.update(tasks).set({ updatedAt: now }).where(eq(tasks.id, taskId));
   }
   return toAttachmentMeta(inserted[0]);
 }
@@ -1117,23 +1076,21 @@ export interface ListAttachmentsFilter {
   taskId?: string;
 }
 
-export function listAttachments(filter: ListAttachmentsFilter): AttachmentMeta[] {
+export async function listAttachments(filter: ListAttachmentsFilter): Promise<AttachmentMeta[]> {
   if (filter.taskId) return attachmentsForTask(filter.taskId);
   if (filter.planId) return attachmentsForPlan(filter.planId);
-  return db
+  return (await db
     .select(ATTACHMENT_META_COLUMNS)
     .from(attachments)
-    .orderBy(desc(attachments.id))
-    .all()
+    .orderBy(desc(attachments.id)))
     .map(toAttachmentMeta);
 }
 
-export function getAttachmentMeta(id: number): AttachmentMeta | null {
-  const row = db
+export async function getAttachmentMeta(id: number): Promise<AttachmentMeta | null> {
+  const row = (await db
     .select(ATTACHMENT_META_COLUMNS)
     .from(attachments)
-    .where(eq(attachments.id, id))
-    .get();
+    .where(eq(attachments.id, id)))[0];
   return row ? toAttachmentMeta(row) : null;
 }
 
@@ -1142,8 +1099,8 @@ export interface AttachmentWithContent extends AttachmentMeta {
 }
 
 /** Full attachment including the BLOB bytes — for downloads and the agent. */
-export function getAttachment(id: number): AttachmentWithContent | null {
-  const row = db.select().from(attachments).where(eq(attachments.id, id)).get();
+export async function getAttachment(id: number): Promise<AttachmentWithContent | null> {
+  const row = (await db.select().from(attachments).where(eq(attachments.id, id)))[0];
   if (!row) return null;
   return {
     ...toAttachmentMeta(row as AttachmentRow),
@@ -1151,19 +1108,18 @@ export function getAttachment(id: number): AttachmentWithContent | null {
   };
 }
 
-export function deleteAttachment(id: number) {
-  const row = db
+export async function deleteAttachment(id: number) {
+  const row = (await db
     .select({ id: attachments.id, planId: attachments.planId, taskId: attachments.taskId })
     .from(attachments)
-    .where(eq(attachments.id, id))
-    .get();
+    .where(eq(attachments.id, id)))[0];
   if (!row) return;
   const now = new Date();
-  db.delete(attachments).where(eq(attachments.id, id)).run();
+  await db.delete(attachments).where(eq(attachments.id, id));
   if (row.planId) {
-    db.update(plans).set({ updatedAt: now }).where(eq(plans.id, row.planId)).run();
+    await db.update(plans).set({ updatedAt: now }).where(eq(plans.id, row.planId));
   } else if (row.taskId) {
-    db.update(tasks).set({ updatedAt: now }).where(eq(tasks.id, row.taskId)).run();
+    await db.update(tasks).set({ updatedAt: now }).where(eq(tasks.id, row.taskId));
   }
 }
 
@@ -1203,17 +1159,16 @@ export function repoIdFromName(name: string): string {
   return `R-${slugify(name)}`;
 }
 
-export function listRepositories(): RepositoryRow[] {
-  return db
+export async function listRepositories(): Promise<RepositoryRow[]> {
+  return (await db
     .select()
     .from(repositories)
-    .orderBy(asc(repositories.id))
-    .all()
+    .orderBy(asc(repositories.id)))
     .map(hydrateRepository);
 }
 
-export function getRepository(id: string): RepositoryRow | null {
-  const row = db.select().from(repositories).where(eq(repositories.id, id)).get();
+export async function getRepository(id: string): Promise<RepositoryRow | null> {
+  const row = (await db.select().from(repositories).where(eq(repositories.id, id)))[0];
   return row ? hydrateRepository(row) : null;
 }
 
@@ -1226,15 +1181,15 @@ export interface CreateRepositoryInput {
   description?: string;
 }
 
-export function createRepository(input: CreateRepositoryInput): RepositoryRow {
+export async function createRepository(input: CreateRepositoryInput): Promise<RepositoryRow> {
   if (!input.name.trim()) throw new RepoError("Repository name is required", 400);
   const id = input.id?.trim() || repoIdFromName(input.name);
   if (!id) throw new RepoError("Repository id could not be derived", 400);
-  if (db.select().from(repositories).where(eq(repositories.id, id)).get()) {
+  if ((await db.select().from(repositories).where(eq(repositories.id, id)))[0]) {
     throw new RepoError(`Repository ${id} already exists`, 409);
   }
   const now = new Date();
-  db.insert(repositories)
+  await db.insert(repositories)
     .values({
       id,
       name: input.name.trim(),
@@ -1244,9 +1199,8 @@ export function createRepository(input: CreateRepositoryInput): RepositoryRow {
       description: input.description ?? "",
       createdAt: now,
       updatedAt: now,
-    })
-    .run();
-  return getRepository(id)!;
+    });
+  return (await getRepository(id))!;
 }
 
 export interface UpdateRepositoryInput {
@@ -1257,8 +1211,8 @@ export interface UpdateRepositoryInput {
   description?: string;
 }
 
-export function updateRepository(id: string, patch: UpdateRepositoryInput): RepositoryRow {
-  const existing = getRepository(id);
+export async function updateRepository(id: string, patch: UpdateRepositoryInput): Promise<RepositoryRow> {
+  const existing = await getRepository(id);
   if (!existing) throw new RepoError(`Repository ${id} not found`, 404);
   const values: Record<string, unknown> = { updatedAt: new Date() };
   if (patch.name !== undefined) {
@@ -1277,61 +1231,59 @@ export function updateRepository(id: string, patch: UpdateRepositoryInput): Repo
     values.defaultBranch = v;
   }
   if (patch.description !== undefined) values.description = patch.description;
-  db.update(repositories).set(values).where(eq(repositories.id, id)).run();
-  return getRepository(id)!;
+  await db.update(repositories).set(values).where(eq(repositories.id, id));
+  return (await getRepository(id))!;
 }
 
-export function deleteRepository(id: string) {
-  const existing = getRepository(id);
+export async function deleteRepository(id: string) {
+  const existing = await getRepository(id);
   if (!existing) return;
   // Block deletion if anything still references this repo — orphaning is
   // worse than the friction of an explicit reassignment.
-  const planRefs = db
+  const planRefs = await db
     .select({ planId: planRepositories.planId })
     .from(planRepositories)
-    .where(eq(planRepositories.repoId, id))
-    .all();
+    .where(eq(planRepositories.repoId, id));
   // Since 0009, chats are folded into agent_runs. A chat-derived run is one
   // with legacy_chat_id IS NOT NULL; newly-created chat runs (post-0009)
   // also fit the same shape with goal='<chat>'. Both block deletion the
   // same way agent task runs do via the agentSessions FK.
-  const runRefs = db
+  const runRefs = await db
     .select({ id: agentSessions.id })
     .from(agentSessions)
-    .where(eq(agentSessions.repoId, id))
-    .all();
+    .where(eq(agentSessions.repoId, id));
   if (planRefs.length > 0 || runRefs.length > 0) {
     throw new RepoError(
       `Cannot delete ${id}: ${planRefs.length} plan(s) and ${runRefs.length} run(s) still reference it. Reassign them first.`,
       409
     );
   }
-  db.delete(repositories).where(eq(repositories.id, id)).run();
+  await db.delete(repositories).where(eq(repositories.id, id));
 }
 
 // Resolution helpers — single source of truth for "which repo does this run
 // in?". Used by lib/agent.ts (task.repoId pinned at creation) and lib/chat.ts
 // (chat.repoId). If a task has no repoId, the agent should escalate rather
 // than guess — see the comment on createTask for the resolution rule.
-export function resolveRepoForTask(taskId: string): RepositoryRow | null {
-  const task = getTask(taskId);
+export async function resolveRepoForTask(taskId: string): Promise<RepositoryRow | null> {
+  const task = await getTask(taskId);
   if (!task?.repoId) return null;
-  return getRepository(task.repoId);
+  return await getRepository(task.repoId);
 }
 
-export function defaultRepoId(): string | null {
+export async function defaultRepoId(): Promise<string | null> {
   // Default repo for newly-created plans/chats: prefer R-default if it's
   // configured (has a local_path), otherwise the first repository with a
   // local_path, otherwise null.
-  const seeded = getRepository(DEFAULT_REPO_ID);
+  const seeded = await getRepository(DEFAULT_REPO_ID);
   if (seeded?.localPath) return seeded.id;
-  const first = listRepositories().find((r) => r.localPath) ?? listRepositories()[0];
+  const first = (await listRepositories()).find((r) => r.localPath) ?? (await listRepositories())[0];
   return first?.id ?? null;
 }
 
-export function defaultRepo(): RepositoryRow | null {
-  const id = defaultRepoId();
-  return id ? getRepository(id) : null;
+export async function defaultRepo(): Promise<RepositoryRow | null> {
+  const id = await defaultRepoId();
+  return id ? await getRepository(id) : null;
 }
 
 // ──────────────────────────────────────────────────────────
@@ -1350,27 +1302,26 @@ export interface PersonaUpsert {
   budgetMaxSeconds?: number | null;
 }
 
-export function getPersona(id: string): Persona | null {
-  const row = db.select().from(personasTable).where(eq(personasTable.id, id)).get();
+export async function getPersona(id: string): Promise<Persona | null> {
+  const row = (await db.select().from(personasTable).where(eq(personasTable.id, id)))[0];
   return row ?? null;
 }
 
-export function listPersonaIds(): string[] {
-  return db
+export async function listPersonaIds(): Promise<string[]> {
+  return (await db
     .select({ id: personasTable.id })
     .from(personasTable)
-    .orderBy(asc(personasTable.id))
-    .all()
+    .orderBy(asc(personasTable.id)))
     .map((r) => r.id);
 }
 
-export function listPersonas(): Persona[] {
-  return db.select().from(personasTable).orderBy(asc(personasTable.id)).all();
+export async function listPersonas(): Promise<Persona[]> {
+  return await db.select().from(personasTable).orderBy(asc(personasTable.id));
 }
 
-export function upsertPersona(p: PersonaUpsert): void {
+export async function upsertPersona(p: PersonaUpsert): Promise<void> {
   const now = new Date();
-  db.insert(personasTable)
+  await db.insert(personasTable)
     .values({
       id: p.id,
       name: p.name,
@@ -1397,26 +1348,24 @@ export function upsertPersona(p: PersonaUpsert): void {
         budgetMaxSeconds: p.budgetMaxSeconds ?? null,
         updatedAt: now,
       },
-    })
-    .run();
+    });
 }
 
-export function getPersonaMemory(personaId: string, scope: string): string | null {
-  const row = db
+export async function getPersonaMemory(personaId: string, scope: string): Promise<string | null> {
+  const row = (await db
     .select({ body: personaMemories.body })
     .from(personaMemories)
-    .where(and(eq(personaMemories.personaId, personaId), eq(personaMemories.scope, scope)))
-    .get();
+    .where(and(eq(personaMemories.personaId, personaId), eq(personaMemories.scope, scope))))[0];
   return row ? row.body : null;
 }
 
-export function appendPersonaMemory(personaId: string, scope: string, note: string): void {
+export async function appendPersonaMemory(personaId: string, scope: string, note: string): Promise<void> {
   const now = new Date();
   const trimmed = note.trim();
   if (!trimmed) return;
   const firstBullet = `- ${trimmed}`;
   const appendFragment = `\n- ${trimmed}`;
-  db.insert(personaMemories)
+  await db.insert(personaMemories)
     .values({ personaId, scope, body: firstBullet, updatedAt: now })
     .onConflictDoUpdate({
       target: [personaMemories.personaId, personaMemories.scope],
@@ -1424,32 +1373,29 @@ export function appendPersonaMemory(personaId: string, scope: string, note: stri
         body: sql`${personaMemories.body} || ${appendFragment}`,
         updatedAt: now,
       },
-    })
-    .run();
+    });
 }
 
-export function removePersonaMemoryLine(
+export async function removePersonaMemoryLine(
   personaId: string,
   scope: string,
   match: string
-): number {
-  const body = getPersonaMemory(personaId, scope);
+): Promise<number> {
+  const body = await getPersonaMemory(personaId, scope);
   if (!body) return 0;
   const lines = body.split("\n");
   const kept = lines.filter((l) => !l.includes(match));
   const removed = lines.length - kept.length;
   if (removed === 0) return 0;
   if (kept.length === 0) {
-    db.delete(personaMemories)
-      .where(and(eq(personaMemories.personaId, personaId), eq(personaMemories.scope, scope)))
-      .run();
+    await db.delete(personaMemories)
+      .where(and(eq(personaMemories.personaId, personaId), eq(personaMemories.scope, scope)));
     return removed;
   }
   const now = new Date();
-  db.update(personaMemories)
+  await db.update(personaMemories)
     .set({ body: kept.join("\n"), updatedAt: now })
-    .where(and(eq(personaMemories.personaId, personaId), eq(personaMemories.scope, scope)))
-    .run();
+    .where(and(eq(personaMemories.personaId, personaId), eq(personaMemories.scope, scope)));
   return removed;
 }
 
@@ -1463,12 +1409,11 @@ export type { PlanningStage };
  * Advance the planning_stage on an agent_runs row, enforcing the state
  * machine defined in PLANNING_STAGE_TRANSITIONS.
  */
-export function setPlanningStage(runId: number, stage: PlanningStage): void {
-  const row = db
+export async function setPlanningStage(runId: number, stage: PlanningStage): Promise<void> {
+  const row = (await db
     .select({ planningStage: agentSessions.planningStage })
     .from(agentSessions)
-    .where(eq(agentSessions.id, runId))
-    .get();
+    .where(eq(agentSessions.id, runId)))[0];
   const current = (row?.planningStage as PlanningStage | null) ?? "gathering";
   const allowed = PLANNING_STAGE_TRANSITIONS[current];
   if (!allowed.includes(stage)) {
@@ -1477,8 +1422,7 @@ export function setPlanningStage(runId: number, stage: PlanningStage): void {
       409
     );
   }
-  db.update(agentSessions)
+  await db.update(agentSessions)
     .set({ planningStage: stage })
-    .where(eq(agentSessions.id, runId))
-    .run();
+    .where(eq(agentSessions.id, runId));
 }

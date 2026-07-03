@@ -29,12 +29,12 @@ async function main() {
     return;
   }
 
-  if (repo.getPlan(SEED_PLAN_ID)) {
+  if (await repo.getPlan(SEED_PLAN_ID)) {
     console.log(`Seed plan ${SEED_PLAN_ID} already exists — skipping.`);
     return;
   }
   console.log("Seeding demo data…");
-  const plan = repo.createPlan({
+  const plan = await repo.createPlan({
     id: SEED_PLAN_ID,
     title: "Markdown Task System",
     state: "accepted",
@@ -104,7 +104,7 @@ async function main() {
   let i = 1;
   const ids: string[] = [];
   for (const t of tasks) {
-    const task = repo.createTask({
+    const task = await repo.createTask({
       id: `T-20260511-${String(i).padStart(4, "0")}`,
       planId: plan.id,
       title: t.title,
@@ -116,13 +116,13 @@ async function main() {
     console.log(`  + ${task.id}  ${task.title}`);
     if (t.state === "done") {
       // Tick all criteria, then move through review → done.
-      const full = repo.getTask(task.id)!;
-      for (const c of full.criteria) repo.updateCriterion(c.id, { done: true });
-      repo.transitionTask(task.id, { state: "in_progress", assignee: "claude" });
-      repo.transitionTask(task.id, { state: "review" });
-      repo.transitionTask(task.id, { state: "done" });
+      const full = (await repo.getTask(task.id))!;
+      for (const c of full.criteria) await repo.updateCriterion(c.id, { done: true });
+      await repo.transitionTask(task.id, { state: "in_progress", assignee: "claude" });
+      await repo.transitionTask(task.id, { state: "review" });
+      await repo.transitionTask(task.id, { state: "done" });
     } else if (t.state === "in_progress") {
-      repo.transitionTask(task.id, { state: "in_progress", assignee: t.assignee });
+      await repo.transitionTask(task.id, { state: "in_progress", assignee: t.assignee });
     }
     i++;
   }

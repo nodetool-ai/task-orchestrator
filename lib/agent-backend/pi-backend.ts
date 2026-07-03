@@ -146,6 +146,14 @@ export class PiBackend implements AgentBackend {
     let totalCostUsd: number | null = null;
     let turns = 0;
 
+    // onEvent persists each envelope to the DB (async). session.subscribe fires
+    // its callback synchronously and does not await it, so we serialize the
+    // persists through a chain to keep them in stream order, then drain it below.
+    // The first persist failure is captured so it can (a) abort the turn promptly
+    // rather than only surfacing at the final await, and (b) be re-thrown there.
+    let persistChain: Promise<void> = Promise.resolve();
+    let persistError: unknown = null;
+
     const stop = session.subscribe((rawEv: any) => {
       if (abort.signal.aborted) return;
       if (rawEv.type === "turn_end") turns += 1;
@@ -156,7 +164,13 @@ export class PiBackend implements AgentBackend {
           env.session_id = `${TAG}${env.session_id}`;
         }
         envelopes.push(env);
-        onEvent(env);
+        persistChain = persistChain.then(() => onEvent(env));
+        // Observe each step so a persist rejection can't sit unhandled, and abort
+        // the turn on the first failure. persistError is re-thrown after the drain.
+        persistChain.catch((err) => {
+          if (persistError == null) persistError = err;
+          if (!abort.signal.aborted) abort.abort();
+        });
 
         if (env.type === "assistant" && env.message?.content) {
           const text = env.message.content
@@ -179,6 +193,10 @@ export class PiBackend implements AgentBackend {
     } finally {
       stop();
     }
+    // Wait for every persist to settle (rejections were already observed +
+    // aborted per-step above), then surface the first failure to the caller.
+    await persistChain.catch(() => {});
+    if (persistError != null) throw persistError;
 
     // pi resolves prompt() normally even when the turn was aborted, so signal
     // the cancellation by throwing here. lib/runs.ts's append loop checks

@@ -96,7 +96,7 @@ export function buildExecutePrompt(plan: PlanFull, tasks: TaskFull[]): string {
  * the runner (lib/runs.ts) call into here so what the user sees in the
  * modal is exactly what the agent receives.
  */
-export function buildImplementPrompt(task: TaskFull): string {
+export async function buildImplementPrompt(task: TaskFull): Promise<string> {
   const lines: string[] = [];
   lines.push(`You are an autonomous coding agent working on task ${task.id}.`);
   lines.push("");
@@ -134,7 +134,7 @@ export function buildImplementPrompt(task: TaskFull): string {
   // snapshot of sibling tasks so the agent knows what's already shipped
   // and what's still open. The agent can fetch more detail via
   // mcp__task_orch__get_plan / get_task; this is proactive lookahead.
-  const plan = repo.getPlan(task.planId);
+  const plan = await repo.getPlan(task.planId);
   if (plan) {
     lines.push("");
     lines.push(`# Parent plan: ${plan.id} — ${plan.title}`);
@@ -150,8 +150,8 @@ export function buildImplementPrompt(task: TaskFull): string {
           : body;
       lines.push(capped);
     }
-    const siblings = repo
-      .listTasks({ planId: plan.id })
+    const siblings = (await repo
+      .listTasks({ planId: plan.id }))
       .filter((t) => t.id !== task.id);
     if (siblings.length > 0) {
       lines.push("");
@@ -234,13 +234,13 @@ export interface ImplementTemplate {
   taskId: string;
 }
 
-export function implementTemplate(task: TaskFull): ImplementTemplate {
+export async function implementTemplate(task: TaskFull): Promise<ImplementTemplate> {
   return {
     goal: "<implement>",
     toolsProfile: "orchestrator,repo_write",
     cwdStrategy: "worktree",
     budget: { maxUsd: IMPLEMENT_DEFAULT_BUDGET_USD },
-    initialPrompt: buildImplementPrompt(task),
+    initialPrompt: await buildImplementPrompt(task),
     taskId: task.id,
   };
 }

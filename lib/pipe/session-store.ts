@@ -38,16 +38,17 @@ function isDanglingRun(run: runs.RunRow): boolean {
 }
 
 /** Find the existing run for (channel, externalId), or create a fresh chat run. */
-export function getOrCreateRun(
+export async function getOrCreateRun(
   channel: string,
   externalId: string,
   opts: GetOrCreateOptions = {}
-): number {
-  const existing = db
-    .select()
-    .from(channelThreads)
-    .where(and(eq(channelThreads.channel, channel), eq(channelThreads.externalId, externalId)))
-    .get();
+): Promise<number> {
+  const existing = (
+    await db
+      .select()
+      .from(channelThreads)
+      .where(and(eq(channelThreads.channel, channel), eq(channelThreads.externalId, externalId)))
+  )[0];
 
   // Guard against a dangling mapping. Two ways a mapping goes dangling:
   //   • the run row was deleted out from under us (ON DELETE CASCADE should
@@ -58,33 +59,37 @@ export function getOrCreateRun(
   //     that un-actionable error instead of starting a usable conversation.
   // In both cases drop the mapping and fall through to create a fresh run.
   if (existing) {
-    const run = runs.getRun(existing.runId);
+    const run = await runs.getRun(existing.runId);
     if (run && !isDanglingRun(run)) return existing.runId;
-    db.delete(channelThreads).where(eq(channelThreads.id, existing.id)).run();
+    await db.delete(channelThreads).where(eq(channelThreads.id, existing.id));
   }
 
   // Leave the title at createChat's "New chat" default (unless a caller overrides
   // it) so runChat auto-titles the run from the first user message — the web
   // /runs list then shows the conversation topic instead of a raw channel id.
-  const created = chat.createChat(null, opts.title, repo.defaultRepoId());
-  if (opts.model) chat.updateChatSettings(created.id, { model: opts.model });
-  db.insert(channelThreads).values({ channel, externalId, runId: created.id }).run();
+  const created = await chat.createChat(null, opts.title, await repo.defaultRepoId());
+  if (opts.model) await chat.updateChatSettings(created.id, { model: opts.model });
+  await db.insert(channelThreads).values({ channel, externalId, runId: created.id });
   return created.id;
 }
 
 /** Drop the mapping so the next message starts a brand-new run (/new, /reset). */
-export function resetThread(channel: string, externalId: string): void {
-  db.delete(channelThreads)
-    .where(and(eq(channelThreads.channel, channel), eq(channelThreads.externalId, externalId)))
-    .run();
+export async function resetThread(channel: string, externalId: string): Promise<void> {
+  await db
+    .delete(channelThreads)
+    .where(and(eq(channelThreads.channel, channel), eq(channelThreads.externalId, externalId)));
 }
 
 /** Current run id for a conversation, or null if none is mapped yet. */
-export function currentRunId(channel: string, externalId: string): number | null {
-  const row = db
-    .select({ runId: channelThreads.runId })
-    .from(channelThreads)
-    .where(and(eq(channelThreads.channel, channel), eq(channelThreads.externalId, externalId)))
-    .get();
+export async function currentRunId(
+  channel: string,
+  externalId: string
+): Promise<number | null> {
+  const row = (
+    await db
+      .select({ runId: channelThreads.runId })
+      .from(channelThreads)
+      .where(and(eq(channelThreads.channel, channel), eq(channelThreads.externalId, externalId)))
+  )[0];
   return row?.runId ?? null;
 }

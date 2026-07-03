@@ -11,7 +11,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const task = repo.getTask(id);
+    const task = await repo.getTask(id);
     if (!task) return NextResponse.json({ error: "Not found" }, { status: 404 });
     return NextResponse.json(task);
   } catch (e) {
@@ -26,7 +26,7 @@ export async function PATCH(
   try {
     const { id } = await params;
     const patch = updateTaskSchema.parse(await req.json());
-    return NextResponse.json(repo.updateTask(id, patch));
+    return NextResponse.json(await repo.updateTask(id, patch));
   } catch (e) {
     return errorResponse(e);
   }
@@ -38,7 +38,7 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    repo.deleteTask(id);
+    await repo.deleteTask(id);
     return new NextResponse(null, { status: 204 });
   } catch (e) {
     return errorResponse(e);

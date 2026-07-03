@@ -18,9 +18,9 @@ export async function GET(
   try {
     const { id } = await params;
     const uid = await userId();
-    const c = chat.getChat(Number(id), uid);
+    const c = await chat.getChat(Number(id), uid);
     if (!c) return NextResponse.json({ error: "Not found" }, { status: 404 });
-    const messages = chat.listMessages(c.id);
+    const messages = await chat.listMessages(c.id);
     return NextResponse.json({ chat: c, messages });
   } catch (e) {
     return errorResponse(e);
@@ -34,7 +34,7 @@ export async function DELETE(
   try {
     const { id } = await params;
     const uid = await userId();
-    chat.deleteChat(Number(id), uid);
+    await chat.deleteChat(Number(id), uid);
     return new NextResponse(null, { status: 204 });
   } catch (e) {
     return errorResponse(e);
@@ -69,8 +69,8 @@ export async function PATCH(
         typeof body.repoId === "string" && body.repoId.trim() ? body.repoId.trim() : null;
     }
 
-    chat.updateChatSettings(Number(id), patch, uid);
-    return NextResponse.json(chat.getChat(Number(id), uid));
+    await chat.updateChatSettings(Number(id), patch, uid);
+    return NextResponse.json(await chat.getChat(Number(id), uid));
   } catch (e) {
     return errorResponse(e);
   }

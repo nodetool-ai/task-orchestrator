@@ -25,31 +25,30 @@ function fakeBackend() {
 }
 
 // Simulate dispatchRun's atomic claim: preparing + fresh heartbeat.
-function claim(id: number) {
-  db.update(agentSessions)
+async function claim(id: number) {
+  await db.update(agentSessions)
     .set({ status: "preparing", heartbeatAt: new Date() })
-    .where(eq(agentSessions.id, id))
-    .run();
+    .where(eq(agentSessions.id, id));
 }
 
 describe("dispatched-worker takeover of its own preparing claim", () => {
   it("WITHOUT takeover, rejects the preparing claim (the wedge)", async () => {
-    const run = create({ goal: "<chat>", defer: true });
-    claim(run.id);
+    const run = await create({ goal: "<chat>", defer: true });
+    await claim(run.id);
     const events: any[] = [];
     for await (const ev of append({ runId: run.id, role: "user", text: "go" })) events.push(ev);
     expect(events.some((e) => e.type === "error" && /already in flight/.test(e.error))).toBe(true);
-    expect(get(run.id)!.status).toBe("preparing"); // still wedged
+    expect((await get(run.id))!.status).toBe("preparing"); // still wedged
   });
 
   it("WITH takeover, adopts the claim and drives the turn off 'preparing'", async () => {
     vi.spyOn(backend, "getBackend").mockResolvedValue(fakeBackend());
-    const run = create({ goal: "<chat>", defer: true });
-    claim(run.id);
+    const run = await create({ goal: "<chat>", defer: true });
+    await claim(run.id);
     const events: any[] = [];
     for await (const ev of append({ runId: run.id, role: "user", text: "go", takeover: true })) events.push(ev);
     expect(events.some((e) => e.type === "error" && /already in flight/.test(e.error))).toBe(false);
-    expect(get(run.id)!.status).not.toBe("preparing"); // proceeded past the guard
+    expect((await get(run.id))!.status).not.toBe("preparing"); // proceeded past the guard
     vi.restoreAllMocks();
   });
 });

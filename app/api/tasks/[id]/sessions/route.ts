@@ -11,7 +11,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    return NextResponse.json(agent.listSessions(id));
+    return NextResponse.json(await agent.listSessions(id));
   } catch (e) {
     return errorResponse(e);
   }
@@ -25,7 +25,7 @@ export async function POST(
     const { id } = await params;
     const body = req.headers.get("content-length") === "0" ? {} : await req.json().catch(() => ({}));
     const input = startSessionSchema.parse(body);
-    const session = agent.startSession({
+    const session = await agent.startSession({
       taskId: id,
       model: input.model,
       baseBranch: input.baseBranch,

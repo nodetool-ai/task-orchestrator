@@ -12,8 +12,8 @@ export async function POST(
   try {
     const { id } = await params;
     const input = addCriterionSchema.parse(await req.json());
-    repo.addCriterion(id, input.text);
-    return NextResponse.json(repo.getTask(id));
+    await repo.addCriterion(id, input.text);
+    return NextResponse.json(await repo.getTask(id));
   } catch (e) {
     return errorResponse(e);
   }

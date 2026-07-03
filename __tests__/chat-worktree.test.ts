@@ -10,21 +10,21 @@ import { isImplementWorktree, worktreeBranchName } from "../lib/runs";
 // must work taskless: a `claude/chat-<id>` branch, no auto-push, no PR, and an
 // `idle`/resumable lifecycle.
 
-beforeEach(() => {
-  seedPersonas();
-  db.delete(agentSessions).run();
-  db.delete(tasks).run();
-  db.delete(plans).run();
+beforeEach(async () => {
+  await seedPersonas();
+  await db.delete(agentSessions);
+  await db.delete(tasks);
+  await db.delete(plans);
 });
 
 describe("createChat cwd strategy", () => {
-  it("defaults to 'worktree' so every chat (web + Discord) is isolated", () => {
-    const c = chat.createChat(null, "New chat", null);
+  it("defaults to 'worktree' so every chat (web + Discord) is isolated", async () => {
+    const c = await chat.createChat(null, "New chat", null);
     expect(c.cwdStrategy).toBe("worktree");
   });
 
-  it("honors an explicit override", () => {
-    const c = chat.createChat(null, "scratch", null, "none");
+  it("honors an explicit override", async () => {
+    const c = await chat.createChat(null, "scratch", null, "none");
     expect(c.cwdStrategy).toBe("none");
   });
 });

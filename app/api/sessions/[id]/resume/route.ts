@@ -12,14 +12,14 @@ export async function POST(
   try {
     const { id } = await params;
     const priorId = parseInt(id, 10);
-    const prior = agent.getSession(priorId);
+    const prior = await agent.getSession(priorId);
     if (!prior) return NextResponse.json({ error: "Not found" }, { status: 404 });
     const raw =
       req.headers.get("content-length") === "0"
         ? {}
         : await req.json().catch(() => ({}));
     const input = startSessionSchema.parse(raw);
-    const session = agent.startSession({
+    const session = await agent.startSession({
       taskId: prior.taskId,
       model: input.model ?? prior.model ?? undefined,
       baseBranch: input.baseBranch,

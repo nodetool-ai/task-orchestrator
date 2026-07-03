@@ -12,11 +12,11 @@ import * as repo from "@/lib/repo";
  * Use this when you want to push a code-driven persona definition and
  * discard UI edits.
  */
-export function seedPersonas(opts: { force?: boolean } = {}): void {
+export async function seedPersonas(opts: { force?: boolean } = {}): Promise<void> {
   const force = opts.force === true;
   for (const p of PERSONAS) {
-    if (!force && repo.getPersona(p.id)) continue;
-    repo.upsertPersona({
+    if (!force && (await repo.getPersona(p.id))) continue;
+    await repo.upsertPersona({
       id: p.id,
       name: p.name,
       description: p.description,

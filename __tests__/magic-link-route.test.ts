@@ -16,11 +16,10 @@ function makeReq(body: unknown): NextRequest {
 }
 
 describe("POST /api/auth/magic-link", () => {
-  beforeEach(() => {
-    db.delete(users).run();
-    db.insert(users)
-      .values({ email: EXISTING_EMAIL, passwordHash: "x" })
-      .run();
+  beforeEach(async () => {
+    await db.delete(users);
+    await db.insert(users)
+      .values({ email: EXISTING_EMAIL, passwordHash: "x" });
   });
 
   afterEach(() => {

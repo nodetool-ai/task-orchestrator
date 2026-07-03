@@ -29,10 +29,22 @@ export async function register(): Promise<void> {
     // no-op'ing the reconcile in production. The try/catch keeps a reconcile
     // *runtime* error from crashing server boot.
     try {
+      // Postgres: migrations + seeding no longer run at import time (the client
+      // connects lazily), so apply them here before anything touches the DB.
+      const dbMod = await import("./db");
+      await dbMod.initDb();
       const runsMod = await import("./lib/runs");
-      runsMod.reconcileOrphanedRuns();
+      await runsMod.reconcileOrphanedRuns();
+      // Start the pending-run pump: it re-dispatches runs the admission gate
+      // deferred for lack of host memory AND reaps stale leases every tick (so an
+      // OOM-killed worker's run recovers without waiting for a restart — the
+      // boot-only reconcile above can't). No-op off the containerized path. Literal
+      // import (no webpackIgnore / variable specifier) so it bundles into the prod
+      // server chunk; see the reconcile note above.
+      const dispatchMod = await import("./lib/run-dispatch");
+      dispatchMod.startPendingRunPump();
     } catch (err) {
-      console.error("[instrumentation] boot reconcile failed:", err);
+      console.error("[instrumentation] boot init/reconcile failed:", err);
     }
 
     // Optional hourly worktree-GC sweep. Kept behind the env flag AND a

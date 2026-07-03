@@ -47,7 +47,7 @@ import {
   extractReviewOutcome,
   parseReviewVerdict,
 } from "./run-templates";
-import { parsePrUrl } from "./gh-url";
+import { parsePrUrl, ownerRepoFromRemote } from "./gh-url";
 import { assistantText, toolResults, type SdkContentBlock } from "./sdk-message";
 import type { AgentSessionFull, RepositoryRow, SessionStatus } from "./types";
 import { isTerminalStatus, SESSION_STATUSES } from "./types";
@@ -72,7 +72,14 @@ import * as runDispatch from "./run-dispatch";
 // `isLeaseLive`, and `setError` are hoisted function declarations, so they are
 // safe to reference at module-init time. `failRun` lets a failed worker spawn
 // mark the run failed (status + event) instead of wedging it in 'preparing'.
-runDispatch.__setRunsApi({ get, isLeaseLive, failRun: setError });
+runDispatch.__setRunsApi({
+  get,
+  isLeaseLive,
+  failRun: setError,
+  countInFlightWorkers,
+  listPendingRunIds,
+  reconcileOrphanedRuns,
+});
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
@@ -264,7 +271,7 @@ function getLock(runId: number): PerRunLock {
 // CRUD: create / list / get
 // ──────────────────────────────────────────────────────────
 
-export function create(input: CreateRunInput): RunRow {
+export async function create(input: CreateRunInput): Promise<RunRow> {
   const goal = input.goal ?? "<chat>";
   const cwdStrategy: CwdStrategy =
     input.cwdStrategy ??
@@ -286,24 +293,24 @@ export function create(input: CreateRunInput): RunRow {
   // cwd resolver falls back to the orchestrator checkout.
   let repoId: string | null = input.repoId ?? null;
   if (!repoId && input.taskId) {
-    const t = repo.getTask(input.taskId);
+    const t = await repo.getTask(input.taskId);
     if (t?.repoId) repoId = t.repoId;
   }
   if (!repoId && input.planId) {
-    const p = repo.getPlan(input.planId);
+    const p = await repo.getPlan(input.planId);
     if (p?.repos.length) repoId = p.repos[0].id;
   }
   if (!repoId && goal === "<chat>") {
-    repoId = repo.defaultRepoId();
+    repoId = await repo.defaultRepoId();
   }
 
-  if (repoId && !repo.getRepository(repoId)) {
+  if (repoId && !(await repo.getRepository(repoId))) {
     throw new repo.RepoError(`Repository ${repoId} not found`, 404);
   }
-  if (input.taskId && !repo.getTask(input.taskId)) {
+  if (input.taskId && !(await repo.getTask(input.taskId))) {
     throw new repo.RepoError(`Task ${input.taskId} not found`, 404);
   }
-  if (input.planId && !repo.getPlan(input.planId)) {
+  if (input.planId && !(await repo.getPlan(input.planId))) {
     throw new repo.RepoError(`Plan ${input.planId} not found`, 404);
   }
   if (!input.defer && goal === "<execute>" && !input.planId) {
@@ -334,14 +341,14 @@ export function create(input: CreateRunInput): RunRow {
   // longer tied to the persona. Fall back to the env default when the caller
   // omits one. We persist the resolved value so the UI shows what was used.
   const personaId = input.personaId ?? "implementor";
-  if (!repo.getPersona(personaId)) {
+  if (!(await repo.getPersona(personaId))) {
     // persona_id is a foreign key; surface a clear 404 instead of letting the
     // insert fail with an opaque "FOREIGN KEY constraint failed".
     throw new repo.RepoError(`Persona '${personaId}' not found`, 404);
   }
   const effectiveModel = input.model ?? DEFAULT_MODEL;
 
-  const inserted = db
+  const inserted = await db
     .insert(agentSessions)
     .values({
       goal,
@@ -363,8 +370,7 @@ export function create(input: CreateRunInput): RunRow {
       status: initialStatus,
       startedAt: new Date(),
     })
-    .returning()
-    .all();
+    .returning();
   const run = hydrateRun(inserted[0]);
 
   // A worktree run with a task is that task's attached session — point
@@ -372,7 +378,7 @@ export function create(input: CreateRunInput): RunRow {
   // deferred chat-box path). `ifUnset` means executor-spawned runs only adopt an
   // empty slot. Bare worktree runs (no task, e.g. tests) skip this.
   if (goal !== "<chat>" && cwdStrategy === "worktree" && input.taskId) {
-    repo.attachRunToTask(input.taskId, run.id, { ifUnset: true });
+    await repo.attachRunToTask(input.taskId, run.id, { ifUnset: true });
   }
 
   // These are create()'s *secondary* launches: a background turn the caller did
@@ -389,11 +395,11 @@ export function create(input: CreateRunInput): RunRow {
   // (chat box, bare test runs) skip this and wait for the user's first message.
   if (!input.defer && goal !== "<chat>" && cwdStrategy === "worktree") {
     // taskId presence validated before the insert above.
-    const task = repo.getTask(input.taskId!)!;
-    const prompt = input.initialPrompt ?? buildImplementPrompt(task);
+    const task = (await repo.getTask(input.taskId!))!;
+    const prompt = input.initialPrompt ?? await buildImplementPrompt(task);
     void (async () => {
       const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
-      if (detachedRunsEnabled()) dispatchRun(run.id);
+      if (detachedRunsEnabled()) void dispatchRun(run.id).catch(() => {});
       else await kickoffFirstTurn(run.id, prompt, input.baseBranch);
     })();
   }
@@ -403,7 +409,7 @@ export function create(input: CreateRunInput): RunRow {
   if (!input.defer && cwdStrategy === "worktree_at_pr") {
     void (async () => {
       const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
-      if (detachedRunsEnabled()) dispatchRun(run.id);
+      if (detachedRunsEnabled()) void dispatchRun(run.id).catch(() => {});
       else await runReview(run.id, input.prUrl!, input.initialPrompt ?? null);
     })();
   }
@@ -414,7 +420,7 @@ export function create(input: CreateRunInput): RunRow {
   if (!input.defer && goal === "<execute>" && input.planId) {
     void (async () => {
       const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
-      if (detachedRunsEnabled()) dispatchRun(run.id);
+      if (detachedRunsEnabled()) void dispatchRun(run.id).catch(() => {});
       else await runExecute(run.id, input.planId!, input.initialPrompt ?? null);
     })();
   }
@@ -422,7 +428,7 @@ export function create(input: CreateRunInput): RunRow {
   return run;
 }
 
-export function list(filter: ListFilter = {}): RunRow[] {
+export async function list(filter: ListFilter = {}): Promise<RunRow[]> {
   const conditions = [];
   if (filter.goal) conditions.push(eq(agentSessions.goal, filter.goal));
   if (filter.status) {
@@ -454,25 +460,25 @@ export function list(filter: ListFilter = {}): RunRow[] {
   }
   const where = conditions.length === 0 ? undefined : conditions.length === 1 ? conditions[0] : and(...conditions);
   const q = db.select().from(agentSessions).orderBy(desc(agentSessions.startedAt));
-  const rows = where ? q.where(where).all() : q.all();
+  const rows = where ? await q.where(where) : await q;
   return rows.map(hydrateRun);
 }
 
 const TERMINAL_STATUS_LIST: SessionStatus[] = SESSION_STATUSES.filter(isTerminalStatus);
 
-export function get(id: number): RunRow | null {
-  const row = db.select().from(agentSessions).where(eq(agentSessions.id, id)).get();
+export async function get(id: number): Promise<RunRow | null> {
+  const row = (await db.select().from(agentSessions).where(eq(agentSessions.id, id)))[0];
   return row ? hydrateRun(row) : null;
 }
 
-export function listMessages(runId: number): MessageRow[] {
-  return db
-    .select()
-    .from(agentMessages)
-    .where(eq(agentMessages.runId, runId))
-    .orderBy(asc(agentMessages.id))
-    .all()
-    .map(hydrateMessage);
+export async function listMessages(runId: number): Promise<MessageRow[]> {
+  return (
+    await db
+      .select()
+      .from(agentMessages)
+      .where(eq(agentMessages.runId, runId))
+      .orderBy(asc(agentMessages.id))
+  ).map(hydrateMessage);
 }
 
 /**
@@ -482,21 +488,23 @@ export function listMessages(runId: number): MessageRow[] {
  * written AFTER the snapshot — no duplicate replay of the already-rendered
  * history, and no gap either (the tail resumes exactly here).
  */
-export function streamCursor(runId: number): { msgId: number; evtId: number } {
-  const m = db
-    .select({ id: agentMessages.id })
-    .from(agentMessages)
-    .where(eq(agentMessages.runId, runId))
-    .orderBy(desc(agentMessages.id))
-    .limit(1)
-    .get();
-  const e = db
-    .select({ id: agentEvents.id })
-    .from(agentEvents)
-    .where(eq(agentEvents.sessionId, runId))
-    .orderBy(desc(agentEvents.id))
-    .limit(1)
-    .get();
+export async function streamCursor(runId: number): Promise<{ msgId: number; evtId: number }> {
+  const m = (
+    await db
+      .select({ id: agentMessages.id })
+      .from(agentMessages)
+      .where(eq(agentMessages.runId, runId))
+      .orderBy(desc(agentMessages.id))
+      .limit(1)
+  )[0];
+  const e = (
+    await db
+      .select({ id: agentEvents.id })
+      .from(agentEvents)
+      .where(eq(agentEvents.sessionId, runId))
+      .orderBy(desc(agentEvents.id))
+      .limit(1)
+  )[0];
   return { msgId: m?.id ?? 0, evtId: e?.id ?? 0 };
 }
 
@@ -532,7 +540,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
   let ownsRunner = false;
 
   try {
-    let run = get(input.runId);
+    let run = await get(input.runId);
     if (!run) {
       yield { type: "error", error: `Run ${input.runId} not found` };
       return;
@@ -575,12 +583,12 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       return;
     }
 
-    const userMsg = persistMessage(run.id, input.role === "system" ? "system" : "user", [
+    const userMsg = await persistMessage(run.id, input.role === "system" ? "system" : "user", [
       { type: "text", text: input.text },
     ]);
     yield { type: "user_message", message: userMsg };
 
-    setStatus(run.id, "running");
+    await setStatus(run.id, "running");
 
     // Register the abort handle and bus BEFORE the (seconds-long) worktree prep.
     // If we waited until after prepareCwd (the old behaviour), a cancel()/
@@ -611,12 +619,12 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     } catch (err) {
       if (abort.signal.aborted) {
         // cancel()/interrupt()/close() fired during prep; respect their row.
-        repairAbortedRun(input.runId);
+        await repairAbortedRun(input.runId);
         yield { type: "done" };
         return;
       }
       const msg = describe(err);
-      setError(run.id, msg);
+      await setError(run.id, msg);
       yield { type: "error", error: msg };
       return;
     }
@@ -625,7 +633,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // (and cancel() removed the worktree). Bail before spending a full model
     // turn on a run the user already stopped.
     if (abort.signal.aborted) {
-      repairAbortedRun(input.runId);
+      await repairAbortedRun(input.runId);
       yield { type: "done" };
       return;
     }
@@ -648,12 +656,12 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
         // Aborted mid-turn. cancel()/interrupt()/close() rewrote the row; a bare
         // client-disconnect (req.signal → input.abort) did not — repair the
         // stranded 'running' row so it doesn't look in-flight forever.
-        repairAbortedRun(input.runId);
+        await repairAbortedRun(input.runId);
         yield { type: "done" };
         return;
       }
       const msg = describe(err);
-      setError(run.id, msg);
+      await setError(run.id, msg);
       yield { type: "error", error: msg };
       return;
     }
@@ -662,7 +670,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // end (backend swallowed it). Respect any terminal row the aborter wrote /
     // repair a stranded lease instead of overwriting it below.
     if (abort.signal.aborted) {
-      repairAbortedRun(input.runId);
+      await repairAbortedRun(input.runId);
       yield { type: "done" };
       return;
     }
@@ -682,7 +690,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       try {
         prUrlUpdate = await gitSyncAfterTurn(run, cwd, result.summary, input.baseBranch);
       } catch (err) {
-        persistMessage(run.id, "system", [
+        await persistMessage(run.id, "system", [
           { type: "text", text: `Push/PR sync failed: ${describe(err)}` },
         ]);
       }
@@ -707,7 +715,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // Conditional on the row NOT already being terminal-by-user: a cancel()/
     // close() that raced in right as the turn ended must win. Without the WHERE
     // guard this update would resurrect a 'cancelled'/'closed' run.
-    const finalUpdate = db.update(agentSessions)
+    const finalUpdate = await db.update(agentSessions)
       .set({
         status: nextStatus,
         sdkSessionId: result.sdkSessionId ?? run.sdkSessionId,
@@ -723,13 +731,12 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
           eq(agentSessions.id, run.id),
           notInArray(agentSessions.status, ["cancelled", "closed"])
         )
-      )
-      .run();
+      );
     // Tell live SSE subscribers (the run-view in the browser) that the turn
     // ended — emit BEFORE dropping the runner (in the finally) so the bus still
     // exists. Only emit when we actually wrote the row; if a cancel()/close()
     // won the race the update was a no-op and the aborter already emitted.
-    if (finalUpdate.changes > 0) emitStatus(run.id, nextStatus);
+    if (finalUpdate.count > 0) await emitStatus(run.id, nextStatus);
 
     yield { type: "done" };
   } finally {
@@ -745,8 +752,8 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
   }
 }
 
-export function cancel(id: number): RunRow {
-  const run = get(id);
+export async function cancel(id: number): Promise<RunRow> {
+  const run = await get(id);
   if (!run) throw new repo.RepoError(`Run ${id} not found`, 404);
   if (isTerminalStatus(run.status)) return run;
   const runner = runners.get(id);
@@ -756,16 +763,19 @@ export function cancel(id: number): RunRow {
   // also signal through the DB. The worker polls isCancelRequested() at
   // heartbeat cadence and aborts its own turn. Harmless for in-process runs —
   // they already aborted synchronously, so the poll is a no-op there.
-  db.update(agentSessions)
+  await db.update(agentSessions)
     .set({ status: "cancelled", completedAt: new Date(), cancelRequested: 1 })
-    .where(eq(agentSessions.id, id))
-    .run();
-  emitStatus(id, "cancelled");
+    .where(eq(agentSessions.id, id));
+  await emitStatus(id, "cancelled");
   closeBus(id);
+  // Hard-stop the detached worker container as a fallback (the cancel_requested
+  // poll aborts it gracefully within a heartbeat; docker stop is the belt). No-op
+  // when not containerized.
+  void runDispatch.stopWorkerContainer(run.workerScope);
   if (run.cwdStrategy === "worktree" && run.worktreePath) {
-    cleanupWorktree(run.worktreePath, repoRoot(run)).catch(() => {});
+    cleanupWorktree(run.worktreePath, await repoRoot(run)).catch(() => {});
   }
-  return get(id)!;
+  return (await get(id))!;
 }
 
 /**
@@ -782,38 +792,36 @@ export function cancel(id: number): RunRow {
  * returns early without resetting the row from `running` (see the abort branch
  * in append()), so we flip the status back to `idle` here.
  */
-export function interrupt(id: number): boolean {
-  const run = get(id);
+export async function interrupt(id: number): Promise<boolean> {
+  const run = await get(id);
   if (!run) return false;
   const runner = runners.get(id);
   if (!runner) return false; // nothing in flight
   runner.abort.abort();
   // Keep the worktree intact (no cleanupWorktree) so the next message resumes
   // instantly. Clear completedAt: an idle run is mid-conversation, not finished.
-  db.update(agentSessions)
+  await db.update(agentSessions)
     .set({ status: "idle", completedAt: null })
-    .where(eq(agentSessions.id, id))
-    .run();
-  emitStatus(id, "idle");
+    .where(eq(agentSessions.id, id));
+  await emitStatus(id, "idle");
   return true;
 }
 
-export function close(id: number): RunRow {
-  const run = get(id);
+export async function close(id: number): Promise<RunRow> {
+  const run = await get(id);
   if (!run) throw new repo.RepoError(`Run ${id} not found`, 404);
   if (run.status === "closed") return run;
   // If a turn is in flight, cancel it first.
   const runner = runners.get(id);
   if (runner) runner.abort.abort();
-  db.update(agentSessions)
+  await db.update(agentSessions)
     .set({ status: "closed", completedAt: new Date() })
-    .where(eq(agentSessions.id, id))
-    .run();
+    .where(eq(agentSessions.id, id));
   closeBus(id);
   if (run.cwdStrategy === "worktree" && run.worktreePath) {
-    cleanupWorktree(run.worktreePath, repoRoot(run)).catch(() => {});
+    cleanupWorktree(run.worktreePath, await repoRoot(run)).catch(() => {});
   }
-  return get(id)!;
+  return (await get(id))!;
 }
 
 /**
@@ -835,7 +843,7 @@ export async function followUp(
   prompt: string,
   opts: { author?: string; addProfiles?: string[]; push?: boolean } = {}
 ): Promise<void> {
-  const run = get(runId);
+  const run = await get(runId);
   if (!run) return;
   if (isLive(runId)) return;
   if (run.cwdStrategy !== "worktree" || !run.branch || !run.worktreePath) return;
@@ -862,8 +870,8 @@ export async function followUp(
   const heartbeat = startHeartbeat(runId);
 
   try {
-    persistMessage(runId, "system", [{ type: "text", text: prompt }]);
-    setStatus(runId, "running");
+    await persistMessage(runId, "system", [{ type: "text", text: prompt }]);
+    await setStatus(runId, "running");
 
     const cwd = await prepareCwd(run);
     const effectiveProfile = opts.addProfiles?.length
@@ -887,13 +895,13 @@ export async function followUp(
       try {
         await sh(["git", "push", "origin", run.branch], cwd);
       } catch (err) {
-        persistMessage(runId, "system", [
+        await persistMessage(runId, "system", [
           { type: "text", text: `Follow-up: git push failed: ${describe(err)}` },
         ]);
       }
     }
 
-    db.update(agentSessions)
+    await db.update(agentSessions)
       .set({
         status: "completed",
         completedAt: new Date(),
@@ -901,16 +909,15 @@ export async function followUp(
         inputTokens: result.inputTokens ?? run.inputTokens,
         outputTokens: result.outputTokens ?? run.outputTokens,
       })
-      .where(eq(agentSessions.id, runId))
-      .run();
-    emitStatus(runId, "completed");
+      .where(eq(agentSessions.id, runId));
+    await emitStatus(runId, "completed");
   } catch (err) {
-    if (!abort.signal.aborted) setError(runId, describe(err));
+    if (!abort.signal.aborted) await setError(runId, describe(err));
   } finally {
     clearInterval(heartbeat);
     closeBus(runId);
     runners.delete(runId);
-    cleanupWorktree(run.worktreePath, repoRoot(run)).catch(() => {});
+    cleanupWorktree(run.worktreePath, await repoRoot(run)).catch(() => {});
     release();
     lock.busy = null;
   }
@@ -925,20 +932,20 @@ export async function followUp(
  * repo. Shared by repoRoot/repoDefaultBranch, which differ only in which
  * field of the resolved repo they read.
  */
-function resolveRepo(run: { repoId: string | null; taskId: string | null }): RepositoryRow | null {
+async function resolveRepo(run: { repoId: string | null; taskId: string | null }): Promise<RepositoryRow | null> {
   if (run.repoId) {
-    const r = repo.getRepository(run.repoId);
+    const r = await repo.getRepository(run.repoId);
     if (r) return r;
   }
   if (run.taskId) {
-    const r = repo.resolveRepoForTask(run.taskId);
+    const r = await repo.resolveRepoForTask(run.taskId);
     if (r) return r;
   }
-  return repo.defaultRepo();
+  return await repo.defaultRepo();
 }
 
-function repoRoot(run: { repoId: string | null; taskId: string | null }): string {
-  const r = resolveRepo(run);
+async function repoRoot(run: { repoId: string | null; taskId: string | null }): Promise<string> {
+  const r = await resolveRepo(run);
   return r?.localPath ? resolve(r.localPath) : ORCHESTRATOR_ROOT;
 }
 
@@ -969,7 +976,7 @@ export function validateCwd(dir: string, ctx: { runId: number; repoId: string | 
 
 async function prepareCwd(run: RunRow): Promise<string> {
   if (run.cwdStrategy === "none" || run.cwdStrategy === "repo") {
-    return validateCwd(repoRoot(run), { runId: run.id, repoId: run.repoId });
+    return validateCwd(await repoRoot(run), { runId: run.id, repoId: run.repoId });
   }
   // worktree / worktree_at_pr: re-materialize if missing.
   if (!run.branch || !run.worktreePath) {
@@ -977,7 +984,16 @@ async function prepareCwd(run: RunRow): Promise<string> {
       `Run #${run.id} has cwd_strategy=${run.cwdStrategy} but no branch/worktree_path recorded yet.`
     );
   }
-  const root = repoRoot(run);
+  // Worker-container resume: the prior container (and its /work checkout) is
+  // gone, so re-clone from the cache and check out the already-pushed branch.
+  if (process.env.REPO_CACHE_DIR) {
+    if (!existsSync(run.worktreePath)) {
+      const work = await containerCheckout(run, run.branch);
+      return validateCwd(work, { runId: run.id, repoId: run.repoId });
+    }
+    return validateCwd(run.worktreePath, { runId: run.id, repoId: run.repoId });
+  }
+  const root = await repoRoot(run);
   if (!existsSync(run.worktreePath)) {
     await mkdir(dirname(run.worktreePath), { recursive: true });
     // The branch already exists on the remote (it was pushed by the initial
@@ -1031,8 +1047,8 @@ export function worktreeBranchName(run: { id: number; taskId: string | null }): 
 }
 
 /** The base branch a task's worktree branches from / merges in. */
-function repoDefaultBranch(run: { repoId: string | null; taskId: string | null }): string {
-  return resolveRepo(run)?.defaultBranch ?? "main";
+async function repoDefaultBranch(run: { repoId: string | null; taskId: string | null }): Promise<string> {
+  return (await resolveRepo(run))?.defaultBranch ?? "main";
 }
 
 /**
@@ -1040,27 +1056,75 @@ function repoDefaultBranch(run: { repoId: string | null; taskId: string | null }
  * worktree off the base branch, persist them, and move the task to in_progress.
  * No-op once a branch exists (later turns re-materialize via prepareCwd).
  */
+// Worker-container git checkout: clone the run's repo from the mounted
+// repo-cache mirror (fast, local objects) into /work/<id>, authenticated by
+// GH_TOKEN so pushes + gh work directly. With `base` set, branch off origin/base
+// (first turn); without it, check out the existing (already-pushed) branch (a
+// resume in a fresh container). Returns the container-local worktree path.
+async function containerCheckout(
+  run: RunRow,
+  branch: string,
+  base?: string
+): Promise<string> {
+  const cache = process.env.REPO_CACHE_DIR!;
+  const repoRow = await resolveRepo(run);
+  const parsed = ownerRepoFromRemote(repoRow?.remote ?? null);
+  if (!parsed) {
+    throw new Error(
+      `Run #${run.id}: repository '${run.repoId ?? "(default)"}' has no GitHub remote to clone for the worker container.`
+    );
+  }
+  if (!process.env.GH_TOKEN) {
+    throw new Error(`Run #${run.id}: GH_TOKEN is required for in-container checkout.`);
+  }
+  const mirror = resolve(cache, `${parsed.owner}_${parsed.repo}.git`);
+  // Plain URL — auth comes from the worker image's git credential helper (which
+  // reads GH_TOKEN), so the token never appears in the URL, .git/config, or any
+  // error string persisted to agent_runs.error.
+  const url = `https://github.com/${parsed.owner}/${parsed.repo}`;
+  const work = `/work/${run.id}`;
+  await mkdir("/work", { recursive: true });
+  const reference = existsSync(mirror) ? ["--reference", mirror, "--dissociate"] : [];
+  await sh(["git", "clone", ...reference, url, work], "/");
+  if (base) {
+    await sh(["git", "-C", work, "checkout", "-B", branch, `origin/${base}`], "/");
+  } else {
+    // resume: the branch is already on the remote; fetch + check it out.
+    await sh(["git", "-C", work, "fetch", "origin", branch], "/");
+    await sh(["git", "-C", work, "checkout", "-B", branch, `origin/${branch}`], "/");
+  }
+  return work;
+}
+
 async function ensureWorktreeBranch(run: RunRow, baseBranch?: string): Promise<RunRow> {
   if (run.cwdStrategy !== "worktree" || run.branch) return run;
-  const base = baseBranch?.trim() || repoDefaultBranch(run);
-  const root = repoRoot(run);
-  const worktreeRoot = resolve(root, ".worktrees");
+  const base = baseBranch?.trim() || (await repoDefaultBranch(run));
   const branch = worktreeBranchName(run);
-  const worktreePath = resolve(worktreeRoot, String(run.id));
-  await mkdir(worktreeRoot, { recursive: true });
-  await sh(["git", "worktree", "add", "-b", branch, worktreePath, base], root);
-  await linkSharedWorktreeArtifacts(worktreePath, root);
-  const taskRepoId = run.taskId ? repo.getTask(run.taskId)?.repoId ?? null : null;
-  db.update(agentSessions)
+  let worktreePath: string;
+  if (process.env.REPO_CACHE_DIR) {
+    // Worker-container mode: clone from the mounted repo-cache mirror into a
+    // container-local dir and branch off `base` there, instead of a host-shared
+    // git worktree. The checkout is ephemeral (the container is --rm); durable
+    // state lives on GitHub (the branch is pushed) + Postgres.
+    worktreePath = await containerCheckout(run, branch, base);
+  } else {
+    const root = await repoRoot(run);
+    const worktreeRoot = resolve(root, ".worktrees");
+    worktreePath = resolve(worktreeRoot, String(run.id));
+    await mkdir(worktreeRoot, { recursive: true });
+    await sh(["git", "worktree", "add", "-b", branch, worktreePath, base], root);
+    await linkSharedWorktreeArtifacts(worktreePath, root);
+  }
+  const taskRepoId = run.taskId ? (await repo.getTask(run.taskId))?.repoId ?? null : null;
+  await db.update(agentSessions)
     .set({ branch, worktreePath, repoId: run.repoId ?? taskRepoId })
-    .where(eq(agentSessions.id, run.id))
-    .run();
+    .where(eq(agentSessions.id, run.id));
   // Task-attached (implement) runs move their task to in_progress; taskless chat
   // worktrees have nothing to transition.
-  const task = run.taskId ? repo.getTask(run.taskId) : null;
+  const task = run.taskId ? await repo.getTask(run.taskId) : null;
   if (run.taskId && task && (task.state === "todo" || task.state === "blocked")) {
     try {
-      repo.transitionTask(run.taskId, {
+      await repo.transitionTask(run.taskId, {
         state: "in_progress",
         assignee: task.assignee ?? "claude-agent",
         note: `Started agent run #${run.id}.`,
@@ -1069,7 +1133,7 @@ async function ensureWorktreeBranch(run: RunRow, baseBranch?: string): Promise<R
       // Best-effort.
     }
   }
-  return get(run.id)!;
+  return (await get(run.id))!;
 }
 
 /**
@@ -1085,7 +1149,7 @@ async function gitSyncAfterTurn(
   baseBranch?: string
 ): Promise<string | null> {
   if (!run.branch) return run.prUrl;
-  const base = baseBranch?.trim() || repoDefaultBranch(run);
+  const base = baseBranch?.trim() || (await repoDefaultBranch(run));
   // Count the commits this branch added beyond its base. Prefer the
   // remote-tracking base (origin/<base>): it reflects the branch's real PR base
   // and isn't thrown off by a stale local checkout of <base>. Fall back to the
@@ -1109,17 +1173,17 @@ async function gitSyncAfterTurn(
   await sh(["git", "push", "-u", "origin", run.branch], cwd);
   if (run.prUrl) return run.prUrl;
   if (!run.taskId) return null;
-  const task = repo.getTask(run.taskId);
+  const task = await repo.getTask(run.taskId);
   if (!task) return null;
   const prUrl = await openPr({ task, branch: run.branch, baseBranch: base, worktreePath: cwd, summary });
   if (prUrl) {
     try {
-      repo.transitionTask(run.taskId, {
+      await repo.transitionTask(run.taskId, {
         state: "review",
         note: `Agent finished. PR: ${prUrl}`,
       });
     } catch (err) {
-      repo.addNote(run.taskId, "claude-agent", `Could not transition to review: ${describe(err)}`);
+      await repo.addNote(run.taskId, "claude-agent", `Could not transition to review: ${describe(err)}`);
     }
   }
   return prUrl ?? run.prUrl;
@@ -1159,8 +1223,8 @@ async function runReview(
   // the cross-process cancel flag so a detached review aborts on cancel().
   const heartbeat = startHeartbeatWithCancel(runId, abort);
 
-  let run = get(runId)!;
-  const root = repoRoot(run);
+  let run = (await get(runId))!;
+  const root = await repoRoot(run);
   const worktreeRoot = resolve(root, ".worktrees");
   const branch = `review-${runId}`;
   const worktreePath = resolve(worktreeRoot, `review-${runId}`);
@@ -1174,12 +1238,12 @@ async function runReview(
   try {
     const parsed = parsePrUrl(prUrl);
     if (!parsed) {
-      setError(runId, `Could not parse PR url: ${prUrl}`);
+      await setError(runId, `Could not parse PR url: ${prUrl}`);
       runners.delete(runId);
       return;
     }
 
-    setStatus(runId, "preparing");
+    await setStatus(runId, "preparing");
     await mkdir(worktreeRoot, { recursive: true });
 
     // Fetch the PR head into a stable per-run ref, then create a worktree on a
@@ -1192,7 +1256,7 @@ async function runReview(
         root
       );
     } catch (err) {
-      setError(
+      await setError(
         runId,
         `git fetch failed for ${prUrl}: ${describe(err)}. Is the PR's origin remote configured?`
       );
@@ -1204,13 +1268,12 @@ async function runReview(
       root
     );
     await linkSharedWorktreeArtifacts(worktreePath, root);
-    db.update(agentSessions)
+    await db.update(agentSessions)
       .set({ branch, worktreePath })
-      .where(eq(agentSessions.id, runId))
-      .run();
-    run = get(runId)!;
+      .where(eq(agentSessions.id, runId));
+    run = (await get(runId))!;
 
-    setStatus(runId, "running");
+    await setStatus(runId, "running");
     const prompt =
       initialPrompt ??
       `Review the PR at ${prUrl} against the task's acceptance criteria. End with a JSON verdict block.`;
@@ -1234,7 +1297,7 @@ async function runReview(
     // verdict block was emitted.
     const outcome = extractReviewOutcome(result.summary);
 
-    db.update(agentSessions)
+    await db.update(agentSessions)
       .set({
         status: "completed",
         completedAt: new Date(),
@@ -1244,21 +1307,20 @@ async function runReview(
         inputTokens: result.inputTokens ?? run.inputTokens,
         outputTokens: result.outputTokens ?? run.outputTokens,
       })
-      .where(eq(agentSessions.id, runId))
-      .run();
-    emitStatus(runId, "completed");
+      .where(eq(agentSessions.id, runId));
+    await emitStatus(runId, "completed");
 
     // An approving verdict marks the task done. The outcome is the JSON
     // verdict block extracted above (or a fallback first line, which won't
     // parse — so a non-approve outcome simply leaves the task untouched).
     if (run.taskId && parseReviewVerdict(outcome) === "approve") {
       try {
-        repo.transitionTask(run.taskId, {
+        await repo.transitionTask(run.taskId, {
           state: "done",
           note: `Review run #${runId} approved the PR.`,
         });
       } catch (err) {
-        repo.addNote(
+        await repo.addNote(
           run.taskId,
           "claude-reviewer",
           `Review approved but could not transition task to done: ${describe(err)}`
@@ -1270,7 +1332,7 @@ async function runReview(
       runners.delete(runId);
       return;
     }
-    setError(runId, describe(err));
+    await setError(runId, describe(err));
   } finally {
     clearInterval(heartbeat);
     closeBus(runId);
@@ -1301,30 +1363,30 @@ async function runExecute(
   // aborts on cancel().
   const heartbeat = startHeartbeatWithCancel(runId, abort);
 
-  let run = get(runId)!;
+  let run = (await get(runId))!;
 
   try {
-    const plan = repo.getPlan(planId);
+    const plan = await repo.getPlan(planId);
     if (!plan) {
-      setError(runId, `Plan ${planId} disappeared before execution could start`);
+      await setError(runId, `Plan ${planId} disappeared before execution could start`);
       runners.delete(runId);
       return;
     }
 
-    setStatus(runId, "running");
+    await setStatus(runId, "running");
     // No worktree of its own — operate at the repo root so gh_pr tools shell
     // out against the real checkout. Children create their own worktrees.
     const cwd = await prepareCwd(run);
     // The execute scaffold (orchestration loop + task list) always runs; an
     // operator-supplied prompt is appended as steering guidance rather than
     // replacing it, so the executor never loses its core instructions.
-    const base = buildExecutePrompt(plan, repo.listTasks({ planId }));
+    const base = buildExecutePrompt(plan, await repo.listTasks({ planId }));
     const extra = initialPrompt?.trim();
     const prompt = extra ? `${base}\n\n## Operator instructions\n\n${extra}` : base;
     // Persist the kickoff prompt so a page load shows what this executor was
     // asked to do — the executor is driven server-side, so unlike append()
     // there is no user message row anchoring the transcript.
-    persistMessage(runId, "system", [{ type: "text", text: prompt }]);
+    await persistMessage(runId, "system", [{ type: "text", text: prompt }]);
     const result = await runOneTurn({
       run,
       cwd,
@@ -1339,7 +1401,7 @@ async function runExecute(
       return;
     }
 
-    db.update(agentSessions)
+    await db.update(agentSessions)
       .set({
         status: "completed",
         completedAt: new Date(),
@@ -1348,20 +1410,19 @@ async function runExecute(
         inputTokens: result.inputTokens ?? run.inputTokens,
         outputTokens: result.outputTokens ?? run.outputTokens,
       })
-      .where(eq(agentSessions.id, runId))
-      .run();
-    emitStatus(runId, "completed");
+      .where(eq(agentSessions.id, runId));
+    await emitStatus(runId, "completed");
 
     // Fallback: if the agent drove every task to a terminal state but didn't
     // close the plan itself, mark the plan done.
     try {
-      const tasks = repo.listTasks({ planId });
+      const tasks = await repo.listTasks({ planId });
       const allClosed =
         tasks.length > 0 &&
         tasks.every((t) => t.state === "done" || t.state === "cancelled");
-      const planNow = repo.getPlan(planId);
+      const planNow = await repo.getPlan(planId);
       if (allClosed && planNow && planNow.state === "accepted") {
-        repo.updatePlan(planId, { state: "done" });
+        await repo.updatePlan(planId, { state: "done" });
       }
     } catch {
       // Best-effort — the agent's own transition_plan is the primary path.
@@ -1371,7 +1432,7 @@ async function runExecute(
       runners.delete(runId);
       return;
     }
-    setError(runId, describe(err));
+    await setError(runId, describe(err));
   } finally {
     clearInterval(heartbeat);
     closeBus(runId);
@@ -1393,12 +1454,12 @@ async function runExecute(
  * terminal status. A missing run is a no-op (the row may have been reaped).
  */
 export async function driveDispatchedRun(runId: number): Promise<void> {
-  const run = get(runId);
+  const run = await get(runId);
   if (!run) return;
 
   if (run.goal === "<review>") {
     if (!run.prUrl) {
-      setError(runId, "Dispatched <review> run has no prUrl to review.");
+      await setError(runId, "Dispatched <review> run has no prUrl to review.");
       return;
     }
     await runReview(runId, run.prUrl, null);
@@ -1407,7 +1468,7 @@ export async function driveDispatchedRun(runId: number): Promise<void> {
 
   if (run.goal === "<execute>") {
     if (!run.planId) {
-      setError(runId, "Dispatched <execute> run has no planId to execute.");
+      await setError(runId, "Dispatched <execute> run has no planId to execute.");
       return;
     }
     await runExecute(runId, run.planId, null);
@@ -1421,21 +1482,21 @@ export async function driveDispatchedRun(runId: number): Promise<void> {
   // takeover: this worker holds the run's claim (dispatchRun left it `preparing`
   // with a fresh heartbeat), so append() must adopt it rather than reject it as
   // an in-flight turn in another process.
-  await kickoffFirstTurn(runId, dispatchTurnPrompt(run), undefined, true);
+  await kickoffFirstTurn(runId, await dispatchTurnPrompt(run), undefined, true);
 }
 
 const DISPATCH_RESUME_PROMPT =
   "Resume this run and continue from where the previous session left off.";
 
-function dispatchTurnPrompt(run: RunRow): string {
+async function dispatchTurnPrompt(run: RunRow): Promise<string> {
   // First turn of an implement worktree run: rebuild the task prompt.
   if (!run.sdkSessionId && run.taskId) {
-    const task = repo.getTask(run.taskId);
+    const task = await repo.getTask(run.taskId);
     if (task) return buildImplementPrompt(task);
   }
   // Otherwise replay the most recent user message (resume / chat), or fall back
   // to a bare continue sentinel when the run has no prompt of its own yet.
-  const msgs = listMessages(run.id);
+  const msgs = await listMessages(run.id);
   for (let i = msgs.length - 1; i >= 0; i--) {
     if (msgs[i].role !== "user") continue;
     const text = msgs[i].content
@@ -1452,7 +1513,7 @@ function dispatchTurnPrompt(run: RunRow): string {
 }
 
 interface OpenPrArgs {
-  task: NonNullable<ReturnType<typeof repo.getTask>>;
+  task: NonNullable<Awaited<ReturnType<typeof repo.getTask>>>;
   branch: string;
   baseBranch: string;
   worktreePath: string;
@@ -1476,7 +1537,7 @@ async function openPr({ task, branch, baseBranch, worktreePath, summary }: OpenP
 }
 
 function buildPrBody(
-  task: NonNullable<ReturnType<typeof repo.getTask>>,
+  task: NonNullable<Awaited<ReturnType<typeof repo.getTask>>>,
   summary: string | null
 ): string {
   const sections: string[] = [];
@@ -1519,7 +1580,7 @@ interface TurnResult {
 async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   const { run, cwd, prompt, abort, author, onSdk } = args;
 
-  const persona = repo.getPersona(run.personaId ?? "implementor");
+  const persona = await repo.getPersona(run.personaId ?? "implementor");
   if (!persona) {
     throw new Error(
       `Persona '${run.personaId ?? "implementor"}' not found; ` +
@@ -1572,28 +1633,27 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   // Assistant messages are written per-envelope (not batched at end-of-turn) so
   // a page load mid-turn — hours into a long executor run — replays the full
   // history from the DB instead of showing only tool results.
-  const onEvent = (env: RunEnvelope) => {
+  const onEvent = async (env: RunEnvelope) => {
     envelopes.push(env);
     onSdk?.(env);
 
     if (env.type === "system" && env.subtype === "init" && env.session_id) {
       sdkSessionId = env.session_id;
-      db.update(agentSessions)
+      await db.update(agentSessions)
         .set({ sdkSessionId })
-        .where(eq(agentSessions.id, run.id))
-        .run();
+        .where(eq(agentSessions.id, run.id));
     }
 
     if (env.type === "assistant" && env.message?.content) {
       const blocks = env.message.content;
-      if (blocks.length > 0) persistMessage(run.id, "agent", blocks as any);
+      if (blocks.length > 0) await persistMessage(run.id, "agent", blocks as any);
       const text = assistantText(blocks as SdkContentBlock[]);
       if (text) lastAssistantText = text;
     }
 
     if (env.type === "user" && env.message?.content) {
       const results = toolResults(env.message.content as SdkContentBlock[]);
-      if (results.length > 0) persistMessage(run.id, "tool", results as any);
+      if (results.length > 0) await persistMessage(run.id, "tool", results as any);
     }
 
     if (env.type === "result") {
@@ -1660,12 +1720,12 @@ function checkBudget(run: RunRow, result: TurnResult): boolean {
 // Persistence helpers
 // ──────────────────────────────────────────────────────────
 
-function persistMessage(
+async function persistMessage(
   runId: number,
   role: MessageRow["role"],
   content: SdkContentBlock[]
-): MessageRow {
-  const inserted = db
+): Promise<MessageRow> {
+  const inserted = await db
     .insert(agentMessages)
     .values({
       runId,
@@ -1673,14 +1733,13 @@ function persistMessage(
       content: JSON.stringify(content),
       createdAt: new Date(),
     })
-    .returning()
-    .all();
+    .returning();
   return hydrateMessage(inserted[0]);
 }
 
-function setStatus(runId: number, status: SessionStatus) {
-  db.update(agentSessions).set({ status }).where(eq(agentSessions.id, runId)).run();
-  emitStatus(runId, status);
+async function setStatus(runId: number, status: SessionStatus) {
+  await db.update(agentSessions).set({ status }).where(eq(agentSessions.id, runId));
+  await emitStatus(runId, status);
 }
 
 // ──────────────────────────────────────────────────────────
@@ -1701,11 +1760,10 @@ const HEARTBEAT_INTERVAL_MS = 20_000;
 export const HEARTBEAT_STALE_MS = 5 * 60_000;
 
 /** Bump a run's heartbeat to now. Best-effort; a missed bump just risks a reap. */
-function touchHeartbeat(runId: number): void {
-  db.update(agentSessions)
+async function touchHeartbeat(runId: number): Promise<void> {
+  await db.update(agentSessions)
     .set({ heartbeatAt: new Date() })
-    .where(eq(agentSessions.id, runId))
-    .run();
+    .where(eq(agentSessions.id, runId));
 }
 
 /**
@@ -1716,8 +1774,10 @@ function touchHeartbeat(runId: number): void {
  * turn is never mistaken for an orphan by isLeaseLive()/reconcileOrphanedRuns().
  */
 function startHeartbeat(runId: number): ReturnType<typeof setInterval> {
-  touchHeartbeat(runId);
-  return setInterval(() => touchHeartbeat(runId), HEARTBEAT_INTERVAL_MS);
+  // touchHeartbeat is async now; keep it fire-and-forget but swallow rejections
+  // so a transient DB blip can't surface as an unhandled rejection.
+  void touchHeartbeat(runId).catch(() => {});
+  return setInterval(() => void touchHeartbeat(runId).catch(() => {}), HEARTBEAT_INTERVAL_MS);
 }
 
 /**
@@ -1725,12 +1785,11 @@ function startHeartbeat(runId: number): ReturnType<typeof setInterval> {
  * on the row; a detached worker (which can't see the web process's
  * AbortController) polls this at heartbeat cadence to abort its own turn.
  */
-export function isCancelRequested(runId: number): boolean {
-  const row = db
+export async function isCancelRequested(runId: number): Promise<boolean> {
+  const row = (await db
     .select({ c: agentSessions.cancelRequested })
     .from(agentSessions)
-    .where(eq(agentSessions.id, runId))
-    .get();
+    .where(eq(agentSessions.id, runId)))[0];
   return row?.c === 1;
 }
 
@@ -1746,10 +1805,16 @@ function startHeartbeatWithCancel(
   runId: number,
   abort: AbortController
 ): ReturnType<typeof setInterval> {
-  touchHeartbeat(runId);
+  void touchHeartbeat(runId).catch(() => {});
+  // The interval body is async and does DB I/O (touchHeartbeat + isCancelRequested);
+  // wrap it so a transient DB blip can't surface as an unhandled rejection (which,
+  // with no global handler, can crash the worker under Node's default). Mirrors the
+  // guard on startHeartbeat above.
   return setInterval(() => {
-    touchHeartbeat(runId);
-    if (isCancelRequested(runId) && !abort.signal.aborted) abort.abort();
+    void (async () => {
+      await touchHeartbeat(runId);
+      if ((await isCancelRequested(runId)) && !abort.signal.aborted) abort.abort();
+    })().catch(() => {});
   }, HEARTBEAT_INTERVAL_MS);
 }
 
@@ -1771,19 +1836,18 @@ export function isLeaseLive(
  * goes stale). Repair that: chat/none runs return to `idle` (resumable next
  * message); everything else lands `failed`.
  */
-function repairAbortedRun(runId: number): void {
-  const cur = get(runId);
+async function repairAbortedRun(runId: number): Promise<void> {
+  const cur = await get(runId);
   if (!cur) return;
   // Not in a lease status → cancel()/interrupt()/close() already handled it.
   if (!LEASE_STATUSES.includes(cur.status)) return;
   if (cur.goal === "<chat>" || cur.cwdStrategy === "none") {
-    db.update(agentSessions)
+    await db.update(agentSessions)
       .set({ status: "idle", completedAt: null })
-      .where(eq(agentSessions.id, runId))
-      .run();
-    emitStatus(runId, "idle");
+      .where(eq(agentSessions.id, runId));
+    await emitStatus(runId, "idle");
   } else {
-    setError(runId, "Turn aborted before it finished (client disconnected).");
+    await setError(runId, "Turn aborted before it finished (client disconnected).");
   }
 }
 
@@ -1794,13 +1858,12 @@ function repairAbortedRun(runId: number): void {
  * every boot and concurrently across processes: a run genuinely live elsewhere
  * keeps its heartbeat fresh and is skipped. Returns the number reaped.
  */
-export function reconcileOrphanedRuns(): number {
+export async function reconcileOrphanedRuns(): Promise<number> {
   const now = Date.now();
-  const rows = db
+  const rows = await db
     .select()
     .from(agentSessions)
-    .where(inArray(agentSessions.status, LEASE_STATUSES))
-    .all();
+    .where(inArray(agentSessions.status, LEASE_STATUSES));
   let reaped = 0;
   for (const row of rows) {
     if (isLeaseLive(row, now)) continue; // fresh lease → owned by a live process
@@ -1812,51 +1875,81 @@ export function reconcileOrphanedRuns(): number {
     // via isImplementWorktree, since the row is still in a *lease* status and
     // isResumableWorktreeRun only accepts post-reap terminal statuses). Clear
     // the stale claim first so dispatchRun can re-claim the row.
-    if (
+    // Containerized workers re-clone from the repo-cache, so the branch (pushed
+    // to GitHub) + an SDK session is enough — the host worktree is gone with the
+    // dead container. Host/dev mode still requires the on-disk worktree.
+    const containerized = !!process.env.TASK_ORCH_WORKER_IMAGE;
+    const resumable =
       runDispatch.detachedRunsEnabled() &&
       isImplementWorktree(row) &&
-      row.sdkSessionId &&
-      row.worktreePath &&
-      existsSync(row.worktreePath)
-    ) {
-      db.update(agentSessions)
+      !!row.sdkSessionId &&
+      (containerized ? !!row.branch : !!row.worktreePath && existsSync(row.worktreePath));
+    if (resumable) {
+      await db.update(agentSessions)
         .set({ workerScope: null })
-        .where(eq(agentSessions.id, row.id))
-        .run();
-      runDispatch.dispatchRun(row.id);
+        .where(eq(agentSessions.id, row.id));
+      void runDispatch.dispatchRun(row.id).catch(() => {});
       reaped++;
       continue;
     }
     if (row.goal === "<chat>") {
-      setStatus(row.id, "idle");
+      await setStatus(row.id, "idle");
     } else {
-      setError(row.id, "Interrupted by a process restart before the turn finished.");
+      await setError(row.id, "Interrupted by a process restart before the turn finished.");
     }
     reaped++;
   }
-  if (reaped > 0) console.log(`[runs] reconciled ${reaped} orphaned run(s) on boot`);
+  if (reaped > 0) console.log(`[runs] reconciled ${reaped} orphaned run(s)`);
   return reaped;
 }
 
-function setError(runId: number, error: string) {
-  db.update(agentSessions)
-    .set({ status: "failed", error, completedAt: new Date() })
-    .where(eq(agentSessions.id, runId))
-    .run();
-  emitStatus(runId, "failed", { error });
+/**
+ * Count runs currently occupying a worker slot: a non-null worker_scope AND an
+ * active (lease) status. This is the admission gate's "in-flight" number.
+ * Counting 'preparing' rows charges a just-claimed worker its full memory
+ * reservation immediately (before its RSS ramps up), closing the dispatch race.
+ */
+export async function countInFlightWorkers(): Promise<number> {
+  const rows = await db
+    .select({ id: agentSessions.id })
+    .from(agentSessions)
+    .where(
+      and(isNotNull(agentSessions.workerScope), inArray(agentSessions.status, LEASE_STATUSES))
+    );
+  return rows.length;
 }
 
-function emitStatus(runId: number, status: SessionStatus, extra?: Record<string, unknown>) {
+/**
+ * Ids of runs parked in 'pending' (the dispatch queue), oldest first. A run sits
+ * here either freshly created (awaiting its kickoff dispatch) or deferred by the
+ * admission gate for lack of host memory; the pending-run pump re-dispatches them.
+ */
+export async function listPendingRunIds(): Promise<number[]> {
+  const rows = await db
+    .select({ id: agentSessions.id })
+    .from(agentSessions)
+    .where(eq(agentSessions.status, "pending"))
+    .orderBy(asc(agentSessions.id));
+  return rows.map((r) => r.id);
+}
+
+async function setError(runId: number, error: string) {
+  await db.update(agentSessions)
+    .set({ status: "failed", error, completedAt: new Date() })
+    .where(eq(agentSessions.id, runId));
+  await emitStatus(runId, "failed", { error });
+}
+
+async function emitStatus(runId: number, status: SessionStatus, extra?: Record<string, unknown>) {
   // Mirror to agent_events so legacy /sessions UI keeps showing transitions.
   try {
-    db.insert(agentEvents)
+    await db.insert(agentEvents)
       .values({
         sessionId: runId,
         type: "status",
         payload: JSON.stringify({ status, ...(extra ?? {}) }),
         createdAt: new Date(),
-      })
-      .run();
+      });
   } catch {
     // ignore event mirror failures
   }
@@ -1997,26 +2090,25 @@ export interface RunFilters {
 }
 
 /** /runs UI lister — a thin, narrower-typed wrapper over list(). */
-export function listRuns(filters: RunFilters = {}): RunRow[] {
-  return list(filters);
+export async function listRuns(filters: RunFilters = {}): Promise<RunRow[]> {
+  return await list(filters);
 }
 
 // Lookup any run by id, regardless of whether it's task-derived or
 // chat-derived. lib/agent.getSession() filters to task-derived only and
 // lib/chat.getChat() filters to chat-derived only; this is the un-filtered
 // view for the /runs/[id] dispatcher.
-export function getRun(id: number): RunRow | null {
-  return get(id);
+export async function getRun(id: number): Promise<RunRow | null> {
+  return await get(id);
 }
 
 // Resolve a legacy chats.id (from before migration 0009) to the new
 // agent_runs.id, for /chat/[id] → /runs/[id] redirects.
-export function resolveLegacyChatId(chatId: number): number | null {
-  const row = db
+export async function resolveLegacyChatId(chatId: number): Promise<number | null> {
+  const row = (await db
     .select({ id: agentSessions.id })
     .from(agentSessions)
-    .where(and(eq(agentSessions.legacyChatId, chatId), isNotNull(agentSessions.legacyChatId)))
-    .get();
+    .where(and(eq(agentSessions.legacyChatId, chatId), isNotNull(agentSessions.legacyChatId))))[0];
   return row?.id ?? null;
 }
 

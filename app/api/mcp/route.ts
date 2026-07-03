@@ -150,7 +150,7 @@ export async function POST(req: NextRequest) {
 
   // We need a stable "author" string for orchestrator mutations. Use the
   // user's email so audit trails make sense; fall back to the user id.
-  const user = getUserById(session.userId);
+  const user = await getUserById(session.userId);
   const author = user?.email ?? `user-${session.userId}`;
 
   let body: JsonRpcRequest;
