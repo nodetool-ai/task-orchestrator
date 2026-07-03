@@ -116,7 +116,7 @@ export const defaultSpawn: SpawnFn = (runId, scope) => {
     : [tsx, worker, String(runId)];
   const child = nodeSpawn(cmd, args, {
     cwd: process.cwd(),
-    env: process.env,
+    env: runtimeEnv(process.env, useSystemd),
     detached: true,
     stdio: "ignore",
   });
@@ -124,9 +124,43 @@ export const defaultSpawn: SpawnFn = (runId, scope) => {
   // an unhandled 'error' that would crash the server. Swallow it; the failure
   // surfaces as a null pid (handled by dispatchRun) instead.
   child.on("error", () => {});
+  // Safety net: `systemd-run` can exit non-zero (e.g. can't reach the user bus)
+  // BEFORE the worker ever runs, which would otherwise wedge the run in
+  // 'preparing' forever (the pid we return is systemd-run's, not the worker's).
+  // If the launcher exits non-zero while the run is still 'preparing' — i.e. the
+  // worker never took over (a healthy worker moves it to 'running' first) — fail
+  // the run so the failure is visible. A normal completion exits 0 and no-ops.
+  child.on("exit", (code) => {
+    if (!code) return;
+    try {
+      const cur = runs().get(runId);
+      if (cur && cur.status === "preparing") {
+        runs().failRun(runId, `run worker launcher exited ${code} before starting (systemd-run/user-bus issue?)`);
+      }
+    } catch {
+      // runs API unavailable (e.g. process shutting down) — nothing to do.
+    }
+  });
   child.unref();
   return child.pid ?? null;
 };
+
+// systemd-run --user talks to the per-user systemd manager over D-Bus, which it
+// locates via XDG_RUNTIME_DIR ($XDG_RUNTIME_DIR/bus). A systemd *service*
+// environment typically lacks XDG_RUNTIME_DIR (unlike an interactive shell), so
+// `systemd-run --user` fails "Failed to connect to bus: No medium found" and the
+// worker never launches. Supply it (derived from the uid) when missing. Pure +
+// exported for unit testing.
+export function runtimeEnv(
+  base: NodeJS.ProcessEnv,
+  useSystemd: boolean
+): NodeJS.ProcessEnv {
+  const env = { ...base };
+  if (useSystemd && !env.XDG_RUNTIME_DIR && typeof process.getuid === "function") {
+    env.XDG_RUNTIME_DIR = `/run/user/${process.getuid()}`;
+  }
+  return env;
+}
 
 function hasSystemdRun(): boolean {
   try {
