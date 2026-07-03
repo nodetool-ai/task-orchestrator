@@ -280,7 +280,24 @@ export function RunView({
     // deduped by its real DB id so a reconnect replay can't double it.
     if (event.type === "message" && event.message) {
       const ui = toUiMessage(event.message);
-      setMessages((prev) => (prev.some((m) => m.id === ui.id) ? prev : [...prev, ui]));
+      setMessages((prev) => {
+        if (prev.some((m) => m.id === ui.id)) return prev; // already have the real row
+        // A just-persisted USER message is also the one we optimistically rendered
+        // (temp negative id, same text) when the local composer sent it. Swap the
+        // temp id for the real row instead of appending a duplicate — dedup-by-id
+        // can't match a temp id to the real one, which is why the bubble doubled.
+        if (ui.role === "user") {
+          const i = prev.findIndex(
+            (m) => m.id < 0 && m.role === "user" && uiMessageText(m) === uiMessageText(ui)
+          );
+          if (i !== -1) {
+            const next = prev.slice();
+            next[i] = ui;
+            return next;
+          }
+        }
+        return [...prev, ui];
+      });
       return;
     }
     if (event.type === "sdk" && event.sdk) {
@@ -755,6 +772,14 @@ async function consumeSse(
       }
     }
   }
+}
+
+// Concatenated text of a message's text blocks — used to match a just-persisted
+// user message to the optimistic bubble it should replace.
+function uiMessageText(m: { content: SdkContentBlock[] }): string {
+  return m.content
+    .map((b) => (b.type === "text" ? (b as { text?: string }).text ?? "" : ""))
+    .join("");
 }
 
 // Map a persisted server row to the UI shape. Kept module-level so both the
