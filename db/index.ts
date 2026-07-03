@@ -8,7 +8,11 @@ import * as schema from "./schema";
 import { PERSONAS } from "@/lib/personas";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const MIGRATIONS_DIR = join(__dirname, "migrations");
+// In the bundled Next server (or a container), db/index.ts's __dirname resolves
+// into .next/server rather than the source db/ dir, so the migration .sql files
+// aren't beside it. TASK_ORCH_MIGRATIONS_DIR lets the runtime point at the
+// copied-in migrations folder; dev/tests (tsx, unbundled) use the default.
+const MIGRATIONS_DIR = process.env.TASK_ORCH_MIGRATIONS_DIR || join(__dirname, "migrations");
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;

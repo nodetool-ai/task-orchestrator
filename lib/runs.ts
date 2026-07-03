@@ -47,7 +47,7 @@ import {
   extractReviewOutcome,
   parseReviewVerdict,
 } from "./run-templates";
-import { parsePrUrl } from "./gh-url";
+import { parsePrUrl, ownerRepoFromRemote } from "./gh-url";
 import { assistantText, toolResults, type SdkContentBlock } from "./sdk-message";
 import type { AgentSessionFull, RepositoryRow, SessionStatus } from "./types";
 import { isTerminalStatus, SESSION_STATUSES } from "./types";
@@ -761,6 +761,10 @@ export async function cancel(id: number): Promise<RunRow> {
     .where(eq(agentSessions.id, id));
   await emitStatus(id, "cancelled");
   closeBus(id);
+  // Hard-stop the detached worker container as a fallback (the cancel_requested
+  // poll aborts it gracefully within a heartbeat; docker stop is the belt). No-op
+  // when not containerized.
+  void runDispatch.stopWorkerContainer(run.workerScope);
   if (run.cwdStrategy === "worktree" && run.worktreePath) {
     cleanupWorktree(run.worktreePath, await repoRoot(run)).catch(() => {});
   }
@@ -973,6 +977,15 @@ async function prepareCwd(run: RunRow): Promise<string> {
       `Run #${run.id} has cwd_strategy=${run.cwdStrategy} but no branch/worktree_path recorded yet.`
     );
   }
+  // Worker-container resume: the prior container (and its /work checkout) is
+  // gone, so re-clone from the cache and check out the already-pushed branch.
+  if (process.env.REPO_CACHE_DIR) {
+    if (!existsSync(run.worktreePath)) {
+      const work = await containerCheckout(run, run.branch);
+      return validateCwd(work, { runId: run.id, repoId: run.repoId });
+    }
+    return validateCwd(run.worktreePath, { runId: run.id, repoId: run.repoId });
+  }
   const root = await repoRoot(run);
   if (!existsSync(run.worktreePath)) {
     await mkdir(dirname(run.worktreePath), { recursive: true });
@@ -1036,16 +1049,61 @@ async function repoDefaultBranch(run: { repoId: string | null; taskId: string | 
  * worktree off the base branch, persist them, and move the task to in_progress.
  * No-op once a branch exists (later turns re-materialize via prepareCwd).
  */
+// Worker-container git checkout: clone the run's repo from the mounted
+// repo-cache mirror (fast, local objects) into /work/<id>, authenticated by
+// GH_TOKEN so pushes + gh work directly. With `base` set, branch off origin/base
+// (first turn); without it, check out the existing (already-pushed) branch (a
+// resume in a fresh container). Returns the container-local worktree path.
+async function containerCheckout(
+  run: RunRow,
+  branch: string,
+  base?: string
+): Promise<string> {
+  const cache = process.env.REPO_CACHE_DIR!;
+  const repoRow = await resolveRepo(run);
+  const parsed = ownerRepoFromRemote(repoRow?.remote ?? null);
+  if (!parsed) {
+    throw new Error(
+      `Run #${run.id}: repository '${run.repoId ?? "(default)"}' has no GitHub remote to clone for the worker container.`
+    );
+  }
+  const token = process.env.GH_TOKEN;
+  if (!token) throw new Error(`Run #${run.id}: GH_TOKEN is required for in-container checkout.`);
+  const mirror = resolve(cache, `${parsed.owner}_${parsed.repo}.git`);
+  const url = `https://x-access-token:${token}@github.com/${parsed.owner}/${parsed.repo}`;
+  const work = `/work/${run.id}`;
+  await mkdir("/work", { recursive: true });
+  const reference = existsSync(mirror) ? ["--reference", mirror, "--dissociate"] : [];
+  await sh(["git", "clone", ...reference, url, work], "/");
+  if (base) {
+    await sh(["git", "-C", work, "checkout", "-B", branch, `origin/${base}`], "/");
+  } else {
+    // resume: the branch is already on the remote; fetch + check it out.
+    await sh(["git", "-C", work, "fetch", "origin", branch], "/");
+    await sh(["git", "-C", work, "checkout", "-B", branch, `origin/${branch}`], "/");
+  }
+  return work;
+}
+
 async function ensureWorktreeBranch(run: RunRow, baseBranch?: string): Promise<RunRow> {
   if (run.cwdStrategy !== "worktree" || run.branch) return run;
   const base = baseBranch?.trim() || (await repoDefaultBranch(run));
-  const root = await repoRoot(run);
-  const worktreeRoot = resolve(root, ".worktrees");
   const branch = worktreeBranchName(run);
-  const worktreePath = resolve(worktreeRoot, String(run.id));
-  await mkdir(worktreeRoot, { recursive: true });
-  await sh(["git", "worktree", "add", "-b", branch, worktreePath, base], root);
-  await linkSharedWorktreeArtifacts(worktreePath, root);
+  let worktreePath: string;
+  if (process.env.REPO_CACHE_DIR) {
+    // Worker-container mode: clone from the mounted repo-cache mirror into a
+    // container-local dir and branch off `base` there, instead of a host-shared
+    // git worktree. The checkout is ephemeral (the container is --rm); durable
+    // state lives on GitHub (the branch is pushed) + Postgres.
+    worktreePath = await containerCheckout(run, branch, base);
+  } else {
+    const root = await repoRoot(run);
+    const worktreeRoot = resolve(root, ".worktrees");
+    worktreePath = resolve(worktreeRoot, String(run.id));
+    await mkdir(worktreeRoot, { recursive: true });
+    await sh(["git", "worktree", "add", "-b", branch, worktreePath, base], root);
+    await linkSharedWorktreeArtifacts(worktreePath, root);
+  }
   const taskRepoId = run.taskId ? (await repo.getTask(run.taskId))?.repoId ?? null : null;
   await db.update(agentSessions)
     .set({ branch, worktreePath, repoId: run.repoId ?? taskRepoId })
@@ -1798,13 +1856,16 @@ export async function reconcileOrphanedRuns(): Promise<number> {
     // via isImplementWorktree, since the row is still in a *lease* status and
     // isResumableWorktreeRun only accepts post-reap terminal statuses). Clear
     // the stale claim first so dispatchRun can re-claim the row.
-    if (
+    // Containerized workers re-clone from the repo-cache, so the branch (pushed
+    // to GitHub) + an SDK session is enough — the host worktree is gone with the
+    // dead container. Host/dev mode still requires the on-disk worktree.
+    const containerized = !!process.env.TASK_ORCH_WORKER_IMAGE;
+    const resumable =
       runDispatch.detachedRunsEnabled() &&
       isImplementWorktree(row) &&
-      row.sdkSessionId &&
-      row.worktreePath &&
-      existsSync(row.worktreePath)
-    ) {
+      !!row.sdkSessionId &&
+      (containerized ? !!row.branch : !!row.worktreePath && existsSync(row.worktreePath));
+    if (resumable) {
       await db.update(agentSessions)
         .set({ workerScope: null })
         .where(eq(agentSessions.id, row.id));

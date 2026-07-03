@@ -1,23 +1,18 @@
 // lib/run-dispatch.ts
 import { and, eq, isNull } from "drizzle-orm";
-import { spawn as nodeSpawn, execFileSync } from "node:child_process";
+import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { db } from "../db";
 import { agentSessions } from "../db/schema";
 import type { RunRow } from "./runs";
 
-export type SpawnFn = (runId: number, scope: string) => number | null;
+// Spawns the worker for a run and returns a truthy "pid" on success or null on
+// failure. May be async (the Docker API is): dispatchRun awaits it.
+export type SpawnFn = (runId: number, scope: string) => number | null | Promise<number | null>;
 
-// Late-bound bridge back into lib/runs. run-dispatch needs get()/isLeaseLive()
-// synchronously, but a *static* `import { get, isLeaseLive } from "./runs"` here
-// forms a runs ↔ run-dispatch import cycle that webpack minification turns into a
-// boot-time TDZ ("Cannot access 'r' before initialization"). runs.ts imports this
-// module (namespace) and injects the two helpers on load, so the only static edge
-// is runs → run-dispatch (no cycle). A function-scoped `require("./runs")` — the
-// plan's original suggestion — would work in the prod bundle but throws under the
-// Vitest ESM loader (native require can't resolve the .ts source), so injection is
-// used instead.
+// Late-bound bridge back into lib/runs (avoids a static import cycle; runs.ts
+// injects these on load). See the longer note kept from the systemd era.
 type RunsApi = {
   get: (id: number) => Promise<RunRow | null>;
   isLeaseLive: (run: { status: string; heartbeatAt: Date | null }, now?: number) => boolean;
@@ -38,8 +33,6 @@ export function detachedRunsEnabled(): boolean {
   return !!v && v !== "0" && v.toLowerCase() !== "false";
 }
 
-// Monotonic per-process nonce (Math.random is unavailable in some sandboxes;
-// a counter + pid is unique enough for a scope unit name).
 let nonceCounter = 0;
 function nonce(): string {
   nonceCounter += 1;
@@ -56,116 +49,115 @@ export async function dispatchRun(
   if (run.workerScope) return "already-claimed";
 
   const scope = `run-${runId}-${nonce()}`;
-  // Atomic claim: only succeeds if worker_scope is still NULL. A concurrent
-  // claimer that wins flips it non-null, so our WHERE matches 0 rows and we bail.
+  // Atomic claim: only succeeds if worker_scope is still NULL.
   const claimed = await db
     .update(agentSessions)
     .set({ status: "preparing", workerScope: scope, cancelRequested: 0, heartbeatAt: new Date() })
     .where(and(eq(agentSessions.id, runId), isNull(agentSessions.workerScope)));
   if (claimed.count === 0) return "already-claimed";
 
-  // Spawn the detached worker. A spawn that throws (bad module resolution in the
-  // prod bundle) OR returns no pid (executable not found) must NOT leave the run
-  // wedged in 'preparing' forever with no error — mark it failed and release the
-  // claim so the failure is visible in the UI and the run can be retried.
+  // Spawn the worker. A throw or a null pid must NOT leave the run wedged in
+  // 'preparing' with no error — mark it failed and release the claim.
   const spawn = opts.spawn ?? defaultSpawn;
   let pid: number | null = null;
   try {
-    pid = spawn(runId, scope);
+    pid = await spawn(runId, scope);
   } catch (err) {
     return await failSpawn(runId, `run worker failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
   }
   if (pid == null) {
-    return await failSpawn(runId, "run worker did not start (spawn returned no pid — is the worker runtime installed?)");
+    return await failSpawn(runId, "run worker did not start (spawn returned no pid — worker image/runtime available?)");
   }
   await db.update(agentSessions).set({ workerPid: pid }).where(eq(agentSessions.id, runId));
   return "spawned";
 }
 
 async function failSpawn(runId: number, message: string): Promise<"spawn-failed"> {
-  // Release the claim so a later dispatch/retry can re-acquire it, then fail.
   await db.update(agentSessions).set({ workerScope: null, workerPid: null }).where(eq(agentSessions.id, runId));
   await runs().failRun(runId, message);
   return "spawn-failed";
 }
 
-// M1: launch the worker in its own transient systemd --user scope so a
-// `systemctl restart` of the web unit cannot signal it. Falls back to a
-// plain detached spawn (dev / no systemd-run). Returns the child pid.
-export const defaultSpawn: SpawnFn = (runId, scope) => {
+// Worker execution runs in its own process/container so a web-service restart or
+// redeploy cannot signal it. Prefer an ad-hoc Docker container (TASK_ORCH_WORKER_IMAGE
+// set — the compose/prod path); fall back to a plain detached tsx process for dev.
+export const defaultSpawn: SpawnFn = async (runId, scope) => {
+  if (process.env.TASK_ORCH_WORKER_IMAGE) return dockerSpawn(runId, scope);
+  return detachedSpawn(runId, scope);
+};
+
+// One worker container per run, launched via the mounted Docker socket. The
+// container connects to Postgres over the compose network, checks out from the
+// repo-cache volume, and pushes to GitHub with GH_TOKEN. workerScope is the
+// container name; liveness is heartbeat-based; cancel() calls stopWorkerContainer.
+async function dockerSpawn(runId: number, scope: string): Promise<number | null> {
+  const { default: Docker } = await import("dockerode");
+  const docker = new Docker();
+  const image = process.env.TASK_ORCH_WORKER_IMAGE!;
+  const pass = (k: string) => `${k}=${process.env[k] ?? ""}`;
+  const env = [
+    pass("DATABASE_URL"),
+    pass("GH_TOKEN"),
+    pass("CLAUDE_CODE_OAUTH_TOKEN"),
+    pass("ANTHROPIC_API_KEY"),
+    pass("TASK_ORCH_AGENT_BACKEND"),
+    pass("TASK_ORCH_CHAT_MODEL"),
+    pass("TASK_ORCH_AGENT_MODEL"),
+    "TASK_ORCH_DETACHED_RUNS=1",
+    // Signals the in-container checkout strategy (Phase 5): clone from the
+    // mounted repo-cache mirror instead of a host worktree.
+    "REPO_CACHE_DIR=/repo-cache",
+  ];
+  const binds: string[] = [];
+  const claudeHome = process.env.TASK_ORCH_CLAUDE_HOME_HOST;
+  if (claudeHome) binds.push(`${claudeHome}:/root/.claude`);
+  const repoCacheVol = process.env.TASK_ORCH_REPO_CACHE_HOST_VOLUME;
+  if (repoCacheVol) binds.push(`${repoCacheVol}:/repo-cache`);
+
+  const container = await docker.createContainer({
+    Image: image,
+    name: scope,
+    Cmd: [String(runId)],
+    Env: env,
+    HostConfig: {
+      AutoRemove: true,
+      Binds: binds,
+      ...(process.env.TASK_ORCH_DOCKER_NETWORK
+        ? { NetworkMode: process.env.TASK_ORCH_DOCKER_NETWORK }
+        : {}),
+    },
+  });
+  await container.start();
+  return 1; // sentinel: container started (not a host pid). cancel() uses the name.
+}
+
+// Dev fallback: a detached `tsx scripts/run-worker.ts <id>` on the host, talking
+// to the same DATABASE_URL. No restart-survival, but dev doesn't redeploy.
+function detachedSpawn(runId: number, _scope: string): number | null {
   const node = process.execPath;
-  // Resolve tsx's CLI by filesystem path, NOT require.resolve/createRequire.
-  // Inside the Next/webpack prod server bundle those get rewritten to webpack's
-  // own module resolver, which can't see node_modules and throws "Cannot find
-  // module 'tsx/cli'" at runtime — wedging the run. `join(cwd, …)` is a plain
-  // runtime path lookup webpack never transforms. cwd is the repo root (same
-  // assumption the relative worker path below already relies on). Override with
-  // TASK_ORCH_TSX_CLI if tsx's internal layout ever moves.
   const tsx =
-    process.env.TASK_ORCH_TSX_CLI ||
-    join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
-  if (!existsSync(tsx)) {
-    throw new Error(`tsx CLI not found at ${tsx} (set TASK_ORCH_TSX_CLI to override)`);
-  }
-  const worker = "scripts/run-worker.ts";
-  const useSystemd = process.platform === "linux" && hasSystemdRun();
-  const cmd = useSystemd ? "systemd-run" : node;
-  const args = useSystemd
-    ? ["--user", "--scope", "--collect", `--unit=${scope}`, "--", node, tsx, worker, String(runId)]
-    : [tsx, worker, String(runId)];
-  const child = nodeSpawn(cmd, args, {
+    process.env.TASK_ORCH_TSX_CLI || join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
+  if (!existsSync(tsx)) throw new Error(`tsx CLI not found at ${tsx} (set TASK_ORCH_TSX_CLI to override)`);
+  const child = nodeSpawn(node, [tsx, "scripts/run-worker.ts", String(runId)], {
     cwd: process.cwd(),
-    env: runtimeEnv(process.env, useSystemd),
+    env: process.env,
     detached: true,
     stdio: "ignore",
   });
-  // A child_process 'error' (ENOENT on cmd, etc.) with no listener is emitted as
-  // an unhandled 'error' that would crash the server. Swallow it; the failure
-  // surfaces as a null pid (handled by dispatchRun) instead.
   child.on("error", () => {});
-  // Safety net: `systemd-run` can exit non-zero (e.g. can't reach the user bus)
-  // BEFORE the worker ever runs, which would otherwise wedge the run in
-  // 'preparing' forever (the pid we return is systemd-run's, not the worker's).
-  // If the launcher exits non-zero while the run is still 'preparing' — i.e. the
-  // worker never took over (a healthy worker moves it to 'running' first) — fail
-  // the run so the failure is visible. A normal completion exits 0 and no-ops.
-  child.on("exit", async (code) => {
-    if (!code) return;
-    try {
-      const cur = await runs().get(runId);
-      if (cur && cur.status === "preparing") {
-        await runs().failRun(runId, `run worker launcher exited ${code} before starting (systemd-run/user-bus issue?)`);
-      }
-    } catch {
-      // runs API unavailable (e.g. process shutting down) — nothing to do.
-    }
-  });
   child.unref();
   return child.pid ?? null;
-};
-
-// systemd-run --user talks to the per-user systemd manager over D-Bus, which it
-// locates via XDG_RUNTIME_DIR ($XDG_RUNTIME_DIR/bus). A systemd *service*
-// environment typically lacks XDG_RUNTIME_DIR (unlike an interactive shell), so
-// `systemd-run --user` fails "Failed to connect to bus: No medium found" and the
-// worker never launches. Supply it (derived from the uid) when missing. Pure +
-// exported for unit testing.
-export function runtimeEnv(
-  base: NodeJS.ProcessEnv,
-  useSystemd: boolean
-): NodeJS.ProcessEnv {
-  const env = { ...base };
-  if (useSystemd && !env.XDG_RUNTIME_DIR && typeof process.getuid === "function") {
-    env.XDG_RUNTIME_DIR = `/run/user/${process.getuid()}`;
-  }
-  return env;
 }
 
-function hasSystemdRun(): boolean {
+/** Best-effort hard stop of a run's worker container (cancel fallback). No-op if
+ *  not containerized or the container is already gone. */
+export async function stopWorkerContainer(scope: string | null): Promise<void> {
+  if (!scope || !process.env.TASK_ORCH_WORKER_IMAGE) return;
   try {
-    execFileSync("systemd-run", ["--version"], { stdio: "ignore" });
-    return true;
+    const { default: Docker } = await import("dockerode");
+    const docker = new Docker();
+    await docker.getContainer(scope).stop({ t: 5 });
   } catch {
-    return false;
+    // already stopped / removed / unreachable — nothing to do
   }
 }

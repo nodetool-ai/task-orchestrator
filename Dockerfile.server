@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1
+# Task Orchestrator web server (Next.js). Also used for the `pipe` service
+# (same image, different command).
+
+FROM node:24-bookworm-slim AS deps
+WORKDIR /app
+# .npmrc carries legacy-peer-deps=true (the claude-agent-sdk zod peer is cosmetic).
+COPY package.json package-lock.json .npmrc ./
+RUN npm ci
+
+FROM node:24-bookworm-slim AS build
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+# `next build` evaluates modules that create the postgres.js client from
+# DATABASE_URL at import. postgres.js connects lazily, so a throwaway URL is
+# enough to compile — no database is contacted during the build.
+ENV DATABASE_URL=postgres://build:build@localhost:5432/build
+RUN npm run build
+
+FROM node:24-bookworm-slim AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+# The migrator reads its .sql files from disk at boot; point it at the copied-in
+# folder (the bundled server's __dirname can't locate db/migrations otherwise).
+ENV TASK_ORCH_MIGRATIONS_DIR=/app/db/migrations
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/.next ./.next
+COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/next.config.mjs ./next.config.mjs
+COPY --from=build /app/db ./db
+EXPOSE 3000
+# `npm run start` -> next start. instrumentation.ts runs initDb() (migrate+seed)
+# on boot before serving.
+CMD ["npm", "run", "start"]

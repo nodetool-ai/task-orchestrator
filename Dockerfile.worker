@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1
+# Task Orchestrator run worker. Spawned ad-hoc (one container per run) by the
+# server via the Docker socket. Runs a single agent turn, checks out/pushes to
+# GitHub directly, and talks to Postgres over the compose network.
+#   docker run --rm ... task-orchestrator-worker:latest <runId>
+
+FROM node:24-bookworm-slim
+
+# git + gh CLI (agents clone/push and open PRs directly with a token).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates curl gnupg \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+# .npmrc carries legacy-peer-deps=true (the claude-agent-sdk zod peer is cosmetic).
+COPY package.json package-lock.json .npmrc ./
+RUN npm ci
+
+# The Claude Agent SDK spawns the `claude` CLI; install it globally.
+RUN npm install -g @anthropic-ai/claude-code
+
+COPY . .
+
+# Commit identity for changes the agent makes.
+RUN git config --system user.email "agent@task-orchestrator.local" \
+    && git config --system user.name "Task Orchestrator Agent"
+
+# The runId is passed as the container command: `docker run worker:latest <id>`.
+ENTRYPOINT ["npx", "tsx", "scripts/run-worker.ts"]
