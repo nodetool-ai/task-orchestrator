@@ -35,7 +35,7 @@ import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, asc, desc, eq, inArray, isNotNull, isNull, notInArray } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, notInArray } from "drizzle-orm";
 
 import { db } from "@/db";
 import { agentEvents, agentMessages, agentSessions } from "@/db/schema";
@@ -1113,9 +1113,19 @@ async function containerCheckout(
   if (base) {
     await sh(["git", "-C", work, "checkout", "-B", branch, `origin/${base}`], "/");
   } else {
-    // resume: the branch is already on the remote; fetch + check it out.
-    await sh(["git", "-C", work, "fetch", "origin", branch], "/");
-    await sh(["git", "-C", work, "checkout", "-B", branch, `origin/${branch}`], "/");
+    // resume: the branch may be on the remote (an implement run that pushed
+    // commits). If it isn't — a chat that never committed never pushed its branch
+    // — fall back to a fresh default-branch checkout under the same branch name.
+    // Conversation continuity lives in the resumed SDK session (~/.claude), not
+    // the git branch, so this is correct for a chat; an implement resume still
+    // gets its pushed work.
+    try {
+      await sh(["git", "-C", work, "fetch", "origin", branch], "/");
+      await sh(["git", "-C", work, "checkout", "-B", branch, `origin/${branch}`], "/");
+    } catch {
+      const def = await repoDefaultBranch(run);
+      await sh(["git", "-C", work, "checkout", "-B", branch, `origin/${def}`], "/");
+    }
   }
   return work;
 }
@@ -1595,7 +1605,22 @@ export async function driveChatSession(runId: number): Promise<void> {
   // parked worker) AND poll the cross-process cancel flag so a UI cancel aborts.
   const heartbeat = startHeartbeatWithCancel(runId, abort);
 
-  let lastProcessed = 0;
+  // On (re)start, skip user messages a prior worker already handled — the resumed
+  // SDK session already contains those turns. Each completed turn emits exactly one
+  // turn_done and messages are drained in id order, so the turn_done count is the
+  // number of already-processed user messages. (A fresh chat has 0 → start at 0.)
+  const priorTurns = (
+    await db
+      .select({ id: agentEvents.id })
+      .from(agentEvents)
+      .where(and(eq(agentEvents.sessionId, runId), eq(agentEvents.type, "turn_done")))
+  ).length;
+  const priorUserIds = (await listMessages(runId))
+    .filter((m) => m.role === "user")
+    .map((m) => m.id)
+    .sort((a, b) => a - b);
+  let lastProcessed =
+    priorTurns > 0 && priorTurns <= priorUserIds.length ? priorUserIds[priorTurns - 1] : 0;
   let pendingWake = false;
   let wake: (() => void) | null = null;
   const unsub = await subscribeRunInput(runId, () => {
@@ -2225,11 +2250,18 @@ export async function reconcileOrphanedRuns(): Promise<number> {
  * reservation immediately (before its RSS ramps up), closing the dispatch race.
  */
 export async function countInFlightWorkers(): Promise<number> {
+  // Count runs a LIVE worker owns — worker_scope set AND a fresh heartbeat —
+  // regardless of status. A long-lived chat worker parked at 'idle' between turns
+  // still holds a resident container + its memory, so it must count against the
+  // admission budget; a dead worker's stale claim (expired heartbeat) must not.
   const rows = await db
     .select({ id: agentSessions.id })
     .from(agentSessions)
     .where(
-      and(isNotNull(agentSessions.workerScope), inArray(agentSessions.status, LEASE_STATUSES))
+      and(
+        isNotNull(agentSessions.workerScope),
+        gt(agentSessions.heartbeatAt, new Date(Date.now() - HEARTBEAT_STALE_MS))
+      )
     );
   return rows.length;
 }
