@@ -12,3 +12,5 @@ out
 # Cloudflare Tunnel credentials (per-host, never share)
 cloudflared.local.yml
 *.cloudflared.json
+.env.test
+.env.docker

@@ -14,3 +14,4 @@ mobile
 __tests__
 .impeccable
 .claude
+.env.test

@@ -70,10 +70,13 @@ services:
     environment:
       <<: *app-env
       TASK_ORCH_DETACHED_RUNS: "1"
-      # DooD: the server spawns worker containers on this network/image.
+      # DooD: the server spawns worker containers on this network/image. The
+      # network + repo-cache volume are namespaced by the compose project, so
+      # derive them from COMPOSE_PROJECT_NAME (default "task-orchestrator") — this
+      # keeps worker spawn correct under a distinct test project name.
       TASK_ORCH_WORKER_IMAGE: task-orchestrator-worker:latest
-      TASK_ORCH_DOCKER_NETWORK: task-orchestrator_default
-      TASK_ORCH_REPO_CACHE_HOST_VOLUME: task-orchestrator_repo-cache
+      TASK_ORCH_DOCKER_NETWORK: ${COMPOSE_PROJECT_NAME:-task-orchestrator}_default
+      TASK_ORCH_REPO_CACHE_HOST_VOLUME: ${COMPOSE_PROJECT_NAME:-task-orchestrator}_repo-cache
       TASK_ORCH_CLAUDE_HOME_HOST: ${CLAUDE_HOME}
     ports:
       - "${SERVER_PORT:-3000}:3000"
