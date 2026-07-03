@@ -68,10 +68,11 @@ import { linkSharedWorktreeArtifacts } from "./worktree-env";
 // would otherwise produce.
 import * as runDispatch from "./run-dispatch";
 
-// Inject this module's helpers into run-dispatch (see the comment above). `get`
-// and `isLeaseLive` are hoisted function declarations, so they are safe to
-// reference at module-init time.
-runDispatch.__setRunsApi({ get, isLeaseLive });
+// Inject this module's helpers into run-dispatch (see the comment above). `get`,
+// `isLeaseLive`, and `setError` are hoisted function declarations, so they are
+// safe to reference at module-init time. `failRun` lets a failed worker spawn
+// mark the run failed (status + event) instead of wedging it in 'preparing'.
+runDispatch.__setRunsApi({ get, isLeaseLive, failRun: setError });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");

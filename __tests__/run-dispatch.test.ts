@@ -39,4 +39,30 @@ describe("dispatchRun", () => {
       .run();
     expect(dispatchRun(run.id, { spawn: () => 1 })).toBe("already-claimed");
   });
+
+  // Regression: a spawn that throws (bad module resolution in the prod bundle —
+  // the 'Cannot find module tsx/cli' incident) must fail the run, not wedge it
+  // in 'preparing' with no error and no worker.
+  it("marks the run failed (not wedged in preparing) when spawn throws", () => {
+    const run = create({ goal: "<implement>", defer: true });
+    const result = dispatchRun(run.id, {
+      spawn: () => {
+        throw new Error("boom-tsx");
+      },
+    });
+    expect(result).toBe("spawn-failed");
+    const row = get(run.id)!;
+    expect(row.status).toBe("failed");
+    expect(row.error).toMatch(/boom-tsx/);
+    expect(row.workerScope).toBeNull(); // claim released for retry
+  });
+
+  it("marks the run failed when spawn returns no pid (executable not found)", () => {
+    const run = create({ goal: "<implement>", defer: true });
+    const result = dispatchRun(run.id, { spawn: () => null });
+    expect(result).toBe("spawn-failed");
+    const row = get(run.id)!;
+    expect(row.status).toBe("failed");
+    expect(row.error).toMatch(/did not start/);
+  });
 });
