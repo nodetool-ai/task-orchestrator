@@ -1605,7 +1605,22 @@ export async function driveChatSession(runId: number): Promise<void> {
   // parked worker) AND poll the cross-process cancel flag so a UI cancel aborts.
   const heartbeat = startHeartbeatWithCancel(runId, abort);
 
-  let lastProcessed = 0;
+  // On (re)start, skip user messages a prior worker already handled — the resumed
+  // SDK session already contains those turns. Each completed turn emits exactly one
+  // turn_done and messages are drained in id order, so the turn_done count is the
+  // number of already-processed user messages. (A fresh chat has 0 → start at 0.)
+  const priorTurns = (
+    await db
+      .select({ id: agentEvents.id })
+      .from(agentEvents)
+      .where(and(eq(agentEvents.sessionId, runId), eq(agentEvents.type, "turn_done")))
+  ).length;
+  const priorUserIds = (await listMessages(runId))
+    .filter((m) => m.role === "user")
+    .map((m) => m.id)
+    .sort((a, b) => a - b);
+  let lastProcessed =
+    priorTurns > 0 && priorTurns <= priorUserIds.length ? priorUserIds[priorTurns - 1] : 0;
   let pendingWake = false;
   let wake: (() => void) | null = null;
   const unsub = await subscribeRunInput(runId, () => {
