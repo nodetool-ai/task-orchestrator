@@ -1,5 +1,7 @@
 "use client";
 
+import { Select } from "@/components/ui/select";
+
 export interface RepositoryOption {
   id: string;
   name: string;
@@ -39,18 +41,13 @@ export function RepositoryPicker({
   id,
   autoFocus,
 }: Props) {
-  const cls =
-    className ??
-    (size === "compact"
-      ? "rounded-sm border border-border/60 bg-background px-2 py-0.5 text-xs outline-none focus:border-foreground/40 disabled:opacity-50"
-      : "w-full rounded-md border border-border/60 bg-background px-2.5 py-1.5 text-sm outline-none focus:border-foreground/40 focus:ring-2 focus:ring-foreground/10 transition-colors disabled:opacity-50");
-
   return (
-    <select
+    <Select
       id={id}
+      uiSize={size === "compact" ? "xs" : "md"}
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className={cls}
+      className={className ?? (size === "default" ? "w-full" : undefined)}
       disabled={disabled}
       title={title ?? "Repository"}
       autoFocus={autoFocus}
@@ -61,6 +58,6 @@ export function RepositoryPicker({
           {showId ? `${r.name} (${r.id})` : r.name}
         </option>
       ))}
-    </select>
+    </Select>
   );
 }

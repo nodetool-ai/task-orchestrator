@@ -8,6 +8,7 @@ import { StateBadge } from "@/components/state-badge";
 import { SessionStatusPill } from "@/components/session-status-pill";
 import { EditRepositoryForm } from "@/components/repositories/edit-repository-form";
 import { formatDate, formatDateTime, relativeDate } from "@/lib/utils";
+import { EmptyState } from "@/components/ui/empty-state";
 
 export const dynamic = "force-dynamic";
 
@@ -67,7 +68,7 @@ export default async function RepositoryPage({
       <section className="space-y-2">
         <h2 className="text-sm font-semibold tracking-tight">Plans ({allPlans.length})</h2>
         {allPlans.length === 0 ? (
-          <p className="text-xs text-muted-foreground">No plans in this repository yet.</p>
+          <EmptyState>No plans in this repository yet.</EmptyState>
         ) : (
           <div className="divide-y divide-border/60 rounded-lg border border-border/60 bg-card/30">
             {allPlans.map((p) => (
@@ -92,7 +93,7 @@ export default async function RepositoryPage({
           Agent sessions ({allSessions.length})
         </h2>
         {allSessions.length === 0 ? (
-          <p className="text-xs text-muted-foreground">No agent sessions yet.</p>
+          <EmptyState>No agent sessions yet.</EmptyState>
         ) : (
           <div className="divide-y divide-border/60 rounded-lg border border-border/60 bg-card/30">
             {allSessions.slice(0, 20).map((s) => (

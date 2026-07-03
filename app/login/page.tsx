@@ -6,6 +6,7 @@ import { signIn } from "next-auth/react";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ErrorText } from "@/components/ui/error-text";
 
 export default function LoginPage() {
   return (
@@ -87,9 +88,7 @@ function LoginForm() {
         Sign in
       </Button>
 
-      {error && (
-        <p className="text-xs text-state-blocked">{error}</p>
-      )}
+      <ErrorText>{error}</ErrorText>
     </form>
   );
 }

@@ -18,6 +18,7 @@ import { Attachments, AttachmentsHeading } from "@/components/attachments";
 import { SessionStatusPill } from "@/components/session-status-pill";
 import { buildPlanChatPromptPrefix } from "@/lib/run-templates";
 import { formatDate, relativeDate } from "@/lib/utils";
+import { EmptyState } from "@/components/ui/empty-state";
 
 export const dynamic = "force-dynamic";
 
@@ -96,7 +97,7 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
           />
         </div>
         {tasks.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No tasks yet.</p>
+          <EmptyState>No tasks yet.</EmptyState>
         ) : (
           <div className="space-y-6">
             {groupOrder.map((state) => {

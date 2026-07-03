@@ -10,6 +10,7 @@ import {
 } from "@/components/pickers/persona-picker";
 import { ModelPicker, type ModelOption } from "@/components/chat/model-picker";
 import { ThinkingLevelPicker, type ThinkingLevel } from "@/components/pickers/thinking-level-picker";
+import { ErrorText } from "@/components/ui/error-text";
 
 export type { PersonaOption };
 
@@ -215,7 +216,7 @@ export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], class
           )}
         </Button>
       </div>
-      {error && <p className="text-xs text-state-blocked">{error}</p>}
+      <ErrorText>{error}</ErrorText>
       {openRunId != null && (
         <p className="text-xs text-muted-foreground">
           Message sent.{" "}

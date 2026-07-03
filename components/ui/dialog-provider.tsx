@@ -3,6 +3,7 @@
 import * as React from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Modal } from "@/components/ui/modal";
 
 type ConfirmOptions = {
   message: string;
@@ -99,33 +100,17 @@ function DialogHost({ req, onClose }: { req: DialogRequest; onClose: () => void 
     [req, onClose]
   );
 
-  React.useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        finish(false, "");
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [finish]);
-
   const tone = req.kind === "confirm" ? req.opts.tone ?? "default" : "default";
   const confirmLabel = req.opts.confirmLabel ?? (req.kind === "prompt" ? "OK" : "Confirm");
   const cancelLabel = req.opts.cancelLabel ?? "Cancel";
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      onClick={() => finish(false, "")}
-      className="fixed inset-0 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm animate-fade-in"
-      style={{ zIndex: 100 }}
+    <Modal
+      onClose={() => finish(false, "")}
+      veilClassName="z-[100]"
+      className="max-w-sm p-5"
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-sm rounded-lg border border-border bg-card p-5 shadow-xl"
-      >
+      <>
         {req.kind === "confirm" ? (
           <p className="text-sm text-foreground">{req.opts.message}</p>
         ) : (
@@ -158,8 +143,8 @@ function DialogHost({ req, onClose }: { req: DialogRequest; onClose: () => void 
             {confirmLabel}
           </Button>
         </div>
-      </div>
-    </div>
+      </>
+    </Modal>
   );
 }
 

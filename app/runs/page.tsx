@@ -10,6 +10,7 @@ import {
   type RunRow,
 } from "@/lib/runs";
 import { formatDateTime, relativeDate } from "@/lib/utils";
+import { EmptyState } from "@/components/ui/empty-state";
 
 export const dynamic = "force-dynamic";
 
@@ -80,7 +81,7 @@ export default async function RunsIndexPage({
       </header>
 
       {grouped.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No runs yet.</p>
+        <EmptyState>No runs yet.</EmptyState>
       ) : (
         grouped.map((group) => (
           <section key={group.group} className="space-y-1.5">

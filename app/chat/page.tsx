@@ -6,6 +6,7 @@ import { getDefaultModel } from "@/lib/chat";
 import { relativeDate } from "@/lib/utils";
 import { NewChatBox } from "@/components/new-chat-box";
 import { SessionStatusPill } from "@/components/session-status-pill";
+import { EmptyState } from "@/components/ui/empty-state";
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +31,7 @@ export default async function ChatPage() {
       <section className="space-y-3">
         <h2 className="text-sm font-semibold tracking-tight">Recent chats</h2>
         {chatRuns.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No chats yet.</p>
+          <EmptyState>No chats yet.</EmptyState>
         ) : (
           <ul className="divide-y divide-border/60 rounded-md border border-border/60 bg-card/40">
             {chatRuns.map((r) => (

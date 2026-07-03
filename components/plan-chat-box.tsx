@@ -16,6 +16,7 @@ import {
 import { ModelPicker, type ModelOption } from "@/components/chat/model-picker";
 import { ThinkingLevelPicker, type ThinkingLevel } from "@/components/pickers/thinking-level-picker";
 import { stashPendingMessage } from "@/lib/pending-first-message";
+import { ErrorText } from "@/components/ui/error-text";
 
 export type { PersonaOption };
 
@@ -252,7 +253,7 @@ export function PlanChatBox({
         </div>
       )}
 
-      {error && <p className="text-xs text-state-blocked">{error}</p>}
+      <ErrorText>{error}</ErrorText>
     </div>
   );
 }

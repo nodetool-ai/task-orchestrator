@@ -205,7 +205,19 @@ The sticky site-header uses `bg-background/80 backdrop-blur` for the same purpos
 
 ## 5. Components
 
-The canonical implementations live in `components/ui/`: `button.tsx` (`Button`, variants `primary` / `ghost` / `outline` / `danger`, sizes `xs` / `sm` / `md` / `icon`), `input.tsx` (`Input`, sizes `md` / `sm` / `xs`, `mono` flag), `textarea.tsx` (`Textarea`, same API), `badge.tsx`, `card.tsx`. New surfaces must compose these primitives rather than hand-rolling the class recipes below; the recipes document what the primitives encode.
+The canonical implementations live in `components/ui/`:
+
+- `button.tsx`: `Button`, variants `primary` / `ghost` / `outline` / `danger`, sizes `xs` / `sm` / `md` / `icon`.
+- `input.tsx`, `textarea.tsx`, `select.tsx`: `Input` / `Textarea` / `Select`, sizes `md` / `sm` / `xs` plus a `mono` flag for literal values (paths, branches, model ids).
+- `field.tsx`: `Field`, the labeled form-field wrapper (meta-voice label above the control).
+- `modal.tsx`: `Modal`, the single sanctioned veil + shadow-xl panel recipe with Escape and veil-click close.
+- `spinner.tsx`: `Spinner`, the one permitted loading animation.
+- `empty-state.tsx`: `EmptyState`, the one-line muted empty state.
+- `error-text.tsx`: `ErrorText`, the Blocked Coral inline error line (renders nothing when empty).
+- `mono.tsx`: `Mono`, the 11px tabular mono tag for copyable literals.
+- `badge.tsx`, `card.tsx`: badges and containers.
+
+New surfaces must compose these primitives rather than hand-rolling the class recipes below; the recipes document what the primitives encode.
 
 ### Buttons
 

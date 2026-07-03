@@ -1,5 +1,6 @@
 import * as repo from "@/lib/repo";
 import { PersonaEditor, type PersonaDto } from "@/components/persona-editor";
+import { EmptyState } from "@/components/ui/empty-state";
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +31,7 @@ export default async function PersonasPage() {
       </header>
 
       {personas.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No personas configured.</p>
+        <EmptyState>No personas configured.</EmptyState>
       ) : (
         <ul className="space-y-4">
           {personas.map((p) => (

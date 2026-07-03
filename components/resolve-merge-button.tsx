@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { GitMerge } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { ErrorText } from "@/components/ui/error-text";
 
 interface Props {
   taskId: string;
@@ -105,7 +106,7 @@ export function ResolveMergeButton({ taskId, className }: Props) {
         <GitMerge className="size-3.5" />
         Resolve merge
       </button>
-      {error && <p className="text-[11px] text-state-blocked">{error}</p>}
+      <ErrorText className="text-[11px]">{error}</ErrorText>
       {sent && !error && (
         <a
           href={`/runs/${runId}`}

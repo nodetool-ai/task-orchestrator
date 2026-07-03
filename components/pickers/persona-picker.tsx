@@ -1,5 +1,7 @@
 "use client";
 
+import { Select } from "@/components/ui/select";
+
 export interface PersonaOption {
   id: string;
   name: string;
@@ -9,7 +11,7 @@ interface Props {
   personas: PersonaOption[];
   value: string;
   onChange: (id: string) => void;
-  /** Optional override for the bare-bones default styling. */
+  /** Optional override merged over the base Select styling. */
   className?: string;
   /** Render compact (small text, slim padding) for inline composer use. */
   size?: "default" | "compact";
@@ -30,16 +32,12 @@ export function PersonaPicker({
   title,
 }: Props) {
   if (personas.length === 0) return null;
-  const cls =
-    className ??
-    (size === "compact"
-      ? "rounded-sm border border-border/60 bg-background px-2 py-0.5 text-xs outline-none focus:border-foreground/40"
-      : "w-full rounded-md border border-border/60 bg-background px-2.5 py-1.5 text-sm outline-none focus:border-foreground/40 focus:ring-2 focus:ring-foreground/10 transition-colors");
   return (
-    <select
+    <Select
+      uiSize={size === "compact" ? "xs" : "md"}
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className={cls}
+      className={className ?? (size === "default" ? "w-full" : undefined)}
       title={title ?? "Persona"}
     >
       {personas.map((p) => (
@@ -47,6 +45,6 @@ export function PersonaPicker({
           {p.name}
         </option>
       ))}
-    </select>
+    </Select>
   );
 }

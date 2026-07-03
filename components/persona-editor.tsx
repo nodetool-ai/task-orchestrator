@@ -1,11 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { Loader2, Check, Save } from "lucide-react";
+import { Check, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Field } from "@/components/ui/field";
+import { Spinner } from "@/components/ui/spinner";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ToolsPicker } from "@/components/pickers/tools-picker";
+import { ErrorText } from "@/components/ui/error-text";
 import {
   ThinkingLevelPicker,
   type ThinkingLevel,
@@ -163,7 +166,7 @@ export function PersonaEditor({ persona }: Props) {
           className="gap-2"
         >
           {saveState === "saving" ? (
-            <Loader2 className="size-3.5 animate-spin" />
+            <Spinner />
           ) : saveState === "saved" ? (
             <Check className="size-3.5" />
           ) : (
@@ -171,9 +174,7 @@ export function PersonaEditor({ persona }: Props) {
           )}
           {saveState === "saved" ? "Saved" : "Save"}
         </Button>
-        {errorMsg && (
-          <span className="text-xs text-state-blocked">{errorMsg}</span>
-        )}
+        <ErrorText>{errorMsg}</ErrorText>
       </div>
     </li>
   );
@@ -181,17 +182,3 @@ export function PersonaEditor({ persona }: Props) {
 
 const fieldClass = "rounded-md px-2.5 text-sm";
 
-function Field({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="block space-y-1">
-      <span className="text-xs font-medium text-muted-foreground">{label}</span>
-      {children}
-    </label>
-  );
-}
