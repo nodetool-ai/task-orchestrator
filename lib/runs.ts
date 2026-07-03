@@ -1113,9 +1113,19 @@ async function containerCheckout(
   if (base) {
     await sh(["git", "-C", work, "checkout", "-B", branch, `origin/${base}`], "/");
   } else {
-    // resume: the branch is already on the remote; fetch + check it out.
-    await sh(["git", "-C", work, "fetch", "origin", branch], "/");
-    await sh(["git", "-C", work, "checkout", "-B", branch, `origin/${branch}`], "/");
+    // resume: the branch may be on the remote (an implement run that pushed
+    // commits). If it isn't — a chat that never committed never pushed its branch
+    // — fall back to a fresh default-branch checkout under the same branch name.
+    // Conversation continuity lives in the resumed SDK session (~/.claude), not
+    // the git branch, so this is correct for a chat; an implement resume still
+    // gets its pushed work.
+    try {
+      await sh(["git", "-C", work, "fetch", "origin", branch], "/");
+      await sh(["git", "-C", work, "checkout", "-B", branch, `origin/${branch}`], "/");
+    } catch {
+      const def = await repoDefaultBranch(run);
+      await sh(["git", "-C", work, "checkout", "-B", branch, `origin/${def}`], "/");
+    }
   }
   return work;
 }
