@@ -17,6 +17,7 @@ import {
 } from "@/components/pickers/repository-picker";
 import { TagsInput } from "@/components/pickers/tags-input";
 import { AssigneePicker } from "@/components/pickers/assignee-picker";
+import { ErrorText } from "@/components/ui/error-text";
 
 type RepoOption = RepositoryOption;
 
@@ -173,7 +174,7 @@ export function NewTaskForm({ planId, repoOptions = [] }: NewTaskFormProps) {
           Cancel
         </Button>
       </div>
-      {error && <p className="text-[11px] text-state-blocked">{error}</p>}
+      <ErrorText className="text-[11px]">{error}</ErrorText>
     </form>
   );
 }

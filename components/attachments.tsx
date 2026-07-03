@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { FileText, Loader2, Paperclip, Trash2, Upload } from "lucide-react";
 import type { AttachmentMeta } from "@/lib/types";
 import { cn, describe, formatBytes, relativeDate } from "@/lib/utils";
+import { ErrorText } from "@/components/ui/error-text";
 
 interface Props {
   scope: "task" | "plan";
@@ -181,7 +182,7 @@ export function Attachments({ scope, ownerId, attachments }: Props) {
         {pending ? "Uploading…" : "Upload image or file"}
       </button>
 
-      {error && <p className="text-[11px] text-state-blocked">{error}</p>}
+      <ErrorText className="text-[11px]">{error}</ErrorText>
     </div>
   );
 }

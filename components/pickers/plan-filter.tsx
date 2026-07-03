@@ -2,6 +2,7 @@
 
 import { useRouter, useSearchParams } from "next/navigation";
 import { ListChecks } from "lucide-react";
+import { Select } from "@/components/ui/select";
 
 export interface PlanOption {
   id: string;
@@ -39,11 +40,7 @@ export function PlanFilter({
     router.push(s ? `${pathname}?${s}` : pathname);
   }
 
-  const cls =
-    className ??
-    (size === "compact"
-      ? "rounded-sm border border-border/60 bg-background pl-6 pr-2 py-1 text-xs outline-none focus:border-foreground/40"
-      : "rounded-md border border-border/60 bg-background pl-7 pr-2.5 py-1.5 text-sm outline-none focus:border-foreground/40 focus:ring-2 focus:ring-foreground/10 transition-colors");
+  const cls = className ?? (size === "compact" ? "pl-6 pr-2" : "pl-7 pr-2.5");
 
   return (
     <span className="relative inline-block">
@@ -54,7 +51,8 @@ export function PlanFilter({
             : "absolute left-2 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none"
         }
       />
-      <select
+      <Select
+        uiSize={size === "compact" ? "sm" : "md"}
         value={value ?? ""}
         onChange={(e) => onChange(e.target.value)}
         className={cls}
@@ -67,7 +65,7 @@ export function PlanFilter({
             {p.title}
           </option>
         ))}
-      </select>
+      </Select>
     </span>
   );
 }

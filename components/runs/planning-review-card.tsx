@@ -6,6 +6,7 @@ import { CheckCircle, MessageSquare } from "lucide-react";
 import { renderMarkdown } from "@/lib/markdown";
 import type { RunRow } from "@/lib/runs";
 import type { SdkContentBlock } from "@/lib/sdk-message";
+import { ErrorText } from "@/components/ui/error-text";
 
 interface MessageLike {
   role: string;
@@ -157,7 +158,7 @@ function SpecReviewCard({ run, messages, onStageChange, onRequestChanges }: Prop
             </div>
           )}
         </div>
-        {error && <p className="text-xs text-state-blocked">{error}</p>}
+        <ErrorText>{error}</ErrorText>
         <div className="flex items-center gap-2">
           <button
             type="button"
@@ -268,7 +269,7 @@ function PlanReviewCard({ run, messages, onStageChange, onRequestChanges }: Prop
             ))}
           </ul>
         </div>
-        {error && <p className="text-xs text-state-blocked">{error}</p>}
+        <ErrorText>{error}</ErrorText>
         <div className="flex items-center gap-2">
           <button
             type="button"

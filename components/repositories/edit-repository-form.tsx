@@ -8,6 +8,7 @@ import { describe } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/dialog-provider";
+import { ErrorText } from "@/components/ui/error-text";
 
 interface Props {
   repository: RepositoryRow;
@@ -154,7 +155,7 @@ export function EditRepositoryForm({ repository }: Props) {
           Cancel
         </Button>
       </div>
-      {error && <p className="text-[11px] text-state-blocked">{error}</p>}
+      <ErrorText className="text-[11px]">{error}</ErrorText>
     </form>
   );
 }

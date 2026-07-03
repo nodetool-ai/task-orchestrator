@@ -6,6 +6,8 @@ import { relativeDate } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/dialog-provider";
+import { ErrorText } from "@/components/ui/error-text";
+import { EmptyState } from "@/components/ui/empty-state";
 
 interface TokenSummary {
   id: number;
@@ -197,7 +199,7 @@ export function ApiTokensManager() {
             Generate
           </Button>
         </div>
-        {error && <p className="text-xs text-state-blocked">{error}</p>}
+        <ErrorText>{error}</ErrorText>
       </div>
 
       {/* Existing tokens table */}
@@ -206,7 +208,7 @@ export function ApiTokensManager() {
         {loading ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
         ) : tokens.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No tokens yet.</p>
+          <EmptyState>No tokens yet.</EmptyState>
         ) : (
           <ul className="divide-y divide-border/60 rounded-md border border-border/60 bg-card/40">
             {tokens.map((t) => (

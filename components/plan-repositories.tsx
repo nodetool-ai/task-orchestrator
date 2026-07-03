@@ -4,6 +4,8 @@ import { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FolderGit2, Plus, X } from "lucide-react";
+import { ErrorText } from "@/components/ui/error-text";
+import { Select } from "@/components/ui/select";
 import type { RepositoryRow } from "@/lib/types";
 import { describe } from "@/lib/utils";
 import { useConfirm } from "@/components/ui/dialog-provider";
@@ -118,14 +120,15 @@ export function PlanRepositories({ planId, repos, allRepositories }: Props) {
         )}
         {adding && (
           <span className="inline-flex items-center gap-1">
-            <select
+            <Select
               autoFocus
+              uiSize="xs"
               onChange={(e) => {
                 if (e.target.value) attach(e.target.value);
               }}
               disabled={pending}
               defaultValue=""
-              className="rounded-md border border-border/60 bg-background/60 px-2 py-0.5 text-xs"
+              className="rounded-md bg-background/60"
             >
               <option value="" disabled>
                 Pick repo…
@@ -135,7 +138,7 @@ export function PlanRepositories({ planId, repos, allRepositories }: Props) {
                   {r.name} ({r.id})
                 </option>
               ))}
-            </select>
+            </Select>
             <button
               type="button"
               onClick={() => setAdding(false)}
@@ -146,7 +149,7 @@ export function PlanRepositories({ planId, repos, allRepositories }: Props) {
           </span>
         )}
       </div>
-      {error && <p className="text-[11px] text-state-blocked">{error}</p>}
+      <ErrorText className="text-[11px]">{error}</ErrorText>
     </div>
   );
 }

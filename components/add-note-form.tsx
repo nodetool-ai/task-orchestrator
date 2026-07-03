@@ -7,6 +7,7 @@ import { describe } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { ErrorText } from "@/components/ui/error-text";
 
 export function AddNoteForm({
   taskId,
@@ -106,7 +107,7 @@ export function AddNoteForm({
           Cancel
         </Button>
       </div>
-      {error && <p className="text-[11px] text-state-blocked">{error}</p>}
+      <ErrorText className="text-[11px]">{error}</ErrorText>
     </form>
   );
 }

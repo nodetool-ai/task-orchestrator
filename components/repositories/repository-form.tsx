@@ -6,6 +6,7 @@ import { Loader2, Plus } from "lucide-react";
 import { describe } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ErrorText } from "@/components/ui/error-text";
 
 export function NewRepositoryForm() {
   const router = useRouter();
@@ -130,7 +131,7 @@ export function NewRepositoryForm() {
           Cancel
         </Button>
       </div>
-      {error && <p className="text-[11px] text-state-blocked">{error}</p>}
+      <ErrorText className="text-[11px]">{error}</ErrorText>
     </form>
   );
 }

@@ -3,6 +3,7 @@ import { FolderGit2 } from "lucide-react";
 import * as repo from "@/lib/repo";
 import { NewRepositoryForm } from "@/components/repositories/repository-form";
 import { formatDate, relativeDate } from "@/lib/utils";
+import { EmptyState } from "@/components/ui/empty-state";
 
 export const dynamic = "force-dynamic";
 
@@ -23,7 +24,7 @@ export default async function RepositoriesPage() {
       </header>
 
       {repositories.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No repositories configured.</p>
+        <EmptyState>No repositories configured.</EmptyState>
       ) : (
         <div className="divide-y divide-border/60 rounded-lg border border-border/60 bg-card/40">
           {repositories.map((r) => (

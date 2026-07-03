@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { TagsInput } from "@/components/pickers/tags-input";
+import { ErrorText } from "@/components/ui/error-text";
 
 export function NewPlanForm() {
   const router = useRouter();
@@ -121,7 +122,7 @@ export function NewPlanForm() {
           Cancel
         </Button>
       </div>
-      {error && <p className="text-[11px] text-state-blocked">{error}</p>}
+      <ErrorText className="text-[11px]">{error}</ErrorText>
     </form>
   );
 }

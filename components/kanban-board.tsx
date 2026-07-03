@@ -1,6 +1,7 @@
 import { STATE_LABEL, TASK_BOARD_STATES, type TaskFull, type TaskState } from "@/lib/types";
 import { StateIcon } from "./state-icon";
 import { TaskCard } from "./task-card";
+import { EmptyState } from "@/components/ui/empty-state";
 
 export function KanbanBoard({ tasks }: { tasks: TaskFull[] }) {
   const byState = groupBy(tasks);
@@ -27,7 +28,7 @@ function Column({ state, tasks }: { state: TaskState; tasks: TaskFull[] }) {
       </div>
       <div className="p-2 space-y-1.5">
         {tasks.length === 0 ? (
-          <div className="px-2 py-6 text-center text-xs text-muted-foreground">No tasks</div>
+          <EmptyState className="px-2 py-6 text-center">No tasks</EmptyState>
         ) : (
           tasks.map((t) => <TaskCard key={t.id} task={t} />)
         )}

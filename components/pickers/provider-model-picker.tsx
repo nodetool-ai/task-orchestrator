@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { Field } from "@/components/ui/field";
+import { Select } from "@/components/ui/select";
 
 interface ProviderCatalog {
   id: string;
@@ -14,6 +16,7 @@ interface Props {
   /** Render the two selects side-by-side (default) or stacked. */
   layout?: "row" | "column";
   className?: string;
+  /** Merged over the base Select styling. */
   selectClassName?: string;
 }
 
@@ -45,7 +48,7 @@ export function ProviderModelPicker({
   onChange,
   layout = "row",
   className = "",
-  selectClassName = defaultSelectClass,
+  selectClassName = "w-full",
 }: Props) {
   const [providers, setProviders] = useState<ProviderCatalog[]>(
     providersCache ?? []
@@ -91,9 +94,8 @@ export function ProviderModelPicker({
 
   return (
     <div className={wrap}>
-      <label className="block space-y-1">
-        <span className="text-xs font-medium text-muted-foreground">Provider</span>
-        <select
+      <Field label="Provider">
+        <Select
           value={provider}
           onChange={(e) => changeProvider(e.target.value)}
           className={selectClassName}
@@ -103,15 +105,15 @@ export function ProviderModelPicker({
               {id}
             </option>
           ))}
-        </select>
-      </label>
+        </Select>
+      </Field>
 
-      <label className="block space-y-1">
-        <span className="text-xs font-medium text-muted-foreground">Model</span>
-        <select
+      <Field label="Model">
+        <Select
+          mono
           value={model}
           onChange={(e) => onChange({ provider, model: e.target.value })}
-          className={`${selectClassName} font-mono text-xs`}
+          className={`${selectClassName} text-xs`}
         >
           {modelOptions.length === 0 && (
             <option value="">(no models for this provider)</option>
@@ -121,11 +123,8 @@ export function ProviderModelPicker({
               {m.name} — {m.id}
             </option>
           ))}
-        </select>
-      </label>
+        </Select>
+      </Field>
     </div>
   );
 }
-
-const defaultSelectClass =
-  "w-full rounded-md border border-border/60 bg-background px-2.5 py-1.5 text-sm outline-none focus:border-foreground/40 focus:ring-2 focus:ring-foreground/10 transition-colors";
