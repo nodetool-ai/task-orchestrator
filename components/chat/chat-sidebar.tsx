@@ -4,6 +4,8 @@ import { useMemo, useState, useTransition } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Plus, MessageSquare, Search, Trash2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useConfirm } from "@/components/ui/dialog-provider";
 
@@ -95,22 +97,19 @@ export function ChatSidebar({ chats }: Props) {
   return (
     <aside className="w-64 shrink-0 border-r border-border/60 bg-card/40 flex flex-col overflow-hidden">
       <div className="p-3 space-y-2 border-b border-border/60">
-        <button
-          onClick={newChat}
-          disabled={creating}
-          className="w-full inline-flex items-center justify-center gap-2 rounded-md bg-foreground text-background hover:bg-foreground/90 disabled:opacity-50 px-3 py-1.5 text-xs font-medium transition-colors"
-        >
+        <Button onClick={newChat} disabled={creating} className="w-full gap-2">
           <Plus className="size-3.5" />
           {creating ? "Creating…" : "New chat"}
-        </button>
+        </Button>
         <div className="relative">
           <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
-          <input
+          <Input
             type="text"
+            uiSize="sm"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search chats…"
-            className="w-full rounded-md border border-border/60 bg-background/60 pl-7 pr-2 py-1.5 text-xs placeholder:text-muted-foreground focus:outline-none focus:border-foreground/30"
+            className="rounded-md bg-background/60 pl-7 pr-2"
           />
         </div>
       </div>

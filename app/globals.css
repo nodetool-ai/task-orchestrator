@@ -4,12 +4,12 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
+    --background: 240 6% 99%;
     --foreground: 240 6% 10%;
-    --card: 0 0% 100%;
+    --card: 240 6% 99%;
     --card-foreground: 240 6% 10%;
     --primary: 240 6% 10%;
-    --primary-foreground: 0 0% 100%;
+    --primary-foreground: 240 6% 98%;
     --secondary: 240 5% 96%;
     --secondary-foreground: 240 6% 10%;
     --muted: 240 5% 96%;
@@ -31,17 +31,17 @@
 
   .dark {
     --background: 240 6% 6%;
-    --foreground: 0 0% 98%;
+    --foreground: 240 6% 98%;
     --card: 240 6% 8%;
-    --card-foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
+    --card-foreground: 240 6% 98%;
+    --primary: 240 6% 98%;
     --primary-foreground: 240 6% 10%;
     --secondary: 240 4% 14%;
-    --secondary-foreground: 0 0% 98%;
+    --secondary-foreground: 240 6% 98%;
     --muted: 240 4% 14%;
     --muted-foreground: 240 5% 64%;
     --accent: 240 4% 14%;
-    --accent-foreground: 0 0% 98%;
+    --accent-foreground: 240 6% 98%;
     --border: 240 4% 16%;
     --input: 240 4% 16%;
     --ring: 240 5% 84%;
@@ -69,7 +69,7 @@
     --pi-raised-2: hsl(240 4% 18%);
     --pi-hairline: hsla(240 4% 30% / 0.5);
     --pi-hairline-strong: hsla(240 4% 38% / 0.7);
-    --pi-fg: hsl(0 0% 98%);
+    --pi-fg: hsl(240 6% 98%);
     --pi-muted: hsl(240 5% 64%);
     --pi-muted-2: hsl(240 4% 46%);
     --s-todo: hsl(240 4% 60%);

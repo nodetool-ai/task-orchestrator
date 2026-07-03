@@ -1,6 +1,8 @@
 "use client";
 
 import * as React from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 type ConfirmOptions = {
   message: string;
@@ -129,8 +131,9 @@ function DialogHost({ req, onClose }: { req: DialogRequest; onClose: () => void 
         ) : (
           <>
             <label className="block text-sm text-foreground">{req.opts.title}</label>
-            <input
+            <Input
               ref={inputRef}
+              uiSize="sm"
               value={value}
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={(e) => {
@@ -140,29 +143,20 @@ function DialogHost({ req, onClose }: { req: DialogRequest; onClose: () => void 
                 }
               }}
               placeholder={req.opts.placeholder}
-              className="mt-2 w-full rounded-md border border-border/60 bg-background/60 px-2.5 py-1.5 text-sm outline-none focus:border-foreground/40"
+              className="mt-2 rounded-md bg-background/60 px-2.5 text-sm"
             />
           </>
         )}
         <div className="mt-5 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={() => finish(false, "")}
-            className="rounded-md border border-border/60 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground"
-          >
+          <Button variant="outline" onClick={() => finish(false, "")}>
             {cancelLabel}
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant={tone === "danger" ? "danger" : "primary"}
             onClick={() => finish(true, value)}
-            className={
-              tone === "danger"
-                ? "rounded-md bg-state-blocked px-3 py-1.5 text-xs font-medium text-white hover:bg-state-blocked/90"
-                : "rounded-md bg-foreground px-3 py-1.5 text-xs font-medium text-background hover:bg-foreground/90"
-            }
           >
             {confirmLabel}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

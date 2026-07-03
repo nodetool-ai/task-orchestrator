@@ -2,6 +2,9 @@
 
 import { useState } from "react";
 import { Loader2, Check, Save } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { ToolsPicker } from "@/components/pickers/tools-picker";
 import {
   ThinkingLevelPicker,
@@ -74,29 +77,33 @@ export function PersonaEditor({ persona }: Props) {
       </div>
 
       <Field label="Name">
-        <input
+        <Input
           type="text"
+          uiSize="sm"
           value={draft.name}
           onChange={(e) => update("name", e.target.value)}
-          className={inputClass}
+          className={fieldClass}
         />
       </Field>
 
       <Field label="Description">
-        <input
+        <Input
           type="text"
+          uiSize="sm"
           value={draft.description ?? ""}
           onChange={(e) => update("description", e.target.value)}
-          className={inputClass}
+          className={fieldClass}
         />
       </Field>
 
       <Field label="System prompt">
-        <textarea
+        <Textarea
+          uiSize="sm"
+          mono
           value={draft.systemPrompt}
           onChange={(e) => update("systemPrompt", e.target.value)}
           rows={8}
-          className={`${inputClass} font-mono text-xs leading-5 resize-y`}
+          className={`${fieldClass} text-xs leading-5 resize-y`}
         />
       </Field>
 
@@ -116,9 +123,10 @@ export function PersonaEditor({ persona }: Props) {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <Field label="Budget — max turns">
-          <input
+          <Input
             type="number"
             min={1}
+            uiSize="sm"
             value={draft.budgetMaxTurns ?? ""}
             onChange={(e) =>
               update(
@@ -126,14 +134,15 @@ export function PersonaEditor({ persona }: Props) {
                 e.target.value ? Number(e.target.value) : null
               )
             }
-            className={inputClass}
+            className={fieldClass}
             placeholder="—"
           />
         </Field>
         <Field label="Budget — max seconds">
-          <input
+          <Input
             type="number"
             min={1}
+            uiSize="sm"
             value={draft.budgetMaxSeconds ?? ""}
             onChange={(e) =>
               update(
@@ -141,18 +150,17 @@ export function PersonaEditor({ persona }: Props) {
                 e.target.value ? Number(e.target.value) : null
               )
             }
-            className={inputClass}
+            className={fieldClass}
             placeholder="—"
           />
         </Field>
       </div>
 
       <div className="flex items-center gap-3 pt-2">
-        <button
-          type="button"
+        <Button
           onClick={save}
           disabled={saveState === "saving"}
-          className="inline-flex items-center gap-2 rounded-md bg-foreground text-background px-3 py-1.5 text-sm font-medium hover:bg-foreground/90 disabled:opacity-50"
+          className="gap-2"
         >
           {saveState === "saving" ? (
             <Loader2 className="size-3.5 animate-spin" />
@@ -162,7 +170,7 @@ export function PersonaEditor({ persona }: Props) {
             <Save className="size-3.5" />
           )}
           {saveState === "saved" ? "Saved" : "Save"}
-        </button>
+        </Button>
         {errorMsg && (
           <span className="text-xs text-state-blocked">{errorMsg}</span>
         )}
@@ -171,8 +179,7 @@ export function PersonaEditor({ persona }: Props) {
   );
 }
 
-const inputClass =
-  "w-full rounded-md border border-border/60 bg-background px-2.5 py-1.5 text-sm outline-none focus:border-foreground/40 focus:ring-2 focus:ring-foreground/10 transition-colors";
+const fieldClass = "rounded-md px-2.5 text-sm";
 
 function Field({
   label,

@@ -4,7 +4,8 @@ import { Suspense, useState, useTransition } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { signIn } from "next-auth/react";
 import { Loader2 } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 export default function LoginPage() {
   return (
@@ -57,14 +58,13 @@ function LoginForm() {
         <label htmlFor="email" className="text-xs font-medium text-muted-foreground">
           Email
         </label>
-        <input
+        <Input
           id="email"
           type="email"
           autoComplete="email"
           required
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-foreground"
         />
       </div>
 
@@ -72,28 +72,20 @@ function LoginForm() {
         <label htmlFor="password" className="text-xs font-medium text-muted-foreground">
           Password
         </label>
-        <input
+        <Input
           id="password"
           type="password"
           autoComplete="current-password"
           required
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-foreground"
         />
       </div>
 
-      <button
-        type="submit"
-        disabled={pending}
-        className={cn(
-          "inline-flex w-full items-center justify-center gap-2 rounded-md bg-foreground text-background px-3 py-2 text-sm font-medium",
-          "hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-        )}
-      >
+      <Button type="submit" size="md" disabled={pending} className="w-full gap-2">
         {pending && <Loader2 className="size-3.5 animate-spin" />}
         Sign in
-      </button>
+      </Button>
 
       {error && (
         <p className="text-xs text-state-blocked">{error}</p>

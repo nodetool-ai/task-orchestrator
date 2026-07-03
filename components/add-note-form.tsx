@@ -3,7 +3,10 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Plus } from "lucide-react";
-import { cn, describe } from "@/lib/utils";
+import { describe } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 
 export function AddNoteForm({
   taskId,
@@ -58,9 +61,10 @@ export function AddNoteForm({
 
   return (
     <form onSubmit={submit} className="space-y-2 rounded-md border border-border/60 bg-card/30 px-3 py-3">
-      <textarea
+      <Textarea
         autoFocus
         rows={2}
+        uiSize="sm"
         value={body}
         onChange={(e) => setBody(e.target.value)}
         onKeyDown={(e) => {
@@ -71,36 +75,36 @@ export function AddNoteForm({
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit(e);
         }}
         placeholder="What happened?"
-        className="w-full resize-none rounded-sm border border-border/60 bg-background px-2 py-1.5 text-sm outline-none focus:border-foreground/40"
+        className="resize-none text-sm"
       />
       <div className="flex items-center gap-2">
-        <input
+        <Input
+          uiSize="xs"
+          mono
           value={author}
           onChange={(e) => setAuthor(e.target.value)}
           placeholder="author"
-          className="w-32 rounded-sm border border-border/60 bg-background px-2 py-1 text-xs font-mono outline-none focus:border-foreground/40"
+          className="w-32"
         />
-        <button
+        <Button
           type="submit"
+          size="xs"
           disabled={pending || !body.trim() || !author.trim()}
-          className={cn(
-            "ml-auto inline-flex items-center gap-1 rounded-md bg-foreground text-background px-2.5 py-1 text-xs font-medium",
-            "hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-          )}
+          className="ml-auto"
         >
           {pending && <Loader2 className="size-3 animate-spin" />}
           Add
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          variant="ghost"
+          size="xs"
           onClick={() => {
             setOpen(false);
             setBody("");
           }}
-          className="text-xs text-muted-foreground hover:text-foreground"
         >
           Cancel
-        </button>
+        </Button>
       </div>
       {error && <p className="text-[11px] text-state-blocked">{error}</p>}
     </form>

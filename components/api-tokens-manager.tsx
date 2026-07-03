@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { Loader2, Plus, Trash2, Copy, Check, KeyRound } from "lucide-react";
 import { relativeDate } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/dialog-provider";
 
 interface TokenSummary {
@@ -119,25 +121,17 @@ export function ApiTokensManager() {
             <code className="flex-1 select-all rounded-md border border-border/60 bg-background px-3 py-2 font-mono text-xs break-all">
               {created.token}
             </code>
-            <button
-              type="button"
-              onClick={copyTokenToClipboard}
-              className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-background px-2.5 py-1.5 text-xs hover:bg-muted/40"
-            >
+            <Button variant="outline" onClick={copyTokenToClipboard}>
               {copied ? (
                 <Check className="size-3.5 text-state-done" />
               ) : (
                 <Copy className="size-3.5" />
               )}
               {copied ? "Copied" : "Copy"}
-            </button>
-            <button
-              type="button"
-              onClick={() => setCreated(null)}
-              className="inline-flex items-center rounded-md border border-border/60 bg-background px-2.5 py-1.5 text-xs hover:bg-muted/40"
-            >
+            </Button>
+            <Button variant="outline" onClick={() => setCreated(null)}>
               Dismiss
-            </button>
+            </Button>
           </div>
 
           <div className="grid gap-3 md:grid-cols-3 pt-1">
@@ -179,8 +173,9 @@ export function ApiTokensManager() {
       <div className="rounded-lg border border-border/60 bg-card/40 p-4 space-y-3">
         <h2 className="text-sm font-medium">New token</h2>
         <div className="flex flex-wrap items-center gap-2">
-          <input
+          <Input
             type="text"
+            uiSize="sm"
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             onKeyDown={(e) => {
@@ -191,21 +186,16 @@ export function ApiTokensManager() {
             }}
             placeholder="e.g. claude-desktop"
             disabled={creating}
-            className="flex-1 min-w-[12rem] rounded-md border border-border/60 bg-background px-2.5 py-1.5 text-sm outline-none focus:border-foreground/40 focus:ring-2 focus:ring-foreground/10 transition-colors disabled:opacity-50"
+            className="flex-1 w-auto min-w-[12rem] rounded-md px-2.5 text-sm"
           />
-          <button
-            type="button"
-            onClick={create}
-            disabled={creating || !newName.trim()}
-            className="inline-flex items-center gap-1.5 rounded-md bg-foreground text-background px-3 py-1.5 text-sm font-medium hover:bg-foreground/90 disabled:opacity-50"
-          >
+          <Button onClick={create} disabled={creating || !newName.trim()}>
             {creating ? (
               <Loader2 className="size-3.5 animate-spin" />
             ) : (
               <Plus className="size-3.5" />
             )}
             Generate
-          </button>
+          </Button>
         </div>
         {error && <p className="text-xs text-state-blocked">{error}</p>}
       </div>
@@ -245,13 +235,14 @@ export function ApiTokensManager() {
                   </div>
                 </div>
                 {!t.revokedAt && (
-                  <button
-                    type="button"
+                  <Button
+                    variant="outline"
+                    size="xs"
                     onClick={() => revoke(t.id)}
-                    className="inline-flex items-center gap-1 rounded-md border border-state-blocked/30 bg-state-blocked/10 px-2 py-0.5 text-[11px] text-state-blocked hover:bg-state-blocked/15"
+                    className="border-state-blocked/30 bg-state-blocked/10 py-0.5 text-[11px] text-state-blocked enabled:hover:border-state-blocked/30 enabled:hover:bg-state-blocked/15 enabled:hover:text-state-blocked"
                   >
                     <Trash2 className="size-3" /> Revoke
-                  </button>
+                  </Button>
                 )}
               </li>
             ))}

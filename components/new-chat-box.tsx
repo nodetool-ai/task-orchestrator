@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowUp, Loader2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
 
 import { type PersonaOption } from "@/components/pickers/persona-picker";
 import {
@@ -157,11 +158,10 @@ export function NewChatBox({ defaultModel, repositories }: Props) {
             />
           )}
           <div className="flex-1" />
-          <button
-            type="button"
+          <Button
+            size="icon"
             onClick={submit}
             disabled={!input.trim() || pending}
-            className="inline-flex size-8 items-center justify-center rounded-full bg-foreground text-background hover:bg-foreground/90 disabled:opacity-40 disabled:hover:bg-foreground transition-colors"
             aria-label="Send"
           >
             {pending ? (
@@ -169,7 +169,7 @@ export function NewChatBox({ defaultModel, repositories }: Props) {
             ) : (
               <ArrowUp className="size-4" />
             )}
-          </button>
+          </Button>
         </div>
       </div>
       {error && <p className="text-xs text-destructive">{error}</p>}

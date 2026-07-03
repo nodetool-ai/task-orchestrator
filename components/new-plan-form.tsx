@@ -3,7 +3,10 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Plus } from "lucide-react";
-import { cn, describe } from "@/lib/utils";
+import { describe } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { TagsInput } from "@/components/pickers/tags-input";
 
 export function NewPlanForm() {
@@ -57,24 +60,21 @@ export function NewPlanForm() {
 
   if (!open) {
     return (
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-foreground text-background px-3 py-1.5 text-xs font-medium hover:opacity-90"
-      >
+      <Button onClick={() => setOpen(true)}>
         <Plus className="size-3.5" /> New plan
-      </button>
+      </Button>
     );
   }
 
   return (
     <form onSubmit={submit} className="space-y-2 rounded-md border border-border/60 bg-card/30 px-3 py-3">
-      <input
+      <Input
         autoFocus
+        uiSize="sm"
         value={title}
         onChange={(e) => setTitle(e.target.value)}
         placeholder="Plan title"
-        className="w-full rounded-sm border border-border/60 bg-background px-2 py-1.5 text-sm font-medium outline-none focus:border-foreground/40"
+        className="text-sm font-medium"
         onKeyDown={(e) => {
           if (e.key === "Escape") {
             reset();
@@ -82,19 +82,22 @@ export function NewPlanForm() {
           }
         }}
       />
-      <textarea
+      <Textarea
         rows={4}
+        uiSize="sm"
         value={body}
         onChange={(e) => setBody(e.target.value)}
         placeholder="Goal / approach (markdown)"
-        className="w-full resize-none rounded-sm border border-border/60 bg-background px-2 py-1.5 text-xs outline-none focus:border-foreground/40"
+        className="resize-none"
       />
       <div className="flex items-center gap-2">
-        <input
+        <Input
+          uiSize="xs"
+          mono
           value={owner}
           onChange={(e) => setOwner(e.target.value)}
           placeholder="owner"
-          className="w-28 rounded-sm border border-border/60 bg-background px-2 py-1 text-xs font-mono outline-none focus:border-foreground/40"
+          className="w-28"
         />
         <div className="flex-1 min-w-[8rem]">
           <TagsInput
@@ -104,27 +107,19 @@ export function NewPlanForm() {
             size="compact"
           />
         </div>
-        <button
-          type="submit"
-          disabled={pending || !title.trim()}
-          className={cn(
-            "inline-flex items-center gap-1 rounded-md bg-foreground text-background px-3 py-1 text-xs font-medium",
-            "hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-          )}
-        >
+        <Button type="submit" disabled={pending || !title.trim()}>
           {pending && <Loader2 className="size-3 animate-spin" />}
           Create
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          variant="ghost"
           onClick={() => {
             reset();
             setOpen(false);
           }}
-          className="text-xs text-muted-foreground hover:text-foreground"
         >
           Cancel
-        </button>
+        </Button>
       </div>
       {error && <p className="text-[11px] text-state-blocked">{error}</p>}
     </form>

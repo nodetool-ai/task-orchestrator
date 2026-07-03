@@ -3,7 +3,10 @@
 import { useState, useTransition, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Plus } from "lucide-react";
-import { cn, describe } from "@/lib/utils";
+import { describe } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import {
   PersonaPicker,
   type PersonaOption,
@@ -107,12 +110,13 @@ export function NewTaskForm({ planId, repoOptions = [] }: NewTaskFormProps) {
 
   return (
     <form onSubmit={submit} className="space-y-2 rounded-md border border-border/60 bg-card/30 px-3 py-3">
-      <input
+      <Input
         autoFocus
+        uiSize="sm"
         value={title}
         onChange={(e) => setTitle(e.target.value)}
         placeholder="Task title"
-        className="w-full rounded-sm border border-border/60 bg-background px-2 py-1.5 text-sm font-medium outline-none focus:border-foreground/40"
+        className="text-sm font-medium"
         onKeyDown={(e) => {
           if (e.key === "Escape") {
             reset();
@@ -120,12 +124,13 @@ export function NewTaskForm({ planId, repoOptions = [] }: NewTaskFormProps) {
           }
         }}
       />
-      <textarea
+      <Textarea
         rows={3}
+        uiSize="sm"
         value={criteria}
         onChange={(e) => setCriteria(e.target.value)}
         placeholder={"Acceptance criteria, one per line"}
-        className="w-full resize-none rounded-sm border border-border/60 bg-background px-2 py-1.5 text-xs outline-none focus:border-foreground/40"
+        className="resize-none"
       />
       <div className="flex flex-wrap items-center gap-2">
         <AssigneePicker value={assignee} onChange={setAssignee} size="compact" />
@@ -154,27 +159,19 @@ export function NewTaskForm({ planId, repoOptions = [] }: NewTaskFormProps) {
         </div>
       </div>
       <div className="flex items-center gap-2">
-        <button
-          type="submit"
-          disabled={pending || !title.trim()}
-          className={cn(
-            "inline-flex items-center gap-1 rounded-md bg-foreground text-background px-3 py-2 text-xs font-medium",
-            "hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-          )}
-        >
+        <Button type="submit" disabled={pending || !title.trim()}>
           {pending && <Loader2 className="size-3 animate-spin" />}
           Create
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          variant="ghost"
           onClick={() => {
             reset();
             setOpen(false);
           }}
-          className="text-xs text-muted-foreground hover:text-foreground py-2"
         >
           Cancel
-        </button>
+        </Button>
       </div>
       {error && <p className="text-[11px] text-state-blocked">{error}</p>}
     </form>
