@@ -35,7 +35,7 @@ import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, asc, desc, eq, inArray, isNotNull, isNull, notInArray } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, notInArray } from "drizzle-orm";
 
 import { db } from "@/db";
 import { agentEvents, agentMessages, agentSessions } from "@/db/schema";
@@ -2250,11 +2250,18 @@ export async function reconcileOrphanedRuns(): Promise<number> {
  * reservation immediately (before its RSS ramps up), closing the dispatch race.
  */
 export async function countInFlightWorkers(): Promise<number> {
+  // Count runs a LIVE worker owns — worker_scope set AND a fresh heartbeat —
+  // regardless of status. A long-lived chat worker parked at 'idle' between turns
+  // still holds a resident container + its memory, so it must count against the
+  // admission budget; a dead worker's stale claim (expired heartbeat) must not.
   const rows = await db
     .select({ id: agentSessions.id })
     .from(agentSessions)
     .where(
-      and(isNotNull(agentSessions.workerScope), inArray(agentSessions.status, LEASE_STATUSES))
+      and(
+        isNotNull(agentSessions.workerScope),
+        gt(agentSessions.heartbeatAt, new Date(Date.now() - HEARTBEAT_STALE_MS))
+      )
     );
   return rows.length;
 }
