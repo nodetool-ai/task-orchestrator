@@ -72,7 +72,14 @@ import * as runDispatch from "./run-dispatch";
 // `isLeaseLive`, and `setError` are hoisted function declarations, so they are
 // safe to reference at module-init time. `failRun` lets a failed worker spawn
 // mark the run failed (status + event) instead of wedging it in 'preparing'.
-runDispatch.__setRunsApi({ get, isLeaseLive, failRun: setError });
+runDispatch.__setRunsApi({
+  get,
+  isLeaseLive,
+  failRun: setError,
+  countInFlightWorkers,
+  listPendingRunIds,
+  reconcileOrphanedRuns,
+});
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
@@ -1892,8 +1899,38 @@ export async function reconcileOrphanedRuns(): Promise<number> {
     }
     reaped++;
   }
-  if (reaped > 0) console.log(`[runs] reconciled ${reaped} orphaned run(s) on boot`);
+  if (reaped > 0) console.log(`[runs] reconciled ${reaped} orphaned run(s)`);
   return reaped;
+}
+
+/**
+ * Count runs currently occupying a worker slot: a non-null worker_scope AND an
+ * active (lease) status. This is the admission gate's "in-flight" number.
+ * Counting 'preparing' rows charges a just-claimed worker its full memory
+ * reservation immediately (before its RSS ramps up), closing the dispatch race.
+ */
+export async function countInFlightWorkers(): Promise<number> {
+  const rows = await db
+    .select({ id: agentSessions.id })
+    .from(agentSessions)
+    .where(
+      and(isNotNull(agentSessions.workerScope), inArray(agentSessions.status, LEASE_STATUSES))
+    );
+  return rows.length;
+}
+
+/**
+ * Ids of runs parked in 'pending' (the dispatch queue), oldest first. A run sits
+ * here either freshly created (awaiting its kickoff dispatch) or deferred by the
+ * admission gate for lack of host memory; the pending-run pump re-dispatches them.
+ */
+export async function listPendingRunIds(): Promise<number[]> {
+  const rows = await db
+    .select({ id: agentSessions.id })
+    .from(agentSessions)
+    .where(eq(agentSessions.status, "pending"))
+    .orderBy(asc(agentSessions.id));
+  return rows.map((r) => r.id);
 }
 
 async function setError(runId: number, error: string) {

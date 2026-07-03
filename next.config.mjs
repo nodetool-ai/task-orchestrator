@@ -11,6 +11,11 @@ const nextConfig = {
   eslint: { ignoreDuringBuilds: true },
   serverExternalPackages: [
     "better-sqlite3",
+    // dockerode (the server spawns/stops worker containers via the Docker socket)
+    // pulls in ssh2, whose native `sshcrypto.node` binary webpack can't parse and
+    // fails the build. It must be required from node_modules at runtime, not
+    // bundled — same hazard and same fix as better-sqlite3.
+    "dockerode",
     // Pi packages ship a bundled jiti for runtime TS loading; if Next webpack
     // tries to bundle them, it stubs node:os/node:path as MODULE_NOT_FOUND
     // throws and the prod server hard-crashes at first import.

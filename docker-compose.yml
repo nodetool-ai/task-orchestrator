@@ -78,6 +78,20 @@ services:
       TASK_ORCH_DOCKER_NETWORK: ${COMPOSE_PROJECT_NAME:-task-orchestrator}_default
       TASK_ORCH_REPO_CACHE_HOST_VOLUME: ${COMPOSE_PROJECT_NAME:-task-orchestrator}_repo-cache
       TASK_ORCH_CLAUDE_HOME_HOST: ${CLAUDE_HOME}
+      # ── Worker resource limits + memory-aware admission ──────────────────
+      # Hard per-worker cgroup caps (bound one runaway worker) + an admission gate
+      # that reads remaining host memory and defers over-capacity runs to 'pending'
+      # (bounds the aggregate across concurrent workers). Defaults sized for an
+      # 8 GB / 4-CPU host → ~2 concurrent workers; raise on bigger hosts. NOTE: do
+      # NOT give the server its own mem_limit — /proc/meminfo must stay host-wide
+      # for the gate's live-memory read.
+      TASK_ORCH_WORKER_MEMORY_MB: ${TASK_ORCH_WORKER_MEMORY_MB:-3072}
+      TASK_ORCH_WORKER_CPUS: ${TASK_ORCH_WORKER_CPUS:-2}
+      TASK_ORCH_WORKER_PIDS_LIMIT: ${TASK_ORCH_WORKER_PIDS_LIMIT:-512}
+      TASK_ORCH_HOST_MEMORY_RESERVE_MB: ${TASK_ORCH_HOST_MEMORY_RESERVE_MB:-2048}
+      TASK_ORCH_MAX_WORKERS: ${TASK_ORCH_MAX_WORKERS:-2}
+      TASK_ORCH_PENDING_PUMP_MS: ${TASK_ORCH_PENDING_PUMP_MS:-15000}
+      TASK_ORCH_MAX_DEFER_MS: ${TASK_ORCH_MAX_DEFER_MS:-1800000}
     ports:
       - "${SERVER_PORT:-3000}:3000"
     volumes:

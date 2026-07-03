@@ -35,6 +35,14 @@ export async function register(): Promise<void> {
       await dbMod.initDb();
       const runsMod = await import("./lib/runs");
       await runsMod.reconcileOrphanedRuns();
+      // Start the pending-run pump: it re-dispatches runs the admission gate
+      // deferred for lack of host memory AND reaps stale leases every tick (so an
+      // OOM-killed worker's run recovers without waiting for a restart — the
+      // boot-only reconcile above can't). No-op off the containerized path. Literal
+      // import (no webpackIgnore / variable specifier) so it bundles into the prod
+      // server chunk; see the reconcile note above.
+      const dispatchMod = await import("./lib/run-dispatch");
+      dispatchMod.startPendingRunPump();
     } catch (err) {
       console.error("[instrumentation] boot init/reconcile failed:", err);
     }
