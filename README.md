@@ -1,23 +1,62 @@
 # Task Orchestrator
 
 Plan work, track tasks, and delegate implementation to Claude Agent SDK
-sessions — one self-contained, SQLite-backed system. The Next.js server
+sessions — one self-contained, Postgres-backed system. The Next.js server
 owns the database; API routes, dashboard pages, and the `npm run task` CLI
 share the same code.
 
 - **[SCHEMA.md](SCHEMA.md)** — DB schema, state machines, REST surface
 - **[AGENTS.md](AGENTS.md)** — workflow contract for humans and agents
+- **[docs/test-deployment.md](docs/test-deployment.md)** — full containerized
+  stack (Postgres + server + Docker workers) for validating the run → PR loop
 
 ## Run
 
+The app needs a Postgres instance reachable via `DATABASE_URL`. For local
+dev, a throwaway container is enough — schema migrations apply automatically
+on boot (`instrumentation.ts` → `initDb()`), there's no separate migrate step.
+
 ```bash
+# 1. Start a dev Postgres (matches the default DATABASE_URL below)
+docker run -d --name taskorch-pg-dev -p 127.0.0.1:5433:5432 \
+  -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=devpw -e POSTGRES_DB=taskorch \
+  postgres:16-alpine
+
+# 2. Configure .env.local (copy from .env.example and fill in)
+cp .env.example .env.local
+# then add:
+#   DATABASE_URL=postgres://postgres:devpw@localhost:5433/taskorch
+#   AUTH_SECRET=<openssl rand -base64 32>
+
 npm install
-npm run db:seed    # demo plan + tasks (idempotent)
-npm run dev        # http://localhost:3000
+npm run dev        # http://localhost:3000 — applies migrations + seeds on boot
+npm run db:seed    # demo plan + tasks (idempotent, optional)
 ```
 
-The SQLite file lives at `data.db` (gitignored). Override with
-`TASK_ORCH_DB=/path/to/db`.
+Migrations live under `db/migrations/` (Drizzle SQL); `npm run db:generate`
+regenerates them after a `db/schema.ts` change. There's no `db:migrate`
+script — applying is folded into `initDb()`, called from `instrumentation.ts`
+on every server boot (dev and prod) and from `vitest.setup.ts` for tests
+(each test file gets its own Postgres schema via `TASK_ORCH_PG_SCHEMA` for
+parallel isolation). To apply migrations without booting the full server:
+
+```bash
+DATABASE_URL=postgres://postgres:devpw@localhost:5433/taskorch \
+  npx tsx -e "import('./db/index').then(m => m.initDb())"
+```
+
+If you're moving data from an older SQLite-backed deployment, use the two
+one-shot ETL scripts (config tables, then run transcripts):
+
+```bash
+SOURCE_SQLITE_DB=/path/to/data.db DATABASE_URL=<postgres-url> \
+  npx tsx scripts/migrate-sqlite-to-pg.ts
+SOURCE_SQLITE_DB=/path/to/data.db DATABASE_URL=<postgres-url> \
+  npx tsx scripts/migrate-transcripts-sqlite-to-pg.ts
+```
+
+Both are idempotent (`--dry-run` to preview) and only relevant for that
+one-time cutover — a fresh dev setup doesn't need them.
 
 Set `TASK_ORCH_TARGET_REPO=/path/to/your/repo` to point agent sessions at
 a different checkout. All `git worktree` operations and `gh pr create`
@@ -223,7 +262,7 @@ Attach images and other files to any plan or task — from the dashboard,
 via REST, or by an agent. The agent sees the attachment roster in its
 prompt and fetches the bytes with `get_attachment`: images come back as
 viewable image blocks, text-like artifacts (logs, JSON, source, SVG) as
-decoded text. Bytes live inline in the SQLite BLOB store, capped at 25 MiB
+decoded text. Bytes live inline in the Postgres bytea store, capped at 25 MiB
 per file.
 
 Each tool call hits the same `lib/repo.ts` the web UI uses, so
@@ -271,14 +310,15 @@ Each delivery is matched to runs by PR url or by head branch + repository, then:
 
 ## Tests
 
-`npm test` runs the Vitest suite against an in-memory SQLite DB. Coverage focuses on `lib/repo.ts`: state
-machine transitions, criteria gating, dependency validation,
-sequential task-ID minting, plan progress.
+`npm test` runs the Vitest suite against a throwaway Postgres (each test
+file gets its own schema for parallel isolation — see `vitest.setup.ts`).
+Coverage focuses on `lib/repo.ts`: state machine transitions, criteria
+gating, dependency validation, sequential task-ID minting, plan progress.
 
 ## Tech
 
 - **Next.js 15** (App Router, dynamic SSR)
-- **Drizzle ORM** + **better-sqlite3** (WAL mode, FK enforcement)
+- **Drizzle ORM** + **Postgres** (`postgres-js` driver)
 - **Zod** request validation
 - **Claude Agent SDK** for autonomous task execution
 - **Vitest** for the repo-layer test suite
