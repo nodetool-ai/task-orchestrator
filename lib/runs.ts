@@ -208,6 +208,13 @@ export interface AppendInput {
    *  PR against. Ignored once the run's branch exists. Falls back to the repo
    *  default branch when unset. */
   baseBranch?: string;
+  /** Set by a dispatched worker driving the FIRST turn of a run it just claimed.
+   *  dispatchRun leaves the run in `preparing` with a fresh heartbeat, which the
+   *  in-flight guard below would otherwise read as "live in another process" and
+   *  reject. The atomic claim guarantees a single worker per run, so the claim IS
+   *  proof of ownership — this flag lets that worker adopt its own `preparing`
+   *  claim. Only honored for `preparing` (never `running`). */
+  takeover?: boolean;
 }
 
 export interface AppendStreamEvent {
@@ -530,7 +537,12 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       yield { type: "error", error: `Run ${input.runId} not found` };
       return;
     }
-    if (runners.has(input.runId) || isLeaseLive(run)) {
+    // A dispatched worker adopting the `preparing` claim it just received (see
+    // AppendInput.takeover) is the legitimate owner, not a competing turn — the
+    // fresh heartbeat that dispatchRun set is its own. Honor takeover only for
+    // `preparing`; a `running` lease still means a real turn is underway.
+    const adoptingOwnClaim = input.takeover === true && run.status === "preparing";
+    if (runners.has(input.runId) || (isLeaseLive(run) && !adoptingOwnClaim)) {
       // A live turn is in flight and must not be double-driven:
       //   • runners.has → an in-process runner exists (append/runReview/
       //     runExecute/followUp is mid-turn in THIS process). The per-run lock
@@ -1117,10 +1129,11 @@ async function gitSyncAfterTurn(
 async function kickoffFirstTurn(
   runId: number,
   prompt: string,
-  baseBranch?: string
+  baseBranch?: string,
+  takeover?: boolean
 ): Promise<void> {
   try {
-    for await (const ev of append({ runId, role: "user", text: prompt, baseBranch })) {
+    for await (const ev of append({ runId, role: "user", text: prompt, baseBranch, takeover })) {
       void ev; // drained; live events reach the run-view via the /events bus
     }
   } catch {
@@ -1405,7 +1418,10 @@ export async function driveDispatchedRun(runId: number): Promise<void> {
   // implement run reconstructs the task prompt create() would have passed to
   // kickoffFirstTurn; a resume (orphan re-dispatch) or chat run replays its
   // last user message, falling back to a bare continue sentinel.
-  await kickoffFirstTurn(runId, dispatchTurnPrompt(run));
+  // takeover: this worker holds the run's claim (dispatchRun left it `preparing`
+  // with a fresh heartbeat), so append() must adopt it rather than reject it as
+  // an in-flight turn in another process.
+  await kickoffFirstTurn(runId, dispatchTurnPrompt(run), undefined, true);
 }
 
 const DISPATCH_RESUME_PROMPT =
