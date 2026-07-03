@@ -138,7 +138,10 @@ export async function GET(
         // If LISTEN can't be established, the safety interval still delivers.
       }
       if (closed) {
-        cleanup(); // client bailed during setup — release the just-made subscription
+        // Client bailed DURING subscribe: cleanup() already ran from the abort
+        // handler (with unsubscribe still null), so calling it again is a no-op.
+        // Release the just-assigned subscription directly.
+        unsubscribe?.();
         return;
       }
 

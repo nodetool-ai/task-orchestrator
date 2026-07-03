@@ -1799,9 +1799,15 @@ function startHeartbeatWithCancel(
   abort: AbortController
 ): ReturnType<typeof setInterval> {
   void touchHeartbeat(runId).catch(() => {});
-  return setInterval(async () => {
-    await touchHeartbeat(runId);
-    if ((await isCancelRequested(runId)) && !abort.signal.aborted) abort.abort();
+  // The interval body is async and does DB I/O (touchHeartbeat + isCancelRequested);
+  // wrap it so a transient DB blip can't surface as an unhandled rejection (which,
+  // with no global handler, can crash the worker under Node's default). Mirrors the
+  // guard on startHeartbeat above.
+  return setInterval(() => {
+    void (async () => {
+      await touchHeartbeat(runId);
+      if ((await isCancelRequested(runId)) && !abort.signal.aborted) abort.abort();
+    })().catch(() => {});
   }, HEARTBEAT_INTERVAL_MS);
 }
 
