@@ -1,6 +1,8 @@
 "use client";
 
 import { FolderClosed, FolderGit2, GitBranch } from "lucide-react";
+import { ChipButton } from "@/components/ui/chip";
+import { Tooltip } from "@/components/ui/tooltip";
 
 export type CwdStrategy = "worktree" | "repo" | "none";
 
@@ -31,7 +33,7 @@ const STRATEGIES: Array<{
   {
     value: "none",
     label: "None",
-    desc: "No checkout — just chat",
+    desc: "No checkout, just chat",
     Icon: FolderClosed,
   },
 ];
@@ -52,20 +54,12 @@ export function CwdStrategyPicker({
       {STRATEGIES.map(({ value: v, label, desc, Icon }) => {
         const on = v === value;
         return (
-          <button
-            key={v}
-            type="button"
-            onClick={() => onChange(v)}
-            title={desc}
-            className={
-              on
-                ? "inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium bg-foreground text-background"
-                : "inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/40"
-            }
-          >
-            <Icon className="size-3" />
-            {label}
-          </button>
+          <Tooltip key={v} content={desc}>
+            <ChipButton selected={on} onClick={() => onChange(v)} className="rounded px-2">
+              <Icon className="size-3" />
+              {label}
+            </ChipButton>
+          </Tooltip>
         );
       })}
     </div>

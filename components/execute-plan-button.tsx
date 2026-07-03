@@ -11,9 +11,9 @@ import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
-import { ModelPicker, type ModelOption } from "@/components/chat/model-picker";
-
-const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
+import { Tooltip } from "@/components/ui/tooltip";
+import { ModelPicker } from "@/components/chat/model-picker";
+import { DEFAULT_CHAT_MODEL, useModelOptions } from "@/components/chat/use-model-options";
 
 interface Props {
   planId: string;
@@ -36,8 +36,7 @@ interface Props {
 export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  const [model, setModel] = useState(DEFAULT_MODEL);
-  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
+  const { model, setModel, modelOptions } = useModelOptions(DEFAULT_CHAT_MODEL, open);
   const [instructions, setInstructions] = useState("");
   const [maxUsd, setMaxUsd] = useState(Math.max(openTaskCount, 1) * 25);
   const [pending, startTransition] = useTransition();
@@ -48,20 +47,6 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
     setError(null);
     setInstructions("");
     setMaxUsd(Math.max(openTaskCount, 1) * 25);
-    fetch("/api/providers")
-      .then((res) => res.json())
-      .then((data: { providers: { id: string; models: { id: string; name: string }[] }[] }) => {
-        const flat: ModelOption[] = [];
-        for (const provider of data.providers ?? []) {
-          for (const m of provider.models ?? []) {
-            flat.push({ id: m.id, name: m.name, provider: provider.id });
-          }
-        }
-        setModelOptions(flat);
-        const qualified = flat.map((o) => `${o.provider}/${o.id}`);
-        setModel((cur) => (qualified.includes(cur) ? cur : qualified[0] ?? cur));
-      })
-      .catch(() => {});
   }, [open, openTaskCount]);
 
   const submit = () => {
@@ -99,15 +84,16 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
 
   return (
     <>
-      <Button
-        onClick={() => setOpen(true)}
-        disabled={openTaskCount === 0}
-        title={openTaskCount === 0 ? "No open tasks to execute" : undefined}
-        className={className}
-      >
-        <PlayCircle className="size-3.5" />
-        Execute plan
-      </Button>
+      <Tooltip content={openTaskCount === 0 ? "No open tasks to execute" : null}>
+        <Button
+          onClick={() => setOpen(true)}
+          disabled={openTaskCount === 0}
+          className={className}
+        >
+          <PlayCircle className="size-3.5" />
+          Execute plan
+        </Button>
+      </Tooltip>
 
       {open && (
         <Modal onClose={() => setOpen(false)} ariaLabel="Execute plan">

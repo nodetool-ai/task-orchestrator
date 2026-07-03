@@ -1,9 +1,9 @@
 "use client";
 
+import { Spinner } from "@/components/ui/spinner";
 import { Suspense, useState, useTransition } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { signIn } from "next-auth/react";
-import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ErrorText } from "@/components/ui/error-text";
@@ -84,7 +84,7 @@ function LoginForm() {
       </div>
 
       <Button type="submit" size="md" disabled={pending} className="w-full gap-2">
-        {pending && <Loader2 className="size-3.5 animate-spin" />}
+        {pending && <Spinner className="size-3.5" />}
         Sign in
       </Button>
 

@@ -3,6 +3,7 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { ListChecks } from "lucide-react";
 import { Select } from "@/components/ui/select";
+import { Tooltip } from "@/components/ui/tooltip";
 
 export interface PlanOption {
   id: string;
@@ -51,21 +52,22 @@ export function PlanFilter({
             : "absolute left-2 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none"
         }
       />
-      <Select
-        uiSize={size === "compact" ? "sm" : "md"}
-        value={value ?? ""}
-        onChange={(e) => onChange(e.target.value)}
-        className={cls}
-        title="Plan"
-        aria-label="Filter by plan"
-      >
-        <option value="">All plans</option>
-        {plans.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.title}
-          </option>
-        ))}
-      </Select>
+      <Tooltip content="Plan">
+        <Select
+          uiSize={size === "compact" ? "sm" : "md"}
+          value={value ?? ""}
+          onChange={(e) => onChange(e.target.value)}
+          className={cls}
+          aria-label="Filter by plan"
+        >
+          <option value="">All plans</option>
+          {plans.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.title}
+            </option>
+          ))}
+        </Select>
+      </Tooltip>
     </span>
   );
 }

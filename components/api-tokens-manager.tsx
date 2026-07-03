@@ -1,7 +1,8 @@
 "use client";
 
+import { Spinner } from "@/components/ui/spinner";
 import { useEffect, useState } from "react";
-import { Loader2, Plus, Trash2, Copy, Check, KeyRound } from "lucide-react";
+import { Plus, Trash2, Copy, Check, KeyRound } from "lucide-react";
 import { relativeDate } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -192,7 +193,7 @@ export function ApiTokensManager() {
           />
           <Button onClick={create} disabled={creating || !newName.trim()}>
             {creating ? (
-              <Loader2 className="size-3.5 animate-spin" />
+              <Spinner className="size-3.5" />
             ) : (
               <Plus className="size-3.5" />
             )}

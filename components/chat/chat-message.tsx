@@ -1,8 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { Bot, User } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Avatar } from "@/components/ui/avatar";
 import { renderMarkdown } from "@/lib/markdown";
 import { humanizeToolName } from "@/lib/builtin-tools";
 import type { SdkContentBlock } from "@/lib/sdk-message";
@@ -65,9 +65,7 @@ function UserMessage({ content }: { content: SdkContentBlock[] }) {
           </div>
         )}
       </div>
-      <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-secondary text-foreground">
-        <User className="size-3.5" />
-      </div>
+      <Avatar variant="user" />
     </div>
   );
 }
@@ -82,9 +80,7 @@ function AssistantMessage({
   const text = plainText(content);
   return (
     <div className="group flex gap-3 px-4 py-3">
-      <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full border border-border/60 bg-card text-foreground">
-        <Bot className="size-3.5" />
-      </div>
+      <Avatar variant="assistant" />
       <div className="min-w-0 flex-1 space-y-2">
         {content.map((block, i) => {
           if (block.type === "text" && typeof block.text === "string") {

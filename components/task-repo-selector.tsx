@@ -7,6 +7,7 @@ import { FolderGit2 } from "lucide-react";
 import type { RepositoryRow } from "@/lib/types";
 import { describe } from "@/lib/utils";
 import { RepositoryPicker } from "@/components/pickers/repository-picker";
+import { ErrorText } from "@/components/ui/error-text";
 
 interface Props {
   taskId: string;
@@ -76,7 +77,7 @@ export function TaskRepoSelector({
         emptyLabel="— unset —"
         size="compact"
       />
-      {error && <span className="text-[11px] text-state-blocked">{error}</span>}
+      <ErrorText className="text-[11px]">{error}</ErrorText>
     </div>
   );
 }

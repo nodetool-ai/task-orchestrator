@@ -4,6 +4,8 @@ import { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FolderGit2, Plus, X } from "lucide-react";
+import { Chip } from "@/components/ui/chip";
+import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorText } from "@/components/ui/error-text";
 import { Select } from "@/components/ui/select";
 import type { RepositoryRow } from "@/lib/types";
@@ -82,15 +84,12 @@ export function PlanRepositories({ planId, repos, allRepositories }: Props) {
           Repos
         </span>
         {repos.length === 0 && (
-          <span className="text-xs text-muted-foreground italic">
+          <EmptyState className="italic">
             No repositories attached. Sessions on tasks under this plan won&apos;t start.
-          </span>
+          </EmptyState>
         )}
         {repos.map((r) => (
-          <span
-            key={r.id}
-            className="group inline-flex items-center gap-1 rounded-md border border-border/60 bg-secondary/40 pl-2 pr-1 py-0.5 text-xs"
-          >
+          <Chip key={r.id} selected className="group gap-1 bg-secondary/40 pl-2 pr-1">
             <Link
               href={`/repositories/${r.id}`}
               className="inline-flex items-center gap-1.5 hover:underline"
@@ -107,7 +106,7 @@ export function PlanRepositories({ planId, repos, allRepositories }: Props) {
             >
               <X className="size-3" />
             </button>
-          </span>
+          </Chip>
         ))}
         {!adding && candidates.length > 0 && (
           <button

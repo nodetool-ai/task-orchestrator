@@ -1,12 +1,14 @@
 "use client";
 
+import { Spinner } from "@/components/ui/spinner";
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Plus } from "lucide-react";
+import { Plus } from "lucide-react";
 import { describe } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ErrorText } from "@/components/ui/error-text";
+import { FormPanel } from "@/components/ui/form-panel";
 
 export function NewRepositoryForm() {
   const router = useRouter();
@@ -70,7 +72,7 @@ export function NewRepositoryForm() {
   }
 
   return (
-    <form onSubmit={submit} className="space-y-2 rounded-md border border-border/60 bg-card/30 px-3 py-3">
+    <FormPanel onSubmit={submit}>
       <Input
         autoFocus
         uiSize="sm"
@@ -118,7 +120,7 @@ export function NewRepositoryForm() {
       </div>
       <div className="flex items-center gap-2">
         <Button type="submit" disabled={pending || !name.trim()}>
-          {pending && <Loader2 className="size-3 animate-spin" />}
+          {pending && <Spinner className="size-3" />}
           Create
         </Button>
         <Button
@@ -132,6 +134,6 @@ export function NewRepositoryForm() {
         </Button>
       </div>
       <ErrorText className="text-[11px]">{error}</ErrorText>
-    </form>
+    </FormPanel>
   );
 }

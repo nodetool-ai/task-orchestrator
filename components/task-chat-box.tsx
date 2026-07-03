@@ -1,20 +1,23 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { ArrowUp, Loader2, MessageCircle } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { useRef, useState } from "react";
+import { MessageCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   PersonaPicker,
   type PersonaOption,
 } from "@/components/pickers/persona-picker";
-import { ModelPicker, type ModelOption } from "@/components/chat/model-picker";
+import { ModelPicker } from "@/components/chat/model-picker";
 import { ThinkingLevelPicker, type ThinkingLevel } from "@/components/pickers/thinking-level-picker";
 import { ErrorText } from "@/components/ui/error-text";
+import {
+  ComposerInputShell,
+  ComposerSendButton,
+  ComposerTextarea,
+} from "@/components/chat/composer-parts";
+import { useModelOptions } from "@/components/chat/use-model-options";
 
 export type { PersonaOption };
-
-const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
 
 interface Props {
   taskId: string;
@@ -40,32 +43,14 @@ interface Props {
 export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], className }: Props) {
   const [input, setInput] = useState("");
   const [personaId, setPersonaId] = useState(personas[0]?.id ?? "implementor");
-  const [model, setModel] = useState(DEFAULT_MODEL);
+  const { model, setModel, modelOptions } = useModelOptions();
   const [reasoning, setReasoning] = useState<ThinkingLevel | null>(null);
-  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // When the browser blocks the run tab we can't recover the popup handle, so
   // surface a manual link instead of leaving the sent message invisible.
   const [openRunId, setOpenRunId] = useState<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-
-  useEffect(() => {
-    fetch("/api/providers")
-      .then((res) => res.json())
-      .then((data: { providers: { id: string; models: { id: string; name: string }[] }[] }) => {
-        const flat: ModelOption[] = [];
-        for (const provider of data.providers ?? []) {
-          for (const m of provider.models ?? []) {
-            flat.push({ id: m.id, name: m.name, provider: provider.id });
-          }
-        }
-        setModelOptions(flat);
-        const qualified = flat.map((o) => `${o.provider}/${o.id}`);
-        setModel((cur) => (qualified.includes(cur) ? cur : qualified[0] ?? cur));
-      })
-      .catch(() => {});
-  }, []);
 
   // Auto-grow the textarea like the run-view composer.
   function onInput(e: React.ChangeEvent<HTMLTextAreaElement>) {
@@ -192,30 +177,17 @@ export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], class
           />
         </div>
       </div>
-      <div className="flex items-end gap-2 rounded-2xl border border-border/60 bg-card/40 px-3 py-2 focus-within:border-foreground/30 transition-colors">
-        <textarea
+      <ComposerInputShell>
+        <ComposerTextarea
           ref={textareaRef}
           value={input}
           onChange={onInput}
           onKeyDown={onKeyDown}
           placeholder="What about this task?"
-          rows={1}
           disabled={pending}
-          className="flex-1 resize-none bg-transparent text-sm placeholder:text-muted-foreground focus:outline-none py-1.5 max-h-48 disabled:opacity-50"
         />
-        <Button
-          size="icon"
-          onClick={submit}
-          disabled={!input.trim() || pending}
-          aria-label="Send"
-        >
-          {pending ? (
-            <Loader2 className="size-4 animate-spin" />
-          ) : (
-            <ArrowUp className="size-4" />
-          )}
-        </Button>
-      </div>
+        <ComposerSendButton pending={pending} disabled={!input.trim()} onClick={submit} />
+      </ComposerInputShell>
       <ErrorText>{error}</ErrorText>
       {openRunId != null && (
         <p className="text-xs text-muted-foreground">

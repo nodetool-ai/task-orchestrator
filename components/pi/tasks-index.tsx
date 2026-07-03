@@ -20,6 +20,7 @@ import {
 import { openSpawn } from "./overlay-store";
 import { useIsMobile } from "./use-is-mobile";
 import { prShortLabel } from "@/lib/utils";
+import { Tooltip } from "@/components/ui/tooltip";
 
 export type TaskRowData = {
   id: string;
@@ -405,26 +406,7 @@ function TaskRow({ row, isMobile }: { row: TaskRowData; isMobile: boolean }) {
               {row.plan}
             </Link>
           ) : null}
-          {row.prUrl && (
-            <a
-              href={row.prUrl}
-              target="_blank"
-              rel="noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              title={prShortLabel(row.prUrl)}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 4,
-                color: "var(--pi-muted)",
-                fontSize: 11,
-                textDecoration: "none",
-              }}
-            >
-              <Icon name="pr" size={11} />
-              <span className="pi-mono">{prShortLabel(row.prUrl)}</span>
-            </a>
-          )}
+          {row.prUrl && <PiPrLink url={row.prUrl} />}
           <span style={{ flex: 1 }} />
           {row.persona ? (
             <PersonaChip id={row.persona} />
@@ -516,26 +498,7 @@ function TaskRow({ row, isMobile }: { row: TaskRowData; isMobile: boolean }) {
       </span>
 
       <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-        {row.prUrl && (
-          <a
-            href={row.prUrl}
-            target="_blank"
-            rel="noreferrer"
-            onClick={(e) => e.stopPropagation()}
-            title={prShortLabel(row.prUrl)}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 4,
-              color: "var(--pi-muted)",
-              fontSize: 11,
-              textDecoration: "none",
-            }}
-          >
-            <Icon name="pr" size={11} />
-            <span className="pi-mono">{prShortLabel(row.prUrl)}</span>
-          </a>
-        )}
+        {row.prUrl && <PiPrLink url={row.prUrl} />}
         {row.state === "todo" && (
           <span
             onClick={(e) => {
@@ -557,5 +520,29 @@ function TaskRow({ row, isMobile }: { row: TaskRowData; isMobile: boolean }) {
         )}
       </span>
     </Link>
+  );
+}
+
+function PiPrLink({ url }: { url: string }) {
+  return (
+    <Tooltip content={prShortLabel(url)}>
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 4,
+          color: "var(--pi-muted)",
+          fontSize: 11,
+          textDecoration: "none",
+        }}
+      >
+        <Icon name="pr" size={11} />
+        <span className="pi-mono">{prShortLabel(url)}</span>
+      </a>
+    </Tooltip>
   );
 }

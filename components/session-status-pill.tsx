@@ -1,5 +1,5 @@
-import { Loader2 } from "lucide-react";
 import type { SessionStatus } from "@/lib/types";
+import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
 const labels: Record<SessionStatus, string> = {
@@ -46,7 +46,7 @@ export function SessionStatusPill({
         className
       )}
     >
-      {isLive && <Loader2 className="size-3 animate-spin" />}
+      {isLive && <Spinner className="size-3" />}
       {labels[status]}
     </span>
   );

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Bot, Sparkles } from "lucide-react";
+import { Sparkles } from "lucide-react";
 import { ChatMessage, ToolCallCard } from "@/components/chat/chat-message";
 import { ToolGroup } from "@/components/tool-group";
 import { segmentToolMessages } from "@/lib/tool-grouping";
@@ -12,6 +12,9 @@ import { ModelPicker, type ModelOption } from "@/components/chat/model-picker";
 import type { ChatMessageRow, ChatRole, ChatRow } from "@/lib/types";
 import type { SdkContentBlock, SdkMessageEnvelope } from "@/lib/sdk-message";
 import { RepositoryPicker } from "@/components/pickers/repository-picker";
+import { Avatar } from "@/components/ui/avatar";
+import { TypingDots } from "@/components/ui/typing-dots";
+import { Tooltip } from "@/components/ui/tooltip";
 
 interface SidebarRepo {
   id: string;
@@ -241,12 +244,11 @@ export function ChatThread({
             />
           </div>
         </div>
-        <div
-          className="mt-1 truncate font-mono text-[11px] text-muted-foreground"
-          title={repoCwdHint}
-        >
-          cwd: {repoCwdHint}
-        </div>
+        <Tooltip content={repoCwdHint} className="mt-1 max-w-full">
+          <div className="truncate font-mono text-[11px] text-muted-foreground">
+            cwd: {repoCwdHint}
+          </div>
+        </Tooltip>
       </header>
 
       <div className="flex-1 overflow-y-auto">
@@ -327,15 +329,9 @@ export function ChatThread({
 function ThinkingIndicator() {
   return (
     <div className="flex gap-3 px-4 py-4">
-      <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full border border-border/60 bg-card text-foreground">
-        <Bot className="size-3.5" />
-      </div>
+      <Avatar variant="assistant" />
       <div className="rounded-2xl rounded-bl-sm bg-secondary/60 px-4 py-2.5">
-        <span className="inline-flex items-center gap-1">
-          <span className="size-1.5 animate-pulse rounded-full bg-foreground/60" />
-          <span className="size-1.5 animate-pulse rounded-full bg-foreground/60 [animation-delay:120ms]" />
-          <span className="size-1.5 animate-pulse rounded-full bg-foreground/60 [animation-delay:240ms]" />
-        </span>
+        <TypingDots />
       </div>
     </div>
   );

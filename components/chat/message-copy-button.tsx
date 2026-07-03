@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Tooltip } from "@/components/ui/tooltip";
 
 interface Props {
   text: string;
@@ -25,22 +26,23 @@ export function MessageCopyButton({ text, className }: Props) {
   }
 
   return (
-    <button
-      type="button"
-      onClick={copy}
-      disabled={copied}
-      aria-label="Copy to clipboard"
-      title="Copy to clipboard"
-      className={cn(
-        "inline-flex size-6 shrink-0 items-center justify-center rounded-md border border-border/60 bg-background/80 text-muted-foreground transition-colors hover:text-foreground hover:bg-muted/60 disabled:opacity-80",
-        className
-      )}
-    >
-      {copied ? (
-        <Check className="size-3 text-state-done" />
-      ) : (
-        <Copy className="size-3" />
-      )}
-    </button>
+    <Tooltip content="Copy to clipboard">
+      <button
+        type="button"
+        onClick={copy}
+        disabled={copied}
+        aria-label="Copy to clipboard"
+        className={cn(
+          "inline-flex size-6 shrink-0 items-center justify-center rounded-md border border-border/60 bg-background/80 text-muted-foreground transition-colors hover:text-foreground hover:bg-muted/60 disabled:opacity-80",
+          className
+        )}
+      >
+        {copied ? (
+          <Check className="size-3 text-state-done" />
+        ) : (
+          <Copy className="size-3" />
+        )}
+      </button>
+    </Tooltip>
   );
 }

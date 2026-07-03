@@ -1,6 +1,7 @@
 "use client";
 
 import { Select } from "@/components/ui/select";
+import { Tooltip } from "@/components/ui/tooltip";
 
 export interface PersonaOption {
   id: string;
@@ -33,18 +34,19 @@ export function PersonaPicker({
 }: Props) {
   if (personas.length === 0) return null;
   return (
-    <Select
-      uiSize={size === "compact" ? "xs" : "md"}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className={className ?? (size === "default" ? "w-full" : undefined)}
-      title={title ?? "Persona"}
-    >
-      {personas.map((p) => (
-        <option key={p.id} value={p.id}>
-          {p.name}
-        </option>
-      ))}
-    </Select>
+    <Tooltip content={title ?? "Persona"}>
+      <Select
+        uiSize={size === "compact" ? "xs" : "md"}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={className ?? (size === "default" ? "w-full" : undefined)}
+      >
+        {personas.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name}
+          </option>
+        ))}
+      </Select>
+    </Tooltip>
   );
 }

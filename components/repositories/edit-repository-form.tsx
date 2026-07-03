@@ -1,14 +1,16 @@
 "use client";
 
+import { Spinner } from "@/components/ui/spinner";
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Pencil, Save, Trash2 } from "lucide-react";
+import { Pencil, Save, Trash2 } from "lucide-react";
 import type { RepositoryRow } from "@/lib/types";
 import { describe } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/dialog-provider";
 import { ErrorText } from "@/components/ui/error-text";
+import { FormPanel } from "@/components/ui/form-panel";
 
 interface Props {
   repository: RepositoryRow;
@@ -100,13 +102,13 @@ export function EditRepositoryForm({ repository }: Props) {
         >
           <Trash2 className="size-3" /> Delete
         </Button>
-        {error && <span className="text-[11px] text-state-blocked">{error}</span>}
+        <ErrorText className="text-[11px]">{error}</ErrorText>
       </div>
     );
   }
 
   return (
-    <form onSubmit={submit} className="space-y-2 rounded-md border border-border/60 bg-card/30 px-3 py-3">
+    <FormPanel onSubmit={submit}>
       <Input
         autoFocus
         uiSize="sm"
@@ -148,7 +150,7 @@ export function EditRepositoryForm({ repository }: Props) {
       </div>
       <div className="flex items-center gap-2">
         <Button type="submit" disabled={pending}>
-          {pending ? <Loader2 className="size-3 animate-spin" /> : <Save className="size-3" />}
+          {pending ? <Spinner className="size-3" /> : <Save className="size-3" />}
           Save
         </Button>
         <Button variant="ghost" onClick={() => setOpen(false)}>
@@ -156,6 +158,6 @@ export function EditRepositoryForm({ repository }: Props) {
         </Button>
       </div>
       <ErrorText className="text-[11px]">{error}</ErrorText>
-    </form>
+    </FormPanel>
   );
 }

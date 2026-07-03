@@ -1,9 +1,11 @@
 "use client";
 
+import { Spinner } from "@/components/ui/spinner";
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Plus } from "lucide-react";
+import { Plus } from "lucide-react";
 import { describe } from "@/lib/utils";
+import { ErrorText } from "@/components/ui/error-text";
 
 export function AddCriterionForm({ taskId }: { taskId: string }) {
   const router = useRouter();
@@ -44,8 +46,8 @@ export function AddCriterionForm({ taskId }: { taskId: string }) {
         placeholder="Add an acceptance criterion"
         className="flex-1 rounded-sm bg-transparent px-1 py-1 text-sm outline-none placeholder:text-muted-foreground focus:bg-muted/40"
       />
-      {pending && <Loader2 className="size-3 animate-spin text-muted-foreground" />}
-      {error && <span className="text-[11px] text-state-blocked">{error}</span>}
+      {pending && <Spinner className="size-3 text-muted-foreground" />}
+      <ErrorText className="text-[11px]">{error}</ErrorText>
     </form>
   );
 }

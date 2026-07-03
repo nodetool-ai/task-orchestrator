@@ -1,8 +1,9 @@
 "use client";
 
+import { Spinner } from "@/components/ui/spinner";
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Sparkles } from "lucide-react";
+import { Sparkles } from "lucide-react";
 import { cn, describe } from "@/lib/utils";
 
 interface Props {
@@ -57,7 +58,7 @@ export function TaskAgentButton({ taskId, hasAttachedRun, className }: Props) {
         )}
       >
         {pending ? (
-          <Loader2 className="size-3.5 animate-spin" />
+          <Spinner className="size-3.5" />
         ) : (
           <Sparkles className="size-3.5 text-state-review" />
         )}

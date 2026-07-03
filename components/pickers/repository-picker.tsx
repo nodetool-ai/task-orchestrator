@@ -1,6 +1,7 @@
 "use client";
 
 import { Select } from "@/components/ui/select";
+import { Tooltip } from "@/components/ui/tooltip";
 
 export interface RepositoryOption {
   id: string;
@@ -42,22 +43,23 @@ export function RepositoryPicker({
   autoFocus,
 }: Props) {
   return (
-    <Select
-      id={id}
-      uiSize={size === "compact" ? "xs" : "md"}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className={className ?? (size === "default" ? "w-full" : undefined)}
-      disabled={disabled}
-      title={title ?? "Repository"}
-      autoFocus={autoFocus}
-    >
-      {emptyLabel !== null && <option value="">{emptyLabel}</option>}
-      {repositories.map((r) => (
-        <option key={r.id} value={r.id}>
-          {showId ? `${r.name} (${r.id})` : r.name}
-        </option>
-      ))}
-    </Select>
+    <Tooltip content={title ?? "Repository"}>
+      <Select
+        id={id}
+        uiSize={size === "compact" ? "xs" : "md"}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={className ?? (size === "default" ? "w-full" : undefined)}
+        disabled={disabled}
+        autoFocus={autoFocus}
+      >
+        {emptyLabel !== null && <option value="">{emptyLabel}</option>}
+        {repositories.map((r) => (
+          <option key={r.id} value={r.id}>
+            {showId ? `${r.name} (${r.id})` : r.name}
+          </option>
+        ))}
+      </Select>
+    </Tooltip>
   );
 }

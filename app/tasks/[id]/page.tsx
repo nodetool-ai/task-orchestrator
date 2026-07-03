@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, GitPullRequest } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 import { TaskRepoSelector } from "@/components/task-repo-selector";
 import * as repo from "@/lib/repo";
 import * as runs from "@/lib/runs";
@@ -18,7 +18,11 @@ import { AddNoteForm } from "@/components/add-note-form";
 import { AddCriterionForm } from "@/components/add-criterion-form";
 import { Attachments, AttachmentsHeading } from "@/components/attachments";
 import { Meta } from "@/components/meta";
-import { formatDate, formatDateTime, prShortLabel, relativeDate } from "@/lib/utils";
+import { formatDate, formatDateTime, relativeDate } from "@/lib/utils";
+import { Tooltip } from "@/components/ui/tooltip";
+import { Chip } from "@/components/ui/chip";
+import { EmptyState } from "@/components/ui/empty-state";
+import { PrLink } from "@/components/pr-link";
 
 export const dynamic = "force-dynamic";
 
@@ -111,28 +115,16 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
           <Meta label="Tags">
             <div className="flex flex-wrap gap-1">
               {task.tags.map((t) => (
-                <span
-                  key={t}
-                  className="rounded border border-border/60 px-1.5 py-px text-[10px] uppercase tracking-wide"
-                >
+                <Chip key={t} className="bg-transparent px-1.5 py-px text-[10px] uppercase tracking-wide">
                   {t}
-                </span>
+                </Chip>
               ))}
             </div>
           </Meta>
         ) : null}
         {latestPr && (
           <Meta label="Pull request" className="col-span-2 md:col-span-4">
-            <a
-              href={latestPr}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1.5 rounded-md border border-border/60 bg-secondary/40 px-2 py-1 text-xs hover:bg-secondary transition-colors"
-            >
-              <GitPullRequest className="size-3.5 text-state-review" />
-              <span className="font-mono text-foreground">{prShortLabel(latestPr)}</span>
-              <span className="text-muted-foreground">↗</span>
-            </a>
+            <PrLink url={latestPr} variant="badge" external />
           </Meta>
         )}
         {deps.length > 0 && (
@@ -170,9 +162,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
             </span>
           )}
         </div>
-        {task.criteria.length === 0 && (
-          <p className="text-xs text-muted-foreground italic">No criteria yet.</p>
-        )}
+        {task.criteria.length === 0 && <EmptyState className="italic">No criteria yet.</EmptyState>}
         <ul className="space-y-0">
           {task.criteria.map((c) => (
             <CriterionCheckbox
@@ -193,7 +183,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
           <AddNoteForm taskId={task.id} defaultAuthor={task.assignee ?? undefined} />
         </div>
         {task.notes.length === 0 ? (
-          <p className="text-xs text-muted-foreground italic">No notes yet.</p>
+          <EmptyState className="italic">No notes yet.</EmptyState>
         ) : (
           <ol className="space-y-3">
             {task.notes.map((n) => (
@@ -221,9 +211,9 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
       <section className="mt-10 space-y-3">
         <h2 className="text-sm font-semibold tracking-tight">Inbox</h2>
         {inbox.length === 0 ? (
-          <p className="text-xs text-muted-foreground italic">
+          <EmptyState className="italic">
             No runs yet. Start one with the buttons above, or ask the agent in the chat box below.
-          </p>
+          </EmptyState>
         ) : (
           <div className="rounded-lg border border-border/60 bg-card/30 divide-y divide-border/60 overflow-hidden">
             {inbox.map((r) => (
@@ -238,12 +228,11 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
                   <span className="font-mono text-xs text-muted-foreground tabular-nums shrink-0">
                     #{r.id}
                   </span>
-                  <span
-                    className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground/80 shrink-0"
-                    title={`goal: ${r.goal}`}
-                  >
-                    {goalLabel(r.goal)}
-                  </span>
+                  <Tooltip content={`goal: ${r.goal}`}>
+                    <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground/80 shrink-0">
+                      {goalLabel(r.goal)}
+                    </span>
+                  </Tooltip>
                   <SessionStatusPill status={r.status} />
                   {r.branch && (
                     <code className="font-mono text-[11px] text-muted-foreground truncate">
@@ -253,16 +242,12 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
                 </Link>
                 <div className="flex items-center gap-3 pl-0 sm:pl-0">
                   {r.prUrl && (
-                    <a
-                      href={r.prUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline decoration-dotted"
-                    >
-                      <GitPullRequest className="size-3" />
-                      {prShortLabel(r.prUrl)}
-                      <span>↗</span>
-                    </a>
+                    <PrLink
+                      url={r.prUrl}
+                      iconClassName="size-3"
+                      external
+                      className="hover:underline decoration-dotted"
+                    />
                   )}
                   <span className="text-[11px] text-muted-foreground tabular-nums">
                     {relativeDate(r.startedAt)}

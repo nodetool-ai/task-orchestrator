@@ -1,8 +1,8 @@
 import Link from "next/link";
-import { GitPullRequest } from "lucide-react";
 import type { TaskFull } from "@/lib/types";
 import { StateIcon } from "./state-icon";
-import { prShortLabel } from "@/lib/utils";
+import { Chip } from "@/components/ui/chip";
+import { PrLink } from "@/components/pr-link";
 
 export function TaskCard({ task }: { task: TaskFull }) {
   const open = task.criteria?.filter((c) => !c.done).length ?? 0;
@@ -19,17 +19,7 @@ export function TaskCard({ task }: { task: TaskFull }) {
         <StateIcon state={task.state} />
         <span className="tabular-nums">{task.id}</span>
         <div className="ml-auto flex items-center gap-2">
-          {task.prUrl && (
-            <a
-              href={task.prUrl}
-              target="_blank"
-              rel="noreferrer"
-              title={prShortLabel(task.prUrl)}
-              className="relative z-10 inline-flex items-center gap-1 hover:text-foreground transition-colors"
-            >
-              <GitPullRequest className="size-3 text-state-review" />
-            </a>
-          )}
+          {task.prUrl && <PrLink url={task.prUrl} label="none" iconClassName="size-3" />}
           {total > 0 && (
             <span className="tabular-nums">
               {total - open}/{total}
@@ -44,9 +34,9 @@ export function TaskCard({ task }: { task: TaskFull }) {
         <div className="mt-2.5 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
           {task.assignee && <span>@{task.assignee}</span>}
           {task.tags?.slice(0, 3).map((t) => (
-            <span key={t} className="rounded border border-border/70 px-1.5 py-px">
+            <Chip key={t} className="bg-transparent px-1.5 py-px text-[11px]">
               {t}
-            </span>
+            </Chip>
           ))}
         </div>
       ) : null}

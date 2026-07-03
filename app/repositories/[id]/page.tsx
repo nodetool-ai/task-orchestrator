@@ -9,6 +9,7 @@ import { SessionStatusPill } from "@/components/session-status-pill";
 import { EditRepositoryForm } from "@/components/repositories/edit-repository-form";
 import { formatDate, formatDateTime, relativeDate } from "@/lib/utils";
 import { EmptyState } from "@/components/ui/empty-state";
+import { Tooltip } from "@/components/ui/tooltip";
 
 export const dynamic = "force-dynamic";
 
@@ -107,9 +108,11 @@ export default async function RepositoryPage({
                 </span>
                 <SessionStatusPill status={s.status} />
                 <span className="font-mono text-[11px] text-muted-foreground">{s.taskId}</span>
-                <span className="ml-auto text-[11px] text-muted-foreground tabular-nums" title={formatDateTime(s.startedAt)}>
-                  {relativeDate(s.startedAt)}
-                </span>
+                <Tooltip content={formatDateTime(s.startedAt)} className="ml-auto">
+                  <span className="text-[11px] text-muted-foreground tabular-nums">
+                    {relativeDate(s.startedAt)}
+                  </span>
+                </Tooltip>
               </Link>
             ))}
           </div>

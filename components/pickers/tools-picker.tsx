@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Check, X } from "lucide-react";
+import { ChipButton } from "@/components/ui/chip";
+import { Tooltip } from "@/components/ui/tooltip";
 
 interface Props {
   /** Comma-separated list of profile keys, the storage shape on persona rows. */
@@ -88,39 +90,34 @@ export function ToolsPicker({ value, onChange, className = "" }: Props) {
         const isOn = selectedSet.has(key);
         const isCustom = !catalog.includes(key);
         return (
-          <button
+          <Tooltip
             key={key}
-            type="button"
-            onClick={() => toggle(key)}
-            className={
-              isOn
-                ? "inline-flex items-center gap-1 rounded-full border border-foreground/40 bg-foreground/10 px-2 py-0.5 text-xs font-mono text-foreground hover:bg-foreground/15 transition-colors"
-                : "inline-flex items-center gap-1 rounded-full border border-border/60 bg-background px-2 py-0.5 text-xs font-mono text-muted-foreground hover:text-foreground hover:border-foreground/30 transition-colors"
-            }
-            title={
+            content={
               isCustom
-                ? `${key} (custom — not in profiles registry)`
+                ? `${key} (custom, not in profiles registry)`
                 : isOn
                   ? `Remove ${key}`
                   : `Add ${key}`
             }
           >
-            {isOn && <Check className="size-3" />}
-            <span>{key}</span>
-            {isCustom && isOn && (
-              <span
-                role="button"
-                tabIndex={-1}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  remove(key);
-                }}
-                className="-mr-0.5 ml-0.5 inline-flex items-center text-state-blocked/70 hover:text-state-blocked"
-              >
-                <X className="size-3" />
-              </span>
-            )}
-          </button>
+            <ChipButton selected={isOn} mono onClick={() => toggle(key)}>
+              {isOn && <Check className="size-3" />}
+              <span>{key}</span>
+              {isCustom && isOn && (
+                <span
+                  role="button"
+                  tabIndex={-1}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    remove(key);
+                  }}
+                  className="-mr-0.5 ml-0.5 inline-flex items-center text-state-blocked/70 hover:text-state-blocked"
+                >
+                  <X className="size-3" />
+                </span>
+              )}
+            </ChipButton>
+          </Tooltip>
         );
       })}
       {allKeys.length === 0 && (

@@ -1,8 +1,9 @@
 "use client";
 
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
-import { ArrowUp, Loader2, Square } from "lucide-react";
+import { ArrowUp, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { ChipButton } from "@/components/ui/chip";
 
 export interface ChatComposerHandle {
   focus: () => void;
@@ -84,15 +85,16 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(function ChatC
               <span>for newline</span>
             </div>
             {sending ? (
-              <button
-                type="button"
+              <ChipButton
+                selected
+                tone="danger"
                 onClick={onStop}
-                className="inline-flex items-center gap-1.5 rounded-full bg-state-blocked/80 px-3 py-1.5 text-[11px] font-medium text-background transition-colors hover:bg-state-blocked"
+                className="px-3 py-1.5 text-[11px]"
                 aria-label="Stop generation"
               >
                 <Square className="size-3 fill-current" />
                 Stop
-              </button>
+              </ChipButton>
             ) : (
               <button
                 type="button"
@@ -106,11 +108,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(function ChatC
                 )}
                 aria-label="Send message"
               >
-                {sending ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <ArrowUp className="size-4" />
-                )}
+                <ArrowUp className="size-4" />
               </button>
             )}
           </div>

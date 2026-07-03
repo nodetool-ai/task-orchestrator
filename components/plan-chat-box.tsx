@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowUp, Loader2, MessageCircle } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { MessageCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   PersonaPicker,
@@ -13,14 +12,19 @@ import {
   RepositoryPicker,
   type RepositoryOption,
 } from "@/components/pickers/repository-picker";
-import { ModelPicker, type ModelOption } from "@/components/chat/model-picker";
+import { ModelPicker } from "@/components/chat/model-picker";
 import { ThinkingLevelPicker, type ThinkingLevel } from "@/components/pickers/thinking-level-picker";
 import { stashPendingMessage } from "@/lib/pending-first-message";
 import { ErrorText } from "@/components/ui/error-text";
+import { ChipButton } from "@/components/ui/chip";
+import {
+  ComposerInputShell,
+  ComposerSendButton,
+  ComposerTextarea,
+} from "@/components/chat/composer-parts";
+import { useModelOptions } from "@/components/chat/use-model-options";
 
 export type { PersonaOption };
-
-const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
 
 interface Props {
   planId: string;
@@ -76,29 +80,11 @@ export function PlanChatBox({
   const [input, setInput] = useState("");
   const [personaId, setPersonaId] = useState(personas[0]?.id ?? "implementor");
   const [repoId, setRepoId] = useState<string>(repoOptions[0]?.id ?? "");
-  const [model, setModel] = useState(DEFAULT_MODEL);
+  const { model, setModel, modelOptions } = useModelOptions();
   const [reasoning, setReasoning] = useState<ThinkingLevel | null>(null);
-  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-
-  useEffect(() => {
-    fetch("/api/providers")
-      .then((res) => res.json())
-      .then((data: { providers: { id: string; models: { id: string; name: string }[] }[] }) => {
-        const flat: ModelOption[] = [];
-        for (const provider of data.providers ?? []) {
-          for (const m of provider.models ?? []) {
-            flat.push({ id: m.id, name: m.name, provider: provider.id });
-          }
-        }
-        setModelOptions(flat);
-        const qualified = flat.map((o) => `${o.provider}/${o.id}`);
-        setModel((cur) => (qualified.includes(cur) ? cur : qualified[0] ?? cur));
-      })
-      .catch(() => {});
-  }, []);
 
   function onInput(e: React.ChangeEvent<HTMLTextAreaElement>) {
     setInput(e.target.value);
@@ -213,42 +199,28 @@ export function PlanChatBox({
         </div>
       </div>
 
-      <div className="flex items-end gap-2 rounded-2xl border border-border/60 bg-card/40 px-3 py-2 focus-within:border-foreground/30 transition-colors">
-        <textarea
+      <ComposerInputShell>
+        <ComposerTextarea
           ref={textareaRef}
           value={input}
           onChange={onInput}
           onKeyDown={onKeyDown}
           placeholder="Reshape the plan, add tasks, change state…"
-          rows={1}
           disabled={pending}
-          className="flex-1 resize-none bg-transparent text-sm placeholder:text-muted-foreground focus:outline-none py-1.5 max-h-48 disabled:opacity-50"
         />
-        <Button
-          size="icon"
-          onClick={submit}
-          disabled={!input.trim() || pending}
-          aria-label="Send"
-        >
-          {pending ? (
-            <Loader2 className="size-4 animate-spin" />
-          ) : (
-            <ArrowUp className="size-4" />
-          )}
-        </Button>
-      </div>
+        <ComposerSendButton pending={pending} disabled={!input.trim()} onClick={submit} />
+      </ComposerInputShell>
 
       {!input.trim() && !pending && (
         <div className="flex flex-wrap gap-1.5 pt-1">
           {QUICK_PROMPTS.map((q) => (
-            <button
+            <ChipButton
               key={q.label}
-              type="button"
               onClick={() => pickQuickPrompt(q.prompt)}
-              className="inline-flex items-center rounded-md border border-border/60 bg-card/30 px-2 py-1 text-[11px] text-muted-foreground hover:border-foreground/30 hover:bg-card hover:text-foreground transition-colors"
+              className="bg-card/30 px-2 py-1 text-[11px]"
             >
               {q.label}
-            </button>
+            </ChipButton>
           ))}
         </div>
       )}

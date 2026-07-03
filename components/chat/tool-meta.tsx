@@ -11,7 +11,6 @@ import {
   FolderTree,
   Globe,
   ListTodo,
-  Loader2,
   Search,
   Sparkles,
   Terminal,
@@ -19,6 +18,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Spinner } from "@/components/ui/spinner";
 import { canonicalToolName, TOOL_INPUT_KEYS, type CanonicalTool } from "@/lib/builtin-tools";
 import type { SdkContentBlock } from "@/lib/sdk-message";
 
@@ -108,7 +108,7 @@ export function isErrorResult(block: SdkContentBlock): boolean {
 
 export function StatusDot({ state }: { state: "running" | "ok" | "error" }) {
   if (state === "running") {
-    return <Loader2 className="size-3 animate-spin text-muted-foreground" />;
+    return <Spinner className="size-3 text-muted-foreground" />;
   }
   if (state === "error") {
     return <CircleAlert className="size-3 text-state-blocked" />;

@@ -1,8 +1,9 @@
 import Link from "next/link";
-import { GitPullRequest } from "lucide-react";
 import type { TaskFull } from "@/lib/types";
 import { StateIcon } from "./state-icon";
-import { prNumberLabel, prShortLabel, relativeDate } from "@/lib/utils";
+import { relativeDate } from "@/lib/utils";
+import { Chip } from "@/components/ui/chip";
+import { PrLink } from "@/components/pr-link";
 
 export function TaskRow({ task }: { task: TaskFull }) {
   return (
@@ -18,30 +19,16 @@ export function TaskRow({ task }: { task: TaskFull }) {
       <span className="font-mono text-xs text-muted-foreground tabular-nums">{task.id}</span>
       <span className="flex-1 truncate text-sm text-foreground">{task.title}</span>
       {task.tags?.slice(0, 2).map((t) => (
-        <span
-          key={t}
-          className="hidden sm:inline-block rounded border border-border/70 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"
-        >
+        <Chip key={t} className="hidden bg-transparent px-1.5 py-0.5 text-[10px] uppercase tracking-wide sm:inline-flex">
           {t}
-        </span>
+        </Chip>
       ))}
       {task.assignee && (
         <span className="hidden md:inline-block text-xs text-muted-foreground">
           @{task.assignee}
         </span>
       )}
-      {task.prUrl && (
-        <a
-          href={task.prUrl}
-          target="_blank"
-          rel="noreferrer"
-          title={prShortLabel(task.prUrl)}
-          className="relative z-10 inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <GitPullRequest className="size-3.5 text-state-review" />
-          <span className="hidden sm:inline font-mono">{prNumberLabel(task.prUrl)}</span>
-        </a>
-      )}
+      {task.prUrl && <PrLink url={task.prUrl} label="number" />}
       <span className="hidden lg:inline-block text-xs text-muted-foreground tabular-nums w-20 text-right">
         {relativeDate(task.updatedAt)}
       </span>

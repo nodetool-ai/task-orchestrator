@@ -1,8 +1,9 @@
 "use client";
 
+import { Spinner } from "@/components/ui/spinner";
 import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { ChevronDown, Loader2 } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import { StateIcon } from "./state-icon";
 import {
   PLAN_TRANSITIONS,
@@ -119,7 +120,7 @@ export function StateChanger(props: Props) {
         <StateIcon state={current as TaskState | PlanState} />
         {STATE_LABEL[current as TaskState | PlanState]}
         {pending ? (
-          <Loader2 className="size-3 animate-spin" />
+          <Spinner className="size-3" />
         ) : allowed.length > 0 ? (
           <ChevronDown className="size-3 opacity-60" />
         ) : null}

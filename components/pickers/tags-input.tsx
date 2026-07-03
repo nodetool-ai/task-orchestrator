@@ -2,6 +2,7 @@
 
 import { useId, useState } from "react";
 import { X } from "lucide-react";
+import { Chip } from "@/components/ui/chip";
 
 interface Props {
   value: string[];
@@ -72,10 +73,7 @@ export function TagsInput({
   return (
     <div className={wrapCls}>
       {value.map((tag) => (
-        <span
-          key={tag}
-          className="inline-flex items-center gap-0.5 rounded-full border border-border/60 bg-secondary/40 pl-2 pr-1 py-0.5 text-xs"
-        >
+        <Chip key={tag} selected className="gap-0.5 bg-secondary/40 pl-2 pr-1">
           {tag}
           <button
             type="button"
@@ -85,7 +83,7 @@ export function TagsInput({
           >
             <X className="size-3" />
           </button>
-        </span>
+        </Chip>
       ))}
       <input
         type="text"

@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
-  ArrowUp,
   ChevronLeft,
   Brain,
   Cpu,
@@ -15,7 +14,14 @@ import {
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { cn, formatDateTime } from "@/lib/utils";
+import {
+  ComposerInputShell,
+  ComposerSendButton,
+  ComposerTextarea,
+} from "@/components/chat/composer-parts";
+import { TypingDots } from "@/components/ui/typing-dots";
+import { Tooltip } from "@/components/ui/tooltip";
+import { formatDateTime } from "@/lib/utils";
 import { isTerminalStatus, type SessionStatus } from "@/lib/types";
 import type { RunRow, MessageRow } from "@/lib/runs";
 import type { SdkContentBlock, SdkMessageEnvelope } from "@/lib/sdk-message";
@@ -514,13 +520,14 @@ export function RunView({
       <header className="border-b border-border/60 bg-background px-6 py-3">
         <div className="flex items-center gap-3 min-w-0">
           {parent && (
-            <Link
-              href={`/runs/${parent.id}`}
-              className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground shrink-0"
-              title={`parent: ${parent.title}`}
-            >
-              <ChevronLeft className="size-3.5" />
-            </Link>
+            <Tooltip content={`parent: ${parent.title}`}>
+              <Link
+                href={`/runs/${parent.id}`}
+                className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground shrink-0"
+              >
+                <ChevronLeft className="size-3.5" />
+              </Link>
+            </Tooltip>
           )}
           <h1 className="text-base font-semibold tracking-tight truncate min-w-0">
             {title}
@@ -574,20 +581,26 @@ export function RunView({
             </span>
           )}
           {run.thinkingLevel && (
-            <span className="inline-flex items-center gap-1" title="Reasoning level">
-              <Brain className="size-3" />
-              <code className="font-mono">{run.thinkingLevel}</code>
-            </span>
+            <Tooltip content="Reasoning level">
+              <span className="inline-flex items-center gap-1">
+                <Brain className="size-3" />
+                <code className="font-mono">{run.thinkingLevel}</code>
+              </span>
+            </Tooltip>
           )}
-          <span className="inline-flex items-center gap-1 min-w-0" title={cwdHint}>
-            <FolderClosed className="size-3 shrink-0" />
-            <code className="font-mono truncate max-w-[280px]">{cwdHint}</code>
-          </span>
-          {run.branch && (
-            <span className="inline-flex items-center gap-1 min-w-0" title={run.branch}>
-              <GitBranch className="size-3 shrink-0" />
-              <code className="font-mono truncate max-w-[180px]">{run.branch}</code>
+          <Tooltip content={cwdHint}>
+            <span className="inline-flex items-center gap-1 min-w-0">
+              <FolderClosed className="size-3 shrink-0" />
+              <code className="font-mono truncate max-w-[280px]">{cwdHint}</code>
             </span>
+          </Tooltip>
+          {run.branch && (
+            <Tooltip content={run.branch}>
+              <span className="inline-flex items-center gap-1 min-w-0">
+                <GitBranch className="size-3 shrink-0" />
+                <code className="font-mono truncate max-w-[180px]">{run.branch}</code>
+              </span>
+            </Tooltip>
           )}
           {task && (
             <Link
@@ -669,16 +682,14 @@ export function RunView({
       {!closed && run.planningStage !== "done" && (
         <div className="border-t border-border/60 bg-background px-4 py-3">
           <div className="mx-auto max-w-3xl">
-            <div className="flex items-end gap-2 rounded-2xl border border-border/60 bg-card/60 px-3 py-2 focus-within:border-foreground/40 focus-within:ring-2 focus-within:ring-foreground/10 transition-all">
-              <textarea
+            <ComposerInputShell className="bg-card/60 focus-within:border-foreground/40 focus-within:ring-2 focus-within:ring-foreground/10">
+              <ComposerTextarea
                 ref={textareaRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={onKeyDown}
                 placeholder={placeholder}
-                rows={1}
                 disabled={composerDisabled}
-                className="flex-1 resize-none bg-transparent text-sm placeholder:text-muted-foreground focus:outline-none py-1.5 max-h-48 disabled:opacity-50"
               />
               {sending ? (
                 <button
@@ -690,16 +701,9 @@ export function RunView({
                   <Square className="size-3.5 fill-current" />
                 </button>
               ) : (
-                <Button
-                  size="icon"
-                  onClick={send}
-                  disabled={!input.trim() || composerDisabled}
-                  aria-label="Send"
-                >
-                  <ArrowUp className="size-4" />
-                </Button>
+                <ComposerSendButton disabled={!input.trim() || composerDisabled} onClick={send} />
               )}
-            </div>
+            </ComposerInputShell>
             {(run.startedAt || run.totalCostUsd != null) && (
               <p className="mt-1.5 text-[10px] text-muted-foreground/70 text-center tabular-nums">
                 {run.startedAt && `Started ${formatDateTime(run.startedAt)}`}
@@ -742,21 +746,7 @@ export function RunView({
 function ThinkingIndicator() {
   return (
     <div className="px-4 py-3">
-      <span className="inline-flex gap-1 items-center">
-        <span className="size-1.5 rounded-full bg-foreground/60 animate-pulse" />
-        <span
-          className={cn(
-            "size-1.5 rounded-full bg-foreground/60 animate-pulse",
-            "[animation-delay:120ms]"
-          )}
-        />
-        <span
-          className={cn(
-            "size-1.5 rounded-full bg-foreground/60 animate-pulse",
-            "[animation-delay:240ms]"
-          )}
-        />
-      </span>
+      <TypingDots />
     </div>
   );
 }

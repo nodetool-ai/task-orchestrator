@@ -1,11 +1,14 @@
 "use client";
 
+import { Spinner } from "@/components/ui/spinner";
 import { useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { FileText, Loader2, Paperclip, Trash2, Upload } from "lucide-react";
+import { FileText, Paperclip, Trash2, Upload } from "lucide-react";
 import type { AttachmentMeta } from "@/lib/types";
 import { cn, describe, formatBytes, relativeDate } from "@/lib/utils";
 import { ErrorText } from "@/components/ui/error-text";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Tooltip } from "@/components/ui/tooltip";
 
 interface Props {
   scope: "task" | "plan";
@@ -80,7 +83,7 @@ export function Attachments({ scope, ownerId, attachments }: Props) {
       />
 
       {attachments.length === 0 ? (
-        <p className="text-xs text-muted-foreground italic">No attachments yet.</p>
+        <EmptyState className="italic">No attachments yet.</EmptyState>
       ) : (
         <div className="space-y-3">
           {images.length > 0 && (
@@ -99,25 +102,26 @@ export function Attachments({ scope, ownerId, attachments }: Props) {
                     />
                   </a>
                   <div className="flex items-center justify-between gap-1 px-2 py-1 text-[10px] text-muted-foreground">
-                    <span className="truncate" title={a.filename}>
-                      {a.filename}
-                    </span>
+                    <Tooltip content={a.filename} className="min-w-0">
+                      <span className="truncate">{a.filename}</span>
+                    </Tooltip>
                     <span className="shrink-0 tabular-nums">{formatBytes(a.sizeBytes)}</span>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => remove(a.id)}
-                    disabled={pending}
-                    aria-label={`Delete ${a.filename}`}
-                    title="Delete"
-                    className="absolute right-1 top-1 rounded bg-background/80 p-1 text-muted-foreground opacity-0 transition-opacity hover:text-state-blocked group-hover:opacity-100 disabled:opacity-50"
-                  >
-                    {deletingId === a.id ? (
-                      <Loader2 className="size-3 animate-spin" />
-                    ) : (
-                      <Trash2 className="size-3" />
-                    )}
-                  </button>
+                  <Tooltip content="Delete" className="absolute right-1 top-1">
+                    <button
+                      type="button"
+                      onClick={() => remove(a.id)}
+                      disabled={pending}
+                      aria-label={`Delete ${a.filename}`}
+                      className="rounded bg-background/80 p-1 text-muted-foreground opacity-0 transition-opacity hover:text-state-blocked group-hover:opacity-100 disabled:opacity-50"
+                    >
+                      {deletingId === a.id ? (
+                        <Spinner className="size-3" />
+                      ) : (
+                        <Trash2 className="size-3" />
+                      )}
+                    </button>
+                  </Tooltip>
                 </li>
               ))}
             </ul>
@@ -128,36 +132,37 @@ export function Attachments({ scope, ownerId, attachments }: Props) {
               {files.map((a) => (
                 <li key={a.id} className="flex items-center gap-3 px-3 py-2">
                   <FileText className="size-4 shrink-0 text-muted-foreground" />
-                  <a
-                    href={`/api/attachments/${a.id}?download=1`}
-                    className="min-w-0 flex-1 truncate text-sm text-foreground hover:underline"
-                    title={a.filename}
-                  >
-                    {a.filename}
-                  </a>
+                  <Tooltip content={a.filename} className="min-w-0 flex-1">
+                    <a
+                      href={`/api/attachments/${a.id}?download=1`}
+                      className="block truncate text-sm text-foreground hover:underline"
+                    >
+                      {a.filename}
+                    </a>
+                  </Tooltip>
                   <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
                     {formatBytes(a.sizeBytes)}
                   </span>
-                  <span
-                    className="shrink-0 text-[11px] text-muted-foreground tabular-nums hidden sm:inline"
-                    title={a.mimeType}
-                  >
-                    {relativeDate(a.createdAt)}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => remove(a.id)}
-                    disabled={pending}
-                    aria-label={`Delete ${a.filename}`}
-                    title="Delete"
-                    className="shrink-0 rounded p-1 text-muted-foreground hover:text-state-blocked disabled:opacity-50"
-                  >
-                    {deletingId === a.id ? (
-                      <Loader2 className="size-3.5 animate-spin" />
-                    ) : (
-                      <Trash2 className="size-3.5" />
-                    )}
-                  </button>
+                  <Tooltip content={a.mimeType} className="hidden shrink-0 sm:inline-flex">
+                    <span className="text-[11px] text-muted-foreground tabular-nums">
+                      {relativeDate(a.createdAt)}
+                    </span>
+                  </Tooltip>
+                  <Tooltip content="Delete" className="shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => remove(a.id)}
+                      disabled={pending}
+                      aria-label={`Delete ${a.filename}`}
+                      className="rounded p-1 text-muted-foreground hover:text-state-blocked disabled:opacity-50"
+                    >
+                      {deletingId === a.id ? (
+                        <Spinner className="size-3.5" />
+                      ) : (
+                        <Trash2 className="size-3.5" />
+                      )}
+                    </button>
+                  </Tooltip>
                 </li>
               ))}
             </ul>
@@ -175,7 +180,7 @@ export function Attachments({ scope, ownerId, attachments }: Props) {
         )}
       >
         {pending ? (
-          <Loader2 className="size-3.5 animate-spin" />
+          <Spinner className="size-3.5" />
         ) : (
           <Upload className="size-3.5" />
         )}

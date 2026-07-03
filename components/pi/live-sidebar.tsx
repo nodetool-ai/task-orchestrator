@@ -3,6 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { Tooltip } from "@/components/ui/tooltip";
 import { Icon, StateIcon, MonoTag, ElapsedTimer, type PiState } from "./primitives";
 import { useIsMobile } from "./use-is-mobile";
 
@@ -246,21 +247,22 @@ function SidebarHeader({
             {total}
           </span>
           {attention > 0 && (
-            <span
-              className="pi-mono"
-              style={{
-                fontSize: 10,
-                padding: "1px 6px",
-                borderRadius: 999,
-                background: "hsla(0 65% 55% / 0.16)",
-                color: "var(--s-blocked)",
-                border: "1px solid hsla(0 65% 55% / 0.32)",
-                fontWeight: 600,
-              }}
-              title={`${attention} need attention`}
-            >
-              {attention}
-            </span>
+            <Tooltip content={`${attention} need attention`}>
+              <span
+                className="pi-mono"
+                style={{
+                  fontSize: 10,
+                  padding: "1px 6px",
+                  borderRadius: 999,
+                  background: "hsla(0 65% 55% / 0.16)",
+                  color: "var(--s-blocked)",
+                  border: "1px solid hsla(0 65% 55% / 0.32)",
+                  fontWeight: 600,
+                }}
+              >
+                {attention}
+              </span>
+            </Tooltip>
           )}
           <span style={{ flex: 1 }} />
         </>
@@ -397,13 +399,11 @@ function SidebarRow({ item, active }: { item: LiveSessionItem; active: boolean }
           <MonoTag style={{ fontSize: 9, padding: "1px 5px" }}>{item.planId}</MonoTag>
         )}
         {item.prNum != null && (
-          <span
-            className="pi-mono"
-            style={{ color: "var(--s-review)", fontWeight: 500 }}
-            title="Pull request"
-          >
-            #{item.prNum}
-          </span>
+          <Tooltip content="Pull request">
+            <span className="pi-mono" style={{ color: "var(--s-review)", fontWeight: 500 }}>
+              #{item.prNum}
+            </span>
+          </Tooltip>
         )}
         {item.branch && (
           <span
@@ -442,11 +442,11 @@ function SidebarRow({ item, active }: { item: LiveSessionItem; active: boolean }
 function SidebarPip({ item, active }: { item: LiveSessionItem; active: boolean }) {
   const state = BUCKET_TO_STATE[item.bucket];
   return (
-    <Link
-      href={`/runs/${item.runDbId}`}
-      title={`${BUCKET_LABEL[item.bucket]} — ${item.title}`}
-      aria-label={`${BUCKET_LABEL[item.bucket]}: ${item.title}`}
-      className={ringClass(item.bucket)}
+    <Tooltip content={`${BUCKET_LABEL[item.bucket]}: ${item.title}`} side="bottom">
+      <Link
+        href={`/runs/${item.runDbId}`}
+        aria-label={`${BUCKET_LABEL[item.bucket]}: ${item.title}`}
+        className={ringClass(item.bucket)}
       style={{
         display: "flex",
         alignItems: "center",
@@ -459,9 +459,10 @@ function SidebarPip({ item, active }: { item: LiveSessionItem; active: boolean }
         color: "var(--pi-fg)",
         ...ringVar(item.bucket),
       }}
-    >
-      <StateIcon state={state} size={13} spin={item.bucket === "running"} />
-    </Link>
+      >
+        <StateIcon state={state} size={13} spin={item.bucket === "running"} />
+      </Link>
+    </Tooltip>
   );
 }
 

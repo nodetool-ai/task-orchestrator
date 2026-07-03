@@ -1,8 +1,10 @@
 "use client";
 
+import { Spinner } from "@/components/ui/spinner";
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, RefreshCcw } from "lucide-react";
+import { RefreshCcw } from "lucide-react";
+import { ErrorText } from "@/components/ui/error-text";
 
 export function ResumeSessionButton({ sessionId }: { sessionId: number }) {
   const router = useRouter();
@@ -35,10 +37,10 @@ export function ResumeSessionButton({ sessionId }: { sessionId: number }) {
         disabled={pending}
         className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-secondary/40 px-2 py-0.5 text-xs hover:bg-secondary disabled:opacity-40"
       >
-        {pending ? <Loader2 className="size-3 animate-spin" /> : <RefreshCcw className="size-3" />}
+        {pending ? <Spinner className="size-3" /> : <RefreshCcw className="size-3" />}
         Resume
       </button>
-      {error && <span className="text-[11px] text-state-blocked">{error}</span>}
+      <ErrorText className="text-[11px]">{error}</ErrorText>
     </div>
   );
 }

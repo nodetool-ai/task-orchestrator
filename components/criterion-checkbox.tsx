@@ -1,9 +1,11 @@
 "use client";
 
+import { Spinner } from "@/components/ui/spinner";
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Check, Loader2 } from "lucide-react";
+import { Check } from "lucide-react";
 import { cn, describe } from "@/lib/utils";
+import { ErrorText } from "@/components/ui/error-text";
 
 export function CriterionCheckbox({
   taskId,
@@ -60,7 +62,7 @@ export function CriterionCheckbox({
         )}
       >
         {pending ? (
-          <Loader2 className="size-3 animate-spin" />
+          <Spinner className="size-3" />
         ) : done ? (
           <Check strokeWidth={3} className="size-3" />
         ) : null}
@@ -73,7 +75,7 @@ export function CriterionCheckbox({
       >
         {text}
       </span>
-      {error && <span className="ml-2 text-xs text-state-blocked">{error}</span>}
+      <ErrorText className="ml-2">{error}</ErrorText>
     </li>
   );
 }
