@@ -3,7 +3,10 @@
 import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, PlayCircle, X } from "lucide-react";
-import { cn, describe } from "@/lib/utils";
+import { describe } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { ModelPicker, type ModelOption } from "@/components/chat/model-picker";
 
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
@@ -101,20 +104,15 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
 
   return (
     <>
-      <button
-        type="button"
+      <Button
         onClick={() => setOpen(true)}
         disabled={openTaskCount === 0}
         title={openTaskCount === 0 ? "No open tasks to execute" : undefined}
-        className={cn(
-          "inline-flex items-center gap-1.5 rounded-md border border-border bg-foreground text-background px-3 py-1.5 text-xs font-medium",
-          "hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed",
-          className
-        )}
+        className={className}
       >
         <PlayCircle className="size-3.5" />
         Execute plan
-      </button>
+      </Button>
 
       {open && (
         <div
@@ -163,14 +161,16 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
                   />
                 </Field>
                 <Field label="Budget (max USD)">
-                  <input
+                  <Input
                     type="number"
                     min={1}
                     step={1}
+                    uiSize="xs"
+                    mono
                     value={maxUsd}
                     onChange={(e) => setMaxUsd(Number(e.target.value))}
                     disabled={pending}
-                    className="w-24 rounded border border-border/60 bg-background px-2 py-0.5 font-mono text-[11px] tabular-nums outline-none focus:border-foreground/40"
+                    className="w-24 rounded py-0.5 text-[11px] tabular-nums"
                   />
                 </Field>
               </div>
@@ -189,18 +189,14 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
                     (optional — appended to the executor&apos;s prompt)
                   </span>
                 </label>
-                <textarea
+                <Textarea
                   id="execute-instructions"
                   value={instructions}
                   onChange={(e) => setInstructions(e.target.value)}
                   disabled={pending}
                   rows={4}
                   placeholder="Steer the executor: priorities, constraints, what to skip, branch/PR conventions…"
-                  className={cn(
-                    "w-full resize-y rounded-md border border-border bg-background px-3 py-2",
-                    "text-xs leading-relaxed text-foreground/90",
-                    "focus:outline-none focus:ring-1 focus:ring-foreground/40 disabled:opacity-50"
-                  )}
+                  className="resize-y text-xs leading-relaxed text-foreground/90"
                 />
               </div>
 
@@ -208,33 +204,17 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
             </div>
 
             <footer className="flex items-center justify-end gap-2 border-t border-border/60 px-5 py-3">
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                disabled={pending}
-                className={cn(
-                  "rounded-md border border-border bg-transparent px-3 py-1.5 text-xs font-medium",
-                  "hover:bg-muted transition-colors disabled:opacity-40"
-                )}
-              >
+              <Button variant="outline" onClick={() => setOpen(false)} disabled={pending}>
                 Cancel
-              </button>
-              <button
-                type="button"
-                onClick={submit}
-                disabled={pending || !(maxUsd > 0)}
-                className={cn(
-                  "inline-flex items-center gap-1.5 rounded-md border border-border bg-foreground text-background px-3 py-1.5 text-xs font-medium",
-                  "hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
-                )}
-              >
+              </Button>
+              <Button onClick={submit} disabled={pending || !(maxUsd > 0)}>
                 {pending ? (
                   <Loader2 className="size-3.5 animate-spin" />
                 ) : (
                   <PlayCircle className="size-3.5" />
                 )}
                 Start execution
-              </button>
+              </Button>
             </footer>
           </div>
         </div>

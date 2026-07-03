@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowUp, Loader2, MessageCircle } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
   PersonaPicker,
@@ -222,11 +223,10 @@ export function PlanChatBox({
           disabled={pending}
           className="flex-1 resize-none bg-transparent text-sm placeholder:text-muted-foreground focus:outline-none py-1.5 max-h-48 disabled:opacity-50"
         />
-        <button
-          type="button"
+        <Button
+          size="icon"
           onClick={submit}
           disabled={!input.trim() || pending}
-          className="inline-flex size-8 items-center justify-center rounded-full bg-foreground text-background hover:bg-foreground/90 disabled:opacity-40 disabled:hover:bg-foreground transition-colors"
           aria-label="Send"
         >
           {pending ? (
@@ -234,7 +234,7 @@ export function PlanChatBox({
           ) : (
             <ArrowUp className="size-4" />
           )}
-        </button>
+        </Button>
       </div>
 
       {!input.trim() && !pending && (

@@ -2,13 +2,13 @@
 name: Task Orchestrator
 description: Operator's console for steering Claude Agent SDK sessions across planned work.
 colors:
-  bg: "#ffffff"
+  bg: "#fcfcfd"
   bg-dark: "#0e0e10"
-  surface: "#ffffff"
+  surface: "#fcfcfd"
   surface-dark: "#131316"
   surface-raised-dark: "#222225"
   fg: "#18181b"
-  fg-inverse: "#fafafa"
+  fg-inverse: "#fafafb"
   muted-fg: "#71717a"
   muted-fg-dark: "#9f9fa8"
   border: "#e4e4e7"
@@ -163,7 +163,7 @@ A single 240° hue carries every neutral, tinted just enough to read as instrume
 
 **The Six-State Rule.** No color outside the six semantic state hues earns a place on the surface. Charts, illustrations, decorative accents: prohibited. If a new role appears (e.g. a warning that isn't blocking), it gets folded into an existing state hue or it is rendered in muted graphite. Never invent a seventh.
 
-**The Tinted Neutral Rule.** Pure `#000` and `#fff` are prohibited going forward. Every neutral leans toward the 240° hue family (chroma ≥ 0.005). The light-mode `--background: 0 0% 100%` is a legacy value that should be migrated to a faintly tinted equivalent (`hsl(240 6% 99%)`) in any future token pass.
+**The Tinted Neutral Rule.** Pure `#000` and `#fff` are prohibited. Every neutral leans toward the 240° hue family (chroma ≥ 0.005). The token pass is done: light-mode `--background`/`--card` are `hsl(240 6% 99%)`, dark-mode foregrounds are `hsl(240 6% 98%)`. Do not reintroduce `0 0% N%` neutrals.
 
 **The State-Is-Accent Rule.** Where other systems use a brand primary on CTAs, this system uses neutral foreground-on-background. Color enters only when the surface communicates state. A button that runs an agent is white-on-black, not Resolved Green: the *act* of running isn't a state, the result will be.
 
@@ -204,6 +204,8 @@ The sticky site-header uses `bg-background/80 backdrop-blur` for the same purpos
 **The Tonal-Depth Rule.** Depth is conveyed by stepping through the graphite ramp (`Console Black` → `Console Surface` → `Console Raised`), not by adding shadow. A raised badge becomes raised because it is `Console Raised`, not because it casts.
 
 ## 5. Components
+
+The canonical implementations live in `components/ui/`: `button.tsx` (`Button`, variants `primary` / `ghost` / `outline` / `danger`, sizes `xs` / `sm` / `md` / `icon`), `input.tsx` (`Input`, sizes `md` / `sm` / `xs`, `mono` flag), `textarea.tsx` (`Textarea`, same API), `badge.tsx`, `card.tsx`. New surfaces must compose these primitives rather than hand-rolling the class recipes below; the recipes document what the primitives encode.
 
 ### Buttons
 
@@ -279,7 +281,7 @@ Hand-drawn inline SVGs at 14px, stroked at 1.75px. Six variants matching the six
 
 ### Don't
 
-- **Don't** ship pure `#000` or `#fff` going forward; every neutral leans toward the 240° hue family. Migrate the legacy `--background: 0 0% 100%` toward `hsl(240 6% 99%)` in the next token pass.
+- **Don't** ship pure `#000` or `#fff`; every neutral leans toward the 240° hue family. The legacy `0 0% N%` tokens were migrated to `240 6% N%` equivalents; keep it that way.
 - **Don't** introduce a brand "primary" accent color. The six state hues are the entire accent vocabulary, and they communicate state, not identity.
 - **Don't** use `border-left` or `border-right` thicker than 1px as a colored accent. Side-stripe cards are prohibited; if a row needs state emphasis, lead with the `StateIcon` and tint the meta text, not the border.
 - **Don't** use gradient text (`background-clip: text` combined with a gradient). Emphasis is weight and size, never gradient fills.

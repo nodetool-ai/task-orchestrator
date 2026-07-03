@@ -14,6 +14,7 @@ import {
   UserRound,
   X,
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { cn, formatDateTime } from "@/lib/utils";
 import { isTerminalStatus, type SessionStatus } from "@/lib/types";
 import type { RunRow, MessageRow } from "@/lib/runs";
@@ -689,15 +690,14 @@ export function RunView({
                   <Square className="size-3.5 fill-current" />
                 </button>
               ) : (
-                <button
-                  type="button"
+                <Button
+                  size="icon"
                   onClick={send}
                   disabled={!input.trim() || composerDisabled}
-                  className="inline-flex size-8 items-center justify-center rounded-full bg-foreground text-background hover:bg-foreground/90 disabled:opacity-40 disabled:hover:bg-foreground transition-colors"
                   aria-label="Send"
                 >
                   <ArrowUp className="size-4" />
-                </button>
+                </Button>
               )}
             </div>
             {(run.startedAt || run.totalCostUsd != null) && (

@@ -4,7 +4,9 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Pencil, Save, Trash2 } from "lucide-react";
 import type { RepositoryRow } from "@/lib/types";
-import { cn, describe } from "@/lib/utils";
+import { describe } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/dialog-provider";
 
 interface Props {
@@ -80,21 +82,23 @@ export function EditRepositoryForm({ repository }: Props) {
   if (!open) {
     return (
       <div className="flex items-center gap-2">
-        <button
-          type="button"
+        <Button
+          variant="outline"
+          size="xs"
           onClick={() => setOpen(true)}
-          className="inline-flex items-center gap-1.5 rounded-md border border-border/60 bg-secondary/40 px-2 py-1 text-xs hover:bg-secondary"
+          className="bg-secondary/40 text-foreground enabled:hover:bg-secondary"
         >
           <Pencil className="size-3" /> Edit
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          variant="outline"
+          size="xs"
           onClick={remove}
           disabled={pending}
-          className="inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2 py-1 text-xs text-muted-foreground hover:text-state-blocked hover:border-state-blocked/60"
+          className="enabled:hover:text-state-blocked enabled:hover:border-state-blocked/60"
         >
           <Trash2 className="size-3" /> Delete
-        </button>
+        </Button>
         {error && <span className="text-[11px] text-state-blocked">{error}</span>}
       </div>
     );
@@ -102,58 +106,53 @@ export function EditRepositoryForm({ repository }: Props) {
 
   return (
     <form onSubmit={submit} className="space-y-2 rounded-md border border-border/60 bg-card/30 px-3 py-3">
-      <input
+      <Input
         autoFocus
+        uiSize="sm"
         value={name}
         onChange={(e) => setName(e.target.value)}
         placeholder="Repository name"
-        className="w-full rounded-sm border border-border/60 bg-background px-2 py-1.5 text-sm font-medium outline-none focus:border-foreground/40"
+        className="text-sm font-medium"
       />
-      <input
+      <Input
+        uiSize="sm"
+        mono
         value={localPath}
         onChange={(e) => setLocalPath(e.target.value)}
         placeholder="Local path"
-        className="w-full rounded-sm border border-border/60 bg-background px-2 py-1.5 text-xs font-mono outline-none focus:border-foreground/40"
       />
-      <input
+      <Input
+        uiSize="sm"
+        mono
         value={remote}
         onChange={(e) => setRemote(e.target.value)}
         placeholder="Remote URL"
-        className="w-full rounded-sm border border-border/60 bg-background px-2 py-1.5 text-xs font-mono outline-none focus:border-foreground/40"
       />
       <div className="flex gap-2">
-        <input
+        <Input
+          uiSize="xs"
+          mono
           value={defaultBranch}
           onChange={(e) => setDefaultBranch(e.target.value)}
           placeholder="default branch"
-          className="w-32 rounded-sm border border-border/60 bg-background px-2 py-1 text-xs font-mono outline-none focus:border-foreground/40"
+          className="w-32"
         />
-        <input
+        <Input
+          uiSize="xs"
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           placeholder="description"
-          className="flex-1 rounded-sm border border-border/60 bg-background px-2 py-1 text-xs outline-none focus:border-foreground/40"
+          className="flex-1 w-auto"
         />
       </div>
       <div className="flex items-center gap-2">
-        <button
-          type="submit"
-          disabled={pending}
-          className={cn(
-            "inline-flex items-center gap-1 rounded-md bg-foreground text-background px-3 py-1 text-xs font-medium",
-            "hover:opacity-90 disabled:opacity-40"
-          )}
-        >
+        <Button type="submit" disabled={pending}>
           {pending ? <Loader2 className="size-3 animate-spin" /> : <Save className="size-3" />}
           Save
-        </button>
-        <button
-          type="button"
-          onClick={() => setOpen(false)}
-          className="text-xs text-muted-foreground hover:text-foreground"
-        >
+        </Button>
+        <Button variant="ghost" onClick={() => setOpen(false)}>
           Cancel
-        </button>
+        </Button>
       </div>
       {error && <p className="text-[11px] text-state-blocked">{error}</p>}
     </form>

@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Plus } from "lucide-react";
+import { Button } from "@/components/ui/button";
 
 export function NewChatCta() {
   const router = useRouter();
@@ -25,14 +26,9 @@ export function NewChatCta() {
   }
 
   return (
-    <button
-      type="button"
-      onClick={create}
-      disabled={creating}
-      className="inline-flex items-center gap-2 rounded-md bg-foreground text-background hover:bg-foreground/90 disabled:opacity-50 px-4 py-2 text-sm font-medium transition-colors"
-    >
+    <Button size="md" onClick={create} disabled={creating} className="gap-2 px-4">
       <Plus className="size-4" />
       {creating ? "Creating…" : "Start a chat"}
-    </button>
+    </Button>
   );
 }

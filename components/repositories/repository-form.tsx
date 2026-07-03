@@ -3,7 +3,9 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Plus } from "lucide-react";
-import { cn, describe } from "@/lib/utils";
+import { describe } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 export function NewRepositoryForm() {
   const router = useRouter();
@@ -60,24 +62,21 @@ export function NewRepositoryForm() {
 
   if (!open) {
     return (
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-foreground text-background px-3 py-1.5 text-xs font-medium hover:opacity-90"
-      >
+      <Button onClick={() => setOpen(true)}>
         <Plus className="size-3.5" /> New repository
-      </button>
+      </Button>
     );
   }
 
   return (
     <form onSubmit={submit} className="space-y-2 rounded-md border border-border/60 bg-card/30 px-3 py-3">
-      <input
+      <Input
         autoFocus
+        uiSize="sm"
         value={name}
         onChange={(e) => setName(e.target.value)}
         placeholder="Repository name (e.g. nodetool)"
-        className="w-full rounded-sm border border-border/60 bg-background px-2 py-1.5 text-sm font-medium outline-none focus:border-foreground/40"
+        className="text-sm font-medium"
         onKeyDown={(e) => {
           if (e.key === "Escape") {
             reset();
@@ -85,54 +84,51 @@ export function NewRepositoryForm() {
           }
         }}
       />
-      <input
+      <Input
+        uiSize="sm"
+        mono
         value={localPath}
         onChange={(e) => setLocalPath(e.target.value)}
         placeholder="Local path (e.g. /home/claude/nodetool)"
-        className="w-full rounded-sm border border-border/60 bg-background px-2 py-1.5 text-xs font-mono outline-none focus:border-foreground/40"
       />
-      <input
+      <Input
+        uiSize="sm"
+        mono
         value={remote}
         onChange={(e) => setRemote(e.target.value)}
         placeholder="Remote URL (e.g. git@github.com:org/repo.git)"
-        className="w-full rounded-sm border border-border/60 bg-background px-2 py-1.5 text-xs font-mono outline-none focus:border-foreground/40"
       />
       <div className="flex gap-2">
-        <input
+        <Input
+          uiSize="xs"
+          mono
           value={defaultBranch}
           onChange={(e) => setDefaultBranch(e.target.value)}
           placeholder="default branch"
-          className="w-32 rounded-sm border border-border/60 bg-background px-2 py-1 text-xs font-mono outline-none focus:border-foreground/40"
+          className="w-32"
         />
-        <input
+        <Input
+          uiSize="xs"
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           placeholder="description"
-          className="flex-1 rounded-sm border border-border/60 bg-background px-2 py-1 text-xs outline-none focus:border-foreground/40"
+          className="flex-1 w-auto"
         />
       </div>
       <div className="flex items-center gap-2">
-        <button
-          type="submit"
-          disabled={pending || !name.trim()}
-          className={cn(
-            "inline-flex items-center gap-1 rounded-md bg-foreground text-background px-3 py-1 text-xs font-medium",
-            "hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-          )}
-        >
+        <Button type="submit" disabled={pending || !name.trim()}>
           {pending && <Loader2 className="size-3 animate-spin" />}
           Create
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          variant="ghost"
           onClick={() => {
             reset();
             setOpen(false);
           }}
-          className="text-xs text-muted-foreground hover:text-foreground"
         >
           Cancel
-        </button>
+        </Button>
       </div>
       {error && <p className="text-[11px] text-state-blocked">{error}</p>}
     </form>
