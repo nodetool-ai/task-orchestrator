@@ -15,6 +15,10 @@ x-app-env: &app-env
   GH_TOKEN: ${GH_TOKEN}
   CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  # Verifies inbound GitHub webhook signatures (CI-autofix / PR events); the app
+  # 401s webhooks without it. CI_AUTOFIX toggles the auto-fix-on-red-CI behavior.
+  GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+  TASK_ORCH_CI_AUTOFIX: ${TASK_ORCH_CI_AUTOFIX:-1}
 
 services:
   postgres:
@@ -23,6 +27,12 @@ services:
       POSTGRES_USER: taskorch
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: taskorch
+    # Bound to loopback only: lets host-side ops (the SQLite→PG ETL, psql) reach
+    # the DB without exposing it off-box. The app talks to it over the compose
+    # network (host `postgres`), not this port. 5434: 5432 is a native host
+    # Postgres and 5433 is the vitest throwaway DB, so this avoids both.
+    ports:
+      - "127.0.0.1:5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
