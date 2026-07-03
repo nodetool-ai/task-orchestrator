@@ -34,6 +34,16 @@ export async function register(): Promise<void> {
       const dbMod = await import("./db");
       await dbMod.initDb();
       const runsMod = await import("./lib/runs");
+      const dispatchMod = await import("./lib/run-dispatch");
+      // Sweep the real container state BEFORE reconcile. A worker that died while
+      // the server was down still has its (exited) container on the host: the
+      // sweep captures its logs + exit code and applies the death policy — so an
+      // OOM-killed run fails visibly here rather than being blindly re-dispatched
+      // by reconcile (which never looks at containers, so it would lose the log
+      // and resume-loop an OOM run once). No-op off the containerized path.
+      await dispatchMod.sweepWorkerContainers().catch((e) => {
+        console.error("[instrumentation] boot container sweep failed:", e);
+      });
       await runsMod.reconcileOrphanedRuns();
       // Start the pending-run pump: it re-dispatches runs the admission gate
       // deferred for lack of host memory AND reaps stale leases every tick (so an
@@ -41,8 +51,12 @@ export async function register(): Promise<void> {
       // boot-only reconcile above can't). No-op off the containerized path. Literal
       // import (no webpackIgnore / variable specifier) so it bundles into the prod
       // server chunk; see the reconcile note above.
-      const dispatchMod = await import("./lib/run-dispatch");
       dispatchMod.startPendingRunPump();
+      // Watch Docker container events so a worker's death is reflected on its
+      // run (logs + exit code captured, status corrected) within seconds instead
+      // of the 5-minute heartbeat timeout. The pump's per-tick container sweep
+      // covers anything this subscription misses. No-op off the containerized path.
+      dispatchMod.startWorkerMonitor();
     } catch (err) {
       console.error("[instrumentation] boot init/reconcile failed:", err);
     }

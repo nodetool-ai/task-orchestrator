@@ -79,6 +79,8 @@ runDispatch.__setRunsApi({
   countInFlightWorkers,
   listPendingRunIds,
   reconcileOrphanedRuns,
+  listLeasedRuns,
+  handleWorkerDeath,
 });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1418,6 +1420,20 @@ async function runReview(
     clearInterval(heartbeat);
     closeBus(runId);
     runners.delete(runId);
+    // Last resort: never let a review turn end without SOME terminal status — the
+    // executor's await_session polls this run's status and would otherwise hang
+    // until the orphan reaper's timeout. An aborted turn is exempt: whoever
+    // aborted (cancel/interrupt) already decided the run's state.
+    if (!abort.signal.aborted) {
+      try {
+        const cur = await get(runId);
+        if (cur && !isTerminalStatus(cur.status)) {
+          await setError(runId, "Review turn ended without a result (worker interrupted).");
+        }
+      } catch {
+        // best-effort
+      }
+    }
     cleanupWorktree(worktreePath, root)
       // Drop the per-run fetch ref once the worktree is gone so refs/reviews/*
       // doesn't accumulate. Best-effort: a missing ref is fine.
@@ -1518,6 +1534,19 @@ async function runExecute(
     clearInterval(heartbeat);
     closeBus(runId);
     runners.delete(runId);
+    // Last resort: an executor turn must always land a terminal status (its
+    // children/UI poll it). Aborted turns are exempt — cancel/interrupt already
+    // decided the run's state.
+    if (!abort.signal.aborted) {
+      try {
+        const cur = await get(runId);
+        if (cur && !isTerminalStatus(cur.status)) {
+          await setError(runId, "Executor turn ended without a result (worker interrupted).");
+        }
+      } catch {
+        // best-effort
+      }
+    }
   }
 }
 
@@ -2287,6 +2316,110 @@ export async function reconcileOrphanedRuns(): Promise<number> {
   }
   if (reaped > 0) console.log(`[runs] reconciled ${reaped} orphaned run(s)`);
   return reaped;
+}
+
+/**
+ * Apply the worker-death policy to a run whose container Docker reports dead
+ * (die event or reconcile sweep — see lib/run-dispatch's worker monitor). Same
+ * policy as reconcileOrphanedRuns, applied the moment the container dies instead
+ * of after the 5-minute heartbeat timeout:
+ *   - superseded / already-finished / parked runs: nothing to do
+ *   - chat runs go back to `idle` (the next message re-dispatches a worker)
+ *   - resumable implement runs are re-dispatched — EXCEPT when the container was
+ *    OOM-killed: the same memory cap will kill the retry at the same spot, so a
+ *    visible failure beats a silent kill loop
+ *   - everything else lands `failed` with the exit code, pointing at the
+ *     captured worker log
+ */
+export async function handleWorkerDeath(
+  runId: number,
+  info: { exitCode: number | null; oomKilled: boolean; containerName: string }
+): Promise<void> {
+  const row = await get(runId);
+  if (!row) return;
+  // Only the run's CURRENT container may decide its fate — a stale container
+  // from a superseded claim (the run was re-dispatched) must not touch it.
+  if (row.workerScope !== info.containerName) return;
+  if (isTerminalStatus(row.status)) return; // finished before/while dying — normal exit
+  if (row.status === "pending") return; // claim already released (deferred)
+
+  // Atomically take ownership of this death: release the claim ONLY if this
+  // container still holds it. This is the real guard (the read above is just a
+  // snapshot): if a concurrent death handler or a re-dispatch already moved on,
+  // the row count is 0 and we do nothing. Clearing heartbeatAt too is what lets
+  // the re-dispatch below actually re-claim — dispatchRun's isLeaseLive guard
+  // treats a fresh heartbeat (the dead worker's last beat, ≤20s old) as "still
+  // live" and would otherwise no-op the re-dispatch, stranding the run until the
+  // 5-minute reaper.
+  const released = await db
+    .update(agentSessions)
+    .set({ workerScope: null, workerPid: null, heartbeatAt: null })
+    .where(and(eq(agentSessions.id, runId), eq(agentSessions.workerScope, info.containerName)));
+  if (released.count === 0) return; // lost the race — another handler owns it
+
+  // Parked chat run whose worker wound down (idle timeout): the claim release
+  // above is the whole job — it's already resumable on the next message.
+  if (row.status === "idle") return;
+
+  const oom = info.oomKilled || info.exitCode === 137;
+  const why =
+    info.exitCode == null
+      ? "its container is gone"
+      : `its container exited with code ${info.exitCode}${oom ? " — killed at its memory cap (OOM)" : ""}`;
+
+  const containerized = !!process.env.TASK_ORCH_WORKER_IMAGE;
+  const resumable =
+    runDispatch.detachedRunsEnabled() &&
+    isImplementWorktree(row) &&
+    !!row.sdkSessionId &&
+    (containerized ? !!row.branch : !!row.worktreePath && existsSync(row.worktreePath));
+  if (resumable && !oom) {
+    // AWAIT the re-dispatch: its atomic claim (status→preparing, fresh heartbeat)
+    // must land before this pump tick's later reconcileOrphanedRuns pass runs, or
+    // that pass would see a lease-status row with a null heartbeat, judge it an
+    // orphan, and re-dispatch it a SECOND time.
+    await runDispatch.dispatchRun(runId).catch(() => {});
+    return;
+  }
+  if (row.goal === "<chat>") {
+    await setStatus(runId, "idle");
+    return;
+  }
+  await setError(
+    runId,
+    `Worker died before finishing — ${why}. Check the worker log on this run for details.`
+  );
+}
+
+/**
+ * The captured worker-container log for a run. Kept OFF RunRow on purpose: the
+ * tail can be 64KB and RunRow feeds list endpoints. Null result = no such run.
+ */
+export async function getWorkerLog(
+  runId: number
+): Promise<{ log: string | null; exitCode: number | null; scope: string | null } | null> {
+  const [row] = await db
+    .select({
+      log: agentSessions.workerLog,
+      exitCode: agentSessions.workerExitCode,
+      scope: agentSessions.workerScope,
+    })
+    .from(agentSessions)
+    .where(eq(agentSessions.id, runId));
+  if (!row) return null;
+  return { log: row.log ?? null, exitCode: row.exitCode ?? null, scope: row.scope ?? null };
+}
+
+/**
+ * Runs in a lease status that hold a worker claim — the sweep cross-checks these
+ * against the containers that actually exist.
+ */
+export async function listLeasedRuns(): Promise<RunRow[]> {
+  const rows = await db
+    .select()
+    .from(agentSessions)
+    .where(and(inArray(agentSessions.status, LEASE_STATUSES), isNotNull(agentSessions.workerScope)));
+  return rows.map(hydrateRun);
 }
 
 /**

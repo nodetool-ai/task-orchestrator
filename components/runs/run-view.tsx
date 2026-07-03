@@ -9,6 +9,7 @@ import {
   Cpu,
   FolderClosed,
   GitBranch,
+  ScrollText,
   Square,
   UserRound,
   X,
@@ -32,6 +33,7 @@ import { segmentToolMessages } from "@/lib/tool-grouping";
 import { SystemEventRow } from "@/components/runs/system-event-row";
 import { PlanningReviewCard } from "@/components/runs/planning-review-card";
 import { useConfirm } from "@/components/ui/dialog-provider";
+import { WorkerLogPanel } from "@/components/runs/worker-log-panel";
 import { takePendingMessage } from "@/lib/pending-first-message";
 
 interface SidebarRepo {
@@ -126,6 +128,7 @@ export function RunView({
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [showWorkerLog, setShowWorkerLog] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -547,6 +550,19 @@ export function RunView({
               PR ↗
             </a>
           )}
+          <button
+            type="button"
+            onClick={() => setShowWorkerLog((v) => !v)}
+            title="Worker container log (docker logs)"
+            className={
+              "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] transition-colors shrink-0 " +
+              (showWorkerLog
+                ? "border-foreground/30 bg-muted/60 text-foreground"
+                : "border-border/60 bg-background/60 text-muted-foreground hover:text-foreground hover:bg-muted/40")
+            }
+          >
+            <ScrollText className="size-3" /> Log
+          </button>
           {canCancel && (
             <button
               type="button"
@@ -614,6 +630,8 @@ export function RunView({
             <span className="truncate">{run.goal}</span>
           )}
         </div>
+
+        {showWorkerLog && <WorkerLogPanel runId={run.id} />}
       </header>
 
       {/* Message stream */}

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { db } from "../db";
 import { agentSessions } from "../db/schema";
 import type { RunRow } from "./runs";
+import { isTerminalStatus } from "./types";
 
 // Spawns the worker for a run and returns a truthy "pid" on success or null on
 // failure. May be async (the Docker API is): dispatchRun awaits it.
@@ -37,6 +38,13 @@ type RunsApi = {
   listPendingRunIds: () => Promise<number[]>;
   /** Reap stale leases (OOM-killed / dead workers); re-dispatches resumable ones. */
   reconcileOrphanedRuns: () => Promise<number>;
+  /** Runs in a lease status with a worker claim (the sweep's run-side view). */
+  listLeasedRuns: () => Promise<RunRow[]>;
+  /** Apply the worker-death policy to a run whose container is known dead. */
+  handleWorkerDeath: (
+    runId: number,
+    info: { exitCode: number | null; oomKilled: boolean; containerName: string }
+  ) => Promise<void>;
 };
 let runsApi: RunsApi | null = null;
 export function __setRunsApi(api: RunsApi): void {
@@ -279,10 +287,19 @@ export async function dispatchRun(
     }
 
     const scope = `run-${runId}-${nonce()}`;
-    // Atomic claim: only succeeds if worker_scope is still NULL.
+    // Atomic claim: only succeeds if worker_scope is still NULL. Also clear any
+    // captured worker log/exit code from a PRIOR container so the run view never
+    // pairs this fresh attempt's live container with a dead one's "exit 137".
     const claimed = await db
       .update(agentSessions)
-      .set({ status: "preparing", workerScope: scope, cancelRequested: 0, heartbeatAt: new Date() })
+      .set({
+        status: "preparing",
+        workerScope: scope,
+        cancelRequested: 0,
+        heartbeatAt: new Date(),
+        workerLog: null,
+        workerExitCode: null,
+      })
       .where(and(eq(agentSessions.id, runId), isNull(agentSessions.workerScope)));
     if (claimed.count === 0) return { kind: "already-claimed" };
     return { kind: "claimed", scope };
@@ -326,6 +343,13 @@ function pumpIntervalMs(): number {
 }
 
 async function pumpTick(): Promise<void> {
+  // Half 0: reconcile against the REAL container state — fast death detection +
+  // log capture for anything the events watcher missed.
+  try {
+    await sweepWorkerContainers();
+  } catch {
+    // best-effort
+  }
   // Half 1: reap stale leases continuously (fixes the boot-only reconcile gap).
   try {
     await runs().reconcileOrphanedRuns();
@@ -395,10 +419,11 @@ export const defaultSpawn: SpawnFn = async (runId, scope) => {
 // One worker container per run, launched via the mounted Docker socket. The
 // container connects to Postgres over the compose network, checks out from the
 // repo-cache volume, and pushes to GitHub with GH_TOKEN. workerScope is the
-// container name; liveness is heartbeat-based; cancel() calls stopWorkerContainer.
-async function dockerSpawn(runId: number, scope: string): Promise<number | null> {
-  const { default: Docker } = await import("dockerode");
-  const docker = new Docker();
+// container name; the worker monitor below tracks the container's REAL state;
+// cancel() calls stopWorkerContainer.
+
+/** Full createContainer options for a run's worker (exported for tests). */
+export function buildWorkerContainerConfig(runId: number, scope: string): Record<string, unknown> {
   const image = process.env.TASK_ORCH_WORKER_IMAGE!;
   const pass = (k: string) => `${k}=${process.env[k] ?? ""}`;
   const env = [
@@ -436,14 +461,23 @@ async function dockerSpawn(runId: number, scope: string): Promise<number | null>
   const repoCacheVol = process.env.TASK_ORCH_REPO_CACHE_HOST_VOLUME;
   if (repoCacheVol) binds.push(`${repoCacheVol}:/repo-cache`);
 
-  const container = await docker.createContainer({
+  return {
     Image: image,
     name: scope,
     Cmd: [String(runId)],
     Env: env,
+    // The worker monitor maps containers back to runs by RUN_LABEL, and scopes
+    // to THIS instance by INSTANCE_LABEL (so a co-hosted stack's workers are
+    // never touched — see the label docs above).
+    Labels: { [RUN_LABEL]: String(runId), [INSTANCE_LABEL]: instanceId() },
     HostConfig: {
-      AutoRemove: true,
+      // Deliberately NO AutoRemove: when the container dies, the monitor first
+      // captures `docker logs` + the exit code into the run row, THEN removes
+      // the container. AutoRemove would race that capture and lose the logs of
+      // exactly the crashes we most need to debug (OOM kill, boot failure).
       Binds: binds,
+      // Bound the on-disk json log so a chatty worker can't fill the host disk.
+      LogConfig: { Type: "json-file", Config: { "max-size": "5m", "max-file": "2" } },
       // Hard per-worker cgroup caps (Memory/MemorySwap/NanoCpus/PidsLimit) so a
       // single runaway worker can't take the host down. Opt-in via env; {} when
       // unset. Paired with the admission gate in dispatchRun, which bounds the
@@ -453,7 +487,12 @@ async function dockerSpawn(runId: number, scope: string): Promise<number | null>
         ? { NetworkMode: process.env.TASK_ORCH_DOCKER_NETWORK }
         : {}),
     },
-  });
+  };
+}
+
+async function dockerSpawn(runId: number, scope: string): Promise<number | null> {
+  const docker = await getDocker();
+  const container = await docker.createContainer(buildWorkerContainerConfig(runId, scope));
   await container.start();
   return 1; // sentinel: container started (not a host pid). cancel() uses the name.
 }
@@ -481,10 +520,364 @@ function detachedSpawn(runId: number, _scope: string): number | null {
 export async function stopWorkerContainer(scope: string | null): Promise<void> {
   if (!scope || !process.env.TASK_ORCH_WORKER_IMAGE) return;
   try {
-    const { default: Docker } = await import("dockerode");
-    const docker = new Docker();
+    const docker = await getDocker();
     await docker.getContainer(scope).stop({ t: 5 });
   } catch {
     // already stopped / removed / unreachable — nothing to do
+  }
+}
+
+// ── worker container monitor ─────────────────────────────────────────────────
+// Keep the DB's picture of a run as close as possible to the REAL container
+// state, instead of trusting only the worker's self-reported heartbeat (a killed
+// worker reports nothing and used to sit "running" until the 5-minute timeout).
+// Two complementary mechanisms:
+//   - startWorkerMonitor(): a Docker events subscription that reacts the moment
+//     a worker container dies — captures its logs + exit code, then applies the
+//     death policy (lib/runs.handleWorkerDeath). Seconds, not minutes.
+//   - sweepWorkerContainers(): a per-pump-tick reconcile that repairs whatever
+//     the events stream missed (server restart, dropped subscription): cleans up
+//     exited containers, stops strays whose run already finished, and declares
+//     dead any leased run whose container no longer exists at all.
+
+/** Container label carrying the run id; how the monitor maps containers→runs. */
+export const RUN_LABEL = "task-orch.run";
+/** Container label scoping a worker to ONE orchestrator instance. Without it, a
+ *  second stack sharing the host Docker socket (staging beside prod, a dev server
+ *  pointed at the host socket) would see the other's workers as strays and stop
+ *  them / delete their exited containers — each instance judges containers
+ *  against its OWN database. Every list/events query filters on this so an
+ *  instance only ever touches containers it launched. */
+export const INSTANCE_LABEL = "task-orch.instance";
+/** This instance's id. Prefer an explicit override; else the compose network
+ *  (project-scoped, distinct per stack); else a shared default (single-stack
+ *  hosts, today's behavior). */
+export function instanceId(): string {
+  return (
+    process.env.TASK_ORCH_INSTANCE_ID ||
+    process.env.TASK_ORCH_DOCKER_NETWORK ||
+    "default"
+  );
+}
+/** Label filter (dockerode `filters.label`) scoping to this instance's workers. */
+function instanceLabelFilter(): string[] {
+  return [RUN_LABEL, `${INSTANCE_LABEL}=${instanceId()}`];
+}
+/** Stored log tail cap (chars) so the run row stays bounded. */
+const WORKER_LOG_MAX_CHARS = 64 * 1024;
+const EVENTS_RECONNECT_MS = 5_000;
+// A freshly claimed run has no container while dockerSpawn's create round-trip
+// is in flight, and the sweep's container list is a point-in-time snapshot;
+// require this much heartbeat silence before declaring a leased run dead.
+const SWEEP_MIN_SILENCE_MS = 30_000;
+// Don't stop a still-running container the instant its run lands terminal — the
+// worker may still be flushing final writes / cleanup after setting the status.
+const STRAY_STOP_GRACE_MS = 60_000;
+
+// Minimal dockerode surface the monitor touches (tests inject a fake).
+export type DockerLike = {
+  createContainer(opts: unknown): Promise<{ start(): Promise<unknown> }>;
+  listContainers(opts: unknown): Promise<
+    Array<{ Id: string; Names?: string[]; State?: string; Labels?: Record<string, string> }>
+  >;
+  getContainer(ref: string): {
+    logs(opts: unknown): Promise<Buffer | NodeJS.ReadableStream>;
+    inspect(): Promise<{ State?: { ExitCode?: number; OOMKilled?: boolean } }>;
+    remove(opts?: unknown): Promise<unknown>;
+    stop(opts?: unknown): Promise<unknown>;
+  };
+  getEvents(opts: unknown): Promise<NodeJS.ReadableStream>;
+};
+
+async function getDocker(): Promise<DockerLike> {
+  const { default: Docker } = await import("dockerode");
+  return new Docker() as unknown as DockerLike;
+}
+
+/**
+ * Docker multiplexes stdout/stderr into 8-byte-header frames when the container
+ * has no TTY: [stream(1), 0,0,0, len(4, BE)] + payload. Workers run TTY-less, so
+ * `docker logs` buffers arrive in this format; strip the headers. A buffer that
+ * doesn't look multiplexed (TTY container / plain text) passes through verbatim.
+ */
+export function demuxDockerLog(buf: Buffer): string {
+  if (buf.length === 0) return "";
+  const looksMultiplexed =
+    buf.length >= 8 && buf[0] <= 2 && buf[1] === 0 && buf[2] === 0 && buf[3] === 0;
+  if (!looksMultiplexed) return buf.toString("utf8");
+  const parts: Buffer[] = [];
+  let off = 0;
+  while (off + 8 <= buf.length) {
+    const len = buf.readUInt32BE(off + 4);
+    const start = off + 8;
+    parts.push(buf.subarray(start, Math.min(start + len, buf.length)));
+    off = start + len;
+  }
+  return Buffer.concat(parts).toString("utf8");
+}
+
+async function readAll(stream: NodeJS.ReadableStream): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const c of stream) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c as string));
+  return Buffer.concat(chunks);
+}
+
+/** Tail of a container's stdout+stderr, demuxed; null if unreadable/gone. */
+export async function fetchContainerLog(
+  ref: string,
+  docker?: DockerLike
+): Promise<string | null> {
+  try {
+    const d = docker ?? (await getDocker());
+    const out = await d
+      .getContainer(ref)
+      .logs({ stdout: true, stderr: true, tail: 2000, follow: false });
+    const buf = Buffer.isBuffer(out) ? out : await readAll(out);
+    const text = demuxDockerLog(buf);
+    if (text.length <= WORKER_LOG_MAX_CHARS) return text;
+    let tail = text.slice(-WORKER_LOG_MAX_CHARS);
+    // The cut can land mid-surrogate-pair (an emoji in the log); a leading lone
+    // low surrogate is invalid UTF-8 and Postgres would reject the insert.
+    const first = tail.charCodeAt(0);
+    if (first >= 0xdc00 && first <= 0xdfff) tail = tail.slice(1);
+    return tail;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A worker container is done (die event, or found exited by the sweep): persist
+ * its final log + exit code onto the run, remove the container, then apply the
+ * death policy — but only if this container still OWNS the run. A stale
+ * container from a superseded claim gets removed without touching the run.
+ */
+export async function handleContainerExit(
+  info: { runId: number; containerName: string; exitCode: number | null; oomKilled: boolean },
+  docker?: DockerLike
+): Promise<void> {
+  const d = docker ?? (await getDocker());
+  const run = await runs().get(info.runId);
+  const isCurrent = !!run && run.workerScope === info.containerName;
+  if (isCurrent) {
+    const log = await fetchContainerLog(info.containerName, d);
+    const patch: Record<string, unknown> = {};
+    if (log) patch.workerLog = log;
+    if (info.exitCode != null) patch.workerExitCode = info.exitCode;
+    if (Object.keys(patch).length > 0) {
+      // Condition the write on the scope STILL matching: fetchContainerLog can
+      // stall, and a re-dispatch in that window would repoint worker_scope at a
+      // new container — this must not overwrite the new attempt's log/exit code
+      // with this dead one's.
+      await db
+        .update(agentSessions)
+        .set(patch)
+        .where(
+          and(eq(agentSessions.id, info.runId), eq(agentSessions.workerScope, info.containerName))
+        );
+    }
+  }
+  try {
+    await d.getContainer(info.containerName).remove({ force: true });
+  } catch {
+    // already removed (event/sweep race) — fine
+  }
+  if (isCurrent) {
+    await runs().handleWorkerDeath(info.runId, {
+      exitCode: info.exitCode,
+      oomKilled: info.oomKilled,
+      containerName: info.containerName,
+    });
+  }
+}
+
+type DockerEvent = {
+  Action?: string;
+  status?: string;
+  id?: string;
+  Actor?: { Attributes?: Record<string, string> };
+};
+
+// Containers hitting the kernel OOM killer emit an `oom` event shortly before
+// `die`; remember them briefly so the die handler can say WHY the worker died.
+const oomFlags = new Map<string, number>();
+function markOom(containerId: string): void {
+  oomFlags.set(containerId, Date.now());
+  if (oomFlags.size > 200) {
+    const cutoff = Date.now() - 10 * 60_000;
+    for (const [k, t] of oomFlags) if (t < cutoff) oomFlags.delete(k);
+  }
+}
+
+/** React to one Docker container event (exported for tests). */
+export async function handleWorkerEvent(evt: DockerEvent, docker?: DockerLike): Promise<void> {
+  const action = evt.Action ?? evt.status;
+  const attrs = evt.Actor?.Attributes ?? {};
+  const runId = Number(attrs[RUN_LABEL]);
+  if (!Number.isFinite(runId)) return;
+  if (action === "oom") {
+    if (evt.id) markOom(evt.id);
+    return;
+  }
+  if (action !== "die") return;
+  const rawExit = Number(attrs.exitCode);
+  const exitCode = Number.isFinite(rawExit) ? rawExit : null;
+  const oomKilled = (evt.id ? oomFlags.delete(evt.id) : false) || exitCode === 137;
+  await handleContainerExit(
+    { runId, containerName: attrs.name ?? "", exitCode, oomKilled },
+    docker
+  );
+}
+
+const MONITOR_KEY = "__taskOrchWorkerMonitor";
+type MonitorState = { stopped: boolean; stream: { destroy?: () => void } | null };
+
+/** Subscribe to Docker container events for worker containers (idempotent;
+ *  no-op off the containerized path). Reconnects itself if the stream drops —
+ *  and whatever slips through a gap is repaired by sweepWorkerContainers. */
+export function startWorkerMonitor(): void {
+  if (!process.env.TASK_ORCH_WORKER_IMAGE) return;
+  const g = globalThis as Record<string, unknown>;
+  if (g[MONITOR_KEY]) return;
+  const state: MonitorState = { stopped: false, stream: null };
+  g[MONITOR_KEY] = state;
+  void connectWorkerEvents(state);
+}
+
+/** Stop the events subscription (tests / graceful shutdown). */
+export function stopWorkerMonitor(): void {
+  const g = globalThis as Record<string, unknown>;
+  const state = g[MONITOR_KEY] as MonitorState | undefined;
+  if (!state) return;
+  state.stopped = true;
+  state.stream?.destroy?.();
+  delete g[MONITOR_KEY];
+}
+
+async function connectWorkerEvents(state: MonitorState): Promise<void> {
+  if (state.stopped) return;
+  let scheduled = false;
+  const reconnect = () => {
+    if (scheduled || state.stopped) return; // 'error' and 'end' both fire
+    scheduled = true;
+    state.stream = null;
+    const t = setTimeout(() => void connectWorkerEvents(state), EVENTS_RECONNECT_MS);
+    (t as { unref?: () => void }).unref?.();
+  };
+  try {
+    const docker = await getDocker();
+    const stream = await docker.getEvents({
+      filters: { type: ["container"], event: ["die", "oom"], label: instanceLabelFilter() },
+    });
+    state.stream = stream as unknown as MonitorState["stream"];
+    // The events endpoint emits newline-delimited JSON; chunks can split a line.
+    let buf = "";
+    stream.on("data", (chunk: Buffer) => {
+      buf += chunk.toString("utf8");
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        try {
+          void handleWorkerEvent(JSON.parse(line) as DockerEvent).catch(() => {});
+        } catch {
+          // malformed frame — skip
+        }
+      }
+    });
+    stream.on("error", reconnect);
+    stream.on("end", reconnect);
+    stream.on("close", reconnect);
+  } catch {
+    reconnect();
+  }
+}
+
+/**
+ * Reconcile DB run state against the real container state, both directions.
+ * Runs every pump tick. Covers everything the events stream can miss: deaths
+ * while the server was down, dropped subscriptions, containers left behind by
+ * older deploys.
+ */
+export async function sweepWorkerContainers(dockerArg?: DockerLike): Promise<void> {
+  if (!dockerArg && !process.env.TASK_ORCH_WORKER_IMAGE) return;
+  let docker: DockerLike;
+  let containers: Awaited<ReturnType<DockerLike["listContainers"]>>;
+  try {
+    docker = dockerArg ?? (await getDocker());
+    containers = await docker.listContainers({
+      all: true,
+      filters: { label: instanceLabelFilter() },
+    });
+  } catch {
+    return; // docker unreachable — nothing to reconcile against
+  }
+  const liveNames = new Set<string>();
+  for (const c of containers) {
+    const name = (c.Names?.[0] ?? "").replace(/^\//, "");
+    if (name) liveNames.add(name);
+  }
+
+  const now = Date.now();
+  for (const c of containers) {
+    const runId = Number(c.Labels?.[RUN_LABEL]);
+    const name = (c.Names?.[0] ?? "").replace(/^\//, "");
+    if (!Number.isFinite(runId) || !name) continue;
+    if (c.State === "exited" || c.State === "dead") {
+      // Normally the events watcher got here first; this is the catch-up path.
+      let exitCode: number | null = null;
+      let oom = false;
+      try {
+        const ins = await docker.getContainer(c.Id).inspect();
+        exitCode = ins.State?.ExitCode ?? null;
+        oom = !!ins.State?.OOMKilled;
+      } catch {
+        // vanished between list and inspect
+      }
+      await handleContainerExit(
+        { runId, containerName: name, exitCode, oomKilled: oom || exitCode === 137 },
+        docker
+      );
+      liveNames.delete(name);
+    } else if (c.State === "running") {
+      // Stray check: a live container whose run is finished, or that lost its
+      // claim to a newer container, burns memory for nothing — stop it. The die
+      // event / next sweep then captures logs and removes it.
+      const run = await runs().get(runId);
+      const stray =
+        !run ||
+        run.workerScope !== name ||
+        (isTerminalStatus(run.status) &&
+          (run.completedAt == null || now - run.completedAt.getTime() > STRAY_STOP_GRACE_MS));
+      if (stray) {
+        try {
+          await docker.getContainer(name).stop({ t: 5 });
+        } catch {
+          // already stopping/gone
+        }
+      }
+    }
+  }
+
+  // Reverse direction: runs holding a worker claim whose container doesn't exist
+  // at all (died and was removed while nothing was watching). Declare them dead
+  // now instead of waiting out the 5-minute heartbeat timeout. The silence guard
+  // avoids racing a dispatch whose container is still being created.
+  let leased: RunRow[];
+  try {
+    leased = await runs().listLeasedRuns();
+  } catch {
+    return;
+  }
+  for (const run of leased) {
+    if (!run.workerScope || liveNames.has(run.workerScope)) continue;
+    const lastSeen = run.heartbeatAt?.getTime() ?? 0;
+    if (now - lastSeen < SWEEP_MIN_SILENCE_MS) continue;
+    await runs().handleWorkerDeath(run.id, {
+      exitCode: null,
+      oomKilled: false,
+      containerName: run.workerScope,
+    });
   }
 }
