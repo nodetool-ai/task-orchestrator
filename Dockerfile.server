@@ -34,8 +34,10 @@ COPY --from=build /app/db ./db
 # the `@/*` path alias. `next start` ignores these; they don't affect it.
 COPY --from=build /app/lib ./lib
 COPY --from=build /app/scripts ./scripts
+COPY --from=build /app/cli.ts ./cli.ts
 COPY --from=build /app/auth.ts ./auth.ts
 COPY --from=build /app/auth.config.ts ./auth.config.ts
+COPY --from=build /app/middleware.ts ./middleware.ts
 COPY --from=build /app/tsconfig.json ./tsconfig.json
 EXPOSE 3000
 # `npm run start` -> next start. instrumentation.ts runs initDb() (migrate+seed)

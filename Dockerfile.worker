@@ -27,13 +27,19 @@ RUN npm install -g @anthropic-ai/claude-code
 
 COPY . .
 
-# Commit identity for changes the agent makes.
+# Commit identity + github auth (system-wide, so the non-root `node` user below
+# inherits them). The credential helper reads GH_TOKEN at runtime — no token in a
+# URL, .git/config, or a persisted git error.
 RUN git config --system user.email "agent@task-orchestrator.local" \
     && git config --system user.name "Task Orchestrator Agent" \
-    # Authenticate github HTTPS via GH_TOKEN at runtime (a credential helper, not
-    # a token-in-URL), so the token never lands in a remote URL, .git/config, or
-    # a git error message that gets persisted to agent_runs.error.
     && git config --system credential.helper '!f() { echo username=x-access-token; echo "password=${GH_TOKEN}"; }; f'
+
+# Run as the non-root `node` user (uid 1000): the Claude Code CLI refuses
+# --dangerously-skip-permissions (what the SDK's bypassPermissions maps to) as
+# root. uid 1000 also matches the host user that owns the mounted ~/.claude, so
+# the session store is read/write. /work holds the per-run checkout.
+RUN mkdir -p /work && chown -R node:node /work
+USER node
 
 # The runId is passed as the container command: `docker run worker:latest <id>`.
 ENTRYPOINT ["npx", "tsx", "scripts/run-worker.ts"]

@@ -8,6 +8,14 @@ prod systemd services or the prod SQLite DB.
 Everything runs as a separate compose project (`task-orch-test`) with its own
 network and **throwaway** volumes on a **non-conflicting port** (3005).
 
+> **Validated 2026-07-03** against `nodetool-ai/nodetool`: a worker container
+> spawned, cloned from the repo-cache mirror, branched off `main`, wrote +
+> committed `DEPLOY_TEST.md`, pushed, and opened a PR — with events/messages
+> streaming into Postgres and the container exiting `--rm`. The test PR was closed
+> and its branch deleted immediately after. The worker runs as the non-root
+> `node` user (uid 1000): the Claude Code CLI refuses `--dangerously-skip-permissions`
+> as root, and uid 1000 matches the host user that owns the mounted `~/.claude`.
+
 ## Prerequisites
 
 - Docker + `docker compose` v2 on the host.
@@ -70,12 +78,37 @@ $DC exec server npx tsx cli.ts new task --plan=<PLAN_ID> \
 
 ## 4. Acceptance test — dispatch a run through the containerized server
 
-Dispatch the task's agent from inside the server container (this exercises the
-real path: `runs.create` → `dispatchRun` → **`docker run` a worker container** via
-the mounted socket):
+Create the run's row, then **await `dispatchRun`** so the `docker run` of the
+worker container completes before the process exits. This exercises the real
+path: `runs.create` → `dispatchRun` → **`docker run` a worker container** via the
+mounted socket → in-container checkout → push/PR.
+
+> **Do not use `cli.ts agent <TASK_ID>` here.** In the detached/containerized
+> model, `runs.create` fires the dispatch in a background `void (async …)()` IIFE
+> and the CLI's `tailSession` waits on the *in-process* event bus — which a
+> separate worker container never feeds (it writes to Postgres). So the CLI tail
+> hangs and never reports completion. Await `dispatchRun` (below) or drive it
+> through the HTTP API and watch via the DB / the run-view SSE.
+
+First create the run row (deferred — no in-process kickoff), then dispatch it:
 
 ```bash
-$DC exec server npx tsx cli.ts agent <TASK_ID>
+# Create an <implement> run for the task WITHOUT the in-process kickoff, capturing
+# its id, then await dispatchRun (the worker container spawns on the mounted socket).
+$DC exec -T server npx tsx -e '
+import "./lib/runs";
+import * as runs from "./lib/runs";
+import { dispatchRun } from "./lib/run-dispatch";
+const task = process.argv[2];
+const run = await runs.create({
+  goal: "<implement>", cwdStrategy: "worktree",
+  toolsProfile: "orchestrator,repo_write,gh_pr,gh_ci",
+  taskId: task, baseBranch: "main", defer: true,
+});
+const r = await dispatchRun(run.id);
+console.log(`run #${run.id} -> ${r}`);
+process.exit(0);
+' <TASK_ID>
 ```
 
 Then watch it work:
@@ -90,7 +123,8 @@ scripts/test-deploy.sh psql \
 scripts/test-deploy.sh psql \
   "SELECT count(*) FROM agent_messages; SELECT count(*) FROM agent_events;"
 
-# worker container's own logs (if it fails, the error is here):
+# worker container's own logs (if it fails, the error is here — note the agent's
+# turn output goes to Postgres, not stdout; stdout only shows the tsx bootstrap):
 docker logs <run-container-name>
 ```
 
@@ -123,6 +157,8 @@ scripts/test-deploy.sh down      # stops everything + removes the pg + repo-cach
 | `containerCheckout` "no GitHub remote" | The run's repository row has no `remote` (step 3). |
 | No live stream in the run view | `run_stream` trigger present (`scripts/test-deploy.sh psql "SELECT tgname FROM pg_trigger WHERE tgname='agent_events_notify';"`) and the listener connected. |
 | Agent turn fails with no API key | `~/.claude` not authenticated on the host, or `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` unset. |
+| Worker exits 1, log shows `--dangerously-skip-permissions cannot be used with root/sudo privileges` | The worker image must run as the non-root `node` user (`USER node` in `Dockerfile.worker`); the SDK's `bypassPermissions` maps to that flag, which Claude Code refuses as root. |
+| Worker can't read the repo-cache mirror | The mirror's git objects must be world-readable (`repo-cache-init`'s `alpine/git` writes them `444`/`755`); the non-root `node` user (uid 1000) reads them directly. |
 
 ## Notes / known gaps (see PR #57)
 

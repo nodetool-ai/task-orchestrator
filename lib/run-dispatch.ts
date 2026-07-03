@@ -110,7 +110,16 @@ async function dockerSpawn(runId: number, scope: string): Promise<number | null>
   ];
   const binds: string[] = [];
   const claudeHome = process.env.TASK_ORCH_CLAUDE_HOME_HOST;
-  if (claudeHome) binds.push(`${claudeHome}:/root/.claude`);
+  if (claudeHome) {
+    // The worker runs as the non-root `node` user (HOME=/home/node) because the
+    // Claude Code CLI refuses --dangerously-skip-permissions as root. Mount the
+    // host session store into node's HOME.
+    binds.push(`${claudeHome}:/home/node/.claude`);
+    // Claude Code also reads its main config from $HOME/.claude.json (a sibling
+    // of the .claude/ dir, not inside it). Without it the SDK's `query()` claude
+    // process exits 1. Mount it alongside.
+    binds.push(`${claudeHome}.json:/home/node/.claude.json`);
+  }
   const repoCacheVol = process.env.TASK_ORCH_REPO_CACHE_HOST_VOLUME;
   if (repoCacheVol) binds.push(`${repoCacheVol}:/repo-cache`);
 
