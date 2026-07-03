@@ -22,6 +22,13 @@
       "when": 1783098304872,
       "tag": "0002_run_input_notify",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1783111735538,
+      "tag": "0003_worker_exit",
+      "breakpoints": true
     }
   ]
 }

@@ -43,6 +43,11 @@ export async function register(): Promise<void> {
       // server chunk; see the reconcile note above.
       const dispatchMod = await import("./lib/run-dispatch");
       dispatchMod.startPendingRunPump();
+      // Watch Docker container events so a worker's death is reflected on its
+      // run (logs + exit code captured, status corrected) within seconds instead
+      // of the 5-minute heartbeat timeout. The pump's per-tick container sweep
+      // covers anything this subscription misses. No-op off the containerized path.
+      dispatchMod.startWorkerMonitor();
     } catch (err) {
       console.error("[instrumentation] boot init/reconcile failed:", err);
     }

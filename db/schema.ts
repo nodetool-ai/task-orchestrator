@@ -233,6 +233,12 @@ export const agentSessions = pgTable(
     workerScope: text("worker_scope"),
     workerPid: integer("worker_pid"),
     cancelRequested: integer("cancel_requested"),
+    // Final container state, captured by the worker monitor when the container
+    // dies: the tail of its stdout/stderr (docker logs) and its exit code. This
+    // is how you debug a worker whose failure never reached the transcript (OOM
+    // kill, crash before the SDK started, git auth, ...).
+    workerLog: text("worker_log"),
+    workerExitCode: integer("worker_exit_code"),
   },
   (t) => ({
     taskIdx: index("agent_runs_task_idx").on(t.taskId),
