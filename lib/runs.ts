@@ -2341,16 +2341,25 @@ export async function handleWorkerDeath(
   // from a superseded claim (the run was re-dispatched) must not touch it.
   if (row.workerScope !== info.containerName) return;
   if (isTerminalStatus(row.status)) return; // finished before/while dying — normal exit
-  if (row.status === "idle") {
-    // Parked chat run whose worker wound down (idle timeout). Already resumable;
-    // release the claim so the next message's dispatch can re-claim cleanly.
-    await db
-      .update(agentSessions)
-      .set({ workerScope: null, workerPid: null })
-      .where(eq(agentSessions.id, runId));
-    return;
-  }
   if (row.status === "pending") return; // claim already released (deferred)
+
+  // Atomically take ownership of this death: release the claim ONLY if this
+  // container still holds it. This is the real guard (the read above is just a
+  // snapshot): if a concurrent death handler or a re-dispatch already moved on,
+  // the row count is 0 and we do nothing. Clearing heartbeatAt too is what lets
+  // the re-dispatch below actually re-claim — dispatchRun's isLeaseLive guard
+  // treats a fresh heartbeat (the dead worker's last beat, ≤20s old) as "still
+  // live" and would otherwise no-op the re-dispatch, stranding the run until the
+  // 5-minute reaper.
+  const released = await db
+    .update(agentSessions)
+    .set({ workerScope: null, workerPid: null, heartbeatAt: null })
+    .where(and(eq(agentSessions.id, runId), eq(agentSessions.workerScope, info.containerName)));
+  if (released.count === 0) return; // lost the race — another handler owns it
+
+  // Parked chat run whose worker wound down (idle timeout): the claim release
+  // above is the whole job — it's already resumable on the next message.
+  if (row.status === "idle") return;
 
   const oom = info.oomKilled || info.exitCode === 137;
   const why =
@@ -2365,18 +2374,14 @@ export async function handleWorkerDeath(
     !!row.sdkSessionId &&
     (containerized ? !!row.branch : !!row.worktreePath && existsSync(row.worktreePath));
   if (resumable && !oom) {
-    await db
-      .update(agentSessions)
-      .set({ workerScope: null, workerPid: null })
-      .where(eq(agentSessions.id, runId));
-    void runDispatch.dispatchRun(runId).catch(() => {});
+    // AWAIT the re-dispatch: its atomic claim (status→preparing, fresh heartbeat)
+    // must land before this pump tick's later reconcileOrphanedRuns pass runs, or
+    // that pass would see a lease-status row with a null heartbeat, judge it an
+    // orphan, and re-dispatch it a SECOND time.
+    await runDispatch.dispatchRun(runId).catch(() => {});
     return;
   }
   if (row.goal === "<chat>") {
-    await db
-      .update(agentSessions)
-      .set({ workerScope: null, workerPid: null })
-      .where(eq(agentSessions.id, runId));
     await setStatus(runId, "idle");
     return;
   }

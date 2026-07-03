@@ -12,14 +12,19 @@ import { agentSessions } from "../db/schema";
 import { create, get, getWorkerLog, handleWorkerDeath } from "../lib/runs";
 import * as dispatch from "../lib/run-dispatch";
 import {
+  INSTANCE_LABEL,
   RUN_LABEL,
   buildWorkerContainerConfig,
   demuxDockerLog,
+  dispatchRun,
   handleContainerExit,
   handleWorkerEvent,
+  instanceId,
   sweepWorkerContainers,
   type DockerLike,
 } from "../lib/run-dispatch";
+
+const FRESH = () => new Date(Date.now() - 5_000); // 5s ago — inside the lease window
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -107,6 +112,14 @@ describe("buildWorkerContainerConfig", () => {
     expect(cfg.HostConfig.AutoRemove).toBeUndefined();
     expect(cfg.HostConfig.LogConfig?.Type).toBe("json-file");
   });
+
+  it("scopes the container to this instance (finding 3)", () => {
+    vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
+    vi.stubEnv("TASK_ORCH_INSTANCE_ID", "prod-1");
+    const cfg = buildWorkerContainerConfig(7, "run-7-x") as { Labels: Record<string, string> };
+    expect(cfg.Labels[INSTANCE_LABEL]).toBe("prod-1");
+    expect(instanceId()).toBe("prod-1");
+  });
 });
 
 describe("handleWorkerDeath policy", () => {
@@ -172,7 +185,7 @@ describe("handleWorkerDeath policy", () => {
     expect(after?.workerScope).toBeNull();
   });
 
-  it("re-dispatches a resumable implement run after a non-OOM death", async () => {
+  it("re-dispatches a resumable implement run after a non-OOM death, clearing the stale heartbeat", async () => {
     vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
     vi.stubEnv("TASK_ORCH_DETACHED_RUNS", "1");
     const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
@@ -180,6 +193,7 @@ describe("handleWorkerDeath policy", () => {
     await patchRun(run.id, {
       status: "running",
       workerScope: "run-r-1",
+      heartbeatAt: FRESH(), // the dead worker's last beat, still "fresh"
       sdkSessionId: "sess-1",
       branch: "claude/task-1",
     });
@@ -189,7 +203,44 @@ describe("handleWorkerDeath policy", () => {
     expect(spy).toHaveBeenCalledWith(run.id);
     const after = await get(run.id);
     expect(after?.workerScope).toBeNull();
+    // Regression (finding 1): heartbeatAt MUST be cleared, or the real
+    // dispatchRun's isLeaseLive guard would see the dead worker's fresh beat and
+    // no-op the re-dispatch, stranding the run until the 5-minute reaper.
+    expect(after?.heartbeatAt).toBeNull();
     expect(after?.status).toBe("running"); // untouched; the fresh dispatch owns it now
+  });
+
+  it("the cleared heartbeat actually lets the real dispatchRun re-claim (finding 1)", async () => {
+    // A run left 'running' with a fresh heartbeat but no scope (the bug's state)
+    // is rejected by dispatchRun's guard...
+    const blocked = await create({ goal: "<implement>", defer: true });
+    await patchRun(blocked.id, { status: "running", workerScope: null, heartbeatAt: FRESH() });
+    expect(await dispatchRun(blocked.id, { spawn: () => 1 })).toBe("already-claimed");
+
+    // ...and with the heartbeat cleared (what handleWorkerDeath now does) it claims.
+    const ok = await create({ goal: "<implement>", defer: true });
+    await patchRun(ok.id, { status: "running", workerScope: null, heartbeatAt: null });
+    expect(await dispatchRun(ok.id, { spawn: () => 1 })).toBe("spawned");
+  });
+
+  it("is idempotent: a second death for the same container is a no-op", async () => {
+    vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
+    vi.stubEnv("TASK_ORCH_DETACHED_RUNS", "1");
+    const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
+    const run = await create({ goal: "<implement>", defer: true });
+    await patchRun(run.id, {
+      status: "running",
+      workerScope: "run-dup",
+      heartbeatAt: FRESH(),
+      sdkSessionId: "sess-d",
+      branch: "claude/task-d",
+    });
+
+    await handleWorkerDeath(run.id, { exitCode: 1, oomKilled: false, containerName: "run-dup" });
+    await handleWorkerDeath(run.id, { exitCode: 1, oomKilled: false, containerName: "run-dup" });
+
+    // The atomic claim-release ran once; the second call found scope already null.
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 
   it("does NOT resume after an OOM kill — the retry would die at the same cap", async () => {
@@ -210,6 +261,24 @@ describe("handleWorkerDeath policy", () => {
     const after = await get(run.id);
     expect(after?.status).toBe("failed");
     expect(after?.error).toMatch(/OOM/);
+  });
+});
+
+describe("dispatchRun log reset", () => {
+  it("clears a prior container's captured log + exit code on re-claim", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
+    await patchRun(run.id, {
+      status: "failed",
+      workerScope: null,
+      workerLog: "old crash output",
+      workerExitCode: 137,
+    });
+
+    expect(await dispatchRun(run.id, { spawn: () => 1 })).toBe("spawned");
+
+    const log = await getWorkerLog(run.id);
+    expect(log?.log).toBeNull();
+    expect(log?.exitCode).toBeNull();
   });
 });
 
@@ -245,6 +314,44 @@ describe("handleContainerExit", () => {
     expect(calls.removed).toContain(`run-${run.id}-OLD`);
     expect((await get(run.id))?.status).toBe("running");
     expect((await getWorkerLog(run.id))?.log).toBeNull();
+  });
+
+  it("does not overwrite the log when a re-dispatch repoints the scope mid-fetch (finding 4)", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
+    const oldScope = `run-${run.id}-OLD`;
+    const newScope = `run-${run.id}-NEW`;
+    await patchRun(run.id, { status: "running", workerScope: oldScope });
+    // A docker whose logs() simulates a re-dispatch landing WHILE we read the old
+    // container's log: the run's scope moves to a fresh container before the patch.
+    const docker: DockerLike = {
+      createContainer: async () => ({ start: async () => undefined }),
+      listContainers: async () => [],
+      getContainer: () => ({
+        logs: async () => {
+          await patchRun(run.id, {
+            workerScope: newScope,
+            workerLog: "NEW container log",
+            workerExitCode: 0,
+          });
+          return muxFrame(1, "OLD container crash");
+        },
+        inspect: async () => ({}),
+        remove: async () => undefined,
+        stop: async () => undefined,
+      }),
+      getEvents: async () => {
+        throw new Error("unused");
+      },
+    };
+
+    await handleContainerExit(
+      { runId: run.id, containerName: oldScope, exitCode: 137, oomKilled: true },
+      docker
+    );
+
+    const log = await getWorkerLog(run.id);
+    expect(log?.log).toBe("NEW container log"); // NOT clobbered by the old crash
+    expect(log?.exitCode).toBe(0);
   });
 });
 

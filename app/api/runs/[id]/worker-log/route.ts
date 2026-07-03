@@ -18,17 +18,24 @@ export async function GET(
   if (!Number.isFinite(runId)) {
     return Response.json({ error: "Bad id" }, { status: 400 });
   }
-  const stored = await runs.getWorkerLog(runId);
-  if (!stored) return Response.json({ error: "Not found" }, { status: 404 });
+  try {
+    const stored = await runs.getWorkerLog(runId);
+    if (!stored) return Response.json({ error: "Not found" }, { status: 404 });
 
-  if (stored.scope && process.env.TASK_ORCH_WORKER_IMAGE) {
-    const live = await fetchContainerLog(stored.scope);
-    if (live != null) {
-      return Response.json({ source: "live", log: live, exitCode: stored.exitCode });
+    if (stored.scope && process.env.TASK_ORCH_WORKER_IMAGE) {
+      const live = await fetchContainerLog(stored.scope);
+      if (live != null) {
+        return Response.json({ source: "live", log: live, exitCode: stored.exitCode });
+      }
     }
+    if (stored.log != null) {
+      return Response.json({ source: "stored", log: stored.log, exitCode: stored.exitCode });
+    }
+    return Response.json({ source: null, log: "", exitCode: stored.exitCode });
+  } catch (err) {
+    return Response.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 500 }
+    );
   }
-  if (stored.log != null) {
-    return Response.json({ source: "stored", log: stored.log, exitCode: stored.exitCode });
-  }
-  return Response.json({ source: null, log: "", exitCode: stored.exitCode });
 }

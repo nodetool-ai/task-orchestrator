@@ -287,10 +287,19 @@ export async function dispatchRun(
     }
 
     const scope = `run-${runId}-${nonce()}`;
-    // Atomic claim: only succeeds if worker_scope is still NULL.
+    // Atomic claim: only succeeds if worker_scope is still NULL. Also clear any
+    // captured worker log/exit code from a PRIOR container so the run view never
+    // pairs this fresh attempt's live container with a dead one's "exit 137".
     const claimed = await db
       .update(agentSessions)
-      .set({ status: "preparing", workerScope: scope, cancelRequested: 0, heartbeatAt: new Date() })
+      .set({
+        status: "preparing",
+        workerScope: scope,
+        cancelRequested: 0,
+        heartbeatAt: new Date(),
+        workerLog: null,
+        workerExitCode: null,
+      })
       .where(and(eq(agentSessions.id, runId), isNull(agentSessions.workerScope)));
     if (claimed.count === 0) return { kind: "already-claimed" };
     return { kind: "claimed", scope };
@@ -457,9 +466,10 @@ export function buildWorkerContainerConfig(runId: number, scope: string): Record
     name: scope,
     Cmd: [String(runId)],
     Env: env,
-    // The worker monitor maps containers back to runs by this label (events
-    // subscription + reconcile sweep).
-    Labels: { [RUN_LABEL]: String(runId) },
+    // The worker monitor maps containers back to runs by RUN_LABEL, and scopes
+    // to THIS instance by INSTANCE_LABEL (so a co-hosted stack's workers are
+    // never touched — see the label docs above).
+    Labels: { [RUN_LABEL]: String(runId), [INSTANCE_LABEL]: instanceId() },
     HostConfig: {
       // Deliberately NO AutoRemove: when the container dies, the monitor first
       // captures `docker logs` + the exit code into the run row, THEN removes
@@ -532,6 +542,27 @@ export async function stopWorkerContainer(scope: string | null): Promise<void> {
 
 /** Container label carrying the run id; how the monitor maps containers→runs. */
 export const RUN_LABEL = "task-orch.run";
+/** Container label scoping a worker to ONE orchestrator instance. Without it, a
+ *  second stack sharing the host Docker socket (staging beside prod, a dev server
+ *  pointed at the host socket) would see the other's workers as strays and stop
+ *  them / delete their exited containers — each instance judges containers
+ *  against its OWN database. Every list/events query filters on this so an
+ *  instance only ever touches containers it launched. */
+export const INSTANCE_LABEL = "task-orch.instance";
+/** This instance's id. Prefer an explicit override; else the compose network
+ *  (project-scoped, distinct per stack); else a shared default (single-stack
+ *  hosts, today's behavior). */
+export function instanceId(): string {
+  return (
+    process.env.TASK_ORCH_INSTANCE_ID ||
+    process.env.TASK_ORCH_DOCKER_NETWORK ||
+    "default"
+  );
+}
+/** Label filter (dockerode `filters.label`) scoping to this instance's workers. */
+function instanceLabelFilter(): string[] {
+  return [RUN_LABEL, `${INSTANCE_LABEL}=${instanceId()}`];
+}
 /** Stored log tail cap (chars) so the run row stays bounded. */
 const WORKER_LOG_MAX_CHARS = 64 * 1024;
 const EVENTS_RECONNECT_MS = 5_000;
@@ -603,7 +634,13 @@ export async function fetchContainerLog(
       .logs({ stdout: true, stderr: true, tail: 2000, follow: false });
     const buf = Buffer.isBuffer(out) ? out : await readAll(out);
     const text = demuxDockerLog(buf);
-    return text.length > WORKER_LOG_MAX_CHARS ? text.slice(-WORKER_LOG_MAX_CHARS) : text;
+    if (text.length <= WORKER_LOG_MAX_CHARS) return text;
+    let tail = text.slice(-WORKER_LOG_MAX_CHARS);
+    // The cut can land mid-surrogate-pair (an emoji in the log); a leading lone
+    // low surrogate is invalid UTF-8 and Postgres would reject the insert.
+    const first = tail.charCodeAt(0);
+    if (first >= 0xdc00 && first <= 0xdfff) tail = tail.slice(1);
+    return tail;
   } catch {
     return null;
   }
@@ -628,7 +665,16 @@ export async function handleContainerExit(
     if (log) patch.workerLog = log;
     if (info.exitCode != null) patch.workerExitCode = info.exitCode;
     if (Object.keys(patch).length > 0) {
-      await db.update(agentSessions).set(patch).where(eq(agentSessions.id, info.runId));
+      // Condition the write on the scope STILL matching: fetchContainerLog can
+      // stall, and a re-dispatch in that window would repoint worker_scope at a
+      // new container — this must not overwrite the new attempt's log/exit code
+      // with this dead one's.
+      await db
+        .update(agentSessions)
+        .set(patch)
+        .where(
+          and(eq(agentSessions.id, info.runId), eq(agentSessions.workerScope, info.containerName))
+        );
     }
   }
   try {
@@ -721,7 +767,7 @@ async function connectWorkerEvents(state: MonitorState): Promise<void> {
   try {
     const docker = await getDocker();
     const stream = await docker.getEvents({
-      filters: { type: ["container"], event: ["die", "oom"], label: [RUN_LABEL] },
+      filters: { type: ["container"], event: ["die", "oom"], label: instanceLabelFilter() },
     });
     state.stream = stream as unknown as MonitorState["stream"];
     // The events endpoint emits newline-delimited JSON; chunks can split a line.
@@ -762,7 +808,7 @@ export async function sweepWorkerContainers(dockerArg?: DockerLike): Promise<voi
     docker = dockerArg ?? (await getDocker());
     containers = await docker.listContainers({
       all: true,
-      filters: { label: [RUN_LABEL] },
+      filters: { label: instanceLabelFilter() },
     });
   } catch {
     return; // docker unreachable — nothing to reconcile against

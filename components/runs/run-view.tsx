@@ -554,12 +554,12 @@ export function RunView({
             type="button"
             onClick={() => setShowWorkerLog((v) => !v)}
             title="Worker container log (docker logs)"
-            className={cn(
-              "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] transition-colors shrink-0",
-              showWorkerLog
+            className={
+              "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] transition-colors shrink-0 " +
+              (showWorkerLog
                 ? "border-foreground/30 bg-muted/60 text-foreground"
-                : "border-border/60 bg-background/60 text-muted-foreground hover:text-foreground hover:bg-muted/40"
-            )}
+                : "border-border/60 bg-background/60 text-muted-foreground hover:text-foreground hover:bg-muted/40")
+            }
           >
             <ScrollText className="size-3" /> Log
           </button>
