@@ -102,6 +102,9 @@ services:
       TASK_ORCH_MAX_WORKERS: ${TASK_ORCH_MAX_WORKERS:-2}
       TASK_ORCH_PENDING_PUMP_MS: ${TASK_ORCH_PENDING_PUMP_MS:-15000}
       TASK_ORCH_MAX_DEFER_MS: ${TASK_ORCH_MAX_DEFER_MS:-1800000}
+      # How long a long-lived chat worker waits (warm) for the next message before
+      # exiting; the next message re-dispatches + resumes. Passed to the worker.
+      TASK_ORCH_CHAT_IDLE_MS: ${TASK_ORCH_CHAT_IDLE_MS:-600000}
     ports:
       - "${SERVER_PORT:-3000}:3000"
     volumes:

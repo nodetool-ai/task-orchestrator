@@ -55,7 +55,10 @@ export async function POST(
         }
       };
       try {
-        for await (const event of runs.append({
+        // sendMessageToRun persists the message and, in the containerized deploy,
+        // dispatches/relays it through a worker (the root server can't run agent
+        // turns); in dev it falls back to in-process append(). Same frame contract.
+        for await (const event of runs.sendMessageToRun({
           runId,
           role: "user",
           text,

@@ -222,6 +222,11 @@ export interface AppendInput {
    *  proof of ownership — this flag lets that worker adopt its own `preparing`
    *  claim. Only honored for `preparing` (never `running`). */
   takeover?: boolean;
+  /** Default true. Set false when the triggering user message is ALREADY in the
+   *  DB (the server persisted it to fire the run_input NOTIFY before dispatching
+   *  the worker). The worker then runs the turn on `text` without re-inserting a
+   *  duplicate user row. In-process/legacy callers leave it unset. */
+  persistUser?: boolean;
 }
 
 export interface AppendStreamEvent {
@@ -583,10 +588,15 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       return;
     }
 
-    const userMsg = await persistMessage(run.id, input.role === "system" ? "system" : "user", [
-      { type: "text", text: input.text },
-    ]);
-    yield { type: "user_message", message: userMsg };
+    // persistUser===false: the server already inserted this user message (to fire
+    // run_input and wake this worker), so re-inserting would duplicate the row and
+    // re-stream the user_message frame the server already relayed. Skip both.
+    if (input.persistUser !== false) {
+      const userMsg = await persistMessage(run.id, input.role === "system" ? "system" : "user", [
+        { type: "text", text: input.text },
+      ]);
+      yield { type: "user_message", message: userMsg };
+    }
 
     await setStatus(run.id, "running");
 
@@ -976,6 +986,20 @@ export function validateCwd(dir: string, ctx: { runId: number; repoId: string | 
 
 async function prepareCwd(run: RunRow): Promise<string> {
   if (run.cwdStrategy === "none" || run.cwdStrategy === "repo") {
+    // Container model: the host repoRoot()/local_path doesn't exist inside a
+    // worker. Clone the repo's default branch from the repo-cache mirror into a
+    // container-local dir (no feature branch, no push — correct for repo/none:
+    // plan-executor at repo root, repo-scoped chats). Idempotent: reuse an
+    // existing /work/<id> across turns in a long-lived worker. Falls back to the
+    // host path in dev/non-container mode.
+    if (process.env.REPO_CACHE_DIR) {
+      const work = `/work/${run.id}`;
+      if (!existsSync(work)) {
+        const def = await repoDefaultBranch(run);
+        await containerCheckout(run, def, def);
+      }
+      return validateCwd(work, { runId: run.id, repoId: run.repoId });
+    }
     return validateCwd(await repoRoot(run), { runId: run.id, repoId: run.repoId });
   }
   // worktree / worktree_at_pr: re-materialize if missing.
@@ -1194,10 +1218,11 @@ async function kickoffFirstTurn(
   runId: number,
   prompt: string,
   baseBranch?: string,
-  takeover?: boolean
+  takeover?: boolean,
+  persistUser?: boolean
 ): Promise<void> {
   try {
-    for await (const ev of append({ runId, role: "user", text: prompt, baseBranch, takeover })) {
+    for await (const ev of append({ runId, role: "user", text: prompt, baseBranch, takeover, persistUser })) {
       void ev; // drained; live events reach the run-view via the /events bus
     }
   } catch {
@@ -1457,6 +1482,14 @@ export async function driveDispatchedRun(runId: number): Promise<void> {
   const run = await get(runId);
   if (!run) return;
 
+  // Chat runs get a long-lived, warm-checkout session loop — one turn per inbound
+  // user message (run_input channel) — instead of a single turn-and-exit. Returns
+  // only when the chat idles out; the worker then exits.
+  if (run.goal === "<chat>") {
+    await driveChatSession(runId);
+    return;
+  }
+
   if (run.goal === "<review>") {
     if (!run.prUrl) {
       await setError(runId, "Dispatched <review> run has no prUrl to review.");
@@ -1475,41 +1508,304 @@ export async function driveDispatchedRun(runId: number): Promise<void> {
     return;
   }
 
-  // implement / chat (worktree or none): drive one append() turn. A fresh
-  // implement run reconstructs the task prompt create() would have passed to
-  // kickoffFirstTurn; a resume (orphan re-dispatch) or chat run replays its
-  // last user message, falling back to a bare continue sentinel.
+  // implement (or a resumed run): drive ONE turn and exit. A fresh implement run
+  // reconstructs the task prompt create() would have passed to kickoffFirstTurn; a
+  // resume (orphan re-dispatch) or a follow-up message replays its last user
+  // message, falling back to a bare continue sentinel.
   // takeover: this worker holds the run's claim (dispatchRun left it `preparing`
   // with a fresh heartbeat), so append() must adopt it rather than reject it as
   // an in-flight turn in another process.
-  await kickoffFirstTurn(runId, await dispatchTurnPrompt(run), undefined, true);
+  // fromUserMsg tells us the prompt IS an already-persisted user message (a
+  // follow-up the server inserted, or a replayed one) — so append must not
+  // re-insert it (persistUser=false). A synthesized task prompt / resume sentinel
+  // is persisted as the first user message (persistUser=true).
+  const { text, fromUserMsg } = await dispatchTurnPrompt(run);
+  await kickoffFirstTurn(runId, text, undefined, true, !fromUserMsg);
 }
 
 const DISPATCH_RESUME_PROMPT =
   "Resume this run and continue from where the previous session left off.";
 
-async function dispatchTurnPrompt(run: RunRow): Promise<string> {
-  // First turn of an implement worktree run: rebuild the task prompt.
+/** Extract the concatenated text of a message's content blocks. */
+function messageText(m: MessageRow): string {
+  return m.content
+    .map((b) =>
+      b.type === "text" && typeof (b as { text?: unknown }).text === "string"
+        ? (b as { text: string }).text
+        : ""
+    )
+    .join("")
+    .trim();
+}
+
+async function dispatchTurnPrompt(run: RunRow): Promise<{ text: string; fromUserMsg: boolean }> {
+  // First turn of an implement worktree run: rebuild the task prompt (synthesized,
+  // not yet persisted).
   if (!run.sdkSessionId && run.taskId) {
     const task = await repo.getTask(run.taskId);
-    if (task) return buildImplementPrompt(task);
+    if (task) return { text: await buildImplementPrompt(task), fromUserMsg: false };
   }
-  // Otherwise replay the most recent user message (resume / chat), or fall back
-  // to a bare continue sentinel when the run has no prompt of its own yet.
+  // Otherwise replay the most recent user message (resume / follow-up), which is
+  // already in the DB — the caller must NOT re-persist it.
   const msgs = await listMessages(run.id);
   for (let i = msgs.length - 1; i >= 0; i--) {
     if (msgs[i].role !== "user") continue;
-    const text = msgs[i].content
-      .map((b) =>
-        b.type === "text" && typeof (b as { text?: unknown }).text === "string"
-          ? (b as { text: string }).text
-          : ""
-      )
-      .join("")
-      .trim();
-    if (text) return text;
+    const text = messageText(msgs[i]);
+    if (text) return { text, fromUserMsg: true };
   }
-  return DISPATCH_RESUME_PROMPT;
+  return { text: DISPATCH_RESUME_PROMPT, fromUserMsg: false };
+}
+
+// ──────────────────────────────────────────────────────────
+// Long-lived chat worker + server-side dispatch/relay
+// ──────────────────────────────────────────────────────────
+
+function chatIdleMs(): number {
+  const raw = process.env.TASK_ORCH_CHAT_IDLE_MS;
+  const n = raw ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 600_000;
+}
+
+/** Per-turn end marker on the run_stream tail. Lets the server relay close a
+ *  single turn's response while the chat run stays idle/resumable (the worker
+ *  lives on). Rides the existing run_stream NOTIFY as a plain agent_events row. */
+async function emitTurnDone(runId: number): Promise<void> {
+  try {
+    await db
+      .insert(agentEvents)
+      .values({ sessionId: runId, type: "turn_done", payload: "{}", createdAt: new Date() });
+  } catch {
+    // best-effort: a missed marker just falls back to the relay's safety timeout.
+  }
+}
+
+/**
+ * Long-lived chat worker loop — runs INSIDE a dispatched worker container for a
+ * goal='<chat>' run. Keeps the checkout warm (/work/<id> reused across turns) and
+ * runs one append() turn per inbound user message, learning of new messages via
+ * the run_input LISTEN channel. Exits after TASK_ORCH_CHAT_IDLE_MS with no
+ * message; the run lands 'idle' (resumable) and releases its claim, so the next
+ * message re-dispatches a fresh worker that resumes via sdkSessionId.
+ */
+export async function driveChatSession(runId: number): Promise<void> {
+  const { subscribeRunInput } = await import("./run-stream-listener");
+  const idleMs = chatIdleMs();
+  const abort = new AbortController();
+  // Keep the heartbeat fresh even while idle-waiting (so reconcile can't reap a
+  // parked worker) AND poll the cross-process cancel flag so a UI cancel aborts.
+  const heartbeat = startHeartbeatWithCancel(runId, abort);
+
+  let lastProcessed = 0;
+  let pendingWake = false;
+  let wake: (() => void) | null = null;
+  const unsub = await subscribeRunInput(runId, () => {
+    pendingWake = true;
+    wake?.();
+    wake = null;
+  });
+  const onAbort = () => {
+    wake?.();
+    wake = null;
+  };
+  abort.signal.addEventListener("abort", onAbort);
+
+  try {
+    for (;;) {
+      // Drain all unprocessed user messages oldest-first, one turn each (handles
+      // messages that arrived while the previous turn was running).
+      const msgs = (await listMessages(runId)).filter(
+        (m) => m.role === "user" && m.id > lastProcessed
+      );
+      for (const m of msgs) {
+        if (abort.signal.aborted) return;
+        const run = await get(runId);
+        if (!run || run.status === "closed") return;
+        lastProcessed = m.id;
+        const text = messageText(m);
+        if (!text) continue;
+        // takeover only on the very first turn (run still 'preparing' from
+        // dispatchRun's claim); later turns see 'idle'. persistUser=false: the
+        // message is already in the DB — it's how we were woken.
+        for await (const _ev of append({
+          runId,
+          role: "user",
+          text,
+          persistUser: false,
+          takeover: run.status === "preparing",
+          abort,
+        })) {
+          void _ev; // frames reach clients via the run_stream tail (server relay)
+        }
+        await emitTurnDone(runId);
+      }
+      if (abort.signal.aborted) break;
+      // Idle-wait for the next run_input notify or the idle timeout.
+      if (!pendingWake) {
+        const timedOut = await new Promise<boolean>((resolve) => {
+          const t = setTimeout(() => {
+            wake = null;
+            resolve(true);
+          }, idleMs);
+          wake = () => {
+            clearTimeout(t);
+            resolve(false);
+          };
+        });
+        if (timedOut) break;
+      }
+      pendingWake = false;
+    }
+  } finally {
+    clearInterval(heartbeat);
+    unsub();
+    abort.signal.removeEventListener("abort", onAbort);
+    // Release the claim so the next message spawns a fresh worker, and land the
+    // run resumable-idle (unless cancel/close already wrote a terminal row).
+    await db
+      .update(agentSessions)
+      .set({ workerScope: null, workerPid: null })
+      .where(eq(agentSessions.id, runId));
+    const cur = await get(runId);
+    if (cur && !isTerminalStatus(cur.status)) await setStatus(runId, "idle");
+  }
+}
+
+/**
+ * Server-side entry for a user/system message. In the containerized model the
+ * server runs as root and cannot run the agent turn, so it persists the message
+ * (firing run_input to wake a live chat worker + run_stream for viewers), ensures
+ * a worker is running (notify-if-live else dispatch), and RELAYS the reply from
+ * the durable run_stream tail — yielding the SAME AppendStreamEvent frames the
+ * in-process append() used to, so routes/UI are unchanged. Falls back to
+ * in-process append() when there is no worker image (dev / non-containerized).
+ */
+export async function* sendMessageToRun(opts: {
+  runId: number;
+  role: "user" | "system";
+  text: string;
+  author?: string;
+  abort: AbortController;
+}): AsyncGenerator<AppendStreamEvent> {
+  const { runId, role, text, author, abort } = opts;
+  const run = await get(runId);
+  if (!run) {
+    yield { type: "error", error: `Run ${runId} not found` };
+    return;
+  }
+  // Only the real containerized deploy forces workers (root server can't run
+  // claude-code). Without a worker image (dev/test), run the turn in-process
+  // exactly as before.
+  if (!process.env.TASK_ORCH_WORKER_IMAGE || !runDispatch.detachedRunsEnabled()) {
+    yield* append({ runId, role, text, author, abort });
+    return;
+  }
+
+  // Cursor BEFORE the insert so the relay captures exactly this turn's frames.
+  const from = await streamCursor(runId);
+  await persistMessage(runId, role, [{ type: "text", text }]);
+
+  const fresh = await get(runId);
+  if (fresh) {
+    if (run.goal === "<chat>") {
+      if (!isWorkerLive(fresh)) {
+        // Clear a dead worker's stale claim so dispatchRun can re-claim (idle chat
+        // rows aren't a lease status, so reconcile never cleared it).
+        if (fresh.workerScope) {
+          await db
+            .update(agentSessions)
+            .set({ workerScope: null, workerPid: null })
+            .where(eq(agentSessions.id, runId));
+        }
+        await runDispatch.dispatchRun(runId);
+      }
+      // else: a live worker will pick up the run_input notify.
+    } else {
+      // Non-chat follow-up: dispatch a single-turn worker (already-claimed is fine
+      // — a turn is already in flight and our message rides the resume).
+      await runDispatch.dispatchRun(runId);
+    }
+  }
+
+  yield* relayRunStream(runId, from, abort);
+}
+
+/**
+ * Tail the durable run_stream for one turn and translate rows into the exact
+ * AppendStreamEvent wire shape (user_message | sdk | done | error) the message
+ * routes already emit — so a worker-run turn streams to the browser byte-compatibly
+ * with the old in-process path. Closes on a per-turn 'turn_done' marker (chat), a
+ * terminal non-idle status (implement/one-shot), a 'failed' status, or abort.
+ */
+async function* relayRunStream(
+  runId: number,
+  from: { msgId: number; evtId: number },
+  abort: AbortController
+): AsyncGenerator<AppendStreamEvent> {
+  const { readStreamSince } = await import("./run-stream");
+  const { subscribeRunStream } = await import("./run-stream-listener");
+  let cursor = from;
+  let pending = true; // drain once immediately
+  let wake: (() => void) | null = null;
+  const unsub = await subscribeRunStream(runId, () => {
+    pending = true;
+    wake?.();
+    wake = null;
+  });
+  const onAbort = () => {
+    wake?.();
+    wake = null;
+  };
+  abort.signal.addEventListener("abort", onAbort);
+  try {
+    while (!abort.signal.aborted) {
+      if (!pending) {
+        // Wait for a NOTIFY wake or a 5s safety re-drain.
+        await new Promise<void>((resolve) => {
+          const t = setTimeout(() => {
+            wake = null;
+            resolve();
+          }, 5000);
+          wake = () => {
+            clearTimeout(t);
+            resolve();
+          };
+        });
+        if (abort.signal.aborted) break;
+      }
+      pending = false;
+      const { frames, cursor: next, terminal } = await readStreamSince(runId, cursor);
+      cursor = next;
+      for (const f of frames) {
+        if (f.kind === "message") {
+          const r = f.message.role;
+          if (r === "user" || r === "system") {
+            yield { type: "user_message", message: f.message };
+          } else if (r === "agent") {
+            yield { type: "sdk", sdk: { type: "assistant", message: { content: f.message.content } } as RunEnvelope };
+          } else if (r === "tool") {
+            yield { type: "sdk", sdk: { type: "user", message: { content: f.message.content } } as RunEnvelope };
+          }
+        } else {
+          const d = f.data as { type?: string; status?: string; error?: string };
+          if (d.type === "turn_done") {
+            yield { type: "done" };
+            return;
+          }
+          if (d.type === "status" && d.status === "failed") {
+            yield { type: "error", error: d.error ?? `Run ${runId} failed` };
+            return;
+          }
+        }
+      }
+      if (terminal) {
+        yield { type: "done" };
+        return;
+      }
+    }
+  } finally {
+    unsub();
+    abort.signal.removeEventListener("abort", onAbort);
+  }
 }
 
 interface OpenPrArgs {
@@ -1825,6 +2121,25 @@ export function isLeaseLive(
 ): boolean {
   if (!LEASE_STATUSES.includes(run.status as SessionStatus)) return false;
   return run.heartbeatAt != null && now - run.heartbeatAt.getTime() < HEARTBEAT_STALE_MS;
+}
+
+/**
+ * True when a worker container owns this run and is still alive — regardless of
+ * status. Unlike isLeaseLive, this stays true for a long-lived chat worker sitting
+ * at status='idle' BETWEEN turns (idle is not a lease status): it holds
+ * worker_scope and keeps its heartbeat fresh while idle-waiting for the next
+ * message. The server uses this to decide notify-only (worker will pick up the
+ * run_input) vs dispatch a fresh worker.
+ */
+export function isWorkerLive(
+  run: { workerScope: string | null; heartbeatAt: Date | null },
+  now = Date.now()
+): boolean {
+  return (
+    run.workerScope != null &&
+    run.heartbeatAt != null &&
+    now - run.heartbeatAt.getTime() < HEARTBEAT_STALE_MS
+  );
 }
 
 /**

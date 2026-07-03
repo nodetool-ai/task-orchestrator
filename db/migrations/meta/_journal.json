@@ -15,6 +15,13 @@
       "when": 1783076389947,
       "tag": "0001_run_stream_notify",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1783098304872,
+      "tag": "0002_run_input_notify",
+      "breakpoints": true
     }
   ]
 }

@@ -409,10 +409,17 @@ async function dockerSpawn(runId: number, scope: string): Promise<number | null>
     pass("TASK_ORCH_AGENT_BACKEND"),
     pass("TASK_ORCH_CHAT_MODEL"),
     pass("TASK_ORCH_AGENT_MODEL"),
+    // Idle timeout for the long-lived chat-session loop (driveChatSession reads it
+    // in the worker). Empty => the worker's built-in default.
+    pass("TASK_ORCH_CHAT_IDLE_MS"),
     "TASK_ORCH_DETACHED_RUNS=1",
     // Signals the in-container checkout strategy (Phase 5): clone from the
     // mounted repo-cache mirror instead of a host worktree.
     "REPO_CACHE_DIR=/repo-cache",
+    // "I am the worker" marker: the server-side message path (sendMessageToRun)
+    // dispatches turns to a worker, but the worker itself must run them in-process
+    // (never re-dispatch). Any code branching on "am I the worker" reads this.
+    "TASK_ORCH_INSIDE_WORKER=1",
   ];
   const binds: string[] = [];
   const claudeHome = process.env.TASK_ORCH_CLAUDE_HOME_HOST;
@@ -460,7 +467,7 @@ function detachedSpawn(runId: number, _scope: string): number | null {
   if (!existsSync(tsx)) throw new Error(`tsx CLI not found at ${tsx} (set TASK_ORCH_TSX_CLI to override)`);
   const child = nodeSpawn(node, [tsx, "scripts/run-worker.ts", String(runId)], {
     cwd: process.cwd(),
-    env: process.env,
+    env: { ...process.env, TASK_ORCH_INSIDE_WORKER: "1" },
     detached: true,
     stdio: "ignore",
   });

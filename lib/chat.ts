@@ -210,7 +210,10 @@ export async function* runChat({
     if (title) await renameChat(chatId, title);
   }
 
-  for await (const event of runs.append({
+  // Chat runs are agent_runs with goal='<chat>'; sendMessageToRun routes the turn
+  // through a long-lived worker container in the real deploy (root server can't run
+  // the agent), falling back to in-process append() in dev. Frame contract unchanged.
+  for await (const event of runs.sendMessageToRun({
     runId: chatId,
     role: "user",
     text: userText,
