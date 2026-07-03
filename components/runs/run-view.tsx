@@ -19,7 +19,9 @@ import { isTerminalStatus, type SessionStatus } from "@/lib/types";
 import type { RunRow, MessageRow } from "@/lib/runs";
 import type { SdkContentBlock, SdkMessageEnvelope } from "@/lib/sdk-message";
 import { SessionStatusPill } from "@/components/session-status-pill";
-import { RunMessage } from "@/components/runs/run-message";
+import { RunMessage, ToolUseBlock } from "@/components/runs/run-message";
+import { ToolGroup } from "@/components/tool-group";
+import { segmentToolMessages } from "@/lib/tool-grouping";
 import { SystemEventRow } from "@/components/runs/system-event-row";
 import { PlanningReviewCard } from "@/components/runs/planning-review-card";
 import { useConfirm } from "@/components/ui/dialog-provider";
@@ -611,17 +613,29 @@ export function RunView({
           </div>
         ) : (
           <div className="mx-auto max-w-3xl py-6">
-            {visibleMessages.map((m) =>
-              m.role === "system" ? (
+            {segmentToolMessages(visibleMessages).map((seg) =>
+              seg.kind === "tools" ? (
+                <ToolGroup key={`tg-${seg.messages[0].id}`} count={seg.toolCount}>
+                  {seg.messages.flatMap((m) =>
+                    m.content
+                      .filter((b) => b.type === "tool_use")
+                      .map((b, bi) => <ToolUseBlock key={`${m.id}-${bi}`} block={b} />)
+                  )}
+                </ToolGroup>
+              ) : seg.message.role === "system" ? (
                 <SystemEventRow
-                  key={m.id}
-                  when={m.createdAt ?? new Date()}
-                  kind={m.systemKind ?? "info"}
-                  payload={m.systemPayload ?? {}}
-                  content={m.content}
+                  key={seg.message.id}
+                  when={seg.message.createdAt ?? new Date()}
+                  kind={seg.message.systemKind ?? "info"}
+                  payload={seg.message.systemPayload ?? {}}
+                  content={seg.message.content}
                 />
               ) : (
-                <RunMessage key={m.id} role={m.role} content={m.content} />
+                <RunMessage
+                  key={seg.message.id}
+                  role={seg.message.role}
+                  content={seg.message.content}
+                />
               )
             )}
             {sending && <ThinkingIndicator />}

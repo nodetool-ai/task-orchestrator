@@ -56,6 +56,32 @@ export function canonicalToolName(raw: string | undefined | null): CanonicalTool
   return RAW_TO_CANONICAL[raw.toLowerCase()] ?? null;
 }
 
+/**
+ * Human-readable label for any tool name. Built-ins keep their clean canonical
+ * name (Read / Write / Bash / Grep …); the cryptic ones — orchestrator snake_case
+ * (`create_task`) and MCP `mcp__<server>__<tool>` — are de-prefixed and
+ * sentence-cased: `create_task` → "Create task", `mcp__gmail__search_threads` →
+ * "Search threads".
+ */
+export function humanizeToolName(raw: string | undefined | null): string {
+  if (!raw) return "Tool";
+  const canonical = canonicalToolName(raw);
+  if (canonical) return canonical;
+  // Strip an MCP prefix (mcp__<server>__<tool>) down to the tool part, then any
+  // orchestrator prefix, then split snake_case / camelCase into words.
+  let n = raw;
+  const mcp = /^mcp__.+?__(.+)$/.exec(raw);
+  if (mcp) n = mcp[1];
+  n = n.replace(/^task_orch__/, "");
+  const spaced = n
+    .replace(/__/g, " ")
+    .replace(/_/g, " ")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .trim();
+  if (!spaced) return raw;
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
 /** Lowercase canonical id for the neutral interceptor seam. Built-ins collapse to
  *  one vocabulary across harnesses (pi `find` and Claude `Glob` both → "glob");
  *  unrecognized tools pass through untouched so interceptors that key on full

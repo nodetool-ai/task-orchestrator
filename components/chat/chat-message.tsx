@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Bot, User } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { renderMarkdown } from "@/lib/markdown";
+import { humanizeToolName } from "@/lib/builtin-tools";
 import type { SdkContentBlock } from "@/lib/sdk-message";
 import type { ChatRole } from "@/lib/types";
 import { MessageCopyButton } from "@/components/chat/message-copy-button";
@@ -113,7 +114,7 @@ function AssistantMessage({
   );
 }
 
-function ToolCallCard({
+export function ToolCallCard({
   block,
   result,
 }: {
@@ -150,9 +151,9 @@ function ToolCallCard({
           <ChevronRight className="size-3 shrink-0 text-muted-foreground" />
         )}
         <meta.Icon className={cn("size-3.5 shrink-0", meta.color)} />
-        <code className="shrink-0 font-mono text-[11px] font-semibold text-foreground">
-          {block.name}
-        </code>
+        <span className="shrink-0 text-[11px] font-semibold text-foreground">
+          {humanizeToolName(block.name)}
+        </span>
         {preview && (
           <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
             {preview}

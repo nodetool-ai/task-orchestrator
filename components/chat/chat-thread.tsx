@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Bot, Sparkles } from "lucide-react";
-import { ChatMessage } from "@/components/chat/chat-message";
+import { ChatMessage, ToolCallCard } from "@/components/chat/chat-message";
+import { ToolGroup } from "@/components/tool-group";
+import { segmentToolMessages } from "@/lib/tool-grouping";
 import { ChatComposer, type ChatComposerHandle } from "@/components/chat/chat-composer";
 import { ThreadErrorBanner } from "@/components/chat/thread-error-banner";
 import { ModelPicker, type ModelOption } from "@/components/chat/model-picker";
@@ -267,14 +269,33 @@ export function ChatThread({
           </div>
         ) : (
           <div className="mx-auto max-w-3xl pb-2">
-            {visibleMessages.map((m) => (
-              <ChatMessage
-                key={m.id}
-                role={m.role}
-                content={m.content}
-                resultByToolId={resultByToolId}
-              />
-            ))}
+            {segmentToolMessages(visibleMessages).map((seg) =>
+              seg.kind === "tools" ? (
+                <ToolGroup key={`tg-${seg.messages[0].id}`} count={seg.toolCount}>
+                  {seg.messages.flatMap((m) =>
+                    m.content
+                      .filter((b) => b.type === "tool_use")
+                      .map((b, bi) => {
+                        const id = (b as { id?: string }).id;
+                        return (
+                          <ToolCallCard
+                            key={`${m.id}-${bi}`}
+                            block={b}
+                            result={id ? resultByToolId.get(id) : undefined}
+                          />
+                        );
+                      })
+                  )}
+                </ToolGroup>
+              ) : (
+                <ChatMessage
+                  key={seg.message.id}
+                  role={seg.message.role}
+                  content={seg.message.content}
+                  resultByToolId={resultByToolId}
+                />
+              )
+            )}
             {sending && <ThinkingIndicator />}
             <div ref={endRef} />
           </div>
