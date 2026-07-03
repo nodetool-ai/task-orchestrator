@@ -12,8 +12,8 @@ export async function POST(
   try {
     const { id } = await params;
     const input = addNoteSchema.parse(await req.json());
-    repo.addNote(id, input.author, input.body);
-    return NextResponse.json(repo.getTask(id));
+    await repo.addNote(id, input.author, input.body);
+    return NextResponse.json(await repo.getTask(id));
   } catch (e) {
     return errorResponse(e);
   }

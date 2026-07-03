@@ -16,7 +16,7 @@ export async function POST(
   const session = await auth();
   const uid = session?.user?.id ? Number(session.user.id) : null;
   const author = session?.user?.email ?? "chat";
-  const existing = chat.getChat(chatId, uid);
+  const existing = await chat.getChat(chatId, uid);
   if (!existing) {
     return new Response("Not found", { status: 404 });
   }

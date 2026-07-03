@@ -11,7 +11,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const r = repo.getRepository(id);
+    const r = await repo.getRepository(id);
     if (!r) return NextResponse.json({ error: "Not found" }, { status: 404 });
     return NextResponse.json(r);
   } catch (e) {
@@ -26,7 +26,7 @@ export async function PATCH(
   try {
     const { id } = await params;
     const input = updateRepositorySchema.parse(await req.json());
-    const r = repo.updateRepository(id, {
+    const r = await repo.updateRepository(id, {
       name: input.name,
       remote: input.remote ?? undefined,
       localPath: input.localPath ?? undefined,
@@ -45,7 +45,7 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    repo.deleteRepository(id);
+    await repo.deleteRepository(id);
     return new NextResponse(null, { status: 204 });
   } catch (e) {
     return errorResponse(e);

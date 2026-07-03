@@ -46,28 +46,18 @@ export async function GET(
     async start(controller) {
       const encoder = new TextEncoder();
       let closed = false;
-      const send = (o: unknown) => {
-        if (closed) return;
-        try {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(o)}\n\n`));
-        } catch {
-          closed = true;
-        }
-      };
-      const ping = () => {
-        if (closed) return;
-        try {
-          controller.enqueue(encoder.encode(`: ping\n\n`));
-        } catch {
-          closed = true;
-        }
-      };
-
+      let cleanedUp = false;
       let unsubscribe: (() => void) | null = null;
       let safety: ReturnType<typeof setInterval> | null = null;
       let keepalive: ReturnType<typeof setInterval> | null = null;
-      const shutdown = () => {
-        if (closed) return;
+      // Idempotent teardown: gate future writes AND release the LISTEN
+      // subscription + intervals + controller exactly once. `closed` only gates
+      // writes; cleanup is what actually frees resources, so an enqueue failure
+      // in send()/ping() must trigger cleanup() — not merely set `closed` (which
+      // used to leave the subscription + intervals leaked).
+      const cleanup = () => {
+        if (cleanedUp) return;
+        cleanedUp = true;
         closed = true;
         unsubscribe?.();
         if (safety) clearInterval(safety);
@@ -76,8 +66,29 @@ export async function GET(
           controller.close();
         } catch {}
       };
+      const send = (o: unknown) => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(o)}\n\n`));
+        } catch {
+          cleanup();
+        }
+      };
+      const ping = () => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(`: ping\n\n`));
+        } catch {
+          cleanup();
+        }
+      };
 
-      req.signal.addEventListener("abort", shutdown);
+      req.signal.addEventListener("abort", cleanup);
+      // The request may already be aborted before start() runs.
+      if (req.signal.aborted) {
+        cleanup();
+        return;
+      }
 
       // Drain every row after the cursor; on a terminal non-idle status, close.
       // Coalesces concurrent wake-ups so a burst of NOTIFYs collapses into one
@@ -108,7 +119,7 @@ export async function GET(
             pending = false;
             if (await drainOnce()) {
               send({ type: "_eos" });
-              shutdown();
+              cleanup();
               return;
             }
           } while (pending && !closed);
@@ -126,10 +137,16 @@ export async function GET(
       } catch {
         // If LISTEN can't be established, the safety interval still delivers.
       }
-      if (closed) return; // client bailed during setup
+      if (closed) {
+        cleanup(); // client bailed during setup — release the just-made subscription
+        return;
+      }
 
       await drain();
-      if (closed) return;
+      if (closed) {
+        cleanup();
+        return;
+      }
 
       safety = setInterval(() => void drain(), SAFETY_DRAIN_MS);
       keepalive = setInterval(ping, PING_EVERY_MS);

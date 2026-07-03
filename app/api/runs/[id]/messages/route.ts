@@ -18,7 +18,7 @@ export async function POST(
   if (!Number.isFinite(runId)) {
     return new Response("Bad id", { status: 400 });
   }
-  const run = runs.get(runId);
+  const run = await runs.get(runId);
   if (!run) return new Response("Not found", { status: 404 });
 
   const session = await auth();

@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    return NextResponse.json(repo.listPlans());
+    return NextResponse.json(await repo.listPlans());
   } catch (e) {
     return errorResponse(e);
   }
@@ -16,7 +16,7 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   try {
     const input = createPlanSchema.parse(await req.json());
-    const plan = repo.createPlan(input);
+    const plan = await repo.createPlan(input);
     return NextResponse.json(plan, { status: 201 });
   } catch (e) {
     return errorResponse(e);

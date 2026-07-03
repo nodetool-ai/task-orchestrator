@@ -12,10 +12,10 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    if (!repo.getTask(id)) {
+    if (!(await repo.getTask(id))) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
-    return NextResponse.json(repo.listAttachments({ taskId: id }));
+    return NextResponse.json(await repo.listAttachments({ taskId: id }));
   } catch (e) {
     return errorResponse(e);
   }
@@ -30,7 +30,7 @@ export async function POST(
     const session = await auth();
     const author = session?.user?.email ?? "web";
     const upload = await parseAttachmentUpload(req);
-    const meta = repo.addAttachment({
+    const meta = await repo.addAttachment({
       taskId: id,
       filename: upload.filename,
       mimeType: upload.mimeType,

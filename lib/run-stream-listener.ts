@@ -24,7 +24,7 @@ const subscribers: Map<number, Set<Callback>> =
 
 function ensureListening(): Promise<void> {
   if (globalThis.__runStreamListen) return globalThis.__runStreamListen;
-  globalThis.__runStreamListen = (async () => {
+  const started = (async () => {
     await sql.listen("run_stream", (payload: string) => {
       let ev: RunStreamEvent;
       try {
@@ -44,7 +44,15 @@ function ensureListening(): Promise<void> {
       }
     });
   })();
-  return globalThis.__runStreamListen;
+  // If LISTEN can't be established, clear the memo so the next subscriber
+  // retries instead of being stuck with a permanently-rejected promise (which
+  // would disable push for the whole process). The SSE route's safety re-drain
+  // keeps streams working meanwhile.
+  started.catch(() => {
+    if (globalThis.__runStreamListen === started) globalThis.__runStreamListen = undefined;
+  });
+  globalThis.__runStreamListen = started;
+  return started;
 }
 
 /**

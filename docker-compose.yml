@@ -46,12 +46,15 @@ services:
     command:
       - |
         set -e
+        # Ephemeral auth header (git -c, not persisted) so the token never lands
+        # in the mirror's stored remote URL / .git/config on the repo-cache volume.
+        AUTH="AUTHORIZATION: basic $$(printf 'x-access-token:%s' "$$GH_TOKEN" | base64 | tr -d '\n')"
         for r in $$TARGET_REPOS; do
           d="/repo-cache/$$(echo "$$r" | tr '/' '_').git"
           if [ -d "$$d" ]; then
-            echo "refresh $$r"; git -C "$$d" fetch --prune origin '+refs/heads/*:refs/heads/*'
+            echo "refresh $$r"; git -c http.extraHeader="$$AUTH" -C "$$d" fetch --prune origin '+refs/heads/*:refs/heads/*'
           else
-            echo "clone $$r"; git clone --mirror "https://x-access-token:$$GH_TOKEN@github.com/$$r" "$$d"
+            echo "clone $$r"; git -c http.extraHeader="$$AUTH" clone --mirror "https://github.com/$$r" "$$d"
           fi
         done
     restart: "no"
@@ -75,6 +78,12 @@ services:
     ports:
       - "${SERVER_PORT:-3000}:3000"
     volumes:
+      # SECURITY: mounting the raw docker socket grants the server host-root-
+      # equivalent control (it can start privileged containers, mount the host
+      # FS, etc.). Accepted for the ad-hoc-worker (DooD) model, but before public
+      # exposure put a least-privilege socket proxy (e.g. tecnativa/docker-socket-
+      # proxy) in front, allowing only container create/start/stop/remove, and
+      # point TASK_ORCH_DOCKER_HOST at it. Tracked as a hardening follow-up.
       - /var/run/docker.sock:/var/run/docker.sock
       - ${CLAUDE_HOME}:/root/.claude
       - repo-cache:/repo-cache

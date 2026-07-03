@@ -11,12 +11,12 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const plan = repo.getPlan(id);
+    const plan = await repo.getPlan(id);
     if (!plan) return NextResponse.json({ error: "Not found" }, { status: 404 });
     return NextResponse.json({
       ...plan,
-      progress: repo.planProgress(id),
-      tasks: repo.listTasks({ planId: id }),
+      progress: await repo.planProgress(id),
+      tasks: await repo.listTasks({ planId: id }),
     });
   } catch (e) {
     return errorResponse(e);
@@ -30,7 +30,7 @@ export async function PATCH(
   try {
     const { id } = await params;
     const patch = updatePlanSchema.parse(await req.json());
-    return NextResponse.json(repo.updatePlan(id, patch));
+    return NextResponse.json(await repo.updatePlan(id, patch));
   } catch (e) {
     return errorResponse(e);
   }
@@ -42,7 +42,7 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    repo.deletePlan(id);
+    await repo.deletePlan(id);
     return new NextResponse(null, { status: 204 });
   } catch (e) {
     return errorResponse(e);

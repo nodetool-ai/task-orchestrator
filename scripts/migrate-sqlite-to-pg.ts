@@ -57,7 +57,9 @@ async function insert<T extends { onConflictDoNothing: () => any }>(
 
 async function main() {
   console.log(`ETL: ${SOURCE} -> ${process.env.DATABASE_URL}${DRY ? "  [DRY RUN]" : ""}`);
-  await initDb(); // ensure the target schema exists
+  // A dry run must not mutate the target — skip migrate/seed. (It only reads the
+  // source SQLite and reports counts.)
+  if (!DRY) await initDb(); // ensure the target schema exists
 
   const s = new Database(SOURCE, { readonly: true });
 

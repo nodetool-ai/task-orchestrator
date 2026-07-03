@@ -46,7 +46,7 @@ export async function POST(req: NextRequest) {
     const raw = await req.json().catch(() => ({}));
     const input = createRunSchema.parse(raw);
     const uid = await userId();
-    const run = runs.create({
+    const run = await runs.create({
       goal: input.goal ?? "<implement>",
       toolsProfile: input.toolsProfile,
       cwdStrategy: input.cwdStrategy,

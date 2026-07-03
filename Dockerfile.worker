@@ -29,7 +29,11 @@ COPY . .
 
 # Commit identity for changes the agent makes.
 RUN git config --system user.email "agent@task-orchestrator.local" \
-    && git config --system user.name "Task Orchestrator Agent"
+    && git config --system user.name "Task Orchestrator Agent" \
+    # Authenticate github HTTPS via GH_TOKEN at runtime (a credential helper, not
+    # a token-in-URL), so the token never lands in a remote URL, .git/config, or
+    # a git error message that gets persisted to agent_runs.error.
+    && git config --system credential.helper '!f() { echo username=x-access-token; echo "password=${GH_TOKEN}"; }; f'
 
 # The runId is passed as the container command: `docker run worker:latest <id>`.
 ENTRYPOINT ["npx", "tsx", "scripts/run-worker.ts"]

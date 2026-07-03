@@ -392,7 +392,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     const prompt = input.initialPrompt ?? await buildImplementPrompt(task);
     void (async () => {
       const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
-      if (detachedRunsEnabled()) dispatchRun(run.id);
+      if (detachedRunsEnabled()) void dispatchRun(run.id).catch(() => {});
       else await kickoffFirstTurn(run.id, prompt, input.baseBranch);
     })();
   }
@@ -402,7 +402,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   if (!input.defer && cwdStrategy === "worktree_at_pr") {
     void (async () => {
       const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
-      if (detachedRunsEnabled()) dispatchRun(run.id);
+      if (detachedRunsEnabled()) void dispatchRun(run.id).catch(() => {});
       else await runReview(run.id, input.prUrl!, input.initialPrompt ?? null);
     })();
   }
@@ -413,7 +413,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   if (!input.defer && goal === "<execute>" && input.planId) {
     void (async () => {
       const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
-      if (detachedRunsEnabled()) dispatchRun(run.id);
+      if (detachedRunsEnabled()) void dispatchRun(run.id).catch(() => {});
       else await runExecute(run.id, input.planId!, input.initialPrompt ?? null);
     })();
   }
@@ -1067,10 +1067,14 @@ async function containerCheckout(
       `Run #${run.id}: repository '${run.repoId ?? "(default)"}' has no GitHub remote to clone for the worker container.`
     );
   }
-  const token = process.env.GH_TOKEN;
-  if (!token) throw new Error(`Run #${run.id}: GH_TOKEN is required for in-container checkout.`);
+  if (!process.env.GH_TOKEN) {
+    throw new Error(`Run #${run.id}: GH_TOKEN is required for in-container checkout.`);
+  }
   const mirror = resolve(cache, `${parsed.owner}_${parsed.repo}.git`);
-  const url = `https://x-access-token:${token}@github.com/${parsed.owner}/${parsed.repo}`;
+  // Plain URL — auth comes from the worker image's git credential helper (which
+  // reads GH_TOKEN), so the token never appears in the URL, .git/config, or any
+  // error string persisted to agent_runs.error.
+  const url = `https://github.com/${parsed.owner}/${parsed.repo}`;
   const work = `/work/${run.id}`;
   await mkdir("/work", { recursive: true });
   const reference = existsSync(mirror) ? ["--reference", mirror, "--dissociate"] : [];
@@ -1763,8 +1767,10 @@ async function touchHeartbeat(runId: number): Promise<void> {
  * turn is never mistaken for an orphan by isLeaseLive()/reconcileOrphanedRuns().
  */
 function startHeartbeat(runId: number): ReturnType<typeof setInterval> {
-  touchHeartbeat(runId);
-  return setInterval(() => touchHeartbeat(runId), HEARTBEAT_INTERVAL_MS);
+  // touchHeartbeat is async now; keep it fire-and-forget but swallow rejections
+  // so a transient DB blip can't surface as an unhandled rejection.
+  void touchHeartbeat(runId).catch(() => {});
+  return setInterval(() => void touchHeartbeat(runId).catch(() => {}), HEARTBEAT_INTERVAL_MS);
 }
 
 /**
@@ -1792,7 +1798,7 @@ function startHeartbeatWithCancel(
   runId: number,
   abort: AbortController
 ): ReturnType<typeof setInterval> {
-  touchHeartbeat(runId);
+  void touchHeartbeat(runId).catch(() => {});
   return setInterval(async () => {
     await touchHeartbeat(runId);
     if ((await isCancelRequested(runId)) && !abort.signal.aborted) abort.abort();
@@ -1869,7 +1875,7 @@ export async function reconcileOrphanedRuns(): Promise<number> {
       await db.update(agentSessions)
         .set({ workerScope: null })
         .where(eq(agentSessions.id, row.id));
-      runDispatch.dispatchRun(row.id);
+      void runDispatch.dispatchRun(row.id).catch(() => {});
       reaped++;
       continue;
     }

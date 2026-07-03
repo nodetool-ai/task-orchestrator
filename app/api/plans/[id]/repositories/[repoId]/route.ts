@@ -10,7 +10,7 @@ export async function DELETE(
 ) {
   try {
     const { id, repoId } = await params;
-    const plan = repo.removePlanRepository(id, repoId);
+    const plan = await repo.removePlanRepository(id, repoId);
     return NextResponse.json(plan);
   } catch (e) {
     return errorResponse(e);

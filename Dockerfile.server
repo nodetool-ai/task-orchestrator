@@ -29,6 +29,14 @@ COPY --from=build /app/.next ./.next
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/next.config.mjs ./next.config.mjs
 COPY --from=build /app/db ./db
+# The `pipe` service runs `tsx scripts/pipe.ts` from THIS image, so the runtime
+# stage needs the TS source it imports (lib/*, scripts/*, auth) + tsconfig for
+# the `@/*` path alias. `next start` ignores these; they don't affect it.
+COPY --from=build /app/lib ./lib
+COPY --from=build /app/scripts ./scripts
+COPY --from=build /app/auth.ts ./auth.ts
+COPY --from=build /app/auth.config.ts ./auth.config.ts
+COPY --from=build /app/tsconfig.json ./tsconfig.json
 EXPOSE 3000
 # `npm run start` -> next start. instrumentation.ts runs initDb() (migrate+seed)
 # on boot before serving.
