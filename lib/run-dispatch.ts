@@ -1,5 +1,5 @@
 // lib/run-dispatch.ts
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, notInArray } from "drizzle-orm";
 import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { cpus, totalmem } from "node:os";
@@ -70,7 +70,12 @@ export function remoteRunnerEnabled(): boolean {
 let nonceCounter = 0;
 function nonce(): string {
   nonceCounter += 1;
-  return `${process.pid}-${nonceCounter}`;
+  // Must be unique across container restarts: PID is 1 every boot, so a bare
+  // `${pid}-${counter}` repeats and a stale row's leftover container name would
+  // collide → createContainer 409 → the run fails. A time + random component
+  // makes the scope (= container name) unique regardless of restarts.
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `${process.pid}-${Date.now().toString(36)}-${nonceCounter}-${rand}`;
 }
 
 // ── env helpers ────────────────────────────────────────────────────────────
@@ -204,6 +209,29 @@ export function admissionDecision(i: {
   return "admit";
 }
 
+// Mirrors runs.ts's HEARTBEAT_STALE_MS. Duplicated here (not imported) because
+// run-dispatch has no static import of runs.ts — runs.ts injects its helpers
+// into this module instead (see the RunsApi comment above) to avoid a boot-time
+// import cycle. Keep this in sync if that value ever changes.
+const WORKER_CLAIM_STALE_MS = 5 * 60_000;
+
+/**
+ * True when `row` currently holds a live worker claim — worker_scope set and a
+ * heartbeat fresher than the stale window — regardless of status. Mirrors
+ * runs.ts's isWorkerLive(): this stays true for a plan-executor mid-turn
+ * (status 'running', blocked in await_session) AND for a long-lived chat
+ * worker parked at 'idle' between turns holding its claim. Computed locally
+ * from the RunRow fields runs().get() already returns, rather than adding a
+ * new method to RunsApi.
+ */
+function hasLiveWorkerClaim(row: { workerScope: string | null; heartbeatAt: Date | null }): boolean {
+  return (
+    row.workerScope != null &&
+    row.heartbeatAt != null &&
+    Date.now() - row.heartbeatAt.getTime() < WORKER_CLAIM_STALE_MS
+  );
+}
+
 /** The gate only runs for managed worker backends, and can be turned off. */
 function admissionEnabled(): boolean {
   const v = process.env.TASK_ORCH_ADMISSION_ENABLED;
@@ -274,7 +302,28 @@ export async function dispatchRun(
     if (run.workerScope) return { kind: "already-claimed" };
 
     if (admissionEnabled()) {
-      const decision = await admitFn(runId);
+      let decision = await admitFn(runId);
+      // Deadlock breaker (M1): a plan-executor run occupies a worker slot for
+      // its ENTIRE turn (countInFlightWorkers/flyAdmit count it the whole
+      // time), and blocks in await_session waiting on the very children it
+      // just spawned. If every slot is held by executors, admission defers
+      // every child to 'pending' forever — the executors never finish (so
+      // never free a slot), the pump's retries never help, and eventually
+      // TASK_ORCH_MAX_DEFER_MS hard-fails the children as "insufficient host
+      // memory": a livelock with money spent and nothing done. No component
+      // otherwise models the parent→child dependency. Break the cycle: a
+      // child whose parent still holds a live worker claim is admitted even
+      // over the cap — the parent's slot is blocked awaiting this very child,
+      // so deferring it only deadlocks the tree. This applies to BOTH the
+      // memory-based gate and flyAdmit's machine-count gate (whichever
+      // admitFn returned "defer"); it does NOT apply to "never-fits" (a
+      // single worker's cap exceeding the whole host budget is a fatal
+      // misconfig no parent claim can fix). The overshoot this permits is
+      // bounded by the run tree's own depth/spawn caps, not by this gate.
+      if (decision === "defer" && run.parentRunId != null) {
+        const parent = await runs().get(run.parentRunId);
+        if (parent && hasLiveWorkerClaim(parent)) decision = "admit";
+      }
       if (decision === "never-fits") {
         await runs().failRun(
           runId,
@@ -308,9 +357,17 @@ export async function dispatchRun(
     }
 
     const scope = `run-${runId}-${nonce()}`;
-    // Atomic claim: only succeeds if worker_scope is still NULL. Also clear any
-    // captured worker log/exit code from a PRIOR container so the run view never
-    // pairs this fresh attempt's live container with a dead one's "exit 137".
+    // Atomic claim: only succeeds if worker_scope is still NULL AND the status is
+    // still claimable. 'cancelled'/'closed' are terminal decisions that must NEVER
+    // be resurrected — a claim landing on them would flip the row to 'preparing'
+    // and wipe cancelRequested, silently undoing a cancel that raced this dispatch
+    // (runs.cancel() no-ops stopRunner when no container exists yet). Every other
+    // status IS claimable here: 'pending'/'idle', the lease statuses (only reached
+    // once isLeaseLive is false — an orphan whose stale claim was cleared), and the
+    // resumable terminal statuses (completed/failed/budget_exhausted) for follow-up
+    // turns. scope is the claim's ownership token. Also clear any captured worker
+    // log/exit code from a PRIOR container so the run view never pairs this fresh
+    // attempt's live container with a dead one's "exit 137".
     const claimed = await db
       .update(agentSessions)
       .set({
@@ -321,7 +378,13 @@ export async function dispatchRun(
         workerLog: null,
         workerExitCode: null,
       })
-      .where(and(eq(agentSessions.id, runId), isNull(agentSessions.workerScope)));
+      .where(
+        and(
+          eq(agentSessions.id, runId),
+          isNull(agentSessions.workerScope),
+          notInArray(agentSessions.status, ["cancelled", "closed"])
+        )
+      );
     if (claimed.count === 0) return { kind: "already-claimed" };
     return { kind: "claimed", scope };
   });
@@ -338,28 +401,42 @@ export async function dispatchRun(
     if (opts.spawn) {
       const spawned = await opts.spawn(runId, outcome.scope);
       if (spawned == null) {
-        return await failSpawn(runId, "run worker did not start (spawn returned no pid — worker image/runtime available?)");
+        return await failSpawn(runId, outcome.scope, "run worker did not start (spawn returned no pid — worker image/runtime available?)");
       }
       pid = spawned;
     } else {
       const ref = await getRunnerProvider().create({ runId, scope: outcome.scope });
       if (!ref) {
-        return await failSpawn(runId, "run worker did not start (spawn returned no pid — worker image/runtime available?)");
+        return await failSpawn(runId, outcome.scope, "run worker did not start (spawn returned no pid — worker image/runtime available?)");
       }
       handle = ref.handle;
     }
   } catch (err) {
-    return await failSpawn(runId, `run worker failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
+    return await failSpawn(runId, outcome.scope, `run worker failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
   }
-  await db
+  // Condition the post-spawn write on THIS dispatch still owning the claim. A slow
+  // create can outlast a sweep that declared the (container-less) run dead and
+  // re-dispatched it: worker_scope then points at the winner's claim, and an
+  // unconditional write here would repoint it back — driving one run with two
+  // workers. If our token is gone we lost the race; leave the winner alone (its
+  // orphaned container, if any, is reaped as a stray by the sweep).
+  const owned = await db
     .update(agentSessions)
     .set({ workerPid: pid, workerScope: handle })
-    .where(eq(agentSessions.id, runId));
+    .where(and(eq(agentSessions.id, runId), eq(agentSessions.workerScope, outcome.scope)));
+  if (owned.count === 0) return "already-claimed";
   return "spawned";
 }
 
-async function failSpawn(runId: number, message: string): Promise<"spawn-failed"> {
-  await db.update(agentSessions).set({ workerScope: null, workerPid: null }).where(eq(agentSessions.id, runId));
+async function failSpawn(runId: number, scope: string, message: string): Promise<DispatchResult> {
+  // Only release + fail if THIS dispatch still owns the claim. A re-dispatch that
+  // superseded us (see the post-spawn note) holds a healthy claim — nulling it and
+  // marking the run failed would kill a live worker for a spawn that's no longer ours.
+  const released = await db
+    .update(agentSessions)
+    .set({ workerScope: null, workerPid: null })
+    .where(and(eq(agentSessions.id, runId), eq(agentSessions.workerScope, scope)));
+  if (released.count === 0) return "already-claimed";
   await runs().failRun(runId, message);
   return "spawn-failed";
 }
@@ -409,10 +486,20 @@ async function pumpTick(): Promise<void> {
     // and is measured from startedAt (≈ its enqueue time).
     const pendingSince = run.heartbeatAt ?? run.startedAt;
     if (maxDeferMs > 0 && pendingSince && now - pendingSince.getTime() > maxDeferMs) {
-      await runs().failRun(
-        id,
-        "insufficient host memory: the run stayed queued past the maximum wait (TASK_ORCH_MAX_DEFER_MS)."
-      );
+      // Atomically take the terminal transition, guarded against a claim that
+      // raced our get() above: only fail a run still parked in 'pending' with no
+      // worker. A dispatch that claimed it in that window owns it now — this write
+      // must not clobber its healthy claim into 'failed'. The conditional UPDATE
+      // moves the row out of 'pending' itself (so the pump can't re-select it);
+      // failRun then emits the status event for the now-failed run.
+      const failMsg =
+        "insufficient host memory: the run stayed queued past the maximum wait (TASK_ORCH_MAX_DEFER_MS).";
+      const failed = await db
+        .update(agentSessions)
+        .set({ status: "failed", error: failMsg, completedAt: new Date() })
+        .where(and(eq(agentSessions.id, id), eq(agentSessions.status, "pending"), isNull(agentSessions.workerScope)));
+      if (failed.count === 0) continue;
+      await runs().failRun(id, failMsg);
       continue;
     }
     const r = await dispatchRun(id);

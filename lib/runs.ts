@@ -406,8 +406,17 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     const prompt = input.initialPrompt ?? await buildImplementPrompt(task);
     void (async () => {
       const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
-      if (detachedRunsEnabled()) void dispatchRun(run.id).catch(() => {});
-      else await kickoffFirstTurn(run.id, prompt, input.baseBranch);
+      if (detachedRunsEnabled()) {
+        // FIX 7 (M20): the detached worker rebuilds its own prompt via
+        // dispatchTurnPrompt, which synthesizes buildImplementPrompt and would
+        // drop a custom initialPrompt. Persist the custom prompt as the run's first
+        // user message so dispatchTurnPrompt's backlog replay (reordered to win
+        // over the synthesized prompt) uses it. No-op when none was supplied.
+        if (input.initialPrompt) {
+          await persistMessage(run.id, "user", [{ type: "text", text: input.initialPrompt }]);
+        }
+        void dispatchRun(run.id).catch(() => {});
+      } else await kickoffFirstTurn(run.id, prompt, input.baseBranch);
     })();
   }
 
@@ -416,8 +425,15 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   if (!input.defer && cwdStrategy === "worktree_at_pr") {
     void (async () => {
       const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
-      if (detachedRunsEnabled()) void dispatchRun(run.id).catch(() => {});
-      else await runReview(run.id, input.prUrl!, input.initialPrompt ?? null);
+      if (detachedRunsEnabled()) {
+        // FIX 7 (M20): persist a custom initialPrompt as the first user message so
+        // driveDispatchedRun's <review> branch can read it back and pass it to
+        // runReview (which would otherwise be dispatched with no prompt).
+        if (input.initialPrompt) {
+          await persistMessage(run.id, "user", [{ type: "text", text: input.initialPrompt }]);
+        }
+        void dispatchRun(run.id).catch(() => {});
+      } else await runReview(run.id, input.prUrl!, input.initialPrompt ?? null);
     })();
   }
 
@@ -427,8 +443,15 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   if (!input.defer && goal === "<execute>" && input.planId) {
     void (async () => {
       const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
-      if (detachedRunsEnabled()) void dispatchRun(run.id).catch(() => {});
-      else await runExecute(run.id, input.planId!, input.initialPrompt ?? null);
+      if (detachedRunsEnabled()) {
+        // FIX 7 (M20): persist a custom initialPrompt as the first user message so
+        // driveDispatchedRun's <execute> branch can read it back and pass it to
+        // runExecute as operator instructions.
+        if (input.initialPrompt) {
+          await persistMessage(run.id, "user", [{ type: "text", text: input.initialPrompt }]);
+        }
+        void dispatchRun(run.id).catch(() => {});
+      } else await runExecute(run.id, input.planId!, input.initialPrompt ?? null);
     })();
   }
 
@@ -764,6 +787,37 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
   }
 }
 
+/**
+ * FIX 1 (M4): enumerate the non-terminal descendant runs of a plan-executor-style
+ * parent — rows whose parent_run_id chains back to `rootId` (children, and one
+ * more level of grandchildren). Recurses breadth-first with a visited-set and a
+ * depth bound so a self-referential / cyclic parent_run_id graph can't loop
+ * forever. We recurse THROUGH terminal nodes (a terminal child may still own a
+ * live grandchild) but only RETURN the non-terminal ones — the runs a cascade
+ * cancel actually needs to stop.
+ */
+async function collectActiveDescendants(rootId: number): Promise<RunRow[]> {
+  const found: RunRow[] = [];
+  const visited = new Set<number>([rootId]);
+  let frontier = [rootId];
+  for (let depth = 0; depth < 5 && frontier.length > 0; depth++) {
+    const children = await db
+      .select()
+      .from(agentSessions)
+      .where(inArray(agentSessions.parentRunId, frontier));
+    const next: number[] = [];
+    for (const row of children) {
+      if (visited.has(row.id)) continue; // self-reference / cycle guard
+      visited.add(row.id);
+      const child = hydrateRun(row);
+      next.push(child.id);
+      if (!isTerminalStatus(child.status)) found.push(child);
+    }
+    frontier = next;
+  }
+  return found;
+}
+
 export async function cancel(id: number): Promise<RunRow> {
   const run = await get(id);
   if (!run) throw new repo.RepoError(`Run ${id} not found`, 404);
@@ -782,9 +836,21 @@ export async function cancel(id: number): Promise<RunRow> {
   closeBus(id);
   // Hard-stop the detached worker as a fallback (the cancel_requested poll aborts
   // it gracefully within a heartbeat; provider stop is the belt). No-op if gone.
-  void runDispatch.stopRunner(run.workerScope);
+  // .catch: stopRunner is fire-and-forget here; a provider hiccup must not surface
+  // as an unhandled rejection.
+  void runDispatch.stopRunner(run.workerScope).catch(() => {});
   if (run.cwdStrategy === "worktree" && run.worktreePath) {
     cleanupWorktree(run.worktreePath, await repoRoot(run)).catch(() => {});
+  }
+  // FIX 1 (M4): cascade the cancel to in-flight descendant runs. A plan-executor
+  // run spawns child runs (parent_run_id = executor id, possibly one level
+  // deeper); cancelling only the executor would leave those children running,
+  // spending, and pushing. cancel() each non-terminal descendant. The target row
+  // is already terminal by now, so its own cancel is idempotent — nested cancels
+  // early-return on terminal status, so this converges (no infinite recursion).
+  for (const child of await collectActiveDescendants(id)) {
+    if (child.id === id) continue; // self-reference guard (belt for the visited-set)
+    await cancel(child.id).catch(() => {});
   }
   return (await get(id))!;
 }
@@ -825,12 +891,26 @@ export async function close(id: number): Promise<RunRow> {
   // If a turn is in flight, cancel it first.
   const runner = runners.get(id);
   if (runner) runner.abort.abort();
+  // Cross-process stop, same as cancel(): the in-process abort above can't reach a
+  // detached worker in its own container, so also set cancel_requested (the worker
+  // polls it at heartbeat cadence and aborts its turn) and hard-stop the runner as
+  // the belt. Without this, closing a run in the containerized deploy leaves the
+  // worker's turn burning tokens to completion.
   await db.update(agentSessions)
-    .set({ status: "closed", completedAt: new Date() })
+    .set({ status: "closed", completedAt: new Date(), cancelRequested: 1 })
     .where(eq(agentSessions.id, id));
   closeBus(id);
+  void runDispatch.stopRunner(run.workerScope).catch(() => {});
   if (run.cwdStrategy === "worktree" && run.worktreePath) {
     cleanupWorktree(run.worktreePath, await repoRoot(run)).catch(() => {});
+  }
+  // FIX 1 (M4): cascade to in-flight descendants, as cancel() does. Children of a
+  // closed parent are CANCELLED, not closed — they are disposable workers for the
+  // parent, not conversations to preserve. The target is already terminal here, so
+  // the nested cancels converge (they early-return on terminal status).
+  for (const child of await collectActiveDescendants(id)) {
+    if (child.id === id) continue; // self-reference guard (belt for the visited-set)
+    await cancel(child.id).catch(() => {});
   }
   return (await get(id))!;
 }
@@ -857,6 +937,12 @@ export async function followUp(
   const run = await get(runId);
   if (!run) return;
   if (isLive(runId)) return;
+  // FIX 4 (M14): the in-process isLive() check above is blind to a DETACHED worker
+  // driving this same run in ANOTHER process. Without a DB check, a webhook autofix
+  // would kick off a SECOND concurrent turn against the same branch/worktree. Bail
+  // when the row shows a live lease (a turn in flight anywhere) or a live worker
+  // owns it — mirrored below on a fresh read after the lock is acquired.
+  if (isLeaseLive(run) || isWorkerLive(run)) return;
   if (run.cwdStrategy !== "worktree" || !run.branch || !run.worktreePath) return;
 
   const lock = getLock(runId);
@@ -868,8 +954,11 @@ export async function followUp(
     }
   }
   // Re-check liveness after acquiring the slot (another follow-up may have run
-  // while we waited).
+  // while we waited). Re-read the row: a detached worker may have claimed/started
+  // a turn cross-process while we were queued, which only a FRESH read reveals.
   if (isLive(runId)) return;
+  const fresh = await get(runId);
+  if (!fresh || isLeaseLive(fresh) || isWorkerLive(fresh)) return;
   let release!: () => void;
   lock.busy = new Promise<void>((res) => (release = res));
 
@@ -1613,43 +1702,103 @@ export async function driveDispatchedRun(runId: number): Promise<void> {
 
   // Chat runs get a long-lived, warm-checkout session loop — one turn per inbound
   // user message (run_input channel) — instead of a single turn-and-exit. Returns
-  // only when the chat idles out; the worker then exits.
+  // only when the chat idles out; the worker then exits. driveChatSession manages
+  // (and releases) its own claim in its finally, so it returns BEFORE the
+  // single-turn release below and must not be routed through it.
   if (run.goal === "<chat>") {
     await driveChatSession(runId);
     return;
   }
 
-  if (run.goal === "<review>") {
-    if (!run.prUrl) {
-      await setError(runId, "Dispatched <review> run has no prUrl to review.");
+  // Single-turn detached workers (review / execute / implement) drive ONE turn and
+  // exit. Their final DB update lands a terminal status but never clears the worker
+  // claim (worker_scope/worker_pid) — and handleWorkerDeath early-returns on a
+  // terminal status before it would release. A lingering claim then wedges the run:
+  // dispatchRun forever returns "already-claimed" (a follow-up via sendMessageToRun
+  // persists but spawns nothing), and countInFlightWorkers charges the ghost claim
+  // against the admission budget until the heartbeat goes stale (HEARTBEAT_STALE_MS,
+  // 5 min). Release the claim here — this runs inside the worker process that owns
+  // it, so it is the single safe release point covering every single-turn path
+  // (including the setError early-exits, which are inside the try). Unconditional,
+  // mirroring driveChatSession's finally: the row is terminal, so no concurrent
+  // re-dispatch can have re-claimed it (dispatchRun no-ops while worker_scope is set).
+  // FIX 3a (M7): snapshot the newest user message BEFORE driving the turn. A
+  // follow-up user message persisted while this single-turn worker's turn is in
+  // flight is rejected by dispatchRun ("already-claimed"); once we exit nothing
+  // re-dispatches it and it sits unprocessed forever. In the finally (after the
+  // claim release) we re-check and fire a fresh dispatch, mirroring
+  // driveChatSession's stranded-message drain.
+  const priorUserId = await newestUserMessageId(runId);
+  try {
+    if (run.goal === "<review>") {
+      if (!run.prUrl) {
+        await setError(runId, "Dispatched <review> run has no prUrl to review.");
+        return;
+      }
+      // FIX 7b (M20): a custom initialPrompt was persisted as the run's first user
+      // message by create(); pass it into runReview so the review uses it instead
+      // of the default prompt. runReview builds its own prompt and does NOT persist
+      // it (unlike runExecute), so there is no duplicate message row.
+      await runReview(runId, run.prUrl, await firstUserMessageText(runId));
       return;
     }
-    await runReview(runId, run.prUrl, null);
-    return;
-  }
 
-  if (run.goal === "<execute>") {
-    if (!run.planId) {
-      await setError(runId, "Dispatched <execute> run has no planId to execute.");
+    if (run.goal === "<execute>") {
+      if (!run.planId) {
+        await setError(runId, "Dispatched <execute> run has no planId to execute.");
+        return;
+      }
+      // FIX 7b (M20): feed a custom initialPrompt (persisted by create() as the
+      // first user message) into runExecute as operator instructions. runExecute
+      // persists its own SYSTEM scaffold prompt — a different role than our user
+      // row — so the two don't duplicate.
+      await runExecute(runId, run.planId, await firstUserMessageText(runId));
       return;
     }
-    await runExecute(runId, run.planId, null);
-    return;
-  }
 
-  // implement (or a resumed run): drive ONE turn and exit. A fresh implement run
-  // reconstructs the task prompt create() would have passed to kickoffFirstTurn; a
-  // resume (orphan re-dispatch) or a follow-up message replays its last user
-  // message, falling back to a bare continue sentinel.
-  // takeover: this worker holds the run's claim (dispatchRun left it `preparing`
-  // with a fresh heartbeat), so append() must adopt it rather than reject it as
-  // an in-flight turn in another process.
-  // fromUserMsg tells us the prompt IS an already-persisted user message (a
-  // follow-up the server inserted, or a replayed one) — so append must not
-  // re-insert it (persistUser=false). A synthesized task prompt / resume sentinel
-  // is persisted as the first user message (persistUser=true).
-  const { text, fromUserMsg } = await dispatchTurnPrompt(run);
-  await kickoffFirstTurn(runId, text, undefined, true, !fromUserMsg);
+    // implement (or a resumed run): drive ONE turn and exit. A fresh implement run
+    // reconstructs the task prompt create() would have passed to kickoffFirstTurn; a
+    // resume (orphan re-dispatch) or a follow-up message replays its last user
+    // message, falling back to a bare continue sentinel.
+    // takeover: this worker holds the run's claim (dispatchRun left it `preparing`
+    // with a fresh heartbeat), so append() must adopt it rather than reject it as
+    // an in-flight turn in another process.
+    // fromUserMsg tells us the prompt IS an already-persisted user message (a
+    // follow-up the server inserted, or a replayed one) — so append must not
+    // re-insert it (persistUser=false). A synthesized task prompt / resume sentinel
+    // is persisted as the first user message (persistUser=true).
+    const { text, fromUserMsg } = await dispatchTurnPrompt(run);
+    await kickoffFirstTurn(runId, text, undefined, true, !fromUserMsg);
+  } finally {
+    // Release the single-turn worker claim now the turn has landed. Does NOT touch
+    // heartbeatAt (the turn is over; staleness is fine). Guarded on the row NOT
+    // being in a lease status: our own turn always lands a non-lease status before
+    // this runs, so a lease status here can only mean a false death report released
+    // our claim mid-turn and a re-dispatched worker re-claimed — clearing THAT
+    // worker's healthy claim would strand it exactly the way this release exists
+    // to prevent.
+    await db
+      .update(agentSessions)
+      .set({ workerScope: null, workerPid: null })
+      .where(
+        and(
+          eq(agentSessions.id, runId),
+          notInArray(agentSessions.status, LEASE_STATUSES)
+        )
+      );
+    // FIX 3a (M7): a newer non-empty user message arrived while this turn ran — it
+    // was rejected as "already-claimed" and would otherwise never be processed.
+    // Now the claim is released, fire-and-forget a fresh dispatch so a new worker
+    // picks it up (mirrors driveChatSession's finally). Skipped when cancel/close
+    // made the run terminal — those must not be revived.
+    const cur = await get(runId);
+    if (cur && cur.status !== "cancelled" && cur.status !== "closed") {
+      const newer = (await listMessages(runId)).some(
+        (m) => m.role === "user" && m.id > priorUserId && messageText(m) !== ""
+      );
+      if (newer) void runDispatch.dispatchRun(runId).catch(() => {});
+    }
+  }
 }
 
 const DISPATCH_RESUME_PROMPT =
@@ -1668,21 +1817,56 @@ function messageText(m: MessageRow): string {
 }
 
 async function dispatchTurnPrompt(run: RunRow): Promise<{ text: string; fromUserMsg: boolean }> {
-  // First turn of an implement worktree run: rebuild the task prompt (synthesized,
-  // not yet persisted).
+  // FIX 3b/FIX 7a: replay the UNANSWERED user-message backlog first — every
+  // user message newer than the most recent 'agent'-role reply, concatenated
+  // with blank lines. This covers, in one branch:
+  //   • a resume / single follow-up after the agent last replied,
+  //   • SEVERAL follow-ups that piled up while a single-turn worker was mid-turn
+  //     (the old code replayed only the LAST, silently dropping the rest),
+  //   • a custom initialPrompt that create()'s detached kickoff persisted as the
+  //     run's first user message (FIX 7) — which must WIN over the synthesized
+  //     task prompt, hence this check runs BEFORE buildImplementPrompt below.
+  // These rows are already in the DB, so the caller must NOT re-persist them
+  // (fromUserMsg=true → kickoffFirstTurn passes persistUser=false).
+  const msgs = await listMessages(run.id);
+  let lastAgentId = 0;
+  for (const m of msgs) if (m.role === "agent" && m.id > lastAgentId) lastAgentId = m.id;
+  const backlog = msgs
+    .filter((m) => m.role === "user" && m.id > lastAgentId)
+    .map(messageText)
+    .filter((t) => t !== "");
+  if (backlog.length > 0) return { text: backlog.join("\n\n"), fromUserMsg: true };
+
+  // First turn of a fresh implement worktree run with no persisted messages:
+  // rebuild the task prompt (synthesized, not yet persisted → caller persists it).
   if (!run.sdkSessionId && run.taskId) {
     const task = await repo.getTask(run.taskId);
     if (task) return { text: await buildImplementPrompt(task), fromUserMsg: false };
   }
-  // Otherwise replay the most recent user message (resume / follow-up), which is
-  // already in the DB — the caller must NOT re-persist it.
-  const msgs = await listMessages(run.id);
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if (msgs[i].role !== "user") continue;
-    const text = messageText(msgs[i]);
-    if (text) return { text, fromUserMsg: true };
-  }
+  // Resume with nothing new to say (orphan re-dispatch): a bare continue sentinel.
   return { text: DISPATCH_RESUME_PROMPT, fromUserMsg: false };
+}
+
+/** First non-empty user-message text of a run, or null. Used by driveDispatchedRun
+ *  to feed a custom initialPrompt (persisted by create() under FIX 7) into
+ *  runReview/runExecute, which build their own prompts and take it as an override. */
+async function firstUserMessageText(runId: number): Promise<string | null> {
+  const msgs = await listMessages(runId);
+  for (const m of msgs) {
+    if (m.role !== "user") continue;
+    const t = messageText(m);
+    if (t) return t;
+  }
+  return null;
+}
+
+/** Newest user-message id of a run (0 if none). Snapshot before a single-turn
+ *  drive so its finally can detect a follow-up that arrived mid-turn (FIX 3a). */
+async function newestUserMessageId(runId: number): Promise<number> {
+  const msgs = await listMessages(runId);
+  let id = 0;
+  for (const m of msgs) if (m.role === "user" && m.id > id) id = m.id;
+  return id;
 }
 
 // ──────────────────────────────────────────────────────────
@@ -1795,7 +1979,17 @@ export async function driveChatSession(runId: number): Promise<void> {
             resolve(false);
           };
         });
-        if (timedOut) break;
+        if (timedOut) {
+          // A run_input notify can land in the race between the timeout firing
+          // (which nulled `wake`) and here: its callback set pendingWake but had no
+          // live `wake` to resume us. Don't strand that message — loop back to drain
+          // it instead of exiting on the timeout.
+          if (pendingWake) {
+            pendingWake = false;
+            continue;
+          }
+          break;
+        }
       }
       pendingWake = false;
     }
@@ -1805,12 +1999,37 @@ export async function driveChatSession(runId: number): Promise<void> {
     abort.signal.removeEventListener("abort", onAbort);
     // Release the claim so the next message spawns a fresh worker, and land the
     // run resumable-idle (unless cancel/close already wrote a terminal row).
+    // Guarded on the row NOT being in a lease status, mirroring the single-turn
+    // release in driveDispatchedRun: a lease status here means a false death
+    // report already released our claim and a re-dispatched worker re-claimed —
+    // don't clear the new owner's claim out from under it.
     await db
       .update(agentSessions)
       .set({ workerScope: null, workerPid: null })
-      .where(eq(agentSessions.id, runId));
+      .where(
+        and(
+          eq(agentSessions.id, runId),
+          notInArray(agentSessions.status, LEASE_STATUSES)
+        )
+      );
     const cur = await get(runId);
     if (cur && !isTerminalStatus(cur.status)) await setStatus(runId, "idle");
+    // Final drain guard against a message stranded by the idle-timeout race: a
+    // user message can be persisted (and its run_input NOTIFY fired) in the window
+    // between our last drain and the claim release above. sendMessageToRun saw
+    // isWorkerLive()===true then, so it only NOTIFYed and did NOT dispatch — and
+    // with this worker now exiting, that message would sit unprocessed until some
+    // FUTURE message triggered a dispatch. Re-check for any unprocessed user message
+    // (id > lastProcessed, non-empty) now the claim is released and, if one exists,
+    // fire-and-forget a fresh dispatch so a new worker resumes and drains it. Also
+    // covers a run_input NOTIFY lost entirely. Skipped when cancel/close made the
+    // run terminal — those must not be revived.
+    if (cur && !isTerminalStatus(cur.status)) {
+      const stranded = (await listMessages(runId)).some(
+        (m) => m.role === "user" && m.id > lastProcessed && messageText(m) !== ""
+      );
+      if (stranded) void runDispatch.dispatchRun(runId).catch(() => {});
+    }
   }
 }
 
@@ -1846,7 +2065,11 @@ export async function* sendMessageToRun(opts: {
 
   // Cursor BEFORE the insert so the relay captures exactly this turn's frames.
   const from = await streamCursor(runId);
-  await persistMessage(runId, role, [{ type: "text", text }]);
+  // FIX 2 (M5): keep the id of the row we just persisted. Because the cursor was
+  // captured BEFORE this insert, a turn already in flight can slip its turn_done /
+  // terminal marker into the stream ahead of our reply; the relay uses this id to
+  // ignore any close marker that precedes our own user_message frame.
+  const ownMsg = await persistMessage(runId, role, [{ type: "text", text }]);
 
   const fresh = await get(runId);
   if (fresh) {
@@ -1864,13 +2087,17 @@ export async function* sendMessageToRun(opts: {
       }
       // else: a live worker will pick up the run_input notify.
     } else {
-      // Non-chat follow-up: dispatch a single-turn worker (already-claimed is fine
-      // — a turn is already in flight and our message rides the resume).
+      // Non-chat follow-up: dispatch a single-turn worker. If the prior turn is
+      // still in flight the claim is held and dispatchRun returns already-claimed
+      // (harmless — that turn will resume onto this freshly persisted message).
+      // Once the prior turn finished it released its claim (see
+      // driveDispatchedRun's finally), so this dispatch now spawns a fresh worker
+      // to pick up the follow-up instead of no-oping against a ghost claim forever.
       await runDispatch.dispatchRun(runId);
     }
   }
 
-  yield* relayRunStream(runId, from, abort);
+  yield* relayRunStream(runId, from, abort, ownMsg.id);
 }
 
 /**
@@ -1880,14 +2107,28 @@ export async function* sendMessageToRun(opts: {
  * with the old in-process path. Closes on a per-turn 'turn_done' marker (chat), a
  * terminal non-idle status (implement/one-shot), a 'failed' status, or abort.
  */
-async function* relayRunStream(
+// Exported as a test seam (FIX 2 / M5): the cursor-gating behaviour is awkward to
+// drive through sendMessageToRun (the `from` cursor is captured internally), so
+// tests call this directly with a hand-crafted cursor + ownMsgId. Not part of the
+// public API otherwise — sendMessageToRun is the only production caller.
+export async function* relayRunStream(
   runId: number,
   from: { msgId: number; evtId: number },
-  abort: AbortController
+  abort: AbortController,
+  ownMsgId: number
 ): AsyncGenerator<AppendStreamEvent> {
   const { readStreamSince } = await import("./run-stream");
   const { subscribeRunStream } = await import("./run-stream-listener");
   let cursor = from;
+  // FIX 2 (M5): the cursor was captured BEFORE our user message was persisted, so
+  // a turn already in flight when sendMessageToRun ran can slip its turn_done /
+  // failed / terminal marker into the stream ahead of our reply. Closing on that
+  // marker finalizes the caller's draft with the WRONG turn's text. Gate every
+  // close condition on having first seen our own user_message frame (ownMsgId):
+  // only a marker AFTER our message belongs to our reply. Chat workers drain
+  // oldest-first and emit exactly one turn_done per message, so the first marker
+  // past our message is ours.
+  let seenOwn = false;
   let pending = true; // drain once immediately
   let wake: (() => void) | null = null;
   const unsub = await subscribeRunStream(runId, () => {
@@ -1922,6 +2163,8 @@ async function* relayRunStream(
       for (const f of frames) {
         if (f.kind === "message") {
           const r = f.message.role;
+          // Our own user_message frame opens the gate: markers after it are ours.
+          if (f.message.id === ownMsgId) seenOwn = true;
           if (r === "user" || r === "system") {
             yield { type: "user_message", message: f.message };
           } else if (r === "agent") {
@@ -1932,16 +2175,20 @@ async function* relayRunStream(
         } else {
           const d = f.data as { type?: string; status?: string; error?: string };
           if (d.type === "turn_done") {
+            if (!seenOwn) continue; // a prior turn's marker — not our reply
             yield { type: "done" };
             return;
           }
           if (d.type === "status" && d.status === "failed") {
+            if (!seenOwn) continue; // a prior turn's failure — not ours
             yield { type: "error", error: d.error ?? `Run ${runId} failed` };
             return;
           }
         }
       }
-      if (terminal) {
+      // The readStreamSince `terminal` flag (a non-idle terminal status frame)
+      // also only closes us once our own message has appeared.
+      if (terminal && seenOwn) {
         yield { type: "done" };
         return;
       }
@@ -2104,7 +2351,8 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   };
 
   const backend = await getBackend();
-  const outcome = await backend.runTurn({
+  const resumeToken = run.sdkSessionId ?? null;
+  const turnArgs = {
     cwd,
     model: { provider: resolvedProvider, id: resolvedModelId },
     // Per-run reasoning level overrides the persona's; fall back to the
@@ -2116,11 +2364,35 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
       | "xhigh"
       | undefined,
     extensions,
-    resumeToken: run.sdkSessionId ?? null,
     abort,
     prompt,
     onEvent,
-  });
+  };
+  // FIX 6 (M8): a resume token references state local to the container/worktree
+  // that produced it (pi: a path under cwd; Claude: the HOME session store). When
+  // a re-dispatch/recycle resumes into a FRESH container the token is dangling, so
+  // the backend throws "session not found"-style. Rather than fail the whole run,
+  // note the lost context and retry ONCE from scratch (resumeToken null) — the
+  // prompt + checked-out code give the agent enough to continue. Never retry on an
+  // abort (a cancel/interrupt aborted the turn deliberately), and only when we
+  // actually had a token to resume. The pi backend's own existence check is
+  // handled by another layer; this is the runs.ts-side safety net.
+  let outcome;
+  try {
+    outcome = await backend.runTurn({ ...turnArgs, resumeToken });
+  } catch (err) {
+    if (resumeToken && !abort.signal.aborted && isMissingSessionError(err)) {
+      await persistMessage(run.id, "system", [
+        {
+          type: "text",
+          text: `Previous session context could not be restored (${describe(err)}); continuing with a fresh session.`,
+        },
+      ]);
+      outcome = await backend.runTurn({ ...turnArgs, resumeToken: null });
+    } else {
+      throw err;
+    }
+  }
 
   return {
     envelopes: envelopes as any,
@@ -2133,6 +2405,21 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     outputTokens: outputTokens ?? outcome.outputTokens,
     turns: outcome.turns,
   };
+}
+
+/**
+ * Heuristic (FIX 6 / M8): does a thrown backend error indicate a missing/invalid
+ * resume session rather than a transient failure we should surface? Resume tokens
+ * point at per-container/worktree state that a fresh container can't find. We
+ * require a session-ish noun AND not-found-ish wording so a live-session error
+ * (e.g. a mid-turn stream failure) isn't misread as a dangling token.
+ */
+function isMissingSessionError(err: unknown): boolean {
+  const msg = describe(err).toLowerCase();
+  if (!/session|resume|conversation/.test(msg)) return false;
+  return /not ?found|no such|missing|invalid|does ?n'?o?t ?exist|doesn'?t exist|unknown|cannot find|could not find|no longer|unrecogni[sz]ed|expired/.test(
+    msg
+  );
 }
 
 function checkBudget(run: RunRow, result: TurnResult): boolean {
@@ -2150,9 +2437,18 @@ function checkBudget(run: RunRow, result: TurnResult): boolean {
   ) {
     return true;
   }
-  // budgetMaxUsd is not enforced: pi exposes no cost surface (totalCostUsd is
-  // null), and while the Claude backend does report total_cost_usd we keep the
-  // cap dormant for parity. Column kept for historical data (see SCHEMA.md).
+  // FIX 5 (M19): enforce the dollar cap when the backend reports a cost. The
+  // Claude backend reports cumulative total_cost_usd per session, so once it meets
+  // or exceeds budgetMaxUsd the run is exhausted. pi runs remain effectively
+  // uncapped here: pi exposes no cost surface (totalCostUsd is null), so this
+  // condition never trips for them. Column kept for historical data (see SCHEMA.md).
+  if (
+    run.budgetMaxUsd != null &&
+    result.totalCostUsd != null &&
+    result.totalCostUsd >= run.budgetMaxUsd
+  ) {
+    return true;
+  }
   return false;
 }
 

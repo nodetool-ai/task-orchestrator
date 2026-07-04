@@ -6,7 +6,7 @@ import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { agentEvents, agentSessions, runnerInstances } from "@/db/schema";
 import { isTerminalStatus, type SessionStatus } from "../types";
-import { nextLifecycleAction } from "./lifecycle";
+import { isWorkerClaimLive, nextLifecycleAction } from "./lifecycle";
 import type { CreateRunnerInput, RunnerProvider, RunnerRef, RunnerState } from "./provider";
 import { type FlyClient, type FlyMachine, type FlyMachineConfig, type FlyVolume, makeFlyClient } from "./fly-client";
 
@@ -67,6 +67,23 @@ function machineStateToRunnerState(state: string): RunnerState {
 
 function isActiveRunStatus(status: string | null): boolean {
   return !!status && LEASE_STATUSES.has(status);
+}
+
+/**
+ * Whether a run row — freshly re-read immediately before executing a queued
+ * suspend/stop — is STILL eligible for that action. False when the run has
+ * become active since the sweep took its decision snapshot: either its status
+ * is now an active lease status (a plan-executor's turn started running) or
+ * its worker claim is live again (a chat worker woke to a new message and
+ * renewed its heartbeat). Exported as a pure predicate so it's directly unit
+ * testable without racing real timing against a live sweep.
+ */
+export function isEligibleForLifecycleAction(row: {
+  status: string | null;
+  workerScope: string | null;
+  heartbeatAt: Date | null;
+}): boolean {
+  return !isActiveRunStatus(row.status) && !isWorkerClaimLive(row);
 }
 
 function lastActivityMs(row: {
@@ -204,6 +221,11 @@ export class FlyRunnerProvider implements RunnerProvider {
       const machine = await this.flyClient.getMachine(instance.machineId);
       if (machine) {
         const state = machineStateToRunnerState(machine.state);
+        // A "gone" machine (destroyed/destroying) is not a live runner even
+        // though Fly still answers GET for it — fall through to cold-recovering
+        // a fresh machine from the volume below instead of returning it as a
+        // live handle. Returning it here would hand the sweep a corpse it
+        // re-death-detects and re-dispatches into forever.
         if (state === "suspended" || state === "stopped") {
           await this.flyClient.startMachine(machine.id);
           await this.updateInstance(runId, {
@@ -213,46 +235,61 @@ export class FlyRunnerProvider implements RunnerProvider {
             region: machine.region || region,
           });
           await emitRunnerEvent(runId, "runner_resumed", { machineId: machine.id, state });
-        } else {
+          return { runId, handle: machine.id, provider: "fly" };
+        } else if (state !== "gone") {
           await this.updateInstance(runId, {
             machineId: machine.id,
             state,
             lastStartedAt: state === "running" ? now : instance.lastStartedAt,
             region: machine.region || region,
           });
+          return { runId, handle: machine.id, provider: "fly" };
         }
-        return { runId, handle: machine.id, provider: "fly" };
       }
     }
 
-    const machine = await this.flyClient.createMachine({
-      name: scope,
-      region,
-      config: buildFlyMachineConfig(runId, instance.volumeId),
-    });
-    await this.updateInstance(runId, {
-      machineId: machine.id,
-      state: "starting",
-      lastStartedAt: now,
-      region: machine.region || region,
-    });
-    await emitRunnerEvent(runId, "runner_cold_recovered", {
-      machineId: machine.id,
-      volumeId: instance.volumeId,
-      region: machine.region || region,
-    });
-    return { runId, handle: machine.id, provider: "fly" };
+    try {
+      const machine = await this.flyClient.createMachine({
+        name: scope,
+        region,
+        config: buildFlyMachineConfig(runId, instance.volumeId),
+      });
+      await this.updateInstance(runId, {
+        machineId: machine.id,
+        state: "starting",
+        lastStartedAt: now,
+        region: machine.region || region,
+      });
+      await emitRunnerEvent(runId, "runner_cold_recovered", {
+        machineId: machine.id,
+        volumeId: instance.volumeId,
+        region: machine.region || region,
+      });
+      return { runId, handle: machine.id, provider: "fly" };
+    } catch (err) {
+      // The volume itself may be gone too (e.g. destroyed alongside a stale
+      // machine) — clear the mapping so the next create() provisions an
+      // entirely fresh volume+machine instead of retrying against a dead
+      // volume forever.
+      console.error("[FlyRunnerProvider] resume cold-recover failed:", err);
+      await this.updateInstance(runId, { machineId: null, volumeId: null, state: "gone" });
+      return null;
+    }
   }
 
   async stop(handle: string): Promise<void> {
     await this.flyClient.destroyMachine(handle, { force: true }).catch(() => {});
     const [row] = await db
-      .select({ runId: runnerInstances.runId })
+      .select({ runId: runnerInstances.runId, volumeId: runnerInstances.volumeId })
       .from(runnerInstances)
       .where(eq(runnerInstances.machineId, handle));
     if (row) {
+      // A hard stop is a permanent cancel, not an idle suspend — unlike lifecycle
+      // suspend/stop, there is no future resume to preserve the volume for, so
+      // reclaim it now (mirrors archive-and-destroy's ordering/error handling).
+      if (row.volumeId) await this.flyClient.destroyVolume(row.volumeId).catch(() => {});
       await this.releaseRunClaimIfCurrent(row.runId, handle);
-      await this.updateInstance(row.runId, { state: "gone" });
+      await this.updateInstance(row.runId, { state: "gone", machineId: null, volumeId: null });
       await emitRunnerEvent(row.runId, "runner_failed", { machineId: handle, reason: "stopped" });
     }
   }
@@ -289,37 +326,44 @@ export class FlyRunnerProvider implements RunnerProvider {
     const now = Date.now();
     for (const row of rows) {
       if (!row.machineId) continue;
-      const machine = machineById.get(row.machineId);
-      if (!machine) {
-        await this.updateInstance(row.runId, { state: "gone" });
-        const lastSeen = row.heartbeatAt?.getTime() ?? 0;
-        if (
-          row.workerScope === row.machineId &&
-          isActiveRunStatus(row.runStatus) &&
-          now - lastSeen >= SWEEP_MIN_SILENCE_MS
-        ) {
-          const runs = await import("../runs");
-          await runs.handleWorkerDeath(row.runId, {
-            exitCode: null,
-            oomKilled: false,
-            containerName: row.machineId,
+      // One row's FlyApiError (e.g. a 412 on an invalid state transition) must
+      // not starve death-detection/lifecycle for every row after it on this
+      // tick, or every tick thereafter.
+      try {
+        const machine = machineById.get(row.machineId);
+        if (!machine) {
+          await this.updateInstance(row.runId, { state: "gone" });
+          const lastSeen = row.heartbeatAt?.getTime() ?? 0;
+          if (
+            row.workerScope === row.machineId &&
+            isActiveRunStatus(row.runStatus) &&
+            now - lastSeen >= SWEEP_MIN_SILENCE_MS
+          ) {
+            const runs = await import("../runs");
+            await runs.handleWorkerDeath(row.runId, {
+              exitCode: null,
+              oomKilled: false,
+              containerName: row.machineId,
+            });
+          }
+          continue;
+        }
+
+        const runnerState = machineStateToRunnerState(machine.state);
+        if (runnerState !== row.state || machine.region !== row.region) {
+          await this.updateInstance(row.runId, {
+            state: runnerState,
+            region: machine.region || row.region,
+            ...(runnerState === "running" ? { lastStartedAt: new Date() } : {}),
+            ...(runnerState === "suspended" ? { lastSuspendedAt: new Date() } : {}),
           });
         }
-        continue;
-      }
 
-      const runnerState = machineStateToRunnerState(machine.state);
-      if (runnerState !== row.state || machine.region !== row.region) {
-        await this.updateInstance(row.runId, {
-          state: runnerState,
-          region: machine.region || row.region,
-          ...(runnerState === "running" ? { lastStartedAt: new Date() } : {}),
-          ...(runnerState === "suspended" ? { lastSuspendedAt: new Date() } : {}),
-        });
+        const runStatus = row.runStatus ?? "closed";
+        await this.applyLifecycle(row, runnerState, runStatus as SessionStatus, now);
+      } catch (err) {
+        console.error(`[FlyRunnerProvider] sweep failed for run ${row.runId}:`, err);
       }
-
-      const runStatus = row.runStatus ?? "closed";
-      await this.applyLifecycle(row, runnerState, runStatus as SessionStatus, now);
     }
   }
 
@@ -328,10 +372,22 @@ export class FlyRunnerProvider implements RunnerProvider {
     if (g[FLY_MONITOR_KEY]) return;
     const intervalMs = intEnv("TASK_ORCH_FLY_POLL_MS", DEFAULT_POLL_MS);
     if (intervalMs <= 0) return;
-    const timer = setInterval(() => void this.sweep().catch(() => {}), intervalMs);
+    // A slow/hung Fly API call can make one sweep tick outlive the poll interval;
+    // without this guard setInterval piles up overlapping sweeps indefinitely.
+    let sweeping = false;
+    const tick = () => {
+      if (sweeping) return;
+      sweeping = true;
+      void this.sweep()
+        .catch(() => {})
+        .finally(() => {
+          sweeping = false;
+        });
+    };
+    const timer = setInterval(tick, intervalMs);
     (timer as { unref?: () => void }).unref?.();
     g[FLY_MONITOR_KEY] = timer;
-    void this.sweep().catch(() => {});
+    tick();
   }
 
   private async getInstance(runId: number): Promise<typeof runnerInstances.$inferSelect | null> {
@@ -363,6 +419,7 @@ export class FlyRunnerProvider implements RunnerProvider {
       lastStartedAt: Date | null;
       lastSuspendedAt: Date | null;
       archivedUri: string | null;
+      workerScope: string | null;
       heartbeatAt: Date | null;
       completedAt: Date | null;
     },
@@ -372,8 +429,33 @@ export class FlyRunnerProvider implements RunnerProvider {
   ): Promise<void> {
     if (!row.machineId) return;
     const idleMs = Math.max(0, nowMs - lastActivityMs(row));
-    const action = nextLifecycleAction({ runStatus, runnerState, idleMs });
+    const action = nextLifecycleAction({
+      runStatus,
+      runnerState,
+      idleMs,
+      workerScope: row.workerScope,
+      heartbeatAt: row.heartbeatAt,
+    });
     if (action.kind === "none") return;
+
+    // The decision above was made from this sweep tick's row snapshot, taken at
+    // the top of sweep() — it can be tens of seconds stale by the time we
+    // actually execute a suspend/stop. In that window a chat worker may have
+    // woken to a new message (renewing its claim) or a plan-executor's status
+    // may now be a live lease status. Re-read the row right before acting and
+    // skip if it's no longer eligible; the next sweep tick re-decides from a
+    // fresh snapshot instead of us suspending/stopping out from under it.
+    if (action.kind === "suspend" || action.kind === "stop") {
+      const [fresh] = await db
+        .select({
+          status: agentSessions.status,
+          workerScope: agentSessions.workerScope,
+          heartbeatAt: agentSessions.heartbeatAt,
+        })
+        .from(agentSessions)
+        .where(eq(agentSessions.id, row.runId));
+      if (fresh && !isEligibleForLifecycleAction(fresh)) return;
+    }
 
     const now = new Date();
     if (action.kind === "suspend") {
@@ -407,7 +489,10 @@ export class FlyRunnerProvider implements RunnerProvider {
       await this.flyClient.destroyMachine(row.machineId, { force: true }).catch(() => {});
       if (row.volumeId) await this.flyClient.destroyVolume(row.volumeId).catch(() => {});
       await this.releaseRunClaimIfCurrent(row.runId, row.machineId);
-      await this.updateInstance(row.runId, { state: "gone" });
+      // Both are now destroyed on Fly's side — clear the mapping too, or a later
+      // dispatch would resume() into a dead machine/volume instead of creating
+      // fresh ones.
+      await this.updateInstance(row.runId, { state: "gone", machineId: null, volumeId: null });
       await emitRunnerEvent(row.runId, "runner_destroyed", {
         machineId: row.machineId,
         volumeId: row.volumeId,

@@ -11,6 +11,9 @@ findings via gh_pr__pr_review with verdict 'comment' for non-blocking
 notes or 'request_changes' for must-fix issues. Approve only when the diff
 is correct, tested, and consistent with the codebase.`,
   thinkingLevel: "high",
-  toolsProfile: "repo_read,gh_pr,gh_ci",
+  // Read-only gh_pr: a review run checks out an untrusted third-party PR, so
+  // it must never be able to merge or approve the PR it's judging (gh_pr_ro
+  // has no pr_merge and pr_review can't emit 'approve').
+  toolsProfile: "repo_read,gh_pr_ro,gh_ci",
   budget: { maxTurns: 20 },
 };

@@ -40,6 +40,10 @@ export interface FlyClientOptions {
   apiToken?: string;
 }
 
+// A hung Fly API call must not stall the sweep tick (or any other caller)
+// indefinitely; every request gets a hard ceiling.
+const REQUEST_TIMEOUT_MS = 30_000;
+
 export class FlyApiError extends Error {
   constructor(
     readonly status: number,
@@ -76,15 +80,24 @@ export function makeFlyClient(input?: typeof fetch | FlyClientOptions): FlyClien
   const { fetchImpl, baseUrl, appName, apiToken } = normalizeOptions(input);
 
   async function request<T = unknown>(method: string, path: string, body?: unknown): Promise<T | null> {
-    const response = await fetchImpl(`${baseUrl}/apps/${appName}${path}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-        Accept: "application/json",
-        ...(body == null ? {} : { "Content-Type": "application/json" }),
-      },
-      body: body == null ? undefined : JSON.stringify(body),
-    });
+    let response: Response;
+    try {
+      response = await fetchImpl(`${baseUrl}/apps/${appName}${path}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+          Accept: "application/json",
+          ...(body == null ? {} : { "Content-Type": "application/json" }),
+        },
+        body: body == null ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === "TimeoutError") {
+        throw new FlyApiError(0, `request timed out after ${REQUEST_TIMEOUT_MS}ms: ${method} ${path}`);
+      }
+      throw err;
+    }
     if (!response.ok) {
       throw new FlyApiError(response.status, await response.text());
     }

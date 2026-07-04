@@ -9,6 +9,7 @@ import * as repo from "./repo";
 import * as agentLib from "./agent";
 import * as runs from "./runs";
 import { REVIEW_DEFAULT_BUDGET_USD, parseReviewVerdict } from "./run-templates";
+import { parsePrUrl } from "./gh-url";
 import {
   PLAN_STATES,
   TASK_STATES,
@@ -117,6 +118,14 @@ const findCriterion = async (taskId: string, needle: string) => {
 };
 
 const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
+
+// States a plan may be *created* in. Full PLAN_STATES also includes
+// 'accepted'/'done'/'cancelled' — allowing those at creation would let a
+// caller mint a plan that's already past review (or terminal) and never went
+// through transition_plan, silently bypassing the lifecycle. 'draft' (the
+// default) and 'proposed' (a plan submitted for review without a separate
+// draft step) are the only initial states callers actually need.
+const PLAN_CREATE_STATES = ["draft", "proposed"] as const satisfies readonly PlanState[];
 
 async function safe<T>(fn: () => Promise<T> | T): Promise<T | { _error: string }> {
   try {
@@ -364,14 +373,17 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "create_plan",
     label: "Create Plan",
     description:
-      "Create a new plan across one or more repositories. Returns the plan id. Tasks under this plan must target one of the listed repositories. If repo_ids is omitted, defaults to [the default repo].",
+      "Create a new plan across one or more repositories. Returns the plan id. Tasks under this plan must target one of the listed repositories. If repo_ids is omitted, defaults to [the default repo]. state defaults to 'draft' and may only be set to 'draft' or 'proposed' at creation — 'accepted'/'done'/'cancelled' would skip the plan's review lifecycle; use transition_plan to advance a plan through its states.",
     parameters: Type.Object({
       title: Type.String({ minLength: 1 }),
       body: Type.Optional(Type.String()),
       owner: Type.Optional(Type.String()),
       tags: Type.Optional(Type.Array(Type.String())),
       state: Type.Optional(
-        Type.Union(PLAN_STATES.map((s) => Type.Literal(s)) as [ReturnType<typeof Type.Literal>, ...ReturnType<typeof Type.Literal>[]])
+        Type.Union(
+          PLAN_CREATE_STATES.map((s) => Type.Literal(s)) as [ReturnType<typeof Type.Literal>, ...ReturnType<typeof Type.Literal>[]],
+          { description: "Initial state. Defaults to 'draft'. Only 'draft' or 'proposed' are allowed here — reach 'accepted'/'done'/'cancelled' via transition_plan." }
+        )
       ),
       repo_ids: Type.Optional(Type.Array(Type.String())),
     }),
@@ -485,11 +497,28 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "delete_plan",
     label: "Delete Plan",
     description:
-      "Delete a plan. CASCADES — destroys all tasks, criteria, notes, and sessions under it. Requires an explicit id (never defaulted) to avoid accidental destruction.",
+      "Delete a plan. CASCADES — destroys all tasks, criteria, notes, and sessions under it. Requires an explicit id (never defaulted) to avoid accidental destruction. Refuses if the plan or any of its tasks has an active (non-terminal) agent run — cancel those with cancel_session first, since the cascade would delete a live run's row out from under it.",
     parameters: Type.Object({ id: Type.String({ minLength: 1 }) }),
     execute: async ({ id }, _ctx) => {
       const existing = await repo.getPlan(id);
       if (!existing) return errResult(`Error: Plan ${id} not found`);
+      // tasks→plans and agent_sessions.taskId→tasks both ON DELETE CASCADE:
+      // deleting the plan while a run is live would vaporize that run's row
+      // mid-turn (worker's next get(runId) throws, worktree leaks, the SDK
+      // process keeps burning with no cancel handle). Refuse instead.
+      const tasksInPlan = await repo.listTasks({ planId: id });
+      const [planRuns, ...taskRunLists] = await Promise.all([
+        runs.list({ planId: id, activeOnly: true }),
+        ...tasksInPlan.map((t) => runs.list({ taskId: t.id, activeOnly: true })),
+      ]);
+      const activeRuns = [...planRuns, ...taskRunLists.flat()];
+      if (activeRuns.length > 0) {
+        return errResult(
+          `Error: Plan ${id} has ${activeRuns.length} active run(s) (${activeRuns
+            .map((r) => `#${r.id}`)
+            .join(", ")}) on it or its tasks. Cancel them with cancel_session before deleting the plan.`
+        );
+      }
       await repo.deletePlan(id);
       return ok(`Deleted plan ${id}.`);
     },
@@ -634,11 +663,23 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
   {
     name: "delete_task",
     label: "Delete Task",
-    description: "Delete a task. CASCADES to its notes, criteria, dependencies, and sessions.",
+    description:
+      "Delete a task. CASCADES to its notes, criteria, dependencies, and sessions. Refuses if the task has an active (non-terminal) agent run — cancel it with cancel_session first, since the cascade would delete a live run's row out from under it.",
     parameters: Type.Object({ id: Type.String({ minLength: 1 }) }),
     execute: async ({ id }, _ctx) => {
       const existing = await repo.getTask(id);
       if (!existing) return errResult(`Error: Task ${id} not found`);
+      // agent_sessions.taskId→tasks is ON DELETE CASCADE: deleting the task
+      // while a run is live would vaporize that run's row mid-turn (worker's
+      // next get(runId) throws, worktree leaks, no cancel handle). Refuse.
+      const activeRuns = await runs.list({ taskId: id, activeOnly: true });
+      if (activeRuns.length > 0) {
+        return errResult(
+          `Error: Task ${id} has ${activeRuns.length} active run(s) (${activeRuns
+            .map((r) => `#${r.id}`)
+            .join(", ")}). Cancel them with cancel_session before deleting the task.`
+        );
+      }
       await repo.deleteTask(id);
       return ok(`Deleted task ${id}.`);
     },
@@ -986,13 +1027,37 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       ),
     }),
     execute: async ({ task_id, pr_url, model, reasoning }, ctx) => {
+      // pr_url gets interpolated straight into a worktree_at_pr checkout;
+      // catch a malformed value here instead of letting the run fail
+      // asynchronously deep in the worker.
+      if (!parsePrUrl(pr_url)) {
+        return errResult(
+          `Error: Could not parse pr_url '${pr_url}'. Expected https://github.com/<owner>/<repo>/pull/<n> or <owner>/<repo>#<n>.`
+        );
+      }
       const task = await repo.getTask(task_id);
       if (!task) return errResult(`Error: Task ${task_id} not found`);
+      // Refuse to stack a second reviewer on the same task while one is
+      // already active — otherwise repeated calls pile up unbounded
+      // concurrent review runs against the same PR.
+      const activeReviews = await runs.list({
+        goal: "<review>",
+        taskId: task_id,
+        activeOnly: true,
+      });
+      if (activeReviews.length > 0) {
+        return errResult(
+          `Error: Task ${task_id} already has an active review (session #${activeReviews[0].id}). Await or cancel it before starting another.`
+        );
+      }
       const result = await safe(() =>
         runs.create({
           goal: "<review>",
           cwdStrategy: "worktree_at_pr",
-          toolsProfile: "orchestrator,repo_read,gh_pr",
+          // Read-only gh_pr: this run checks out an untrusted third-party PR,
+          // so it must never be able to merge or approve the PR it's judging
+          // (gh_pr_ro has no pr_merge and pr_review can't emit 'approve').
+          toolsProfile: "orchestrator,repo_read,gh_pr_ro",
           taskId: task_id,
           prUrl: pr_url,
           repoId: task.repoId ?? null,
@@ -1014,10 +1079,16 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "await_session",
     label: "Await Session",
     description:
-      "Block until an agent session reaches a terminal status (completed | failed | cancelled | closed | budget_exhausted), then return its status, outcome, review verdict (if any), PR url, error, and cost. Use after start_session / start_review to wait for a child run to finish. Times out after timeout_seconds (default 1800) and returns the current (non-terminal) status with timed_out=true.",
+      "Block until an agent session reaches a terminal status (completed | failed | cancelled | closed | budget_exhausted), then return its status, outcome, review verdict (if any), PR url, error, and cost. Use after start_session / start_review to wait for a child run to finish. Times out after timeout_seconds (default 1800, max 7200) and returns the current (non-terminal) status with timed_out=true.",
     parameters: Type.Object({
       session_id: Type.Integer(),
-      timeout_seconds: Type.Optional(Type.Integer({ minimum: 1 })),
+      timeout_seconds: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          maximum: 7200,
+          description: "Seconds to wait before returning non-terminal status. Default 1800, max 7200 (2h) — this call blocks the turn, it shouldn't pin it for longer than that.",
+        })
+      ),
     }),
     execute: async ({ session_id, timeout_seconds }, _ctx) => {
       const timeoutMs = (timeout_seconds ?? 1800) * 1000;

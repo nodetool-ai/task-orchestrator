@@ -36,6 +36,56 @@ describe("ghCiExtension", () => {
       expect(def.label.length).toBeGreaterThan(0);
     }
   });
+
+  it("ci_logs rejects non-numeric run_id", async () => {
+    const { calls, pi } = makeStub();
+    ghCiExtension({ cwd: "/tmp" })(pi);
+    const ciLogs = calls.find((c) => c.name === "gh_ci__ci_logs")!;
+    const res = await ciLogs.def.execute("id", {
+      url: "https://github.com/test/repo/pull/1",
+      run_id: "--web",
+      mode: "full",
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/run_id must be a numeric value/);
+  });
+
+  it("ci_logs rejects non-numeric string run_id", async () => {
+    const { calls, pi } = makeStub();
+    ghCiExtension({ cwd: "/tmp" })(pi);
+    const ciLogs = calls.find((c) => c.name === "gh_ci__ci_logs")!;
+    const res = await ciLogs.def.execute("id", {
+      url: "https://github.com/test/repo/pull/1",
+      run_id: "abc123",
+      mode: "full",
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/run_id must be a numeric value/);
+  });
+
+  it("ci_rerun rejects non-numeric run_id", async () => {
+    const { calls, pi } = makeStub();
+    ghCiExtension({ cwd: "/tmp" })(pi);
+    const ciRerun = calls.find((c) => c.name === "gh_ci__ci_rerun")!;
+    const res = await ciRerun.def.execute("id", {
+      url: "https://github.com/test/repo/pull/1",
+      run_id: "--failed",
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/run_id must be a numeric value/);
+  });
+
+  it("ci_rerun rejects string run_id with non-numeric content", async () => {
+    const { calls, pi } = makeStub();
+    ghCiExtension({ cwd: "/tmp" })(pi);
+    const ciRerun = calls.find((c) => c.name === "gh_ci__ci_rerun")!;
+    const res = await ciRerun.def.execute("id", {
+      url: "https://github.com/test/repo/pull/1",
+      run_id: "123abc",
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/run_id must be a numeric value/);
+  });
 });
 
 // ──────────────────────────────────────────────────────────

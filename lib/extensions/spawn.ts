@@ -8,14 +8,15 @@
 // Pure helpers re-exported for direct unit testing.
 
 import { Type } from "typebox";
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 
 import { db } from "@/db";
 import { agentSessions, agentMessages } from "@/db/schema";
 import * as repo from "../repo";
 import * as runs from "../runs";
+import * as runDispatch from "../run-dispatch";
 import { isResumableWorktreeRun } from "../runs";
-import type { RunRow, CwdStrategy } from "../runs";
+import type { RunRow, CwdStrategy, AppendStreamEvent } from "../runs";
 import { isTerminalStatus } from "../types";
 import type { SessionStatus } from "../types";
 import { listProfiles } from "../profiles";
@@ -318,12 +319,19 @@ async function collectSubtree(
 /**
  * Find the last agent text emitted on a run, by scanning agentMessages in
  * reverse. Returns null if no agent text is present.
+ *
+ * extractLatestAssistantText walks the rows oldest→newest and returns the LAST
+ * agent block, so the query must return rows in insertion order. Postgres gives
+ * no ordering guarantee without an explicit ORDER BY (a plan change or a
+ * concurrent turn's insert could shuffle them), so pin it to ascending id —
+ * otherwise get_run/append_message could report a stale (non-latest) agent text.
  */
 async function lastAgentText(runId: number): Promise<string | null> {
   const rows = await db
     .select({ role: agentMessages.role, content: agentMessages.content })
     .from(agentMessages)
-    .where(eq(agentMessages.runId, runId));
+    .where(eq(agentMessages.runId, runId))
+    .orderBy(asc(agentMessages.id));
   return extractLatestAssistantText(rows);
 }
 
@@ -333,6 +341,75 @@ async function lastAgentText(runId: number): Promise<string | null> {
 
 const ok = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined });
 const errResult = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined, isError: true });
+
+/**
+ * Drain an AppendStreamEvent generator (from runs.append or
+ * runs.sendMessageToRun) to its terminal frame (`done`/`error`), bounded by
+ * `timeoutMs`. Returns { timedOut:false, error } on natural completion — `error`
+ * is the last error-frame message, or null.
+ *
+ * On timeout it stops tailing WITHOUT killing the child turn: it aborts
+ * `relayAbort` (so a remote relay's finally unsubscribes from run_stream, i.e.
+ * the iterator is not leaked) and closes the generator. The child keeps running
+ * on its worker; the caller can await_session / spawn__get_run later. `relayAbort`
+ * is null for the in-process dev path, where there is no separate relay to abort.
+ */
+async function drainAppend(
+  gen: AsyncGenerator<AppendStreamEvent>,
+  timeoutMs: number,
+  relayAbort: AbortController | null
+): Promise<{ timedOut: boolean; error: string | null }> {
+  let error: string | null = null;
+  const drain = (async () => {
+    for await (const event of gen) {
+      if (event.type === "error") error = event.error ?? "append failed";
+      if (event.type === "done" || event.type === "error") break;
+    }
+  })().catch((err) => {
+    error = err instanceof Error ? err.message : String(err);
+  });
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<"timeout">((res) => {
+    timer = setTimeout(() => res("timeout"), timeoutMs);
+  });
+  const outcome = await Promise.race([drain.then(() => "done" as const), timeout]);
+  if (timer) clearTimeout(timer);
+
+  if (outcome === "timeout") {
+    // Do NOT kill the child: only tear down our tail of its stream.
+    relayAbort?.abort();
+    await gen.return(undefined).catch(() => {});
+    return { timedOut: true, error: null };
+  }
+  return { timedOut: false, error };
+}
+
+/**
+ * Result envelope for a bounded await=true drain that hit its time limit. The
+ * child turn is still in flight (NOT cancelled) — the executor should treat this
+ * like await_session's timed_out and check back later.
+ */
+function timedOutResult(runIdArg: number, seconds: number, rootId: number) {
+  return ok(
+    JSON.stringify(
+      {
+        run_id: runIdArg,
+        status: "timed_out",
+        awaited: true,
+        child_in_flight: true,
+        timeout_seconds: seconds,
+        message:
+          `append_message did not observe run ${runIdArg} return within ${seconds}s. ` +
+          `The child turn is still running on its worker (it was NOT cancelled); ` +
+          `await_session or spawn__get_run later to read the result.`,
+        tree_root_id: rootId,
+      },
+      null,
+      2
+    )
+  );
+}
 
 export interface SpawnExtensionOptions {
   runId: number;
@@ -533,11 +610,22 @@ export const spawnExtension =
       name: "spawn__append_message",
       label: "Append Message",
       description:
-        "Send a user message to an existing run, resuming its SDK session. Uses the same per-run lock as the UI composer, so this is safe to call concurrently with the UI. When await=true, blocks until the run returns to idle (or a terminal state) and returns the new agent text. Refuses on closed/cancelled runs, and on completed/failed/budget_exhausted runs that are NOT resumable worktree (implement-style) children — those can be resumed even after they land 'completed'. Cannot target your own run or a mid-turn ancestor (that would deadlock). Same tree-budget cap as spawn__spawn_agent.",
+        "Send a user message to an existing run, resuming its SDK session. Uses the same per-run lock as the UI composer, so this is safe to call concurrently with the UI. When await=true, blocks until the run returns to idle (or a terminal state) and returns the new agent text; if the child does not return within timeout_seconds (default 1800) the call returns status 'timed_out' with the child STILL running (not cancelled) — await_session or spawn__get_run later. Refuses on closed/cancelled runs, and on completed/failed/budget_exhausted runs that are NOT resumable worktree (implement-style) children — those can be resumed even after they land 'completed'. Cannot target your own run or a mid-turn ancestor (that would deadlock). Same tree-budget cap as spawn__spawn_agent.",
       parameters: Type.Object({
         run_id: Type.Integer({ minimum: 1 }),
         text: Type.String({ minLength: 1 }),
         await: Type.Optional(Type.Boolean()),
+        timeout_seconds: Type.Optional(
+          Type.Integer({
+            minimum: 1,
+            maximum: 7200,
+            default: 1800,
+            description:
+              "Only honored when await=true: max seconds to wait for the child to return " +
+              "before giving up with status 'timed_out' (the child keeps running). Mirrors " +
+              "await_session's timeout. Default 1800.",
+          })
+        ),
       }),
       execute: async (_id, args) => {
         // 0. Self / ancestor guard. runs.append grabs the per-run lock BEFORE
@@ -597,43 +685,13 @@ export const spawnExtension =
         }
 
         const awaitIdle = args.await === true;
+        const timeoutSeconds = args.timeout_seconds ?? 1800;
+        const timeoutMs = timeoutSeconds * 1000;
 
-        // 3. Fire the append.
-        let appendError: string | null = null;
-        const drain = (async () => {
-          try {
-            for await (const event of runs.append({
-              runId: args.run_id,
-              role: "user",
-              text: args.text,
-            })) {
-              if (event.type === "error") {
-                appendError = event.error ?? "append failed";
-              }
-              if (event.type === "done" || event.type === "error") break;
-            }
-          } catch (err) {
-            appendError = err instanceof Error ? err.message : String(err);
-          }
-        })();
-
-        if (!awaitIdle) {
-          // Give a synchronously-failing append a chance to record its error
-          // before we report back: race the drain against one setImmediate tick.
-          // runs.append yields its up-front errors (target not found / already
-          // in flight in another process / non-resumable terminal / prepareCwd
-          // failure that rejects immediately) within microtasks, which settle
-          // before the setImmediate macrotask fires — so appendError is
-          // populated for those cases and we surface a real error instead of a
-          // false {status: 'running'}.
-          await Promise.race([
-            drain,
-            new Promise<void>((res) => setImmediate(res)),
-          ]);
-          if (appendError) {
-            return errResult(`append failed: ${appendError}`);
-          }
-          return ok(
+        // Envelope for a fire-and-forget append (the message is persisted + a
+        // turn is running, but we did not wait for it).
+        const runningResult = () =>
+          ok(
             JSON.stringify(
               {
                 run_id: args.run_id,
@@ -650,36 +708,138 @@ export const spawnExtension =
               2
             )
           );
+
+        // Envelope for a completed await=true drain.
+        const awaitedResult = (after: RunRow | null, latestText: string | null) =>
+          ok(
+            JSON.stringify(
+              {
+                run_id: args.run_id,
+                status: after?.status ?? "idle",
+                awaited: true,
+                last_text: latestText,
+                total_cost_usd: after?.totalCostUsd ?? null,
+                tree_root_id: callerRoot.id,
+              },
+              null,
+              2
+            )
+          );
+
+        // 3. Fire the append.
+        //
+        // BUG (M3): appending via runs.append DIRECTLY drove the child's whole
+        // SDK turn inside THIS executor's worker container — the child ran under
+        // the caller's cgroup/memory cap and bypassed the dispatch admission
+        // gate; and with await=false the floated drain promise was killed
+        // mid-write when scripts/run-worker.ts calls process.exit(0), stranding
+        // the child at 'running' until the stale-lease reaper. When a remote
+        // runner is configured we instead route through runs.sendMessageToRun,
+        // which PERSISTS the message and DISPATCHES a worker, then RELAYS the
+        // same AppendStreamEvent frames from the durable run_stream — so the
+        // child's turn runs in ITS OWN admitted container, not ours. The
+        // in-process path below is kept for dev / non-remote mode.
+        if (runDispatch.remoteRunnerEnabled()) {
+          // The relay controller governs only OUR tail of the child's stream:
+          // aborting it unsubscribes the relay but does NOT kill the child turn,
+          // which runs independently on its worker.
+          const relayAbort = new AbortController();
+          const gen = runs.sendMessageToRun({
+            runId: args.run_id,
+            role: "user",
+            text: args.text,
+            abort: relayAbort,
+          });
+
+          if (!awaitIdle) {
+            // INVARIANT: sendMessageToRun persists the user message AND fires the
+            // worker dispatch BEFORE its first yield — both are awaited ahead of
+            // the `yield* relayRunStream(...)` tail (see lib/runs.ts). So a single
+            // gen.next() is enough to guarantee persist+dispatch have completed:
+            // whatever it yields (the just-persisted user_message frame, or an
+            // up-front error frame) proves the message is durable and a worker was
+            // asked to run it. We then DETACH — abort the relay + close the
+            // iterator so its finally unsubscribes — rather than float the tail
+            // past this tool return (that float is exactly what process.exit
+            // truncated). The child's turn continues on its worker regardless.
+            let first: IteratorResult<AppendStreamEvent>;
+            try {
+              first = await gen.next();
+            } catch (err) {
+              relayAbort.abort();
+              await gen.return(undefined).catch(() => {});
+              return errResult(
+                `append failed: ${err instanceof Error ? err.message : String(err)}`
+              );
+            }
+            relayAbort.abort();
+            await gen.return(undefined).catch(() => {});
+            if (!first.done && first.value?.type === "error") {
+              return errResult(`append failed: ${first.value.error ?? "append failed"}`);
+            }
+            return runningResult();
+          }
+
+          // await=true: drain the relay to terminal, bounded by timeout (BUG M2)
+          // so a wedged child cannot wedge the executor forever.
+          const { timedOut, error } = await drainAppend(gen, timeoutMs, relayAbort);
+          if (timedOut) {
+            return timedOutResult(args.run_id, timeoutSeconds, callerRoot.id);
+          }
+          if (error) {
+            return errResult(`append failed: ${error}`);
+          }
+          const after = await runs.get(args.run_id);
+          const latestText = await lastAgentText(args.run_id);
+          return awaitedResult(after, latestText);
         }
 
-        // 4. Awaiting path: `drain` resolves only when runs.append's generator
-        //    completes, which happens once the turn reaches a terminal status
-        //    (it yields `done` last) — that is the terminal signal. A
-        //    pre-append runs.subscribe() would be a no-op here anyway: the
-        //    run's event bus only exists while the turn is live, i.e. after
-        //    append has already started.
-        await drain.catch(() => {});
-
-        if (appendError) {
-          return errResult(`append failed: ${appendError}`);
+        // ── In-process (dev / non-remote) mode ──────────────────────────────
+        if (!awaitIdle) {
+          // Fire-and-forget: drive the turn in-process on a floated drain. Race
+          // it against one setImmediate tick so a synchronously-failing append
+          // (target not found / already in flight in another process /
+          // non-resumable terminal / prepareCwd failure that rejects
+          // immediately) surfaces a real error instead of a false
+          // {status:'running'} — those errors yield within microtasks, which
+          // settle before the setImmediate macrotask fires.
+          let appendError: string | null = null;
+          const drain = (async () => {
+            try {
+              for await (const event of runs.append({
+                runId: args.run_id,
+                role: "user",
+                text: args.text,
+              })) {
+                if (event.type === "error") appendError = event.error ?? "append failed";
+                if (event.type === "done" || event.type === "error") break;
+              }
+            } catch (err) {
+              appendError = err instanceof Error ? err.message : String(err);
+            }
+          })();
+          await Promise.race([drain, new Promise<void>((res) => setImmediate(res))]);
+          if (appendError) {
+            return errResult(`append failed: ${appendError}`);
+          }
+          return runningResult();
         }
 
+        // await=true (dev): drain runs.append's generator, bounded by timeout
+        // (BUG M2). The generator completes once the turn hits a terminal status
+        // (it yields `done` last). relayAbort is null here — there is no separate
+        // relay; on timeout we just stop iterating.
+        const gen = runs.append({ runId: args.run_id, role: "user", text: args.text });
+        const { timedOut, error } = await drainAppend(gen, timeoutMs, null);
+        if (timedOut) {
+          return timedOutResult(args.run_id, timeoutSeconds, callerRoot.id);
+        }
+        if (error) {
+          return errResult(`append failed: ${error}`);
+        }
         const after = await runs.get(args.run_id);
         const latestText = await lastAgentText(args.run_id);
-        return ok(
-          JSON.stringify(
-            {
-              run_id: args.run_id,
-              status: after?.status ?? "idle",
-              awaited: true,
-              last_text: latestText,
-              total_cost_usd: after?.totalCostUsd ?? null,
-              tree_root_id: callerRoot.id,
-            },
-            null,
-            2
-          )
-        );
+        return awaitedResult(after, latestText);
       },
     });
   };

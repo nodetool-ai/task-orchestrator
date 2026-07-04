@@ -50,4 +50,19 @@ describe("makeFlyClient", () => {
     const fly = makeFlyClient({ fetchImpl: fetchMock as unknown as typeof fetch, appName: "app", apiToken: "tok" });
     await expect(fly.listMachines()).rejects.toBeInstanceOf(FlyApiError);
   });
+
+  it("attaches a bounded AbortSignal so a hung request can't stall forever", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    const fly = makeFlyClient({ fetchImpl: fetchMock as unknown as typeof fetch, appName: "app", apiToken: "tok" });
+    await fly.suspendMachine("m1");
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("surfaces a fetch timeout as a clear FlyApiError instead of hanging", async () => {
+    const timeoutError = new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    const fetchMock = vi.fn().mockRejectedValue(timeoutError);
+    const fly = makeFlyClient({ fetchImpl: fetchMock as unknown as typeof fetch, appName: "app", apiToken: "tok" });
+    await expect(fly.listMachines()).rejects.toThrow(/timed out/);
+  });
 });

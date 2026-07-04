@@ -9,7 +9,7 @@
 import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, asc, desc, eq, gt, inArray, isNotNull } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, sql } from "drizzle-orm";
 
 import { db } from "@/db";
 import { agentEvents, agentSessions, tasks } from "@/db/schema";
@@ -47,6 +47,12 @@ declare global {
 // (empty test DBs never enter the filter callback, so the suite stayed green).
 const NON_TERMINAL_BUT_DEAD = ["pending", "preparing", "running", "pushing", "opening_pr"];
 
+// Grace period for pending rows before treating as orphaned. Fresh pending rows
+// are the dispatch queue — owned by the creating process's kickoff or the
+// detached pump in lib/run-dispatch.ts. Only an old one indicates the owning
+// process died before dispatch.
+const PENDING_GRACE_PERIOD_MS = 15 * 60_000; // 15 minutes
+
 if (!globalThis.__agentReaperRan) {
   globalThis.__agentReaperRan = true;
   reapOrphans().catch((err) => {
@@ -65,6 +71,7 @@ if (!globalThis.__agentPrWatcher && PR_POLL_MS > 0) {
 async function reapOrphans() {
   // Implement-style runs in any in-flight status are suspect after a restart.
   // Idle/closed/budget_exhausted/completed/failed/cancelled rows are left alone.
+  const now = new Date();
   const orphans = (
     await db
       .select()
@@ -75,7 +82,14 @@ async function reapOrphans() {
           isNotNull(agentSessions.taskId)
         )
       )
-  ).filter((row) => NON_TERMINAL_BUT_DEAD.includes(row.status));
+  ).filter((row) => {
+    if (!NON_TERMINAL_BUT_DEAD.includes(row.status)) return false;
+    // pending rows are fresh dispatch-queue entries; only reap if genuinely stale
+    if (row.status === "pending") {
+      return now.getTime() - row.startedAt.getTime() > PENDING_GRACE_PERIOD_MS;
+    }
+    return true;
+  });
 
   for (const orphan of orphans) {
     // Never reap a run that is genuinely in flight:
@@ -229,42 +243,66 @@ export interface StartSessionInput {
 export async function startSession(input: StartSessionInput): Promise<AgentSessionFull> {
   const task = await repo.getTask(input.taskId);
   if (!task) throw new repo.RepoError(`Task ${input.taskId} not found`, 404);
-  const active = await listActiveSessions(input.taskId);
-  if (active.length > 0) {
-    throw new repo.RepoError(
-      `Task ${input.taskId} already has an active session (#${active[0].id})`,
-      409
-    );
-  }
-  if (input.resumeOf) {
-    const prior = await runs.get(input.resumeOf);
-    if (!prior) throw new repo.RepoError(`Prior session #${input.resumeOf} not found`, 404);
-    if (prior.taskId !== input.taskId) {
-      throw new repo.RepoError(`Session #${input.resumeOf} belongs to a different task`, 400);
-    }
-    if (!prior.sdkSessionId) {
+
+  // M17c: listActiveSessions(taskId) followed eventually by runs.create() used
+  // to be a plain check-then-insert with several awaits in between (resumeOf
+  // validation, runs.create's own internal queries) — two concurrent
+  // start_session calls for the same task could both observe zero active
+  // sessions and both go on to create a run, leaving two competing
+  // worktrees/PRs implementing the same task.
+  //
+  // runs.create is owned by lib/runs.ts (out of scope for this fix) and
+  // inserts via the module-level `db`, not a transaction we control here, so
+  // we can't take a row lock on the run it's about to insert. Instead we take
+  // a Postgres *transaction-scoped advisory lock* keyed on the task id around
+  // the whole check-then-create critical section: every racer must acquire
+  // this lock before it (re-)checks for an active session. As long as both
+  // racers go through this same acquire-then-check path, the lock serializes
+  // them — the loser blocks until the winner's transaction ends, then
+  // re-checks and finds the winner's session already active. The lock is
+  // released automatically when the transaction ends, whether by commit or
+  // by a thrown RepoError below (transaction rollback), so an error here
+  // never leaves the task's session slot stuck locked.
+  return await db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${input.taskId}))`);
+
+    const active = await listActiveSessions(input.taskId);
+    if (active.length > 0) {
       throw new repo.RepoError(
-        `Session #${input.resumeOf} has no SDK session id — nothing to resume`,
-        400
+        `Task ${input.taskId} already has an active session (#${active[0].id})`,
+        409
       );
     }
-  }
+    if (input.resumeOf) {
+      const prior = await runs.get(input.resumeOf);
+      if (!prior) throw new repo.RepoError(`Prior session #${input.resumeOf} not found`, 404);
+      if (prior.taskId !== input.taskId) {
+        throw new repo.RepoError(`Session #${input.resumeOf} belongs to a different task`, 400);
+      }
+      if (!prior.sdkSessionId) {
+        throw new repo.RepoError(
+          `Session #${input.resumeOf} has no SDK session id — nothing to resume`,
+          400
+        );
+      }
+    }
 
-  const created = await runs.create({
-    goal: "<implement>",
-    cwdStrategy: "worktree",
-    // gh_pr/gh_ci let the agent inspect its own PR and fetch CI results
-    // (e.g. when reacting to webhook-driven CI failures).
-    toolsProfile: "orchestrator,repo_write,gh_pr,gh_ci",
-    taskId: input.taskId,
-    repoId: task.repoId ?? null,
-    model: input.model ?? DEFAULT_MODEL,
-    thinkingLevel: input.thinkingLevel ?? null,
-    baseBranch: input.baseBranch ?? "main",
-    parentRunId: input.resumeOf ?? input.parentRunId ?? null,
+    const created = await runs.create({
+      goal: "<implement>",
+      cwdStrategy: "worktree",
+      // gh_pr/gh_ci let the agent inspect its own PR and fetch CI results
+      // (e.g. when reacting to webhook-driven CI failures).
+      toolsProfile: "orchestrator,repo_write,gh_pr,gh_ci",
+      taskId: input.taskId,
+      repoId: task.repoId ?? null,
+      model: input.model ?? DEFAULT_MODEL,
+      thinkingLevel: input.thinkingLevel ?? null,
+      baseBranch: input.baseBranch ?? "main",
+      parentRunId: input.resumeOf ?? input.parentRunId ?? null,
+    });
+
+    return runs.toAgentSessionFull(created);
   });
-
-  return runs.toAgentSessionFull(created);
 }
 
 export async function listSessions(taskId?: string): Promise<AgentSessionFull[]> {
@@ -408,4 +446,10 @@ function safeJson(s: string): unknown {
 function describe(err: unknown): string {
   if (err instanceof Error) return err.message;
   return typeof err === "string" ? err : JSON.stringify(err);
+}
+
+// Test hook: reset the reaper guard and run reapOrphans for testing.
+export async function _reapOrphansForTest(): Promise<void> {
+  globalThis.__agentReaperRan = false;
+  return reapOrphans();
 }
