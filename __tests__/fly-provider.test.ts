@@ -4,8 +4,8 @@ import { db } from "../db";
 import { agentSessions, runnerInstances } from "../db/schema";
 import { create, get } from "../lib/runs";
 import { dispatchRun } from "../lib/run-dispatch";
-import { FlyRunnerProvider, isEligibleForLifecycleAction } from "../lib/runner/fly";
-import type { FlyClient, FlyMachine, FlyMachineConfig } from "../lib/runner/fly-client";
+import { FlyRunnerProvider, isEligibleForLifecycleAction, isReapableVolume } from "../lib/runner/fly";
+import type { FlyClient, FlyMachine, FlyMachineConfig, FlyVolume } from "../lib/runner/fly-client";
 
 type FakeOptions = {
   machines?: FlyMachine[];
@@ -14,12 +14,17 @@ type FakeOptions = {
   createMachineFailsForVolume?: Set<string>;
   /** Machine ids whose stopMachine call should throw. */
   stopMachineFailsFor?: Set<string>;
+  /** Volumes returned by listVolumes() (orphan-reaper tests). */
+  volumes?: FlyVolume[];
+  /** Volume ids whose destroyVolume call should throw (reaper failure tests). */
+  destroyVolumeFailsFor?: Set<string>;
 };
 
 function fakeFlyClient(calls: string[] = [], opts: FakeOptions = {}): FlyClient {
   let machineSeq = 0;
   let volumeSeq = 0;
   const machines = new Map((opts.machines ?? []).map((m) => [m.id, m]));
+  const volumes = new Map((opts.volumes ?? []).map((v) => [v.id, v]));
   return {
     async createVolume(input: { name: string }) {
       calls.push(`createVolume:${input.name}`);
@@ -28,6 +33,14 @@ function fakeFlyClient(calls: string[] = [], opts: FakeOptions = {}): FlyClient 
     },
     async destroyVolume(id: string) {
       calls.push(`destroyVolume:${id}`);
+      if (opts.destroyVolumeFailsFor?.has(id)) {
+        throw new Error(`fake: destroyVolume rejected for ${id}`);
+      }
+      volumes.delete(id);
+    },
+    async listVolumes() {
+      calls.push("listVolumes");
+      return [...volumes.values()];
     },
     async createMachine(input: { name: string; region: string; config: FlyMachineConfig }) {
       const volumeId = input.config.mounts[0]?.volume;
@@ -249,8 +262,11 @@ describe("FlyRunnerProvider", () => {
     const calls: string[] = [];
     const bad = await create({ goal: "<implement>", defer: true });
     const ok = await create({ goal: "<implement>", defer: true });
-    await db.update(agentSessions).set({ status: "completed" }).where(eq(agentSessions.id, bad.id));
-    await db.update(agentSessions).set({ status: "completed" }).where(eq(agentSessions.id, ok.id));
+    // Idle (resumable) rows so SUSPEND_MS=0 drives the stop path this test
+    // exercises. A terminal run would instead take the short terminal-window
+    // path (suspend within 1h, archive-and-destroy after) — a different action.
+    await db.update(agentSessions).set({ status: "idle" }).where(eq(agentSessions.id, bad.id));
+    await db.update(agentSessions).set({ status: "idle" }).where(eq(agentSessions.id, ok.id));
     await db.insert(runnerInstances).values({
       runId: bad.id,
       machineId: "m-bad",
@@ -316,6 +332,144 @@ describe("FlyRunnerProvider", () => {
         })
       ).toBe(true);
     });
+  });
+
+  // Task 5: the orphan-volume reaper's guards live in this pure predicate — unit
+  // test each guard directly so the "reap a leak but never an in-use volume" rules
+  // are covered deterministically.
+  describe("isReapableVolume (orphan-volume reaper guards)", () => {
+    const OLD = new Date(Date.now() - 60 * 60_000); // 1h old, past the grace window
+    const now = Date.now();
+
+    it("is reapable: unattached + old + vol_run_* + unprotected", () => {
+      expect(
+        isReapableVolume(
+          { id: "v1", name: "vol_run_7", attachedMachineId: null, createdAt: OLD },
+          new Set(),
+          now
+        )
+      ).toBe(true);
+    });
+
+    it("is reapable when createdAt is absent (unknown age → old enough)", () => {
+      expect(
+        isReapableVolume({ id: "v1", name: "vol_run_7", attachedMachineId: null }, new Set(), now)
+      ).toBe(true);
+    });
+
+    it("is NOT reapable when a machine is attached", () => {
+      expect(
+        isReapableVolume(
+          { id: "v1", name: "vol_run_7", attachedMachineId: "m1", createdAt: OLD },
+          new Set(),
+          now
+        )
+      ).toBe(false);
+    });
+
+    it("is NOT reapable when protected by a live runner_instances row", () => {
+      expect(
+        isReapableVolume(
+          { id: "v1", name: "vol_run_7", attachedMachineId: null, createdAt: OLD },
+          new Set(["v1"]),
+          now
+        )
+      ).toBe(false);
+    });
+
+    it("is NOT reapable when too young (createdAt within the grace window)", () => {
+      expect(
+        isReapableVolume(
+          { id: "v1", name: "vol_run_7", attachedMachineId: null, createdAt: new Date(now - 60_000) },
+          new Set(),
+          now
+        )
+      ).toBe(false);
+    });
+
+    it("is NOT reapable when the name isn't ours (not vol_run_*)", () => {
+      expect(
+        isReapableVolume(
+          { id: "v1", name: "some_other_vol", attachedMachineId: null, createdAt: OLD },
+          new Set(),
+          now
+        )
+      ).toBe(false);
+    });
+
+    it("is NOT reapable when the name is missing (unknown provenance)", () => {
+      expect(
+        isReapableVolume({ id: "v1", attachedMachineId: null, createdAt: OLD }, new Set(), now)
+      ).toBe(false);
+    });
+  });
+
+  it("sweep reaps a leaked volume but spares attached/referenced ones", async () => {
+    const calls: string[] = [];
+    // A run whose volume is still referenced by a non-gone runner_instances row.
+    const live = await create({ goal: "<implement>", defer: true });
+    const liveVol = `vol_run_${live.id}`;
+    await db.insert(runnerInstances).values({
+      runId: live.id,
+      machineId: null,
+      volumeId: liveVol,
+      region: "ams",
+      state: "starting",
+    });
+
+    const old = new Date(Date.now() - 60 * 60_000);
+    const leaked = "vol_run_orphan";
+    const attached = "vol_run_attached";
+    const provider = new FlyRunnerProvider(
+      fakeFlyClient(calls, {
+        machines: [],
+        volumes: [
+          // Leaked: our naming, unattached, old, no non-gone row → reaped.
+          { id: leaked, region: "ams", name: leaked, attachedMachineId: null, createdAt: old },
+          // Attached to a machine → spared.
+          { id: attached, region: "ams", name: attached, attachedMachineId: "m9", createdAt: old },
+          // Referenced by the live runner_instances row above → spared.
+          { id: liveVol, region: "ams", name: liveVol, attachedMachineId: null, createdAt: old },
+        ],
+      })
+    );
+
+    await provider.sweep();
+
+    expect(calls).toContain("listVolumes");
+    expect(calls).toContain(`destroyVolume:${leaked}`);
+    expect(calls).not.toContain(`destroyVolume:${attached}`);
+    expect(calls).not.toContain(`destroyVolume:${liveVol}`);
+  });
+
+  it("a failed reap destroy leaves the runner_instances mapping intact", async () => {
+    const calls: string[] = [];
+    // A "gone" row still carrying a stale (reapable) volumeId. The reaper would
+    // normally clear volumeId after destroying — but only on a CONFIRMED destroy.
+    const run = await create({ goal: "<implement>", defer: true });
+    const staleVol = `vol_run_fail_${run.id}`;
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      machineId: null,
+      volumeId: staleVol,
+      region: "ams",
+      state: "gone",
+    });
+    const old = new Date(Date.now() - 60 * 60_000);
+    const provider = new FlyRunnerProvider(
+      fakeFlyClient(calls, {
+        machines: [],
+        volumes: [{ id: staleVol, region: "ams", name: staleVol, attachedMachineId: null, createdAt: old }],
+        destroyVolumeFailsFor: new Set([staleVol]),
+      })
+    );
+
+    await provider.sweep();
+
+    expect(calls).toContain(`destroyVolume:${staleVol}`);
+    // Destroy failed → mapping must NOT be cleared, so the next sweep retries.
+    const [row] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(row.volumeId).toBe(staleVol);
   });
 
   it("stop() destroys the machine's volume and clears the mapping", async () => {

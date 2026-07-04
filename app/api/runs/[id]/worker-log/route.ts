@@ -4,11 +4,13 @@ import { fetchContainerLog } from "@/lib/run-dispatch";
 
 export const dynamic = "force-dynamic";
 
-// The run's worker-container output (docker logs) — the debugging channel for
-// failures that never reach the transcript (OOM kill, crash before the SDK
-// started, git auth, ...). While the container is alive this reads the live log
+// The run's worker output — the debugging channel for failures that never reach
+// the transcript (OOM kill, crash before the SDK started, git auth, ...). For a
+// local docker worker, while the container is alive this reads the live log
 // straight from Docker; after it dies it serves the tail the worker monitor
-// captured onto the run row before removing the container.
+// captured onto the run row before removing the container. For a Fly worker
+// (no container) it serves the runner.log tail the worker flushes onto the run
+// row during the run and at exit.
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }

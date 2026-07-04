@@ -67,4 +67,75 @@ describe("nextLifecycleAction", () => {
       expect(action.kind).toBe("suspend");
     });
   });
+
+  // A terminal run (completed/failed/cancelled/closed/budget_exhausted) never
+  // resumes, so its volume gets only the short TASK_ORCH_RUNNER_TERMINAL_MS
+  // window (default 1h) before archive+destroy — no 7d wait.
+  describe("terminal runs", () => {
+    it("archives+destroys a completed run past the 1h window", () => {
+      expect(
+        nextLifecycleAction({ runStatus: "completed", runnerState: "running", idleMs: H + 60_000 }).kind,
+      ).toBe("archive-and-destroy");
+    });
+
+    it("archives+destroys every terminal status past the window", () => {
+      for (const status of ["completed", "failed", "cancelled", "closed", "budget_exhausted"]) {
+        expect(
+          nextLifecycleAction({ runStatus: status, runnerState: "running", idleMs: H + 60_000 }).kind,
+        ).toBe("archive-and-destroy");
+      }
+    });
+
+    it("archives+destroys a stopped terminal run past the window without waiting 7d", () => {
+      // Previously a stopped machine waited TASK_ORCH_RUNNER_STOP_MS (7d); a
+      // terminal run only waits the short window.
+      expect(
+        nextLifecycleAction({ runStatus: "completed", runnerState: "stopped", idleMs: H + 60_000 }).kind,
+      ).toBe("archive-and-destroy");
+    });
+
+    it("suspends a running terminal run within the window", () => {
+      expect(
+        nextLifecycleAction({ runStatus: "completed", runnerState: "running", idleMs: 10 * 60_000 }).kind,
+      ).toBe("suspend");
+    });
+
+    it("leaves a stopped/suspended terminal run within the window alone", () => {
+      expect(
+        nextLifecycleAction({ runStatus: "completed", runnerState: "stopped", idleMs: 10 * 60_000 }).kind,
+      ).toBe("none");
+      expect(
+        nextLifecycleAction({ runStatus: "completed", runnerState: "suspended", idleMs: 10 * 60_000 }).kind,
+      ).toBe("none");
+    });
+
+    it("keeps the long window for an idle/resumable run at the same idleMs", () => {
+      // idle is NOT terminal: at 2h it is still suspend/stop per the old
+      // windows, NOT destroyed.
+      expect(nextLifecycleAction({ runStatus: "idle", runnerState: "running", idleMs: 2 * H }).kind).toBe("suspend");
+      expect(nextLifecycleAction({ runStatus: "idle", runnerState: "stopped", idleMs: 2 * H }).kind).toBe("none");
+    });
+
+    it("honors the TASK_ORCH_RUNNER_TERMINAL_MS override", () => {
+      vi.stubEnv("TASK_ORCH_RUNNER_TERMINAL_MS", String(3 * H));
+      // 2h is now within the (3h) window: running → suspend, stopped → none.
+      expect(nextLifecycleAction({ runStatus: "completed", runnerState: "running", idleMs: 2 * H }).kind).toBe("suspend");
+      expect(nextLifecycleAction({ runStatus: "completed", runnerState: "stopped", idleMs: 2 * H }).kind).toBe("none");
+      // Past 3h → archive-and-destroy.
+      expect(
+        nextLifecycleAction({ runStatus: "completed", runnerState: "running", idleMs: 3 * H + 60_000 }).kind,
+      ).toBe("archive-and-destroy");
+    });
+
+    it("never touches a terminal run whose worker claim is still live", () => {
+      const action = nextLifecycleAction({
+        runStatus: "completed",
+        runnerState: "running",
+        idleMs: 2 * H,
+        workerScope: "m1",
+        heartbeatAt: new Date(),
+      });
+      expect(action.kind).toBe("none");
+    });
+  });
 });
