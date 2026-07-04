@@ -1,11 +1,13 @@
 name: Deploy to Fly
 
-# Auto-deploy the Task Orchestrator web server on every push to main.
-# Requires a deploy-scoped token in the FLY_API_TOKEN repo secret:
-#   fly tokens create deploy -a task-orchestrator
-# Docs-only pushes are skipped. The runner image (fly.runner.toml /
-# Dockerfile.fly-runner) is NOT rebuilt here — run ./scripts/fly-deploy.sh
-# (or a manual runner push) when runner code changes.
+# Auto-deploy on every push to main (docs-only pushes skipped):
+#   • server  — releases the web/control-plane app (fly.toml)
+#   • runner  — rebuilds + pushes the per-run worker image (fly.runner.toml,
+#               registry.fly.io/task-orchestrator-runners:latest) so new runs
+#               never boot stale worker code. build-only: no machine released.
+# The two jobs run in parallel and each uses its own app-scoped deploy token:
+#   fly tokens create deploy -a task-orchestrator          -> FLY_API_TOKEN
+#   fly tokens create deploy -a task-orchestrator-runners  -> FLY_RUNNER_API_TOKEN
 on:
   push:
     branches: [main]
@@ -14,11 +16,11 @@ on:
       - "**/*.md"
 
 concurrency:
-  group: fly-deploy-server
+  group: fly-deploy
   cancel-in-progress: true
 
 jobs:
-  deploy:
+  server:
     name: Deploy server
     runs-on: ubuntu-latest
     steps:
@@ -28,3 +30,17 @@ jobs:
         run: flyctl deploy --config fly.toml --remote-only --ha=false
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+  runner:
+    name: Build + push runner image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: fly deploy (runner image, build-only)
+        run: >
+          flyctl deploy --config fly.runner.toml -a task-orchestrator-runners
+          --dockerfile Dockerfile.fly-runner
+          --build-only --push --image-label latest --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_RUNNER_API_TOKEN }}
