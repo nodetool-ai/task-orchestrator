@@ -4,7 +4,7 @@ import { db } from "../db";
 import { agentSessions, runnerInstances } from "../db/schema";
 import { create, get } from "../lib/runs";
 import { dispatchRun } from "../lib/run-dispatch";
-import { FlyRunnerProvider } from "../lib/runner/fly";
+import { FlyRunnerProvider, isEligibleForLifecycleAction } from "../lib/runner/fly";
 import type { FlyClient, FlyMachine, FlyMachineConfig } from "../lib/runner/fly-client";
 
 type FakeOptions = {
@@ -279,6 +279,40 @@ describe("FlyRunnerProvider", () => {
     expect(calls).toContain("stopMachine:m-ok");
     const [okRow] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, ok.id));
     expect(okRow.state).toBe("stopped");
+  });
+
+  // M15: the pre-execution re-check (applyLifecycle, right before suspendMachine/
+  // stopMachine) is driven by this pure predicate — unit-test it directly so the
+  // "row went active between the sweep's decision and its execution" case is
+  // covered deterministically, without racing real timing against a live sweep.
+  describe("isEligibleForLifecycleAction (M15 pre-execution re-check)", () => {
+    it("is eligible when idle with no live claim", () => {
+      expect(
+        isEligibleForLifecycleAction({ status: "idle", workerScope: null, heartbeatAt: null })
+      ).toBe(true);
+    });
+
+    it("skips (not eligible) when the row went active — a lease status by execution time", () => {
+      expect(
+        isEligibleForLifecycleAction({ status: "running", workerScope: "m1", heartbeatAt: new Date() })
+      ).toBe(false);
+    });
+
+    it("skips (not eligible) when a chat worker re-claimed with a fresh heartbeat at 'idle'", () => {
+      expect(
+        isEligibleForLifecycleAction({ status: "idle", workerScope: "m1", heartbeatAt: new Date() })
+      ).toBe(false);
+    });
+
+    it("is eligible again once a held claim's heartbeat has gone stale", () => {
+      expect(
+        isEligibleForLifecycleAction({
+          status: "idle",
+          workerScope: "m1",
+          heartbeatAt: new Date(Date.now() - 6 * 60_000),
+        })
+      ).toBe(true);
+    });
   });
 
   it("stop() destroys the machine's volume and clears the mapping", async () => {

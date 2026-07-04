@@ -616,29 +616,38 @@ export interface UpdatePlanInput {
 }
 
 export async function updatePlan(id: string, patch: UpdatePlanInput): Promise<PlanFull> {
-  const existing = await getPlan(id);
-  if (!existing) throw new RepoError(`Plan ${id} not found`, 404);
-  if (patch.state && patch.state !== existing.state) {
-    const allowed = PLAN_TRANSITIONS[existing.state];
-    if (!allowed.includes(patch.state)) {
-      throw new RepoError(
-        `Cannot transition plan ${existing.state} → ${patch.state}`,
-        400
-      );
-    }
-  }
-  if (patch.repoIds) {
-    for (const rid of patch.repoIds) {
-      if (!(await getRepository(rid))) throw new RepoError(`Repository ${rid} not found`, 404);
-    }
-  }
-  const values: Record<string, unknown> = { updatedAt: new Date() };
-  if (patch.title !== undefined) values.title = patch.title;
-  if (patch.state !== undefined) values.state = patch.state;
-  if (patch.owner !== undefined) values.owner = patch.owner;
-  if (patch.body !== undefined) values.body = patch.body;
-  if (patch.tags !== undefined) values.tags = JSON.stringify(patch.tags);
+  // M17b: same TOCTOU as transitionTask (see its comment) — the PLAN_TRANSITIONS
+  // guard used to run against a pre-write snapshot with awaits (repo validation)
+  // in between, so two concurrent state-changing updatePlan calls could both
+  // pass the guard against the same stale state. Lock the plan row FOR UPDATE
+  // inside the transaction and re-derive the guard from the locked read so
+  // concurrent transitions serialize instead of racing.
   await db.transaction(async (tx) => {
+    const row = (
+      await tx.select().from(plans).where(eq(plans.id, id)).for("update")
+    )[0];
+    if (!row) throw new RepoError(`Plan ${id} not found`, 404);
+    const existingState = row.state as PlanState;
+    if (patch.state && patch.state !== existingState) {
+      const allowed = PLAN_TRANSITIONS[existingState];
+      if (!allowed.includes(patch.state)) {
+        throw new RepoError(
+          `Cannot transition plan ${existingState} → ${patch.state}`,
+          400
+        );
+      }
+    }
+    if (patch.repoIds) {
+      for (const rid of patch.repoIds) {
+        if (!(await getRepository(rid))) throw new RepoError(`Repository ${rid} not found`, 404);
+      }
+    }
+    const values: Record<string, unknown> = { updatedAt: new Date() };
+    if (patch.title !== undefined) values.title = patch.title;
+    if (patch.state !== undefined) values.state = patch.state;
+    if (patch.owner !== undefined) values.owner = patch.owner;
+    if (patch.body !== undefined) values.body = patch.body;
+    if (patch.tags !== undefined) values.tags = JSON.stringify(patch.tags);
     await tx.update(plans).set(values).where(eq(plans.id, id));
     if (patch.repoIds !== undefined) {
       await tx.delete(planRepositories).where(eq(planRepositories.planId, id));
@@ -891,33 +900,52 @@ export interface TransitionInput {
 }
 
 export async function transitionTask(id: string, input: TransitionInput): Promise<TaskFull> {
-  const existing = await getTask(id);
-  if (!existing) throw new RepoError(`Task ${id} not found`, 404);
-  const prev = existing.state;
-  if (input.state !== prev) {
-    const allowed = TASK_TRANSITIONS[prev];
-    if (!allowed.includes(input.state)) {
-      throw new RepoError(
-        `Cannot transition ${prev} → ${input.state}. Allowed: ${allowed.join(", ") || "(terminal)"}`,
-        400
-      );
-    }
-  }
-  let assignee = input.assignee ?? existing.assignee ?? undefined;
-  if (input.state === "in_progress" && !assignee) {
-    throw new RepoError("Going to in_progress requires an assignee", 400);
-  }
-  if (input.state === "done" && !input.bypassCriteria) {
-    const openCriteria = existing.criteria.filter((c) => !c.done).length;
-    if (openCriteria > 0) {
-      throw new RepoError(
-        `Cannot mark done: ${openCriteria} acceptance criteria still open`,
-        400
-      );
-    }
-  }
-  const now = new Date();
+  // M17a: the read (getTask), the TASK_TRANSITIONS guard, and the
+  // done-criteria gate all used to run against a snapshot taken *before* the
+  // write, with awaits in between — any interleaving (e.g. a human's
+  // review→cancelled racing the PR-merge poller's review→done) let both
+  // callers pass the guard against the same stale row and the loser's write
+  // would silently clobber the winner's terminal state. Locking the task row
+  // with SELECT ... FOR UPDATE inside a single transaction serializes
+  // concurrent transitions: the second caller blocks until the first commits,
+  // then re-derives prev/assignee/criteria from the now-current row, so a
+  // transition that's no longer legal (e.g. the task already left `review`)
+  // is rejected instead of silently applied.
   await db.transaction(async (tx) => {
+    const row = (
+      await tx.select().from(tasks).where(eq(tasks.id, id)).for("update")
+    )[0];
+    if (!row) throw new RepoError(`Task ${id} not found`, 404);
+    const prev = row.state as TaskState;
+    if (input.state !== prev) {
+      const allowed = TASK_TRANSITIONS[prev];
+      if (!allowed.includes(input.state)) {
+        throw new RepoError(
+          `Cannot transition ${prev} → ${input.state}. Allowed: ${allowed.join(", ") || "(terminal)"}`,
+          400
+        );
+      }
+    }
+    const assignee = input.assignee ?? row.assignee ?? undefined;
+    if (input.state === "in_progress" && !assignee) {
+      throw new RepoError("Going to in_progress requires an assignee", 400);
+    }
+    if (input.state === "done" && !input.bypassCriteria) {
+      // Re-read criteria inside the tx too — otherwise a concurrent
+      // updateCriterion could race the same way the transition itself did.
+      const criteriaRows = await tx
+        .select({ done: acceptanceCriteria.done })
+        .from(acceptanceCriteria)
+        .where(eq(acceptanceCriteria.taskId, id));
+      const openCriteria = criteriaRows.filter((c) => !c.done).length;
+      if (openCriteria > 0) {
+        throw new RepoError(
+          `Cannot mark done: ${openCriteria} acceptance criteria still open`,
+          400
+        );
+      }
+    }
+    const now = new Date();
     await tx.update(tasks)
       .set({ state: input.state, assignee: assignee ?? null, updatedAt: now })
       .where(eq(tasks.id, id));

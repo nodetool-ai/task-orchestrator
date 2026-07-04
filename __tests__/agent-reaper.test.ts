@@ -6,12 +6,13 @@
 // until actually dispatched; only stale ones (older than a grace period)
 // indicate their owning process died before dispatch.
 
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
 import { agentSessions, tasks, plans } from "../db/schema";
-import { _reapOrphansForTest } from "../lib/agent";
+import { _reapOrphansForTest, startSession } from "../lib/agent";
 import { create, get } from "../lib/runs";
+import * as runs from "../lib/runs";
 import * as repo from "../lib/repo";
 
 const YOUNG = new Date(Date.now() - 5 * 60_000); // 5 minutes ago
@@ -25,7 +26,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
-  // No cleanup needed beyond beforeEach
+  vi.restoreAllMocks();
 });
 
 async function createTestTask(): Promise<string> {
@@ -141,5 +142,69 @@ describe("reapOrphans (orphan reaper in lib/agent.ts)", () => {
     const after = await get(run.id);
     expect(after?.status).toBe("pending");
     expect(after?.error).toBeNull();
+  });
+});
+
+describe("startSession concurrency (M17c)", () => {
+  // startSession's duplicate-active-session guard used to be a plain
+  // check-then-insert (listActiveSessions(taskId), then several awaits,
+  // then runs.create) — two concurrent start_session calls for the same
+  // task could both observe zero active sessions and both create a run.
+  // Fixed with a Postgres transaction-scoped advisory lock (keyed on the
+  // task id) around the check+create critical section in lib/agent.ts.
+  //
+  // runs.create's real implement-run path kicks off a worktree/SDK/gh
+  // lifecycle (lib/runs.ts's kickoffFirstTurn / dispatchRun) that this test
+  // must not trigger. Mirroring how agent-reaper.test.ts above and
+  // dispatch-routing.test.ts avoid those side effects, we spy on runs.create
+  // and force `defer: true` through to the real implementation: this still
+  // exercises the real DB insert (and thus the real race on the advisory
+  // lock + listActiveSessions re-check) without spawning a worker.
+  const realCreate = runs.create;
+
+  beforeEach(() => {
+    vi.spyOn(runs, "create").mockImplementation((input) =>
+      realCreate({ ...input, defer: true })
+    );
+  });
+
+  async function createTestTaskForRace(): Promise<string> {
+    const plan = await repo.createPlan({
+      title: "Race Plan",
+      body: "Test plan for startSession race tests",
+    });
+    const task = await repo.createTask({ planId: plan.id, title: "Race Task" });
+    return task.id;
+  }
+
+  it("two concurrent startSession calls for one task: exactly one creates a run, the other gets a 409", async () => {
+    const taskId = await createTestTaskForRace();
+
+    const results = await Promise.allSettled([
+      startSession({ taskId }),
+      startSession({ taskId }),
+    ]);
+
+    const fulfilled = results.filter(
+      (r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof startSession>>> =>
+        r.status === "fulfilled"
+    );
+    const rejected = results.filter(
+      (r): r is PromiseRejectedResult => r.status === "rejected"
+    );
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBeInstanceOf(repo.RepoError);
+    expect((rejected[0].reason as Error).message).toMatch(/already has an active session/);
+    expect((rejected[0].reason as repo.RepoError).status).toBe(409);
+
+    // Exactly one implement run row exists for this task — no duplicate
+    // worktree/session was created by the loser.
+    const rows = await db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.taskId, taskId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(fulfilled[0].value.id);
   });
 });

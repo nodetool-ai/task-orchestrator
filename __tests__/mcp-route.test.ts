@@ -121,6 +121,107 @@ describe("POST /api/mcp", () => {
     expect(body.error.code).toBe(-32601);
   });
 
+  it("tools/call rejects an unknown enum value with -32602 and does not execute", async () => {
+    const res = await POST(
+      makeReq(
+        {
+          jsonrpc: "2.0",
+          id: 6,
+          method: "tools/call",
+          params: { name: "create_plan", arguments: { title: "Bogus State Plan", state: "bogus" } },
+        },
+        { Authorization: `Bearer ${token}` }
+      ) as never
+    );
+    const body = await res.json();
+    expect(body.error.code).toBe(-32602);
+    expect(body.error.message).toMatch(/state/);
+    expect(body.result).toBeUndefined();
+    // The plan must never have been created.
+    const list = await POST(
+      makeReq(
+        {
+          jsonrpc: "2.0",
+          id: 7,
+          method: "tools/call",
+          params: { name: "list_plans", arguments: {} },
+        },
+        { Authorization: `Bearer ${token}` }
+      ) as never
+    );
+    const listBody = await list.json();
+    const text = listBody.result.content[0].text as string;
+    expect(text).not.toMatch(/Bogus State Plan/);
+  });
+
+  it("tools/call rejects create_plan with a terminal/accepted initial state", async () => {
+    for (const state of ["accepted", "done", "cancelled"]) {
+      const res = await POST(
+        makeReq(
+          {
+            jsonrpc: "2.0",
+            id: 8,
+            method: "tools/call",
+            params: { name: "create_plan", arguments: { title: `P-${state}`, state } },
+          },
+          { Authorization: `Bearer ${token}` }
+        ) as never
+      );
+      const body = await res.json();
+      expect(body.error?.code).toBe(-32602);
+    }
+  });
+
+  it("tools/call rejects a missing required field with -32602", async () => {
+    const res = await POST(
+      makeReq(
+        {
+          jsonrpc: "2.0",
+          id: 9,
+          method: "tools/call",
+          params: { name: "create_plan", arguments: {} },
+        },
+        { Authorization: `Bearer ${token}` }
+      ) as never
+    );
+    const body = await res.json();
+    expect(body.error.code).toBe(-32602);
+    expect(body.error.message).toMatch(/title/);
+  });
+
+  it("tools/call rejects a wrong-typed field with -32602", async () => {
+    const res = await POST(
+      makeReq(
+        {
+          jsonrpc: "2.0",
+          id: 10,
+          method: "tools/call",
+          params: { name: "get_repository", arguments: { id: 123 } },
+        },
+        { Authorization: `Bearer ${token}` }
+      ) as never
+    );
+    const body = await res.json();
+    expect(body.error.code).toBe(-32602);
+  });
+
+  it("tools/call still executes with valid args (regression)", async () => {
+    const res = await POST(
+      makeReq(
+        {
+          jsonrpc: "2.0",
+          id: 11,
+          method: "tools/call",
+          params: { name: "create_plan", arguments: { title: "Valid Plan", state: "draft" } },
+        },
+        { Authorization: `Bearer ${token}` }
+      ) as never
+    );
+    const body = await res.json();
+    expect(body.error).toBeUndefined();
+    expect(body.result.content[0].text).toMatch(/Created plan/);
+  });
+
   it("notifications/initialized returns 202 with empty body", async () => {
     const res = await POST(
       makeReq(

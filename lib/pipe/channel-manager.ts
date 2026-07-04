@@ -24,9 +24,10 @@ export class ChannelManager {
       const loop = new AgentLoop(ch, this.config);
       ch.onMessage((msg) => {
         // Publish on the bus (fan-in point for future multi-channel use) and
-        // dispatch the turn. Fire-and-forget: distinct conversations run
-        // concurrently, while same-conversation turns serialise on
-        // runs.append's per-run lock.
+        // dispatch the turn. Fire-and-forget: AgentLoop.handle serialises
+        // same-conversation turns on its own per-conversation queue (needed
+        // above runs.append's per-run lock — see agent-loop.ts M9a), while
+        // distinct conversations still run concurrently.
         this.bus.publishInbound(msg);
         void loop.handle(msg).catch((e) => console.error("[pipe] agent-loop error:", e));
       });

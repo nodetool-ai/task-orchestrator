@@ -209,6 +209,29 @@ export function admissionDecision(i: {
   return "admit";
 }
 
+// Mirrors runs.ts's HEARTBEAT_STALE_MS. Duplicated here (not imported) because
+// run-dispatch has no static import of runs.ts — runs.ts injects its helpers
+// into this module instead (see the RunsApi comment above) to avoid a boot-time
+// import cycle. Keep this in sync if that value ever changes.
+const WORKER_CLAIM_STALE_MS = 5 * 60_000;
+
+/**
+ * True when `row` currently holds a live worker claim — worker_scope set and a
+ * heartbeat fresher than the stale window — regardless of status. Mirrors
+ * runs.ts's isWorkerLive(): this stays true for a plan-executor mid-turn
+ * (status 'running', blocked in await_session) AND for a long-lived chat
+ * worker parked at 'idle' between turns holding its claim. Computed locally
+ * from the RunRow fields runs().get() already returns, rather than adding a
+ * new method to RunsApi.
+ */
+function hasLiveWorkerClaim(row: { workerScope: string | null; heartbeatAt: Date | null }): boolean {
+  return (
+    row.workerScope != null &&
+    row.heartbeatAt != null &&
+    Date.now() - row.heartbeatAt.getTime() < WORKER_CLAIM_STALE_MS
+  );
+}
+
 /** The gate only runs for managed worker backends, and can be turned off. */
 function admissionEnabled(): boolean {
   const v = process.env.TASK_ORCH_ADMISSION_ENABLED;
@@ -279,7 +302,28 @@ export async function dispatchRun(
     if (run.workerScope) return { kind: "already-claimed" };
 
     if (admissionEnabled()) {
-      const decision = await admitFn(runId);
+      let decision = await admitFn(runId);
+      // Deadlock breaker (M1): a plan-executor run occupies a worker slot for
+      // its ENTIRE turn (countInFlightWorkers/flyAdmit count it the whole
+      // time), and blocks in await_session waiting on the very children it
+      // just spawned. If every slot is held by executors, admission defers
+      // every child to 'pending' forever — the executors never finish (so
+      // never free a slot), the pump's retries never help, and eventually
+      // TASK_ORCH_MAX_DEFER_MS hard-fails the children as "insufficient host
+      // memory": a livelock with money spent and nothing done. No component
+      // otherwise models the parent→child dependency. Break the cycle: a
+      // child whose parent still holds a live worker claim is admitted even
+      // over the cap — the parent's slot is blocked awaiting this very child,
+      // so deferring it only deadlocks the tree. This applies to BOTH the
+      // memory-based gate and flyAdmit's machine-count gate (whichever
+      // admitFn returned "defer"); it does NOT apply to "never-fits" (a
+      // single worker's cap exceeding the whole host budget is a fatal
+      // misconfig no parent claim can fix). The overshoot this permits is
+      // bounded by the run tree's own depth/spawn caps, not by this gate.
+      if (decision === "defer" && run.parentRunId != null) {
+        const parent = await runs().get(run.parentRunId);
+        if (parent && hasLiveWorkerClaim(parent)) decision = "admit";
+      }
       if (decision === "never-fits") {
         await runs().failRun(
           runId,

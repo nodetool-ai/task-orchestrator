@@ -8,7 +8,7 @@
 import { and, eq } from "drizzle-orm";
 
 import { db } from "@/db";
-import { channelThreads } from "@/db/schema";
+import { channelThreads, type ChannelThread } from "@/db/schema";
 import * as chat from "@/lib/chat";
 import * as repo from "@/lib/repo";
 import * as runs from "@/lib/runs";
@@ -37,18 +37,35 @@ function isDanglingRun(run: runs.RunRow): boolean {
   );
 }
 
+/** Look up the mapping row for (channel, externalId), if any. */
+async function findMapping(
+  channel: string,
+  externalId: string
+): Promise<ChannelThread | undefined> {
+  return (
+    await db
+      .select()
+      .from(channelThreads)
+      .where(and(eq(channelThreads.channel, channel), eq(channelThreads.externalId, externalId)))
+  )[0];
+}
+
+/**
+ * True for a Postgres unique-violation error (SQLSTATE 23505) — postgres.js
+ * surfaces this as an error object with a `code` property, not a subclass we
+ * can `instanceof` against.
+ */
+function isUniqueViolation(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === "23505";
+}
+
 /** Find the existing run for (channel, externalId), or create a fresh chat run. */
 export async function getOrCreateRun(
   channel: string,
   externalId: string,
   opts: GetOrCreateOptions = {}
 ): Promise<number> {
-  const existing = (
-    await db
-      .select()
-      .from(channelThreads)
-      .where(and(eq(channelThreads.channel, channel), eq(channelThreads.externalId, externalId)))
-  )[0];
+  const existing = await findMapping(channel, externalId);
 
   // Guard against a dangling mapping. Two ways a mapping goes dangling:
   //   • the run row was deleted out from under us (ON DELETE CASCADE should
@@ -69,8 +86,25 @@ export async function getOrCreateRun(
   // /runs list then shows the conversation topic instead of a raw channel id.
   const created = await chat.createChat(null, opts.title, await repo.defaultRepoId());
   if (opts.model) await chat.updateChatSettings(created.id, { model: opts.model });
-  await db.insert(channelThreads).values({ channel, externalId, runId: created.id });
-  return created.id;
+  try {
+    await db.insert(channelThreads).values({ channel, externalId, runId: created.id });
+    return created.id;
+  } catch (err) {
+    // Two near-simultaneous first messages for the same conversation can both
+    // get past the `existing` check above and both createChat before either
+    // inserts the mapping — the unique index on (channel, externalId) then
+    // makes the loser's insert throw. AgentLoop's per-conversation queue (M9a)
+    // makes this vanish for the normal Discord path, but getOrCreateRun is
+    // called directly by commands.ts too, so stay robust regardless: re-read
+    // the winning mapping and hand back its runId instead of dropping the
+    // message, and best-effort delete the orphan run we created (harmless if
+    // it fails — it just leaks an unused idle chat row).
+    if (!isUniqueViolation(err)) throw err;
+    const winner = await findMapping(channel, externalId);
+    if (!winner) throw err; // unique violation but no row to read — surface the original error
+    await chat.deleteChat(created.id).catch(() => {});
+    return winner.runId;
+  }
 }
 
 /** Drop the mapping so the next message starts a brand-new run (/new, /reset). */

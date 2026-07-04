@@ -6,7 +6,7 @@ import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { agentEvents, agentSessions, runnerInstances } from "@/db/schema";
 import { isTerminalStatus, type SessionStatus } from "../types";
-import { nextLifecycleAction } from "./lifecycle";
+import { isWorkerClaimLive, nextLifecycleAction } from "./lifecycle";
 import type { CreateRunnerInput, RunnerProvider, RunnerRef, RunnerState } from "./provider";
 import { type FlyClient, type FlyMachine, type FlyMachineConfig, type FlyVolume, makeFlyClient } from "./fly-client";
 
@@ -67,6 +67,23 @@ function machineStateToRunnerState(state: string): RunnerState {
 
 function isActiveRunStatus(status: string | null): boolean {
   return !!status && LEASE_STATUSES.has(status);
+}
+
+/**
+ * Whether a run row — freshly re-read immediately before executing a queued
+ * suspend/stop — is STILL eligible for that action. False when the run has
+ * become active since the sweep took its decision snapshot: either its status
+ * is now an active lease status (a plan-executor's turn started running) or
+ * its worker claim is live again (a chat worker woke to a new message and
+ * renewed its heartbeat). Exported as a pure predicate so it's directly unit
+ * testable without racing real timing against a live sweep.
+ */
+export function isEligibleForLifecycleAction(row: {
+  status: string | null;
+  workerScope: string | null;
+  heartbeatAt: Date | null;
+}): boolean {
+  return !isActiveRunStatus(row.status) && !isWorkerClaimLive(row);
 }
 
 function lastActivityMs(row: {
@@ -402,6 +419,7 @@ export class FlyRunnerProvider implements RunnerProvider {
       lastStartedAt: Date | null;
       lastSuspendedAt: Date | null;
       archivedUri: string | null;
+      workerScope: string | null;
       heartbeatAt: Date | null;
       completedAt: Date | null;
     },
@@ -411,8 +429,33 @@ export class FlyRunnerProvider implements RunnerProvider {
   ): Promise<void> {
     if (!row.machineId) return;
     const idleMs = Math.max(0, nowMs - lastActivityMs(row));
-    const action = nextLifecycleAction({ runStatus, runnerState, idleMs });
+    const action = nextLifecycleAction({
+      runStatus,
+      runnerState,
+      idleMs,
+      workerScope: row.workerScope,
+      heartbeatAt: row.heartbeatAt,
+    });
     if (action.kind === "none") return;
+
+    // The decision above was made from this sweep tick's row snapshot, taken at
+    // the top of sweep() — it can be tens of seconds stale by the time we
+    // actually execute a suspend/stop. In that window a chat worker may have
+    // woken to a new message (renewing its claim) or a plan-executor's status
+    // may now be a live lease status. Re-read the row right before acting and
+    // skip if it's no longer eligible; the next sweep tick re-decides from a
+    // fresh snapshot instead of us suspending/stopping out from under it.
+    if (action.kind === "suspend" || action.kind === "stop") {
+      const [fresh] = await db
+        .select({
+          status: agentSessions.status,
+          workerScope: agentSessions.workerScope,
+          heartbeatAt: agentSessions.heartbeatAt,
+        })
+        .from(agentSessions)
+        .where(eq(agentSessions.id, row.runId));
+      if (fresh && !isEligibleForLifecycleAction(fresh)) return;
+    }
 
     const now = new Date();
     if (action.kind === "suspend") {
