@@ -493,7 +493,7 @@ async function pumpTick(): Promise<void> {
       // moves the row out of 'pending' itself (so the pump can't re-select it);
       // failRun then emits the status event for the now-failed run.
       const failMsg =
-        "insufficient host memory: the run stayed queued past the maximum wait (TASK_ORCH_MAX_DEFER_MS).";
+        "no worker capacity: the run stayed queued past the maximum wait (TASK_ORCH_MAX_DEFER_MS) — worker slots (machines/memory) stayed full.";
       const failed = await db
         .update(agentSessions)
         .set({ status: "failed", error: failMsg, completedAt: new Date() })

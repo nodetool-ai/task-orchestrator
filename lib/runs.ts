@@ -36,6 +36,7 @@ import { tmpdir } from "node:os";
 import path, { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, notInArray } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 
 import { db } from "@/db";
 import { agentEvents, agentMessages, agentSessions } from "@/db/schema";
@@ -2785,18 +2786,46 @@ export async function countInFlightWorkers(): Promise<number> {
   return rows.length;
 }
 
+const pendingParent = alias(agentSessions, "pending_parent");
+
 /**
- * Ids of runs parked in 'pending' (the dispatch queue), oldest first. A run sits
- * here either freshly created (awaiting its kickoff dispatch) or deferred by the
- * admission gate for lack of host memory; the pending-run pump re-dispatches them.
+ * Ids of runs parked in 'pending' (the dispatch queue). A run sits here either
+ * freshly created (awaiting its kickoff dispatch) or deferred by the admission
+ * gate for lack of host capacity; the pending-run pump re-dispatches them.
+ *
+ * Ordering: pending runs whose PARENT holds a live worker claim come first
+ * (oldest-first among themselves), then every other pending run, oldest-first.
+ * This is NOT just a fairness nicety — dispatchRun's deadlock breaker (see the
+ * "Deadlock breaker (M1)" comment there) admits exactly this set of children
+ * over the cap, so they can never come back as "deferred". The pump
+ * (pumpTick) stops at the FIRST deferred result, on the assumption that a
+ * defer means the host is full and later ids won't fare better either. A
+ * deferred ROOT run sitting ahead of a breaker-eligible child in id order
+ * would trip that early break and starve the child until
+ * TASK_ORCH_MAX_DEFER_MS fails it — even though the child was always
+ * dispatchable. Serving breaker-eligible children first means the pump only
+ * ever hits its early break on the plain root-run tail, where "stop at the
+ * first defer" is actually true.
  */
 export async function listPendingRunIds(): Promise<number[]> {
   const rows = await db
-    .select({ id: agentSessions.id })
+    .select({
+      id: agentSessions.id,
+      parentWorkerScope: pendingParent.workerScope,
+      parentHeartbeatAt: pendingParent.heartbeatAt,
+    })
     .from(agentSessions)
+    .leftJoin(pendingParent, eq(agentSessions.parentRunId, pendingParent.id))
     .where(eq(agentSessions.status, "pending"))
     .orderBy(asc(agentSessions.id));
-  return rows.map((r) => r.id);
+
+  const liveParentChildren: number[] = [];
+  const rest: number[] = [];
+  for (const r of rows) {
+    const parentLive = isWorkerLive({ workerScope: r.parentWorkerScope, heartbeatAt: r.parentHeartbeatAt });
+    (parentLive ? liveParentChildren : rest).push(r.id);
+  }
+  return [...liveParentChildren, ...rest];
 }
 
 async function setError(runId: number, error: string) {
