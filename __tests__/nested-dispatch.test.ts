@@ -74,22 +74,26 @@ describe("nestedDispatchMode()", () => {
 });
 
 describe("create() launch branches: nested-dispatch isolate", () => {
-  it("worker + isolate: parks 'pending', persists the prompt, emits runner_deferred, does NOT dispatch", async () => {
+  it("worker + isolate: parks 'pending', persists the prompt, emits runner_deferred, no worker claim", async () => {
     process.env.TASK_ORCH_DETACHED_RUNS = "1";
     process.env.TASK_ORCH_INSIDE_WORKER = "1";
     process.env.TASK_ORCH_NESTED_DISPATCH = "isolate";
-    const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
-
+    // The choke point moved into dispatchRun (FIX A): the launch branch DOES call
+    // the real dispatchRun, which — under worker+isolate — parks the row rather
+    // than spawning. So we assert observable OUTCOMES (status/claim/event/prompt),
+    // not that dispatchRun went uncalled. Let the real dispatchRun run.
     const parent = await create({ goal: "<implement>", defer: true });
     const run = await createReview({ initialPrompt: "please review carefully", parentRunId: parent.id });
 
     // Wait for the fire-and-forget launch branch to record the deferral.
     await expect.poll(async () => (await runnerDeferredEvents(run.id)).length).toBe(1);
 
-    expect(spy).not.toHaveBeenCalled();
-    expect((await get(run.id))?.status).toBe("pending");
+    const parked = (await get(run.id))!;
+    expect(parked.status).toBe("pending"); // still queued for the server's pump
+    expect(parked.workerScope).toBeNull(); // never claimed a worker inside the worker
 
     const events = await runnerDeferredEvents(run.id);
+    expect(events.length).toBe(1); // exactly one
     expect(JSON.parse(events[0].payload as string)).toEqual({
       parentRunId: parent.id,
       reason: "nested_isolate",
@@ -101,6 +105,40 @@ describe("create() launch branches: nested-dispatch isolate", () => {
       .where(and(eq(agentMessages.runId, run.id), eq(agentMessages.role, "user")));
     expect(msgs.length).toBe(1);
     expect(JSON.stringify(msgs[0].content)).toContain("please review carefully");
+  });
+
+  it("dispatchRun itself parks under worker+isolate: returns 'deferred', never spawns, leaves 'pending'", async () => {
+    process.env.TASK_ORCH_INSIDE_WORKER = "1";
+    process.env.TASK_ORCH_NESTED_DISPATCH = "isolate";
+    const run = await create({ goal: "<implement>", defer: true });
+    // Put it on the real pump surface (a queued row).
+    await db.update(agentSessions).set({ status: "pending" }).where(eq(agentSessions.id, run.id));
+
+    const spawn = vi.fn(() => 1);
+    const result = await dispatch.dispatchRun(run.id, { spawn });
+
+    expect(result).toBe("deferred");
+    expect(spawn).not.toHaveBeenCalled();
+    const row = (await get(run.id))!;
+    expect(row.status).toBe("pending");
+    expect(row.workerScope).toBeNull();
+  });
+
+  it("dispatchRun under worker+isolate does NOT resurrect a 'cancelled' run", async () => {
+    process.env.TASK_ORCH_INSIDE_WORKER = "1";
+    process.env.TASK_ORCH_NESTED_DISPATCH = "isolate";
+    const run = await create({ goal: "<implement>", defer: true });
+    await db.update(agentSessions).set({ status: "cancelled" }).where(eq(agentSessions.id, run.id));
+
+    const spawn = vi.fn(() => 1);
+    const result = await dispatch.dispatchRun(run.id, { spawn });
+
+    expect(result).toBe("deferred");
+    expect(spawn).not.toHaveBeenCalled();
+    const row = (await get(run.id))!;
+    // The park's conditional UPDATE excludes 'cancelled'/'closed' — the terminal
+    // decision stands; no flip back to 'pending'.
+    expect(row.status).toBe("cancelled");
   });
 
   it("worker + inline: dispatches (no parking, no runner_deferred)", async () => {

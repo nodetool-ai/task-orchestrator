@@ -315,58 +315,66 @@ async function fetchParentRunId(id: number): Promise<number | null> {
 }
 
 /**
- * Depth a new run would have if created with `parentRunId` as its parent (root =
- * depth 0, so a direct child of a root is depth 1). Walks agent_sessions'
- * parent_run_id chain upward one row at a time — the chain is short in practice,
- * so a bounded loop reads more plainly here than a recursive CTE. Robust to a
- * dangling parentRunId: parent_run_id carries no FK, so an ancestor row can be
- * deleted out from under its descendants; when the walk can't find a row it just
- * stops there (treats the missing ancestor as if it were the root), rather than
- * throwing.
+ * ONE upward walk of agent_sessions' parent_run_id chain from `parentRunId`,
+ * returning both figures the tree-limit check needs:
+ *   - depth: the depth a new run would have if created with `parentRunId` as its
+ *     parent (root = depth 0, so a direct child of a root is depth 1).
+ *   - rootId: the topmost ancestor's id (the tree root), used to scope the size
+ *     count.
+ * A single bounded loop replaces the two former separate walks (wouldBeDepth +
+ * findTreeRoot), which each issued up to MAX_PARENT_WALK sequential SELECTs over
+ * the SAME chain — halving the DB round-trips. The chain is short in practice, so
+ * a bounded loop reads more plainly here than a recursive CTE.
+ *
+ * Preserved semantics from both former walks:
+ *  - Visited-set cycle guard: a self-referential/cyclic parent_run_id graph
+ *    (nothing enforces acyclicity at the DB level) breaks the loop instead of
+ *    hanging.
+ *  - MAX_PARENT_WALK hard cap on iterations.
+ *  - Dangling-parent tolerance: parent_run_id carries no FK, so an ancestor row
+ *    can be deleted out from under its descendants; when the walk can't find a
+ *    row it stops there (treats the missing ancestor as the root) rather than
+ *    throwing.
+ *
+ * Truncation caveat: with the depth cap disabled (MAX_RUN_DEPTH<=0), a chain
+ * longer than MAX_PARENT_WALK stops mid-chain, so rootId is a mid-tree node and
+ * the subsequent size count is scoped to that subtree, not the true root — an
+ * accepted limitation (a 64-deep chain is already pathological).
  */
-async function wouldBeDepth(parentRunId: number): Promise<number> {
+async function walkParentChain(parentRunId: number): Promise<{ depth: number; rootId: number }> {
   let depth = 1; // the new run sits one level below parentRunId
-  let currentId: number | null = parentRunId;
+  let currentId = parentRunId;
+  let rootId = parentRunId;
   const visited = new Set<number>();
-  for (let i = 0; i < MAX_PARENT_WALK && currentId != null; i++) {
+  for (let i = 0; i < MAX_PARENT_WALK; i++) {
     if (visited.has(currentId)) break; // cyclic parent_run_id graph
     visited.add(currentId);
+    rootId = currentId; // deepest confirmed ancestor so far
     const parent = await fetchParentRunId(currentId); // no row (deleted parent) => null, stop here
     if (parent == null) break;
     depth++;
     currentId = parent;
   }
-  return depth;
-}
-
-/**
- * Root id of the tree containing `startId` — walks parent_run_id upward until it
- * finds a run with no parent (or a dangling one; see wouldBeDepth). Same
- * cycle/iteration bound as wouldBeDepth.
- */
-async function findTreeRoot(startId: number): Promise<number> {
-  let currentId = startId;
-  const visited = new Set<number>();
-  for (let i = 0; i < MAX_PARENT_WALK; i++) {
-    if (visited.has(currentId)) break;
-    visited.add(currentId);
-    const parent = await fetchParentRunId(currentId);
-    if (parent == null) break;
-    currentId = parent;
-  }
-  return currentId;
+  return { depth, rootId };
 }
 
 /**
  * Total number of runs (any status) sharing rootId's tree. The tree can fan out
- * wide (unlike the parent-chain walks above, which are single-path), so this is
- * a set-based recursive CTE rather than another app-level loop.
+ * wide (unlike the parent-chain walk above, which is single-path), so this is a
+ * set-based recursive CTE rather than another app-level loop.
+ *
+ * UNION (not UNION ALL): row dedup makes the recursion TERMINATE on a cyclic
+ * parent_run_id graph — the exact direct-DB-write threat model this check
+ * defends against. With UNION ALL a cycle (A→B→A) re-visits rows forever and the
+ * query never returns; UNION drops already-seen ids so the recursion's frontier
+ * empties. Rows are single-column ids, so the dedup is cheap and the count stays
+ * correct.
  */
 async function countTreeRuns(rootId: number): Promise<number> {
   const rows = await db.execute(sql`
     WITH RECURSIVE tree AS (
       SELECT id FROM agent_runs WHERE id = ${rootId}
-      UNION ALL
+      UNION
       SELECT s.id FROM agent_runs s JOIN tree t ON s.parent_run_id = t.id
     )
     SELECT count(*)::int AS count FROM tree
@@ -381,7 +389,10 @@ async function countTreeRuns(rootId: number): Promise<number> {
  * `extraTreeRuns` accounts for a run not yet in the table: create() calls this
  * BEFORE inserting the new row (extraTreeRuns=1, counting the run-to-be), while
  * checkTreeLimits calls it for a run that already exists (extraTreeRuns=0, it's
- * already part of the CTE's count).
+ * already part of the CTE's count). Walks the parent chain exactly ONCE and
+ * reuses both figures: if the depth cap is enabled and violated, return the depth
+ * violation immediately (the tree is already illegal — no size count needed);
+ * otherwise use the same walk's rootId to scope the size count.
  */
 async function evaluateTreeLimits(
   parentRunId: number,
@@ -389,15 +400,12 @@ async function evaluateTreeLimits(
 ): Promise<string | null> {
   const maxDepth = treeLimitEnv("TASK_ORCH_MAX_RUN_DEPTH", 3);
   const maxTreeRuns = treeLimitEnv("TASK_ORCH_MAX_TREE_RUNS", 32);
-  if (maxDepth > 0) {
-    const depth = await wouldBeDepth(parentRunId);
-    if (depth > maxDepth) {
-      return `run tree depth ${depth} exceeds TASK_ORCH_MAX_RUN_DEPTH=${maxDepth} (parent_run_id nesting cap; see docs/nested-machine-dispatch.md)`;
-    }
+  const { depth, rootId } = await walkParentChain(parentRunId);
+  if (maxDepth > 0 && depth > maxDepth) {
+    return `run tree depth ${depth} exceeds TASK_ORCH_MAX_RUN_DEPTH=${maxDepth} (parent_run_id nesting cap; see docs/nested-machine-dispatch.md)`;
   }
   if (maxTreeRuns > 0) {
-    const root = await findTreeRoot(parentRunId);
-    const size = (await countTreeRuns(root)) + opts.extraTreeRuns;
+    const size = (await countTreeRuns(rootId)) + opts.extraTreeRuns;
     if (size > maxTreeRuns) {
       return `run tree size ${size} exceeds TASK_ORCH_MAX_TREE_RUNS=${maxTreeRuns} (total runs sharing this run's root; see docs/nested-machine-dispatch.md)`;
     }
@@ -408,16 +416,14 @@ async function evaluateTreeLimits(
 /**
  * Server-side re-verify for dispatchRun (defense in depth): a worker that writes
  * run rows directly, bypassing create()'s check, must still not get a Machine
- * past this. No-op (returns null) for a root run (no parentRunId) — a run that
- * ever had its parent link removed is not re-checked either, matching create()'s
- * dangling-parent tolerance. Injected into lib/run-dispatch.ts via __setRunsApi
- * below (run-dispatch has no static import of this module — see the import-cycle
- * note by that call).
+ * past this. Takes the child's parentRunId directly — dispatchRun already holds
+ * the run row and only calls this for a child it has confirmed is 'pending' with
+ * a non-null parentRunId, so there is no need to re-fetch the run here. Injected
+ * into lib/run-dispatch.ts via __setRunsApi below (run-dispatch has no static
+ * import of this module — see the import-cycle note by that call).
  */
-export async function checkTreeLimits(runId: number): Promise<string | null> {
-  const run = await get(runId);
-  if (!run || run.parentRunId == null) return null;
-  return evaluateTreeLimits(run.parentRunId, { extraTreeRuns: 0 });
+export async function checkTreeLimits(parentRunId: number): Promise<string | null> {
+  return evaluateTreeLimits(parentRunId, { extraTreeRuns: 0 });
 }
 
 // ──────────────────────────────────────────────────────────
@@ -567,7 +573,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
       // the run's first user message so dispatchTurnPrompt's backlog replay
       // (reordered to win over the synthesized prompt) uses it.
       if (detachedRunsEnabled()) {
-        await launchDetached(run.id, input.initialPrompt, input.parentRunId ?? null);
+        await launchDetached(run.id, input.initialPrompt);
       } else await kickoffFirstTurn(run.id, prompt, input.baseBranch);
     })();
   }
@@ -581,7 +587,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
       // user message so driveDispatchedRun's <review> branch can read it back and
       // pass it to runReview (which would otherwise be dispatched with no prompt).
       if (detachedRunsEnabled()) {
-        await launchDetached(run.id, input.initialPrompt, input.parentRunId ?? null);
+        await launchDetached(run.id, input.initialPrompt);
       } else await runReview(run.id, input.prUrl!, input.initialPrompt ?? null);
     })();
   }
@@ -596,7 +602,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
       // user message so driveDispatchedRun's <execute> branch can read it back and
       // pass it to runExecute as operator instructions.
       if (detachedRunsEnabled()) {
-        await launchDetached(run.id, input.initialPrompt, input.parentRunId ?? null);
+        await launchDetached(run.id, input.initialPrompt);
       } else await runExecute(run.id, input.planId!, input.initialPrompt ?? null);
     })();
   }
@@ -606,56 +612,34 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
 
 /**
  * Shared tail of create()'s three detached launch branches: persist any custom
- * initialPrompt as the run's first user message, then EITHER isolate (park the
- * row for the server to dispatch onto its own Machine) OR dispatch in-process.
+ * initialPrompt as the run's first user message, then hand the run to
+ * dispatchRun. There is no policy branch here anymore — dispatchRun is the SINGLE
+ * choke point for the nested-dispatch isolate decision
+ * (docs/nested-machine-dispatch.md, Decisions 1 + 5).
  *
- * Isolate (docs/nested-machine-dispatch.md, Decision 1): when this process is a
- * worker AND the nested-dispatch policy is "isolate", we must NOT call
- * dispatchRun. A worker holds no Fly credentials and none of the admission /
- * pending-pump / sweep machinery, so dispatching here falls through to an
- * in-container spawn inside the parent's Machine — exactly the bug this design
- * fixes. Instead we leave the freshly-inserted row at status 'pending' (its
- * initialStatus): that pending row IS the dispatch request. The SERVER's pending
- * pump claims it, runs admission, and provisions the child its own Fly Machine.
- * We also emit a runner_deferred event (Decision 6) so the gap between "tool
- * returned a session id" and "machine created" is visible in the run's event tail.
- *
- * Everywhere else — the SERVER (insideWorker() false), and a worker under the
- * "inline" policy (off-Fly / rollback) — behavior is byte-identical to before:
- * persist the prompt, then dispatchRun.
+ * Why the policy lives in dispatchRun, not here: a worker holds no Fly
+ * credentials and none of the admission / pending-pump / sweep machinery, so it
+ * must never provision a child Machine itself. But launch branches are not the
+ * only way a worker reaches dispatchRun (driveDispatchedRun / driveChatSession
+ * re-dispatch stranded follow-ups too), so the "worker + isolate → park" rule
+ * has to sit inside dispatchRun to cover them all. When it fires, dispatchRun
+ * parks the freshly-inserted row at status 'pending' (its initialStatus) and
+ * emits the runner_deferred event (Decision 6); that pending row IS the dispatch
+ * request, and the SERVER's pending pump claims it, runs admission, and gives the
+ * child its own Fly Machine. Off-Fly / inline / server paths are unchanged:
+ * dispatchRun spawns in-process/in-container exactly as before. Fire-and-forget
+ * because the caller's create() must return the run id without waiting on a
+ * spawn (or a park).
  */
 async function launchDetached(
   runId: number,
-  initialPrompt: string | null | undefined,
-  parentRunId: number | null
+  initialPrompt: string | null | undefined
 ): Promise<void> {
-  const { dispatchRun, insideWorker, nestedDispatchMode } = await import("./run-dispatch");
+  const { dispatchRun } = await import("./run-dispatch");
   if (initialPrompt) {
     await persistMessage(runId, "user", [{ type: "text", text: initialPrompt }]);
   }
-  if (insideWorker() && nestedDispatchMode() === "isolate") {
-    await emitRunnerDeferred(runId, parentRunId);
-    return; // row stays 'pending'; the server's pump dispatches it to its own Machine
-  }
   void dispatchRun(runId).catch(() => {});
-}
-
-/**
- * Observability event marking a worker parking a child at 'pending' for the
- * server to isolate onto its own Machine (docs/nested-machine-dispatch.md,
- * Decision 6). Best-effort: an event-mirror failure must never break the launch.
- */
-async function emitRunnerDeferred(runId: number, parentRunId: number | null): Promise<void> {
-  try {
-    await db.insert(agentEvents).values({
-      sessionId: runId,
-      type: "runner_deferred",
-      payload: JSON.stringify({ parentRunId, reason: "nested_isolate" }),
-      createdAt: new Date(),
-    });
-  } catch {
-    // ignore event mirror failures
-  }
 }
 
 export async function list(filter: ListFilter = {}): Promise<RunRow[]> {
@@ -2692,6 +2676,17 @@ const HEARTBEAT_INTERVAL_MS = 20_000;
  * exceed HEARTBEAT_INTERVAL_MS and any plausible pause between bumps (the
  * interval keeps ticking even while a slow model/tool call is awaited, so this
  * only needs slack for scheduling jitter / GC pauses).
+ *
+ * MUST stay equal to lib/run-dispatch.ts's WORKER_CLAIM_STALE_MS. This is a hard
+ * invariant, not just tidiness: isWorkerLive() (which reads this constant) is
+ * what listPendingRunIds uses to partition the pump queue into "children of a
+ * live-claim parent" (served first) vs. the rest, while the dispatch deadlock
+ * breaker uses WORKER_CLAIM_STALE_MS to decide the SAME parent-live question when
+ * admitting a child over the cap. The queue ordering only keeps break-on-first-
+ * defer correct because the breaker admits exactly the children the pump front-
+ * loads; if the two windows diverged, a child served early by the pump could be
+ * deferred by the breaker, tripping pumpTick's stop-at-first-defer and starving
+ * the queue. Keep the two constants identical.
  */
 export const HEARTBEAT_STALE_MS = 5 * 60_000;
 

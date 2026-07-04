@@ -5,9 +5,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { cpus, totalmem } from "node:os";
 import { join } from "node:path";
 import { db } from "../db";
-import { agentSessions, runnerInstances } from "../db/schema";
+import { agentEvents, agentSessions, runnerInstances } from "../db/schema";
 import type { RunRow } from "./runs";
-import { getRunnerProvider, runnerProviderKindFromEnv } from "./runner/provider";
+import {
+  getRunnerProvider,
+  insideWorker,
+  nestedDispatchMode,
+  runnerProviderKindFromEnv,
+} from "./runner/provider";
 import { isTerminalStatus } from "./types";
 
 // Spawns the worker for a run and returns a truthy "pid" on success or null on
@@ -47,12 +52,13 @@ type RunsApi = {
     info: { exitCode: number | null; oomKilled: boolean; containerName: string }
   ) => Promise<void>;
   /** Re-verify the run-tree depth/size caps (docs/nested-machine-dispatch.md,
-   *  Decision 2) for a run that already has a parentRunId. Returns an error
-   *  message naming the violated limit, or null if the run is fine (including
-   *  root runs, which have no tree to bound). Defense in depth: create()
-   *  already checks this before insert, but a worker writing rows directly
-   *  would bypass that. */
-  checkTreeLimits: (runId: number) => Promise<string | null>;
+   *  Decision 2) for a child whose parent is `parentRunId`. Returns an error
+   *  message naming the violated limit, or null if the tree is within bounds.
+   *  The caller (dispatchRun) already holds the run row and passes its
+   *  parentRunId, so this takes the parent id directly rather than re-fetching
+   *  the run. Defense in depth: create() already checks this before insert, but
+   *  a worker writing rows directly would bypass that. */
+  checkTreeLimits: (parentRunId: number) => Promise<string | null>;
 };
 let runsApi: RunsApi | null = null;
 export function __setRunsApi(api: RunsApi): void {
@@ -229,6 +235,16 @@ export function admissionDecision(i: {
 // run-dispatch has no static import of runs.ts — runs.ts injects its helpers
 // into this module instead (see the RunsApi comment above) to avoid a boot-time
 // import cycle. Keep this in sync if that value ever changes.
+//
+// This is not a soft "should match": it is a hard invariant tying the deadlock
+// breaker (hasLiveWorkerClaim, below) to the pump's queue partition
+// (listPendingRunIds in runs.ts, which uses isWorkerLive → HEARTBEAT_STALE_MS to
+// decide "child of a live-claim parent"). listPendingRunIds serves those
+// children first PRECISELY because the breaker admits them over the cap so they
+// never return "deferred"; pumpTick then stops at the first defer. If the two
+// windows disagreed, a child the pump classifies as "live parent" (served early)
+// could be classified "dead parent" by the breaker (not admitted → deferred),
+// tripping pumpTick's stop-at-first-defer and starving the rest of the queue.
 const WORKER_CLAIM_STALE_MS = 5 * 60_000;
 
 /**
@@ -300,6 +316,25 @@ function withAdmissionLock<T>(fn: () => Promise<T>): Promise<T> {
   return result;
 }
 
+/**
+ * Observability event marking a worker-created child parked at 'pending' for the
+ * server to isolate onto its own Machine (docs/nested-machine-dispatch.md,
+ * Decision 6). Best-effort — an event-mirror failure must never break the park —
+ * mirroring emitRunnerEvent in lib/runner/fly.ts (try/insert/catch-ignore).
+ */
+async function emitRunnerDeferred(runId: number, parentRunId: number | null): Promise<void> {
+  try {
+    await db.insert(agentEvents).values({
+      sessionId: runId,
+      type: "runner_deferred",
+      payload: JSON.stringify({ parentRunId, reason: "nested_isolate" }),
+      createdAt: new Date(),
+    });
+  } catch {
+    // ignore event mirror failures
+  }
+}
+
 export async function dispatchRun(
   runId: number,
   opts: { spawn?: SpawnFn; admit?: AdmitFn } = {}
@@ -317,6 +352,44 @@ export async function dispatchRun(
     if (runs().isLeaseLive(run)) return { kind: "already-claimed" };
     if (run.workerScope) return { kind: "already-claimed" };
 
+    // Nested-dispatch isolate policy (docs/nested-machine-dispatch.md,
+    // Decisions 1 + 5) — the SINGLE choke point. A worker holds no Fly
+    // credentials and none of the admission / pending-pump / sweep machinery, so
+    // it must never provision a child itself; under "isolate" it parks the child
+    // 'pending' and the SERVER's pump dispatches it onto its own Machine. This
+    // MUST live here in dispatchRun, not just in create()'s launch branches: a
+    // worker reaches dispatchRun by other paths too — driveDispatchedRun's
+    // finally re-dispatches a stranded follow-up, driveChatSession's drain
+    // re-dispatches a stranded message — and every one of them would otherwise
+    // detachedSpawn a child INSIDE the worker's own Machine (the exact bug this
+    // design fixes). Covering every dispatchRun call in a worker process closes
+    // that hole. Park via a conditional UPDATE that mirrors the defer branch
+    // below: null the claim, stamp heartbeatAt as the START of the pending
+    // episode ONLY when the row wasn't already 'pending' (so MAX_DEFER measures
+    // time-in-pending, and a re-defer of an already-pending row never resets it),
+    // and guard on status NOT IN ('cancelled','closed') so a cancel that raced
+    // this dispatch is never resurrected (same reasoning as the claim's
+    // notInArray guard). Then emit runner_deferred (Decision 6) and defer.
+    if (insideWorker() && nestedDispatchMode() === "isolate") {
+      const stampEpisode = run.status !== "pending";
+      await db
+        .update(agentSessions)
+        .set({
+          status: "pending",
+          workerScope: null,
+          workerPid: null,
+          ...(stampEpisode ? { heartbeatAt: new Date() } : {}),
+        })
+        .where(
+          and(
+            eq(agentSessions.id, runId),
+            notInArray(agentSessions.status, ["cancelled", "closed"])
+          )
+        );
+      await emitRunnerDeferred(runId, run.parentRunId ?? null);
+      return { kind: "deferred" };
+    }
+
     // Tree-limit re-verify (Decision 2 in docs/nested-machine-dispatch.md):
     // create() already rejects an over-depth/over-size child before insert, but
     // that's a courtesy for the common path — a worker could write a child row
@@ -325,8 +398,19 @@ export async function dispatchRun(
     // (container/Machine). Unlike admission's "defer, retry later" policy, a
     // tree-limit violation is a permanent rejection: retrying won't shrink the
     // tree, so fail the run now instead of parking it in 'pending' forever.
-    if (run.parentRunId != null) {
-      const violation = await runs().checkTreeLimits(runId);
+    //
+    // FIX B: gate to runs whose CURRENT status is 'pending'. That is exactly the
+    // queue-via-DB surface this defense-in-depth exists for — a fresh child row
+    // written around create() can only reach a Machine via the pump, which only
+    // serves 'pending'. countTreeRuns counts rows of ANY status and never
+    // shrinks, so once a tree exceeds the cap (a TOCTOU overshoot at create time,
+    // or rows predating the feature) EVERY re-dispatch of a run already in that
+    // tree would be permanently failRun()'d: reconcileOrphanedRuns re-dispatching
+    // a healthy orphaned child, or a follow-up turn on a terminal child. A run
+    // that already ran must never be tree-limit-failed on resume — only a run
+    // still queued (pending) for its first Machine is re-checked.
+    if (run.parentRunId != null && run.status === "pending") {
+      const violation = await runs().checkTreeLimits(run.parentRunId);
       if (violation) {
         await runs().failRun(runId, violation);
         return { kind: "spawn-failed" };
@@ -341,8 +425,8 @@ export async function dispatchRun(
       // just spawned. If every slot is held by executors, admission defers
       // every child to 'pending' forever — the executors never finish (so
       // never free a slot), the pump's retries never help, and eventually
-      // TASK_ORCH_MAX_DEFER_MS hard-fails the children as "insufficient host
-      // memory": a livelock with money spent and nothing done. No component
+      // TASK_ORCH_MAX_DEFER_MS hard-fails the children with "no worker
+      // capacity: ...": a livelock with money spent and nothing done. No component
       // otherwise models the parent→child dependency. Break the cycle: a
       // child whose parent still holds a live worker claim is admitted even
       // over the cap — the parent's slot is blocked awaiting this very child,
