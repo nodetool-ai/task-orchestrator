@@ -19,6 +19,8 @@ import { SessionStatusPill } from "@/components/session-status-pill";
 import { buildPlanChatPromptPrefix } from "@/lib/run-templates";
 import { formatDate, relativeDate } from "@/lib/utils";
 import { EmptyState } from "@/components/ui/empty-state";
+import { ListPanel } from "@/components/ui/list-panel";
+import { PageSection } from "@/components/ui/page-section";
 
 export const dynamic = "force-dynamic";
 
@@ -88,14 +90,16 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
         </div>
       )}
 
-      <section className="mt-8">
-        <div className="flex items-baseline justify-between mb-3">
-          <h2 className="text-sm font-semibold tracking-tight">Tasks</h2>
+      <PageSection
+        className="mt-8"
+        title="Tasks"
+        action={
           <NewTaskForm
             planId={plan.id}
             repoOptions={plan.repos.map((r) => ({ id: r.id, name: r.name }))}
           />
-        </div>
+        }
+      >
         {tasks.length === 0 ? (
           <EmptyState>No tasks yet.</EmptyState>
         ) : (
@@ -112,39 +116,39 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
                     </h3>
                     <span className="text-xs text-muted-foreground tabular-nums">{group.length}</span>
                   </div>
-                  <div className="rounded-lg border border-border/60 bg-card/30 divide-y divide-border/60 overflow-hidden">
+                  <ListPanel>
                     {group.map((t) => (
                       <div key={t.id} className="px-3">
                         <TaskRow task={t} />
                       </div>
                     ))}
-                  </div>
+                  </ListPanel>
                 </div>
               );
             })}
           </div>
         )}
-      </section>
+      </PageSection>
 
-      <section className="mt-10 space-y-3">
-        <div className="flex items-baseline justify-between">
-          <h2 className="text-sm font-semibold tracking-tight">Chat about this plan</h2>
+      <PageSection
+        title="Chat about this plan"
+        action={
           <span className="text-[11px] text-muted-foreground">
             agent can create tasks, edit the plan, change state
           </span>
-        </div>
+        }
+      >
         <PlanChatBox
           planId={plan.id}
           repoOptions={plan.repos.map((r) => ({ id: r.id, name: r.name }))}
           promptPrefix={chatPromptPrefix}
           personas={personas}
         />
-      </section>
+      </PageSection>
 
       {planChats.length > 0 && (
-        <section className="mt-8 space-y-3">
-          <h2 className="text-sm font-semibold tracking-tight">Recent chats on this plan</h2>
-          <div className="rounded-lg border border-border/60 bg-card/30 divide-y divide-border/60 overflow-hidden">
+        <PageSection className="mt-8" title="Recent chats on this plan">
+          <ListPanel>
             {planChats.map((r) => (
               <Link
                 key={r.id}
@@ -164,18 +168,18 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
                 </span>
               </Link>
             ))}
-          </div>
-        </section>
+          </ListPanel>
+        </PageSection>
       )}
 
       <div className="my-8 h-px bg-border/60" />
 
       <MarkdownBody source={plan.body} />
 
-      <section className="mt-10 space-y-3">
+      <PageSection>
         <AttachmentsHeading count={plan.attachments.length} />
         <Attachments scope="plan" ownerId={plan.id} attachments={plan.attachments} />
-      </section>
+      </PageSection>
     </article>
   );
 }

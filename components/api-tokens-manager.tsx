@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { Plus, Trash2, Copy, Check, KeyRound } from "lucide-react";
 import { relativeDate } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { CodeBlock } from "@/components/ui/code-block";
 import { Input } from "@/components/ui/input";
 import { useConfirm } from "@/components/ui/dialog-provider";
 import { ErrorText } from "@/components/ui/error-text";
@@ -291,9 +292,9 @@ function SnippetBlock({ label, text }: { label: string; text: string }) {
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
-      <pre className="whitespace-pre-wrap font-mono text-[11px] leading-5 text-muted-foreground select-all">
+      <CodeBlock tone="muted" selectable className="border-0 bg-transparent p-0">
         {text}
-      </pre>
+      </CodeBlock>
     </div>
   );
 }

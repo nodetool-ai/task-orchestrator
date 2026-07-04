@@ -1,4 +1,5 @@
 import { ApiTokensManager } from "@/components/api-tokens-manager";
+import { CodeBlock } from "@/components/ui/code-block";
 
 export const dynamic = "force-dynamic";
 
@@ -16,15 +17,15 @@ export default function TokensPage() {
         <div className="grid gap-3 md:grid-cols-3">
           <div className="rounded-md border border-border/60 bg-card/40 p-3 text-xs space-y-1.5">
             <div className="font-medium">Claude Code (CLI):</div>
-            <pre className="whitespace-pre-wrap font-mono text-[11px] leading-5 text-muted-foreground">{`claude mcp add --transport http \\
+            <CodeBlock tone="muted" className="border-0 bg-transparent p-0">{`claude mcp add --transport http \\
   task-orchestrator \\
   https://tasks.nodetool.ai/api/mcp \\
-  --header "Authorization: Bearer tot_…"`}</pre>
+  --header "Authorization: Bearer tot_…"`}</CodeBlock>
           </div>
 
           <div className="rounded-md border border-border/60 bg-card/40 p-3 text-xs space-y-1.5">
             <div className="font-medium">Claude Desktop:</div>
-            <pre className="whitespace-pre-wrap font-mono text-[11px] leading-5 text-muted-foreground">{`{
+            <CodeBlock tone="muted" className="border-0 bg-transparent p-0">{`{
   "mcpServers": {
     "task-orchestrator": {
       "type": "http",
@@ -32,19 +33,19 @@ export default function TokensPage() {
       "headers": { "Authorization": "Bearer tot_…" }
     }
   }
-}`}</pre>
+}`}</CodeBlock>
           </div>
 
           <div className="rounded-md border border-border/60 bg-card/40 p-3 text-xs space-y-1.5">
             <div className="font-medium">Cursor (~/.cursor/mcp.json):</div>
-            <pre className="whitespace-pre-wrap font-mono text-[11px] leading-5 text-muted-foreground">{`{
+            <CodeBlock tone="muted" className="border-0 bg-transparent p-0">{`{
   "mcpServers": {
     "task-orchestrator": {
       "url": "https://tasks.nodetool.ai/api/mcp",
       "headers": { "Authorization": "Bearer tot_…" }
     }
   }
-}`}</pre>
+}`}</CodeBlock>
           </div>
         </div>
       </header>

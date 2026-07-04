@@ -22,6 +22,8 @@ import { formatDate, formatDateTime, relativeDate } from "@/lib/utils";
 import { Tooltip } from "@/components/ui/tooltip";
 import { Chip } from "@/components/ui/chip";
 import { EmptyState } from "@/components/ui/empty-state";
+import { ListPanel } from "@/components/ui/list-panel";
+import { PageSection } from "@/components/ui/page-section";
 import { PrLink } from "@/components/pr-link";
 
 export const dynamic = "force-dynamic";
@@ -148,20 +150,20 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
 
       <div className="my-8 h-px bg-border/60" />
 
-      <section className="space-y-3">
-        <h2 className="text-sm font-semibold tracking-tight">Description</h2>
+      <PageSection className="mt-0" title="Description">
         <MarkdownBody source={task.body} />
-      </section>
+      </PageSection>
 
-      <section className="mt-10 space-y-3">
-        <div className="flex items-baseline justify-between">
-          <h2 className="text-sm font-semibold tracking-tight">Acceptance criteria</h2>
-          {task.criteria.length > 0 && (
+      <PageSection
+        title="Acceptance criteria"
+        action={
+          task.criteria.length > 0 ? (
             <span className="text-xs text-muted-foreground tabular-nums">
               {task.criteria.filter((c) => c.done).length} / {task.criteria.length} done
             </span>
-          )}
-        </div>
+          ) : null
+        }
+      >
         {task.criteria.length === 0 && <EmptyState className="italic">No criteria yet.</EmptyState>}
         <ul className="space-y-0">
           {task.criteria.map((c) => (
@@ -175,13 +177,12 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
           ))}
         </ul>
         <AddCriterionForm taskId={task.id} />
-      </section>
+      </PageSection>
 
-      <section className="mt-10 space-y-3">
-        <div className="flex items-baseline justify-between">
-          <h2 className="text-sm font-semibold tracking-tight">Notes</h2>
-          <AddNoteForm taskId={task.id} defaultAuthor={task.assignee ?? undefined} />
-        </div>
+      <PageSection
+        title="Notes"
+        action={<AddNoteForm taskId={task.id} defaultAuthor={task.assignee ?? undefined} />}
+      >
         {task.notes.length === 0 ? (
           <EmptyState className="italic">No notes yet.</EmptyState>
         ) : (
@@ -201,21 +202,20 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
             ))}
           </ol>
         )}
-      </section>
+      </PageSection>
 
-      <section className="mt-10 space-y-3">
+      <PageSection>
         <AttachmentsHeading count={task.attachments.length} />
         <Attachments scope="task" ownerId={task.id} attachments={task.attachments} />
-      </section>
+      </PageSection>
 
-      <section className="mt-10 space-y-3">
-        <h2 className="text-sm font-semibold tracking-tight">Inbox</h2>
+      <PageSection title="Inbox">
         {inbox.length === 0 ? (
           <EmptyState className="italic">
             No runs yet. Start one with the buttons above, or ask the agent in the chat box below.
           </EmptyState>
         ) : (
-          <div className="rounded-lg border border-border/60 bg-card/30 divide-y divide-border/60 overflow-hidden">
+          <ListPanel>
             {inbox.map((r) => (
               <div
                 key={r.id}
@@ -255,19 +255,18 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
                 </div>
               </div>
             ))}
-          </div>
+          </ListPanel>
         )}
-      </section>
+      </PageSection>
 
-      <section className="mt-10 space-y-3">
-        <h2 className="text-sm font-semibold tracking-tight">Chat about this task</h2>
+      <PageSection title="Chat about this task">
         <TaskChatBox
           taskId={task.id}
           repoId={task.repoId ?? null}
           promptPrefix={chatPromptPrefix}
           personas={personas}
         />
-      </section>
+      </PageSection>
     </article>
   );
 }

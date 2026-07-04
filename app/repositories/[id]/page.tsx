@@ -9,6 +9,8 @@ import { SessionStatusPill } from "@/components/session-status-pill";
 import { EditRepositoryForm } from "@/components/repositories/edit-repository-form";
 import { formatDate, formatDateTime, relativeDate } from "@/lib/utils";
 import { EmptyState } from "@/components/ui/empty-state";
+import { ListPanel } from "@/components/ui/list-panel";
+import { PageSection } from "@/components/ui/page-section";
 import { Tooltip } from "@/components/ui/tooltip";
 
 export const dynamic = "force-dynamic";
@@ -66,12 +68,11 @@ export default async function RepositoryPage({
         <Meta label="Created">{formatDate(r.createdAt)}</Meta>
       </dl>
 
-      <section className="space-y-2">
-        <h2 className="text-sm font-semibold tracking-tight">Plans ({allPlans.length})</h2>
+      <PageSection className="mt-0 space-y-2" title={`Plans (${allPlans.length})`}>
         {allPlans.length === 0 ? (
           <EmptyState>No plans in this repository yet.</EmptyState>
         ) : (
-          <div className="divide-y divide-border/60 rounded-lg border border-border/60 bg-card/30">
+          <ListPanel>
             {allPlans.map((p) => (
               <Link
                 key={p.id}
@@ -85,18 +86,15 @@ export default async function RepositoryPage({
                 <StateBadge state={p.state} />
               </Link>
             ))}
-          </div>
+          </ListPanel>
         )}
-      </section>
+      </PageSection>
 
-      <section className="space-y-2">
-        <h2 className="text-sm font-semibold tracking-tight">
-          Agent sessions ({allSessions.length})
-        </h2>
+      <PageSection className="mt-0 space-y-2" title={`Agent sessions (${allSessions.length})`}>
         {allSessions.length === 0 ? (
           <EmptyState>No agent sessions yet.</EmptyState>
         ) : (
-          <div className="divide-y divide-border/60 rounded-lg border border-border/60 bg-card/30">
+          <ListPanel>
             {allSessions.slice(0, 20).map((s) => (
               <Link
                 key={s.id}
@@ -115,9 +113,9 @@ export default async function RepositoryPage({
                 </Tooltip>
               </Link>
             ))}
-          </div>
+          </ListPanel>
         )}
-      </section>
+      </PageSection>
     </article>
   );
 }
