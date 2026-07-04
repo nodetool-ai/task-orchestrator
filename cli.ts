@@ -13,6 +13,8 @@ import { createMagicToken } from "./lib/magic-link";
 import { sql } from "./db";
 import { TASK_STATES, isTerminalStatus, type TaskState } from "./lib/types";
 import { assistantText, toolUses, type SdkMessageEnvelope } from "./lib/sdk-message";
+import { collectRunnerInventory } from "./lib/runner/inventory";
+import { makeFlyClient } from "./lib/runner/fly-client";
 
 function isTaskState(s: string): s is TaskState {
   return (TASK_STATES as readonly string[]).includes(s);
@@ -552,6 +554,80 @@ async function cmdUser(args: Args): Promise<number> {
   }
 }
 
+function formatAge(ms: number | null): string {
+  if (ms == null) return "—";
+  const mins = Math.floor(ms / 60_000);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+async function cmdRunners(args: Args): Promise<number> {
+  const inv = await collectRunnerInventory();
+  if (args.json) {
+    console.log(JSON.stringify(inv, null, 2));
+    return 0;
+  }
+
+  if (inv.rows.length === 0) {
+    console.log("(no runner machines or volumes)");
+  } else {
+    console.log(
+      `${pad("RUN", 6)} ${pad("MACHINE", 20)} ${pad("M-STATE", 10)} ${pad("VOLUME", 22)} ${pad("V-STATE", 10)} ${pad("SIZE", 6)} ${pad("AGE", 6)} ${pad("$/MO", 8)} ORPHAN`
+    );
+    for (const r of inv.rows) {
+      console.log(
+        `${pad(r.runId != null ? "#" + r.runId : "—", 6)} ` +
+          `${pad(r.machineId ?? "—", 20)} ` +
+          `${pad(r.machineState ?? "—", 10)} ` +
+          `${pad(r.volumeId ?? "—", 22)} ` +
+          `${pad(r.volumeState ?? "—", 10)} ` +
+          `${pad(r.sizeGb != null ? `${r.sizeGb}G` : "—", 6)} ` +
+          `${pad(formatAge(r.ageMs), 6)} ` +
+          `${pad(`$${r.estMonthlyCostUsd.toFixed(2)}`, 8)} ` +
+          `${r.orphan ? "⚠ orphan" : ""}`
+      );
+    }
+  }
+
+  const t = inv.totals;
+  console.log(
+    `\n${t.machines} machines, ${t.volumes} volumes, ${t.totalGb} GB, ~$${t.estMonthlyCostUsd.toFixed(2)}/mo (${t.orphanVolumes} orphan volumes)`
+  );
+
+  if (args.reap) {
+    const orphans = inv.rows.filter((r) => r.orphan && r.volumeId);
+    if (orphans.length === 0) {
+      console.log("\nNo orphan volumes to reap.");
+      return 0;
+    }
+    let client;
+    try {
+      client = makeFlyClient();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.error(`\nCannot reap — Fly client unavailable: ${message}`);
+      return 1;
+    }
+    console.log(`\nReaping ${orphans.length} orphan volume(s):`);
+    let reaped = 0;
+    for (const r of orphans) {
+      try {
+        await client.destroyVolume(r.volumeId!);
+        console.log(`  destroyed ${r.volumeId}`);
+        reaped++;
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        console.error(`  failed ${r.volumeId}: ${message}`);
+      }
+    }
+    console.log(`Reaped ${reaped} orphan volume(s)`);
+  }
+
+  return 0;
+}
+
 function help() {
   console.log(`Usage: npm run task -- <command> [args]
 
@@ -591,6 +667,8 @@ Commands:
                                     Update a user's password.
   user link <email> [--origin=...]  Generate a one-time magic login link.
   user rm <email>                   Delete a user.
+
+  runners [--json] [--reap]         List runner Machines + volumes with state, run, age, est. cost. --reap destroys orphan volumes.
 
 States:
   Tasks: ${TASK_STATES.join(", ")}
@@ -645,6 +723,9 @@ async function main() {
         break;
       case "user":
         code = await cmdUser(args);
+        break;
+      case "runners":
+        code = await cmdRunners(args);
         break;
       case "help":
       case undefined:

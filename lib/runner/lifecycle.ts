@@ -23,6 +23,7 @@ export interface LifecycleInput {
   heartbeatAt?: Date | null;
 }
 
+const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function intEnv(key: string, dflt: number): number {
@@ -65,8 +66,20 @@ function isActiveRunStatus(status: string): boolean {
 }
 
 /**
- * Pure lifecycle policy for cost control:
- * - active runs are never touched;
+ * Pure lifecycle policy for cost control. Actively-used machines (creating/
+ * starting, or holding a live worker claim) are never touched. Everything else
+ * splits on whether the run is TERMINAL (done forever) or merely idle/resumable:
+ *
+ * Terminal runs (completed/failed/cancelled/closed/budget_exhausted) will never
+ * resume, so their volume's only unique artifact (runner.log) is being made
+ * durable elsewhere and needs no long retention. They get the SHORT window
+ * TASK_ORCH_RUNNER_TERMINAL_MS (default 1h):
+ * - within the window a still-running machine is suspended (stop paying for
+ *   compute immediately), otherwise left alone;
+ * - past the window it is archived/destroyed regardless of runner state.
+ *
+ * Idle/resumable runs (e.g. a chat run waiting for the next message) keep the
+ * long windows so a user can come back to them:
  * - idle/done runs on a running machine are suspended first;
  * - once idle past TASK_ORCH_RUNNER_SUSPEND_MS (default 24h), suspended machines
  *   are stopped;
@@ -88,8 +101,21 @@ export function nextLifecycleAction(i: LifecycleInput): LifecycleAction {
   // finishes its turn) does the machine become eligible for suspend/stop.
   if (isWorkerClaimLive(i)) return { kind: "none" };
 
-  const terminal = isTerminalStatus(i.runStatus as SessionStatus);
-  if (!terminal && isActiveRunStatus(i.runStatus)) return { kind: "none" };
+  // Terminal runs are done forever: no resume is possible, so their volume gets
+  // only the short retention window before we archive+destroy. The creating/
+  // starting/gone states were already returned above, so any state reaching
+  // here (running/suspended/stopped) is eligible.
+  if (isTerminalStatus(i.runStatus as SessionStatus)) {
+    const terminalWindowMs = intEnv("TASK_ORCH_RUNNER_TERMINAL_MS", HOUR_MS);
+    if (i.idleMs >= terminalWindowMs) return { kind: "archive-and-destroy" };
+    // Still within the short window: stop paying for compute immediately, but
+    // keep the volume around until the window elapses.
+    return state === "running" ? { kind: "suspend" } : { kind: "none" };
+  }
+
+  // Non-terminal: active runs are never touched; idle/resumable runs keep the
+  // long suspend/stop windows below.
+  if (isActiveRunStatus(i.runStatus)) return { kind: "none" };
 
   const suspendWindowMs = intEnv("TASK_ORCH_RUNNER_SUSPEND_MS", DAY_MS);
   const stopWindowMs = intEnv("TASK_ORCH_RUNNER_STOP_MS", 7 * DAY_MS);

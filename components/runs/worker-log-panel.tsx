@@ -11,10 +11,12 @@ interface WorkerLogResponse {
   error?: string;
 }
 
-// The raw docker-logs output of a run's worker container — the place to look
-// when a run fails without anything useful in the transcript (OOM kill, crash
-// before the agent started, git/auth trouble). "live" = read from the running
-// container just now; "stored" = the tail captured when the container died.
+// The raw output of a run's worker (a local docker container's logs, or a Fly
+// worker's runner.log) — the place to look when a run fails without anything
+// useful in the transcript (OOM kill, crash before the agent started, git/auth
+// trouble). "live" = read from the running container just now; "stored" = the
+// tail captured/flushed onto the run row (at container death, or during/at the
+// end of a Fly run).
 export function WorkerLogPanel({ runId }: { runId: number }) {
   const [data, setData] = useState<WorkerLogResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -80,7 +82,7 @@ export function WorkerLogPanel({ runId }: { runId: number }) {
         ) : (
           <span className="text-muted-foreground/60">
             No worker log for this run — it either predates log capture or its
-            worker never started a container.
+            worker never produced any output.
           </span>
         )}
       </pre>

@@ -237,11 +237,12 @@ Full descriptions are in `.env.docker.example`.
 | `TASK_ORCH_FLY_REGION` | web region | Region for run Machines + Volumes. |
 | `TASK_ORCH_FLY_CPUS` | `2` | vCPUs per run Machine (shared). |
 | `TASK_ORCH_FLY_MEMORY_MB` | `4096` | Memory per run Machine. |
-| `TASK_ORCH_RUNNER_VOLUME_GB` | `20` | Volume size per run. |
+| `TASK_ORCH_RUNNER_VOLUME_GB` | `10` | Volume size per run. `10` GB comfortably fits a repo checkout + npm cache + Claude session store for typical repos; bump it (e.g. `20`) for monorepos or heavy `node_modules`. Only the volume's `logs/runner.log` is unique, and it is shipped to Postgres (see below), so a right-sized volume loses nothing when destroyed. |
 | `TASK_ORCH_MAX_MACHINES` | `0` (fly gate off) | Max active Machines; `>0` also enables the admission gate that defers over-cap runs to `pending`. |
-| `TASK_ORCH_FLY_POLL_MS` | `10000` | How often the server reconciles Fly state. |
-| `TASK_ORCH_RUNNER_SUSPEND_MS` | `86400000` (24h) | Idle window before a suspended Machine is stopped. |
-| `TASK_ORCH_RUNNER_STOP_MS` | `604800000` (7d) | Idle window before a stopped Machine + Volume is destroyed. |
+| `TASK_ORCH_FLY_POLL_MS` | `10000` | How often the server reconciles Fly state (and runs the orphan-volume reaper). |
+| `TASK_ORCH_RUNNER_TERMINAL_MS` | `3600000` (1h) | Idle window before a **terminal** run's Machine + Volume is destroyed. A finished run (completed/failed/cancelled/closed/budget_exhausted) is done forever, so its volume is reclaimed quickly rather than kept for 7 days. |
+| `TASK_ORCH_RUNNER_SUSPEND_MS` | `86400000` (24h) | Idle window before a suspended **resumable** run's Machine is stopped. |
+| `TASK_ORCH_RUNNER_STOP_MS` | `604800000` (7d) | Idle window before a stopped **resumable** run's Machine + Volume is destroyed. Applies to idle/resumable runs (e.g. a chat waiting for the next message); terminal runs use `TASK_ORCH_RUNNER_TERMINAL_MS` instead. |
 | `TASK_ORCH_CHAT_IDLE_MS` | `600000` (10m) | How long a long-lived chat runner waits warm for the next message. |
 | `TASK_ORCH_ARCHIVE_R2` | *(unset)* | If set, cold Volumes are flagged for archival instead of being destroyed with data (archiver is a future component). |
 
@@ -322,19 +323,39 @@ fly ssh console -a my-orch -C \
 Cost control is automatic. The web server's monitor sweeps Fly state every
 `TASK_ORCH_FLY_POLL_MS` and applies this pure policy (`lib/runner/lifecycle.ts`):
 
+The policy distinguishes a **terminal** run (done forever) from an **idle /
+resumable** run (paused, may resume on the next message):
+
 | Run state | Machine state | Idle time | Action |
 | --- | --- | --- | --- |
-| active (`pending`/`preparing`/`running`/`pushing`/`opening_pr`) | any | — | **none** (never touch a live run) |
-| idle / terminal | `running` | < 24h | **suspend** (fast resume, keeps the Volume) |
-| idle / terminal | `suspended`/`running` | ≥ `TASK_ORCH_RUNNER_SUSPEND_MS` (24h) | **stop** |
-| idle / terminal | `stopped` | ≥ `TASK_ORCH_RUNNER_STOP_MS` (7d) | **archive-and-destroy** (Machine + Volume) |
+| active (`pending`/`preparing`/`running`/`pushing`/`opening_pr`) or live worker claim | any | — | **none** (never touch a live run) |
+| **terminal** (`completed`/`failed`/`cancelled`/`closed`/`budget_exhausted`) | `running` | < `TASK_ORCH_RUNNER_TERMINAL_MS` (1h) | **suspend** (stop paying for compute) |
+| **terminal** | any | ≥ `TASK_ORCH_RUNNER_TERMINAL_MS` (1h) | **archive-and-destroy** (Machine + Volume) |
+| idle / resumable | `running` | < `TASK_ORCH_RUNNER_SUSPEND_MS` (24h) | **suspend** (fast resume, keeps the Volume) |
+| idle / resumable | `suspended`/`running` | ≥ `TASK_ORCH_RUNNER_SUSPEND_MS` (24h) | **stop** |
+| idle / resumable | `stopped` | ≥ `TASK_ORCH_RUNNER_STOP_MS` (7d) | **archive-and-destroy** (Machine + Volume) |
 
 Key properties:
 
+- **Destroying a volume is lossless.** A run's `logs/runner.log` — the volume's
+  only unique artifact — is streamed to Postgres (`agent_sessions.worker_log`,
+  visible on the run detail page and `GET /api/runs/:id/worker-log`) incrementally
+  during the run and flushed a final time at terminal. Everything else on the
+  volume (checkout, npm cache, Claude session store) is reproducible or lives in
+  Postgres, so a destroyed volume loses no debugging history.
+- **Terminal runs are reclaimed fast.** Because destroy is lossless, a finished
+  run's Machine + Volume are destroyed ~1h after it goes idle rather than kept for
+  7 days. Only idle/resumable runs keep the long window (they can be restarted
+  onto their existing Volume).
 - **Resume keeps state.** A suspended or stopped Machine can be restarted onto its
   existing Volume, so a resumed run keeps its checkout, npm cache, and Claude
   session store. If the Machine is gone but the Volume remains, the server
   cold-recovers by creating a fresh Machine on that Volume.
+- **Orphan-volume reaper.** Each sweep also destroys **leaked** volumes — a
+  `vol_run_*` Volume with no attached Machine and no live/resumable run row (the
+  residue of a crash or a missed destroy). It never touches a Volume attached to a
+  Machine or referenced by a non-`gone` run, and skips volumes younger than a
+  10-minute grace window so a just-created, not-yet-attached Volume is safe.
 - **Crash detection.** If a Machine disappears while its run is still marked
   active, the sweep applies the death policy (`handleWorkerDeath`) so the run
   fails visibly instead of hanging — the boot reconcile + pending pump also cover
@@ -343,8 +364,26 @@ Key properties:
   over-cap runs to `pending` and a pump re-dispatches them oldest-first as slots
   free up.
 
-Tune the windows down for aggressive cost savings (e.g. stop after 1h, destroy
-after 1d) or up if you frequently resume old runs.
+**Inventory + cost.** `npm run task -- runners` lists live runner Machines +
+Volumes with state, run id, age, and estimated monthly storage cost, plus totals
+and an orphan marker. `npm run task -- runners --reap` destroys the orphan
+Volumes it finds (the same predicate the sweep uses). Add `--json` for scripting.
+
+**Tuning.** The defaults (destroy terminal runs after 1h; suspend resumable-idle
+after 24h, destroy after 7d) suit workloads that rarely resume old runs. Set
+shorter windows on the **web app** for tighter cost control — e.g. destroy a
+resumable-idle run after ~1 day rather than 7:
+
+```bash
+fly secrets set --app "$APP" \
+  TASK_ORCH_RUNNER_TERMINAL_MS=3600000 \
+  TASK_ORCH_RUNNER_SUSPEND_MS=43200000 \
+  TASK_ORCH_RUNNER_STOP_MS=86400000 \
+  TASK_ORCH_RUNNER_VOLUME_GB=10
+```
+
+Raise them if you frequently resume old runs. These are read by the server (the
+control plane creates Machines and runs the lifecycle), not the runner pool.
 
 ---
 

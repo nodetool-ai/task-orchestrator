@@ -19,11 +19,22 @@ export interface FlyMachine {
 export interface FlyVolume {
   id: string;
   region: string;
+  // Enriched fields from list/get responses (absent on a bare create echo →
+  // left undefined). `attachedMachineId` is the linchpin for orphan detection:
+  // a volume with no attachment is a candidate to reap.
+  name?: string;
+  state?: string;
+  sizeGb?: number;
+  attachedMachineId?: string | null;
+  /** Volume creation time, when the list/get response carries it. Lets the
+   *  orphan reaper skip a just-created volume that hasn't been attached yet. */
+  createdAt?: Date | null;
 }
 
 export interface FlyClient {
   createVolume(input: { name: string; region: string; size_gb: number }): Promise<FlyVolume>;
   destroyVolume(id: string): Promise<void>;
+  listVolumes(): Promise<FlyVolume[]>;
   createMachine(input: { name: string; region: string; config: FlyMachineConfig }): Promise<FlyMachine>;
   getMachine(id: string): Promise<FlyMachine | null>;
   startMachine(id: string): Promise<void>;
@@ -76,7 +87,19 @@ function machineFromJson(result: any): FlyMachine {
 }
 
 function volumeFromJson(result: any): FlyVolume {
-  return { id: String(result.id), region: String(result.region ?? "") };
+  const vol: FlyVolume = { id: String(result.id), region: String(result.region ?? "") };
+  if (result.name != null) vol.name = String(result.name);
+  if (result.state != null) vol.state = String(result.state);
+  if (result.size_gb != null) vol.sizeGb = Number(result.size_gb);
+  // Fly reports the attachment under either key depending on API version; a
+  // volume with neither set is unattached (reap candidate).
+  const attached = result.attached_machine_id ?? result.attached_machine ?? null;
+  vol.attachedMachineId = attached == null ? null : String(attached);
+  if (result.created_at != null) {
+    const d = new Date(result.created_at);
+    vol.createdAt = Number.isNaN(d.getTime()) ? null : d;
+  }
+  return vol;
 }
 
 export function makeFlyClient(input?: typeof fetch | FlyClientOptions): FlyClient {
@@ -118,6 +141,12 @@ export function makeFlyClient(input?: typeof fetch | FlyClientOptions): FlyClien
 
     async destroyVolume(id: string) {
       await request("DELETE", `/volumes/${encodeURIComponent(id)}`);
+    },
+
+    async listVolumes(): Promise<FlyVolume[]> {
+      const result = await request<any>("GET", "/volumes");
+      const rows = Array.isArray(result) ? result : Array.isArray(result?.volumes) ? result.volumes : [];
+      return rows.map(volumeFromJson);
     },
 
     async createMachine(input: { name: string; region: string; config: FlyMachineConfig }) {
