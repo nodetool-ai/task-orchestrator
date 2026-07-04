@@ -5,7 +5,9 @@ name: task-orchestrator
 # across ephemeral worker containers).
 
 x-app-env: &app-env
-  DATABASE_URL: postgres://taskorch:${POSTGRES_PASSWORD}@postgres:5432/taskorch
+  # DATABASE_URL from the env (Supabase) when set; else the local compose
+  # `postgres` service. Unset DATABASE_URL in .env to roll back to local.
+  DATABASE_URL: ${DATABASE_URL:-postgres://taskorch:${POSTGRES_PASSWORD}@postgres:5432/taskorch}
   AUTH_SECRET: ${AUTH_SECRET}
   NEXTAUTH_URL: ${NEXTAUTH_URL}
   AUTH_TRUST_HOST: "true"
