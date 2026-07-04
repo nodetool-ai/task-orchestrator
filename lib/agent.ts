@@ -238,6 +238,9 @@ export interface StartSessionInput {
   /** Lineage parent (e.g. the plan executor that spawned this). Used for UI
    *  grouping and the tree budget cap. `resumeOf` takes precedence. */
   parentRunId?: number | null;
+  /** User the session is attributed to; spawned children inherit the
+   *  spawner's userId so attribution survives across the run tree. */
+  userId?: number | null;
 }
 
 export async function startSession(input: StartSessionInput): Promise<AgentSessionFull> {
@@ -299,6 +302,7 @@ export async function startSession(input: StartSessionInput): Promise<AgentSessi
       thinkingLevel: input.thinkingLevel ?? null,
       baseBranch: input.baseBranch ?? "main",
       parentRunId: input.resumeOf ?? input.parentRunId ?? null,
+      userId: input.userId ?? null,
     });
 
     return runs.toAgentSessionFull(created);

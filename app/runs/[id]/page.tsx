@@ -41,6 +41,26 @@ export default async function RunPage({
     }
   }
 
+  // Child runs this run spawned (start_session / start_review stamp
+  // parentRunId). list() orders by startedAt desc; the section wants id order.
+  const childRows = (await runs.list({ parentRunId: runId })).sort(
+    (a, b) => a.id - b.id
+  );
+  const childTaskTitles = new Map<string, string>();
+  for (const taskId of new Set(
+    childRows.flatMap((c) => (c.taskId ? [c.taskId] : []))
+  )) {
+    const t = await repo.getTask(taskId);
+    if (t) childTaskTitles.set(taskId, t.title);
+  }
+  const childRuns = childRows.map((c) => ({
+    id: c.id,
+    goal: c.goal,
+    status: c.status,
+    taskId: c.taskId,
+    taskTitle: c.taskId ? childTaskTitles.get(c.taskId) ?? null : null,
+  }));
+
   // Task info used by the implement-run header (PR link, branch, task id).
   const task = run.taskId ? await repo.getTask(run.taskId) : null;
 
@@ -61,6 +81,7 @@ export default async function RunPage({
         userEmail={session?.user?.email ?? null}
         repositories={repositories}
         parent={parent}
+        childRuns={childRuns}
         task={task ? { id: task.id, title: task.title } : null}
         personaName={persona?.name ?? null}
       />

@@ -85,6 +85,16 @@ const resolvePlanId = (provided: string | undefined, ctx: OrchestratorToolContex
   return ctx.defaultPlanId ?? null;
 };
 
+// Spawned children (start_session / start_review) inherit the spawner's user
+// attribution. The tool context only carries the run id, so resolve userId off
+// the spawning run's row; null when invoked outside a run (e.g. the MCP
+// server) or when the spawner itself has no user.
+const resolveSpawnerUserId = async (ctx: OrchestratorToolContext): Promise<number | null> => {
+  if (ctx.runId == null) return null;
+  const spawner = await runs.get(ctx.runId);
+  return spawner?.userId ?? null;
+};
+
 // Max bytes we inline an image for the model; bigger images are referenced by
 // download URL instead. Text artifacts inline up to a char cap, then truncate.
 const IMAGE_INLINE_MAX = 5 * 1024 * 1024;
@@ -995,6 +1005,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       base_branch: Type.Optional(Type.String()),
     }),
     execute: async ({ task_id, model, reasoning, base_branch }, ctx) => {
+      const userId = await resolveSpawnerUserId(ctx);
       const result = await safe(() =>
         agentLib.startSession({
           taskId: task_id,
@@ -1002,6 +1013,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
           thinkingLevel: reasoning ?? null,
           baseBranch: base_branch,
           parentRunId: ctx.runId ?? null,
+          userId,
         })
       );
       if ("_error" in result) return errResult(`Error: ${result._error}`);
@@ -1050,6 +1062,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
           `Error: Task ${task_id} already has an active review (session #${activeReviews[0].id}). Await or cancel it before starting another.`
         );
       }
+      const userId = await resolveSpawnerUserId(ctx);
       const result = await safe(() =>
         runs.create({
           goal: "<review>",
@@ -1065,6 +1078,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
           model: model ?? null,
           thinkingLevel: reasoning ?? null,
           parentRunId: ctx.runId ?? null,
+          userId,
           budget: { maxUsd: REVIEW_DEFAULT_BUDGET_USD },
         })
       );

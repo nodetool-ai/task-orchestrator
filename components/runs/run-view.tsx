@@ -51,6 +51,14 @@ interface Props {
   userEmail: string | null;
   repositories: SidebarRepo[];
   parent: { id: number; title: string } | null;
+  /** Runs this run spawned (their parentRunId points here), in id order. */
+  childRuns: Array<{
+    id: number;
+    goal: string;
+    status: SessionStatus;
+    taskId: string | null;
+    taskTitle: string | null;
+  }>;
   task: { id: string; title: string } | null;
   personaName: string | null;
 }
@@ -116,6 +124,7 @@ export function RunView({
   userEmail,
   repositories,
   parent,
+  childRuns,
   task,
   personaName,
 }: Props) {
@@ -629,7 +638,54 @@ export function RunView({
           {run.goal && run.goal !== "<implement>" && run.goal !== "<chat>" && (
             <span className="truncate">{run.goal}</span>
           )}
+          {parent && (
+            <Tooltip content={parent.title}>
+              <Link
+                href={`/runs/${parent.id}`}
+                className="inline-flex items-center gap-1 hover:text-foreground"
+              >
+                ↳ spawned by Run #{parent.id}
+              </Link>
+            </Tooltip>
+          )}
         </div>
+
+        {childRuns.length > 0 && (
+          <div className="mt-2 rounded-md border border-border/60 bg-card/30 overflow-hidden">
+            <div className="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground border-b border-border/60">
+              Spawned runs
+              <span className="ml-2 font-normal normal-case tabular-nums">
+                {childRuns.length}
+              </span>
+            </div>
+            <div className="divide-y divide-border/60">
+              {childRuns.map((c) => (
+                <div
+                  key={c.id}
+                  className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1.5 text-xs hover:bg-muted/40 transition-colors"
+                >
+                  <Link
+                    href={`/runs/${c.id}`}
+                    className="font-mono text-muted-foreground tabular-nums hover:text-foreground"
+                  >
+                    #{c.id}
+                  </Link>
+                  <span className="font-medium">{c.goal}</span>
+                  <SessionStatusPill status={c.status} />
+                  {c.taskId && (
+                    <Link
+                      href={`/tasks/${c.taskId}`}
+                      className="min-w-0 truncate text-muted-foreground hover:text-foreground"
+                    >
+                      <code className="font-mono text-[11px]">{c.taskId}</code>
+                      {c.taskTitle && <span className="ml-1.5">{c.taskTitle}</span>}
+                    </Link>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {showWorkerLog && <WorkerLogPanel runId={run.id} />}
       </header>
