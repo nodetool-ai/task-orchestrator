@@ -99,9 +99,19 @@ export class PiBackend implements AgentBackend {
 
     const sessionDir = path.join(cwd, ".pi", "sessions");
     const resumePath = piSessionPath(args.resumeToken);
-    const sessionManager = resumePath
-      ? SessionManager.open(resumePath, sessionDir)
-      : SessionManager.create(cwd, sessionDir);
+    // If the resume path doesn't exist (e.g., container/worktree restart), start fresh
+    // rather than attempting to open a non-existent session file.
+    let sessionManager;
+    if (resumePath && fs.existsSync(resumePath)) {
+      sessionManager = SessionManager.open(resumePath, sessionDir);
+    } else {
+      if (resumePath) {
+        console.warn(
+          `Resume session file not found: ${resumePath}; starting fresh session instead`
+        );
+      }
+      sessionManager = SessionManager.create(cwd, sessionDir);
+    }
 
     const authStorage = AuthStorage.create();
     const modelRegistry = ModelRegistry.create(authStorage);

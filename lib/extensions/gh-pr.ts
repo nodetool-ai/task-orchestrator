@@ -25,17 +25,43 @@ interface GhResult {
   stderr: string;
 }
 
+// Timeout for gh subprocess calls (seconds). Prevents indefinite hangs on network issues.
+const GH_TIMEOUT_SECONDS = 120;
+
 function gh(args: string[], cwd: string | undefined): Promise<GhResult> {
-  return new Promise((resolveP) => {
+  return new Promise((resolveP, rejectP) => {
     const child = spawn("gh", args, { env: process.env, cwd });
     let stdout = "";
     let stderr = "";
+    let resolved = false;
+
+    const settle = (result: GhResult) => {
+      if (!resolved) {
+        resolved = true;
+        resolveP(result);
+      }
+    };
+
+    // Set a timeout to kill the process if it hangs.
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      settle({
+        code: -1,
+        stdout,
+        stderr: stderr + `\ngh ${args[0]} timed out after ${GH_TIMEOUT_SECONDS}s`,
+      });
+    }, GH_TIMEOUT_SECONDS * 1000);
+
     child.stdout.on("data", (d) => (stdout += d.toString()));
     child.stderr.on("data", (d) => (stderr += d.toString()));
-    child.on("error", (err) =>
-      resolveP({ code: -1, stdout, stderr: stderr + String(err) })
-    );
-    child.on("close", (code) => resolveP({ code: code ?? -1, stdout, stderr }));
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      settle({ code: -1, stdout, stderr: stderr + String(err) });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      settle({ code: code ?? -1, stdout, stderr });
+    });
   });
 }
 
