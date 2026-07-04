@@ -26,6 +26,11 @@ export default auth((req) => {
   if (path === "/login" || path === "/login-link" || path.startsWith("/api/auth/")) {
     return NextResponse.next();
   }
+  // /api/health is an unauthenticated liveness/readiness probe (Fly health
+  // checks, uptime monitors). It exposes no data beyond up/down + DB reachability.
+  if (path === "/api/health") {
+    return NextResponse.next();
+  }
   // /api/mcp has its own Bearer-token auth (lib/api-tokens). Bypass the
   // session gate so MCP clients without a browser session can reach it.
   if (path === "/api/mcp") {
