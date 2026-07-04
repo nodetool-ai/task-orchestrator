@@ -35,7 +35,7 @@ import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, notInArray } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, notInArray, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 
 import { db } from "@/db";
@@ -82,6 +82,7 @@ runDispatch.__setRunsApi({
   reconcileOrphanedRuns,
   listLeasedRuns,
   handleWorkerDeath,
+  checkTreeLimits,
 });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -276,6 +277,150 @@ function getLock(runId: number): PerRunLock {
 }
 
 // ──────────────────────────────────────────────────────────
+// Tree limits (docs/nested-machine-dispatch.md, Decision 2)
+// ──────────────────────────────────────────────────────────
+// Bound how deep and how large a parent_run_id tree can grow, so a worker that
+// spawns children (and whose children later become real, billable Fly Machines)
+// can't fan out without limit. Checked in create() (friendly, synchronous tool
+// error) AND re-verified in dispatchRun (defense in depth: a worker writing rows
+// directly, bypassing create(), still can't get a Machine past the server-side
+// check). Both call sites funnel through evaluateTreeLimits so the two produce
+// byte-identical messages.
+
+// Read fresh per call (config changes take effect without a restart, matching
+// lib/run-dispatch.ts's intEnv). 0 or negative disables the corresponding check.
+function treeLimitEnv(key: string, dflt: number): number {
+  const raw = process.env[key];
+  if (raw == null || raw === "") return dflt;
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.floor(n) : dflt;
+}
+
+// Hard stop for the parent-chain walks below, paired with a visited-set cycle
+// guard: a self-referential/cyclic parent_run_id graph (shouldn't happen, but
+// nothing enforces it at the DB level) must not hang a create()/dispatchRun call.
+const MAX_PARENT_WALK = 64;
+
+/** A run's own parent_run_id, or null if the run has none — or no longer exists
+ *  (parent_run_id carries no FK, so an ancestor can be deleted out from under
+ *  its descendants). Shared by the parent-chain walks below. */
+async function fetchParentRunId(id: number): Promise<number | null> {
+  const row: { parentRunId: number | null } | undefined = (
+    await db
+      .select({ parentRunId: agentSessions.parentRunId })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, id))
+  )[0];
+  return row?.parentRunId ?? null;
+}
+
+/**
+ * Depth a new run would have if created with `parentRunId` as its parent (root =
+ * depth 0, so a direct child of a root is depth 1). Walks agent_sessions'
+ * parent_run_id chain upward one row at a time — the chain is short in practice,
+ * so a bounded loop reads more plainly here than a recursive CTE. Robust to a
+ * dangling parentRunId: parent_run_id carries no FK, so an ancestor row can be
+ * deleted out from under its descendants; when the walk can't find a row it just
+ * stops there (treats the missing ancestor as if it were the root), rather than
+ * throwing.
+ */
+async function wouldBeDepth(parentRunId: number): Promise<number> {
+  let depth = 1; // the new run sits one level below parentRunId
+  let currentId: number | null = parentRunId;
+  const visited = new Set<number>();
+  for (let i = 0; i < MAX_PARENT_WALK && currentId != null; i++) {
+    if (visited.has(currentId)) break; // cyclic parent_run_id graph
+    visited.add(currentId);
+    const parent = await fetchParentRunId(currentId); // no row (deleted parent) => null, stop here
+    if (parent == null) break;
+    depth++;
+    currentId = parent;
+  }
+  return depth;
+}
+
+/**
+ * Root id of the tree containing `startId` — walks parent_run_id upward until it
+ * finds a run with no parent (or a dangling one; see wouldBeDepth). Same
+ * cycle/iteration bound as wouldBeDepth.
+ */
+async function findTreeRoot(startId: number): Promise<number> {
+  let currentId = startId;
+  const visited = new Set<number>();
+  for (let i = 0; i < MAX_PARENT_WALK; i++) {
+    if (visited.has(currentId)) break;
+    visited.add(currentId);
+    const parent = await fetchParentRunId(currentId);
+    if (parent == null) break;
+    currentId = parent;
+  }
+  return currentId;
+}
+
+/**
+ * Total number of runs (any status) sharing rootId's tree. The tree can fan out
+ * wide (unlike the parent-chain walks above, which are single-path), so this is
+ * a set-based recursive CTE rather than another app-level loop.
+ */
+async function countTreeRuns(rootId: number): Promise<number> {
+  const rows = await db.execute(sql`
+    WITH RECURSIVE tree AS (
+      SELECT id FROM agent_runs WHERE id = ${rootId}
+      UNION ALL
+      SELECT s.id FROM agent_runs s JOIN tree t ON s.parent_run_id = t.id
+    )
+    SELECT count(*)::int AS count FROM tree
+  `);
+  const first = (rows as unknown as Array<{ count: number }>)[0];
+  return Number(first?.count ?? 0);
+}
+
+/**
+ * Depth + tree-size check shared by create() and dispatchRun's re-verify (via
+ * checkTreeLimits below), so both surfaces reject with the exact same message.
+ * `extraTreeRuns` accounts for a run not yet in the table: create() calls this
+ * BEFORE inserting the new row (extraTreeRuns=1, counting the run-to-be), while
+ * checkTreeLimits calls it for a run that already exists (extraTreeRuns=0, it's
+ * already part of the CTE's count).
+ */
+async function evaluateTreeLimits(
+  parentRunId: number,
+  opts: { extraTreeRuns: number }
+): Promise<string | null> {
+  const maxDepth = treeLimitEnv("TASK_ORCH_MAX_RUN_DEPTH", 3);
+  const maxTreeRuns = treeLimitEnv("TASK_ORCH_MAX_TREE_RUNS", 32);
+  if (maxDepth > 0) {
+    const depth = await wouldBeDepth(parentRunId);
+    if (depth > maxDepth) {
+      return `run tree depth ${depth} exceeds TASK_ORCH_MAX_RUN_DEPTH=${maxDepth} (parent_run_id nesting cap; see docs/nested-machine-dispatch.md)`;
+    }
+  }
+  if (maxTreeRuns > 0) {
+    const root = await findTreeRoot(parentRunId);
+    const size = (await countTreeRuns(root)) + opts.extraTreeRuns;
+    if (size > maxTreeRuns) {
+      return `run tree size ${size} exceeds TASK_ORCH_MAX_TREE_RUNS=${maxTreeRuns} (total runs sharing this run's root; see docs/nested-machine-dispatch.md)`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Server-side re-verify for dispatchRun (defense in depth): a worker that writes
+ * run rows directly, bypassing create()'s check, must still not get a Machine
+ * past this. No-op (returns null) for a root run (no parentRunId) — a run that
+ * ever had its parent link removed is not re-checked either, matching create()'s
+ * dangling-parent tolerance. Injected into lib/run-dispatch.ts via __setRunsApi
+ * below (run-dispatch has no static import of this module — see the import-cycle
+ * note by that call).
+ */
+export async function checkTreeLimits(runId: number): Promise<string | null> {
+  const run = await get(runId);
+  if (!run || run.parentRunId == null) return null;
+  return evaluateTreeLimits(run.parentRunId, { extraTreeRuns: 0 });
+}
+
+// ──────────────────────────────────────────────────────────
 // CRUD: create / list / get
 // ──────────────────────────────────────────────────────────
 
@@ -355,6 +500,15 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     throw new repo.RepoError(`Persona '${personaId}' not found`, 404);
   }
   const effectiveModel = input.model ?? DEFAULT_MODEL;
+
+  // Tree limits (Decision 2): reject BEFORE inserting, same reasoning as the
+  // worktree-invariant checks above — validating after the insert would leave an
+  // undriveable ghost row behind. Only applies to child runs; a root run (no
+  // parentRunId) has no tree to bound.
+  if (input.parentRunId != null) {
+    const violation = await evaluateTreeLimits(input.parentRunId, { extraTreeRuns: 1 });
+    if (violation) throw new repo.RepoError(violation, 400);
+  }
 
   const inserted = await db
     .insert(agentSessions)

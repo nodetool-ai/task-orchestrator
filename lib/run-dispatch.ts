@@ -46,6 +46,13 @@ type RunsApi = {
     runId: number,
     info: { exitCode: number | null; oomKilled: boolean; containerName: string }
   ) => Promise<void>;
+  /** Re-verify the run-tree depth/size caps (docs/nested-machine-dispatch.md,
+   *  Decision 2) for a run that already has a parentRunId. Returns an error
+   *  message naming the violated limit, or null if the run is fine (including
+   *  root runs, which have no tree to bound). Defense in depth: create()
+   *  already checks this before insert, but a worker writing rows directly
+   *  would bypass that. */
+  checkTreeLimits: (runId: number) => Promise<string | null>;
 };
 let runsApi: RunsApi | null = null;
 export function __setRunsApi(api: RunsApi): void {
@@ -300,6 +307,22 @@ export async function dispatchRun(
     if (!run) return { kind: "not-found" };
     if (runs().isLeaseLive(run)) return { kind: "already-claimed" };
     if (run.workerScope) return { kind: "already-claimed" };
+
+    // Tree-limit re-verify (Decision 2 in docs/nested-machine-dispatch.md):
+    // create() already rejects an over-depth/over-size child before insert, but
+    // that's a courtesy for the common path — a worker could write a child row
+    // directly (or repoint parent_run_id) and skip it entirely. Re-check here,
+    // before the claim, so no row this deep/large ever gets a real worker
+    // (container/Machine). Unlike admission's "defer, retry later" policy, a
+    // tree-limit violation is a permanent rejection: retrying won't shrink the
+    // tree, so fail the run now instead of parking it in 'pending' forever.
+    if (run.parentRunId != null) {
+      const violation = await runs().checkTreeLimits(runId);
+      if (violation) {
+        await runs().failRun(runId, violation);
+        return { kind: "spawn-failed" };
+      }
+    }
 
     if (admissionEnabled()) {
       let decision = await admitFn(runId);
