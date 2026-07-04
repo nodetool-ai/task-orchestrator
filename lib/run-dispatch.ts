@@ -1,12 +1,13 @@
 // lib/run-dispatch.ts
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { cpus, totalmem } from "node:os";
 import { join } from "node:path";
 import { db } from "../db";
-import { agentSessions } from "../db/schema";
+import { agentSessions, runnerInstances } from "../db/schema";
 import type { RunRow } from "./runs";
+import { getRunnerProvider, runnerProviderKindFromEnv } from "./runner/provider";
 import { isTerminalStatus } from "./types";
 
 // Spawns the worker for a run and returns a truthy "pid" on success or null on
@@ -56,8 +57,14 @@ function runs(): RunsApi {
 }
 
 export function detachedRunsEnabled(): boolean {
+  if (runnerProviderKindFromEnv() === "fly") return true;
   const v = process.env.TASK_ORCH_DETACHED_RUNS;
   return !!v && v !== "0" && v.toLowerCase() !== "false";
+}
+
+/** True when the server must route user turns through an out-of-process runner. */
+export function remoteRunnerEnabled(): boolean {
+  return detachedRunsEnabled() && (runnerProviderKindFromEnv() === "fly" || !!process.env.TASK_ORCH_WORKER_IMAGE);
 }
 
 let nonceCounter = 0;
@@ -197,15 +204,29 @@ export function admissionDecision(i: {
   return "admit";
 }
 
-/** The gate only runs on the containerized path, and can be turned off. */
+/** The gate only runs for managed worker backends, and can be turned off. */
 function admissionEnabled(): boolean {
-  if (!process.env.TASK_ORCH_WORKER_IMAGE) return false;
   const v = process.env.TASK_ORCH_ADMISSION_ENABLED;
-  return v == null || (v !== "0" && v.toLowerCase() !== "false");
+  if (v != null && (v === "0" || v.toLowerCase() === "false")) return false;
+  if (runnerProviderKindFromEnv() === "fly") return intEnv("TASK_ORCH_MAX_MACHINES", 0) > 0;
+  return !!process.env.TASK_ORCH_WORKER_IMAGE;
+}
+
+const FLY_ADMISSION_STATES = ["creating", "starting", "running"];
+
+async function flyAdmit(): Promise<AdmitDecision> {
+  const maxMachines = intEnv("TASK_ORCH_MAX_MACHINES", 0);
+  if (maxMachines <= 0) return "admit";
+  const active = await db
+    .select({ runId: runnerInstances.runId })
+    .from(runnerInstances)
+    .where(and(eq(runnerInstances.provider, "fly"), inArray(runnerInstances.state, FLY_ADMISSION_STATES)));
+  return active.length >= maxMachines ? "defer" : "admit";
 }
 
 async function admit(runId: number): Promise<AdmitDecision> {
   void runId; // reserved for future per-run sizing; decision is host-global today
+  if (runnerProviderKindFromEnv() === "fly") return flyAdmit();
   const capMB = intEnv("TASK_ORCH_WORKER_MEMORY_MB", 0);
   const reserveMB = intEnv("TASK_ORCH_HOST_MEMORY_RESERVE_MB", 0);
   const maxWorkers = intEnv("TASK_ORCH_MAX_WORKERS", 0);
@@ -307,19 +328,33 @@ export async function dispatchRun(
 
   if (outcome.kind !== "claimed") return outcome.kind;
 
-  // Spawn the worker. A throw or a null pid must NOT leave the run wedged in
-  // 'preparing' with no error — mark it failed and release the claim.
-  const spawn = opts.spawn ?? defaultSpawn;
-  let pid: number | null = null;
+  // Start the worker through the selected provider. A throw/null must NOT leave
+  // the run wedged in 'preparing' with no error — mark it failed and release the
+  // claim. opts.spawn remains as the legacy test seam and is adapted to a local
+  // RunnerRef while preserving the returned pid in worker_pid.
+  let pid = 1;
+  let handle = outcome.scope;
   try {
-    pid = await spawn(runId, outcome.scope);
+    if (opts.spawn) {
+      const spawned = await opts.spawn(runId, outcome.scope);
+      if (spawned == null) {
+        return await failSpawn(runId, "run worker did not start (spawn returned no pid — worker image/runtime available?)");
+      }
+      pid = spawned;
+    } else {
+      const ref = await getRunnerProvider().create({ runId, scope: outcome.scope });
+      if (!ref) {
+        return await failSpawn(runId, "run worker did not start (spawn returned no pid — worker image/runtime available?)");
+      }
+      handle = ref.handle;
+    }
   } catch (err) {
     return await failSpawn(runId, `run worker failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
   }
-  if (pid == null) {
-    return await failSpawn(runId, "run worker did not start (spawn returned no pid — worker image/runtime available?)");
-  }
-  await db.update(agentSessions).set({ workerPid: pid }).where(eq(agentSessions.id, runId));
+  await db
+    .update(agentSessions)
+    .set({ workerPid: pid, workerScope: handle })
+    .where(eq(agentSessions.id, runId));
   return "spawned";
 }
 
@@ -343,10 +378,10 @@ function pumpIntervalMs(): number {
 }
 
 async function pumpTick(): Promise<void> {
-  // Half 0: reconcile against the REAL container state — fast death detection +
-  // log capture for anything the events watcher missed.
+  // Half 0: reconcile against the REAL runner state — fast death detection +
+  // log capture/state repair for anything the provider watcher missed.
   try {
-    await sweepWorkerContainers();
+    await getRunnerProvider().sweep();
   } catch {
     // best-effort
   }
@@ -388,7 +423,7 @@ async function pumpTick(): Promise<void> {
 /** Start the periodic pump (idempotent). No-op off the containerized path or when
  *  the interval is disabled (TASK_ORCH_PENDING_PUMP_MS=0). */
 export function startPendingRunPump(): void {
-  if (!process.env.TASK_ORCH_WORKER_IMAGE) return;
+  if (!process.env.TASK_ORCH_WORKER_IMAGE && runnerProviderKindFromEnv() !== "fly") return;
   const ms = pumpIntervalMs();
   if (ms <= 0) return;
   const g = globalThis as Record<string, unknown>;
@@ -490,7 +525,7 @@ export function buildWorkerContainerConfig(runId: number, scope: string): Record
   };
 }
 
-async function dockerSpawn(runId: number, scope: string): Promise<number | null> {
+export async function dockerSpawn(runId: number, scope: string): Promise<number | null> {
   const docker = await getDocker();
   const container = await docker.createContainer(buildWorkerContainerConfig(runId, scope));
   await container.start();
@@ -525,6 +560,12 @@ export async function stopWorkerContainer(scope: string | null): Promise<void> {
   } catch {
     // already stopped / removed / unreachable — nothing to do
   }
+}
+
+/** Provider-aware hard-stop used by run cancellation. */
+export async function stopRunner(scope: string | null): Promise<void> {
+  if (!scope) return;
+  await getRunnerProvider().stop(scope);
 }
 
 // ── worker container monitor ─────────────────────────────────────────────────

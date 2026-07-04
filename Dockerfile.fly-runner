@@ -1,0 +1,34 @@
+# syntax=docker/dockerfile:1
+# Fly Machines runner image. One Fly Machine runs one already-claimed agent run
+# against a persistent volume mounted at /mnt/session.
+
+FROM node:24-bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      git ca-certificates curl gnupg openssh-client ripgrep jq gosu \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY package.json package-lock.json .npmrc ./
+# Keep dev dependencies: the existing worker entrypoint is TypeScript and runs via tsx.
+RUN npm ci
+RUN npm install -g @anthropic-ai/claude-code
+
+COPY . .
+
+RUN git config --system user.email "agent@task-orchestrator.local" \
+    && git config --system user.name "Task Orchestrator Agent" \
+    && git config --system credential.helper '!f() { echo username=x-access-token; echo "password=${GH_TOKEN}"; }; f'
+
+COPY scripts/fly-runner-entry.sh /usr/local/bin/fly-runner-entry
+RUN chmod +x /usr/local/bin/fly-runner-entry
+
+ENV SESSION_ROOT=/mnt/session
+ENTRYPOINT ["/usr/local/bin/fly-runner-entry"]

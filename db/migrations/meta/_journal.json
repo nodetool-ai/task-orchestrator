@@ -29,6 +29,13 @@
       "when": 1783111735538,
       "tag": "0003_worker_exit",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1783184640000,
+      "tag": "0004_runner_instances",
+      "breakpoints": true
     }
   ]
 }

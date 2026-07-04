@@ -780,10 +780,9 @@ export async function cancel(id: number): Promise<RunRow> {
     .where(eq(agentSessions.id, id));
   await emitStatus(id, "cancelled");
   closeBus(id);
-  // Hard-stop the detached worker container as a fallback (the cancel_requested
-  // poll aborts it gracefully within a heartbeat; docker stop is the belt). No-op
-  // when not containerized.
-  void runDispatch.stopWorkerContainer(run.workerScope);
+  // Hard-stop the detached worker as a fallback (the cancel_requested poll aborts
+  // it gracefully within a heartbeat; provider stop is the belt). No-op if gone.
+  void runDispatch.stopRunner(run.workerScope);
   if (run.cwdStrategy === "worktree" && run.worktreePath) {
     cleanupWorktree(run.worktreePath, await repoRoot(run)).catch(() => {});
   }
@@ -987,18 +986,16 @@ export function validateCwd(dir: string, ctx: { runId: number; repoId: string | 
 }
 
 async function prepareCwd(run: RunRow): Promise<string> {
+  const sessionWork = sessionRepoPath();
   if (run.cwdStrategy === "none" || run.cwdStrategy === "repo") {
-    // Container model: the host repoRoot()/local_path doesn't exist inside a
-    // worker. Clone the repo's default branch from the repo-cache mirror into a
-    // container-local dir (no feature branch, no push — correct for repo/none:
-    // plan-executor at repo root, repo-scoped chats). Idempotent: reuse an
-    // existing /work/<id> across turns in a long-lived worker. Falls back to the
-    // host path in dev/non-container mode.
-    if (process.env.REPO_CACHE_DIR) {
-      const work = `/work/${run.id}`;
-      if (!existsSync(work)) {
+    // Container/Fly model: the host repoRoot()/local_path doesn't exist inside a
+    // worker. Clone the repo's default branch into a runner-local dir. On Fly the
+    // dir lives on the persistent session volume; on Docker it is /work/<id>.
+    if (sessionWork || process.env.REPO_CACHE_DIR) {
+      const work = sessionWork ?? `/work/${run.id}`;
+      if (!existsSync(join(work, ".git"))) {
         const def = await repoDefaultBranch(run);
-        await containerCheckout(run, def, def);
+        await containerCheckoutAt(run, work, def, def);
       }
       return validateCwd(work, { runId: run.id, repoId: run.repoId });
     }
@@ -1009,6 +1006,20 @@ async function prepareCwd(run: RunRow): Promise<string> {
     throw new Error(
       `Run #${run.id} has cwd_strategy=${run.cwdStrategy} but no branch/worktree_path recorded yet.`
     );
+  }
+  // Fly resume: the checkout usually already exists on the session volume. Make
+  // it current idempotently and persist the volume path so SDK cwd is stable
+  // across same-machine and new-machine resumes.
+  if (sessionWork) {
+    if (!existsSync(join(sessionWork, ".git"))) {
+      await containerCheckoutAt(run, sessionWork, run.branch);
+    }
+    if (run.worktreePath !== sessionWork) {
+      await db.update(agentSessions)
+        .set({ worktreePath: sessionWork })
+        .where(eq(agentSessions.id, run.id));
+    }
+    return validateCwd(sessionWork, { runId: run.id, repoId: run.repoId });
   }
   // Worker-container resume: the prior container (and its /work checkout) is
   // gone, so re-clone from the cache and check out the already-pushed branch.
@@ -1082,45 +1093,46 @@ async function repoDefaultBranch(run: { repoId: string | null; taskId: string | 
  * worktree off the base branch, persist them, and move the task to in_progress.
  * No-op once a branch exists (later turns re-materialize via prepareCwd).
  */
-// Worker-container git checkout: clone the run's repo from the mounted
-// repo-cache mirror (fast, local objects) into /work/<id>, authenticated by
-// GH_TOKEN so pushes + gh work directly. With `base` set, branch off origin/base
-// (first turn); without it, check out the existing (already-pushed) branch (a
-// resume in a fresh container). Returns the container-local worktree path.
-async function containerCheckout(
+function sessionRepoPath(): string | null {
+  const root = process.env.SESSION_ROOT;
+  return root ? resolve(root, "repo") : null;
+}
+
+// Worker/Fly git checkout: clone the run's repo from GitHub, optionally using the
+// mounted repo-cache mirror as an object reference. With `base` set, branch off
+// origin/base (first turn); without it, check out the existing pushed branch
+// (resume), falling back to the repo default for chat branches that never pushed.
+// Idempotent: if `work` already contains a clone, fetch + checkout in place.
+async function containerCheckoutAt(
   run: RunRow,
+  work: string,
   branch: string,
   base?: string
 ): Promise<string> {
-  const cache = process.env.REPO_CACHE_DIR!;
   const repoRow = await resolveRepo(run);
   const parsed = ownerRepoFromRemote(repoRow?.remote ?? null);
   if (!parsed) {
     throw new Error(
-      `Run #${run.id}: repository '${run.repoId ?? "(default)"}' has no GitHub remote to clone for the worker container.`
+      `Run #${run.id}: repository '${run.repoId ?? "(default)"}' has no GitHub remote to clone for the worker.`
     );
   }
   if (!process.env.GH_TOKEN) {
-    throw new Error(`Run #${run.id}: GH_TOKEN is required for in-container checkout.`);
+    throw new Error(`Run #${run.id}: GH_TOKEN is required for in-runner checkout.`);
   }
-  const mirror = resolve(cache, `${parsed.owner}_${parsed.repo}.git`);
-  // Plain URL — auth comes from the worker image's git credential helper (which
-  // reads GH_TOKEN), so the token never appears in the URL, .git/config, or any
-  // error string persisted to agent_runs.error.
+  const cache = process.env.REPO_CACHE_DIR;
+  const mirror = cache ? resolve(cache, `${parsed.owner}_${parsed.repo}.git`) : "";
   const url = `https://github.com/${parsed.owner}/${parsed.repo}`;
-  const work = `/work/${run.id}`;
-  await mkdir("/work", { recursive: true });
-  const reference = existsSync(mirror) ? ["--reference", mirror, "--dissociate"] : [];
-  await sh(["git", "clone", ...reference, url, work], "/");
+  await mkdir(dirname(work), { recursive: true });
+  if (!existsSync(join(work, ".git"))) {
+    const reference = mirror && existsSync(mirror) ? ["--reference", mirror, "--dissociate"] : [];
+    await sh(["git", "clone", ...reference, url, work], "/");
+  } else {
+    await sh(["git", "-C", work, "remote", "set-url", "origin", url], "/").catch(() => {});
+  }
+  await sh(["git", "-C", work, "fetch", "--prune", "origin"], "/").catch(() => {});
   if (base) {
     await sh(["git", "-C", work, "checkout", "-B", branch, `origin/${base}`], "/");
   } else {
-    // resume: the branch may be on the remote (an implement run that pushed
-    // commits). If it isn't — a chat that never committed never pushed its branch
-    // — fall back to a fresh default-branch checkout under the same branch name.
-    // Conversation continuity lives in the resumed SDK session (~/.claude), not
-    // the git branch, so this is correct for a chat; an implement resume still
-    // gets its pushed work.
     try {
       await sh(["git", "-C", work, "fetch", "origin", branch], "/");
       await sh(["git", "-C", work, "checkout", "-B", branch, `origin/${branch}`], "/");
@@ -1132,17 +1144,27 @@ async function containerCheckout(
   return work;
 }
 
+async function containerCheckout(
+  run: RunRow,
+  branch: string,
+  base?: string
+): Promise<string> {
+  const work = `/work/${run.id}`;
+  await mkdir("/work", { recursive: true });
+  return containerCheckoutAt(run, work, branch, base);
+}
+
 // Review-run container checkout: clone the repo from the repo-cache mirror into
 // /work/<id>, fetch the PR head into a stable per-run ref, and check it out on a
 // throwaway review branch. Auth for the clone/fetch comes from the worker image's
 // git credential helper (GH_TOKEN). Returns the container-local worktree path.
-async function containerReviewCheckout(
+async function containerReviewCheckoutAt(
   run: RunRow,
+  work: string,
   prNumber: number,
   branch: string,
   reviewRef: string
 ): Promise<string> {
-  const cache = process.env.REPO_CACHE_DIR!;
   const repoRow = await resolveRepo(run);
   const parsed = ownerRepoFromRemote(repoRow?.remote ?? null);
   if (!parsed) {
@@ -1153,15 +1175,30 @@ async function containerReviewCheckout(
   if (!process.env.GH_TOKEN) {
     throw new Error("GH_TOKEN is required for in-container review checkout.");
   }
-  const mirror = resolve(cache, `${parsed.owner}_${parsed.repo}.git`);
+  const cache = process.env.REPO_CACHE_DIR;
+  const mirror = cache ? resolve(cache, `${parsed.owner}_${parsed.repo}.git`) : "";
   const url = `https://github.com/${parsed.owner}/${parsed.repo}`;
-  const work = `/work/${run.id}`;
-  await mkdir("/work", { recursive: true });
-  const reference = existsSync(mirror) ? ["--reference", mirror, "--dissociate"] : [];
-  await sh(["git", "clone", ...reference, url, work], "/");
+  await mkdir(dirname(work), { recursive: true });
+  if (!existsSync(join(work, ".git"))) {
+    const reference = mirror && existsSync(mirror) ? ["--reference", mirror, "--dissociate"] : [];
+    await sh(["git", "clone", ...reference, url, work], "/");
+  } else {
+    await sh(["git", "-C", work, "remote", "set-url", "origin", url], "/").catch(() => {});
+  }
   await sh(["git", "-C", work, "fetch", "origin", `pull/${prNumber}/head:${reviewRef}`], "/");
   await sh(["git", "-C", work, "checkout", "-B", branch, reviewRef], "/");
   return work;
+}
+
+async function containerReviewCheckout(
+  run: RunRow,
+  prNumber: number,
+  branch: string,
+  reviewRef: string
+): Promise<string> {
+  const work = `/work/${run.id}`;
+  await mkdir("/work", { recursive: true });
+  return containerReviewCheckoutAt(run, work, prNumber, branch, reviewRef);
 }
 
 async function ensureWorktreeBranch(run: RunRow, baseBranch?: string): Promise<RunRow> {
@@ -1169,7 +1206,12 @@ async function ensureWorktreeBranch(run: RunRow, baseBranch?: string): Promise<R
   const base = baseBranch?.trim() || (await repoDefaultBranch(run));
   const branch = worktreeBranchName(run);
   let worktreePath: string;
-  if (process.env.REPO_CACHE_DIR) {
+  const sessionWork = sessionRepoPath();
+  if (sessionWork) {
+    // Fly mode: clone/checkout on the persistent per-run volume. The same path is
+    // reused across same-machine resumes and new machines attached to the volume.
+    worktreePath = await containerCheckoutAt(run, sessionWork, branch, base);
+  } else if (process.env.REPO_CACHE_DIR) {
     // Worker-container mode: clone from the mounted repo-cache mirror into a
     // container-local dir and branch off `base` there, instead of a host-shared
     // git worktree. The checkout is ephemeral (the container is --rm); durable
@@ -1315,14 +1357,16 @@ async function runReview(
 
     await setStatus(runId, "preparing");
 
-    if (process.env.REPO_CACHE_DIR) {
-      // Worker container: clone the repo from the repo-cache mirror into
-      // /work/<id>, fetch the PR head, and check it out there. The host
-      // localPath and shared `.worktrees/` don't exist in the container (and
-      // `mkdir /home/claude/...` fails as the non-root worker user) — this is
-      // the review-run equivalent of prepareCwd's container checkout.
+    const sessionWork = sessionRepoPath();
+    if (sessionWork || process.env.REPO_CACHE_DIR) {
+      // Worker/Fly container: clone the repo into the runner-local checkout
+      // (/mnt/session/repo on Fly, /work/<id> for Docker), fetch the PR head,
+      // and check it out there. Host localPath/.worktrees do not exist inside
+      // remote runners.
       try {
-        worktreePath = await containerReviewCheckout(run, parsed.number, branch, reviewRef);
+        worktreePath = sessionWork
+          ? await containerReviewCheckoutAt(run, sessionWork, parsed.number, branch, reviewRef)
+          : await containerReviewCheckout(run, parsed.number, branch, reviewRef);
       } catch (err) {
         await setError(runId, `Could not check out PR ${prUrl} for review: ${describe(err)}`);
         runners.delete(runId);
@@ -1792,10 +1836,10 @@ export async function* sendMessageToRun(opts: {
     yield { type: "error", error: `Run ${runId} not found` };
     return;
   }
-  // Only the real containerized deploy forces workers (root server can't run
-  // claude-code). Without a worker image (dev/test), run the turn in-process
-  // exactly as before.
-  if (!process.env.TASK_ORCH_WORKER_IMAGE || !runDispatch.detachedRunsEnabled()) {
+  // Remote runner deployments (Docker worker image or Fly Machines provider)
+  // force turns through workers. Plain dev/test with no remote runner keeps the
+  // old in-process streaming path.
+  if (!runDispatch.remoteRunnerEnabled()) {
     yield* append({ runId, role, text, author, abort });
     return;
   }

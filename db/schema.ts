@@ -252,6 +252,25 @@ export const agentSessions = pgTable(
   })
 );
 
+export const runnerInstances = pgTable("runner_instances", {
+  runId: integer("run_id")
+    .primaryKey()
+    .references(() => agentSessions.id, { onDelete: "cascade" }),
+  provider: text("provider").notNull().default("fly"),
+  flyApp: text("fly_app"),
+  machineId: text("machine_id"),
+  volumeId: text("volume_id"),
+  region: text("region"),
+  // RunnerState: creating | starting | running | suspended | stopped | gone.
+  state: text("state").notNull().default("creating"),
+  repoPath: text("repo_path").notNull().default("/mnt/session/repo"),
+  claudePath: text("claude_path").notNull().default("/mnt/session/claude"),
+  createdAt: ts("created_at").notNull().defaultNow(),
+  lastStartedAt: ts("last_started_at"),
+  lastSuspendedAt: ts("last_suspended_at"),
+  archivedUri: text("archived_uri"),
+});
+
 export const agentMessages = pgTable(
   "agent_messages",
   {
@@ -387,6 +406,7 @@ export type TaskNote = typeof taskNotes.$inferSelect;
 export type AcceptanceCriterion = typeof acceptanceCriteria.$inferSelect;
 export type Attachment = typeof attachments.$inferSelect;
 export type AgentSession = typeof agentSessions.$inferSelect;
+export type RunnerInstance = typeof runnerInstances.$inferSelect;
 export type AgentEvent = typeof agentEvents.$inferSelect;
 export type AgentMessage = typeof agentMessages.$inferSelect;
 export type ChannelThread = typeof channelThreads.$inferSelect;
