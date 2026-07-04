@@ -988,11 +988,27 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     execute: async ({ task_id, pr_url, model, reasoning }, ctx) => {
       const task = await repo.getTask(task_id);
       if (!task) return errResult(`Error: Task ${task_id} not found`);
+      // Refuse to stack a second reviewer on the same task while one is
+      // already active — otherwise repeated calls pile up unbounded
+      // concurrent review runs against the same PR.
+      const activeReviews = await runs.list({
+        goal: "<review>",
+        taskId: task_id,
+        activeOnly: true,
+      });
+      if (activeReviews.length > 0) {
+        return errResult(
+          `Error: Task ${task_id} already has an active review (session #${activeReviews[0].id}). Await or cancel it before starting another.`
+        );
+      }
       const result = await safe(() =>
         runs.create({
           goal: "<review>",
           cwdStrategy: "worktree_at_pr",
-          toolsProfile: "orchestrator,repo_read,gh_pr",
+          // Read-only gh_pr: this run checks out an untrusted third-party PR,
+          // so it must never be able to merge or approve the PR it's judging
+          // (gh_pr_ro has no pr_merge and pr_review can't emit 'approve').
+          toolsProfile: "orchestrator,repo_read,gh_pr_ro",
           taskId: task_id,
           prUrl: pr_url,
           repoId: task.repoId ?? null,

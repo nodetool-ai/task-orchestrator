@@ -782,7 +782,9 @@ export async function cancel(id: number): Promise<RunRow> {
   closeBus(id);
   // Hard-stop the detached worker as a fallback (the cancel_requested poll aborts
   // it gracefully within a heartbeat; provider stop is the belt). No-op if gone.
-  void runDispatch.stopRunner(run.workerScope);
+  // .catch: stopRunner is fire-and-forget here; a provider hiccup must not surface
+  // as an unhandled rejection.
+  void runDispatch.stopRunner(run.workerScope).catch(() => {});
   if (run.cwdStrategy === "worktree" && run.worktreePath) {
     cleanupWorktree(run.worktreePath, await repoRoot(run)).catch(() => {});
   }
@@ -825,10 +827,16 @@ export async function close(id: number): Promise<RunRow> {
   // If a turn is in flight, cancel it first.
   const runner = runners.get(id);
   if (runner) runner.abort.abort();
+  // Cross-process stop, same as cancel(): the in-process abort above can't reach a
+  // detached worker in its own container, so also set cancel_requested (the worker
+  // polls it at heartbeat cadence and aborts its turn) and hard-stop the runner as
+  // the belt. Without this, closing a run in the containerized deploy leaves the
+  // worker's turn burning tokens to completion.
   await db.update(agentSessions)
-    .set({ status: "closed", completedAt: new Date() })
+    .set({ status: "closed", completedAt: new Date(), cancelRequested: 1 })
     .where(eq(agentSessions.id, id));
   closeBus(id);
+  void runDispatch.stopRunner(run.workerScope).catch(() => {});
   if (run.cwdStrategy === "worktree" && run.worktreePath) {
     cleanupWorktree(run.worktreePath, await repoRoot(run)).catch(() => {});
   }
@@ -1613,43 +1621,76 @@ export async function driveDispatchedRun(runId: number): Promise<void> {
 
   // Chat runs get a long-lived, warm-checkout session loop — one turn per inbound
   // user message (run_input channel) — instead of a single turn-and-exit. Returns
-  // only when the chat idles out; the worker then exits.
+  // only when the chat idles out; the worker then exits. driveChatSession manages
+  // (and releases) its own claim in its finally, so it returns BEFORE the
+  // single-turn release below and must not be routed through it.
   if (run.goal === "<chat>") {
     await driveChatSession(runId);
     return;
   }
 
-  if (run.goal === "<review>") {
-    if (!run.prUrl) {
-      await setError(runId, "Dispatched <review> run has no prUrl to review.");
+  // Single-turn detached workers (review / execute / implement) drive ONE turn and
+  // exit. Their final DB update lands a terminal status but never clears the worker
+  // claim (worker_scope/worker_pid) — and handleWorkerDeath early-returns on a
+  // terminal status before it would release. A lingering claim then wedges the run:
+  // dispatchRun forever returns "already-claimed" (a follow-up via sendMessageToRun
+  // persists but spawns nothing), and countInFlightWorkers charges the ghost claim
+  // against the admission budget until the heartbeat goes stale (HEARTBEAT_STALE_MS,
+  // 5 min). Release the claim here — this runs inside the worker process that owns
+  // it, so it is the single safe release point covering every single-turn path
+  // (including the setError early-exits, which are inside the try). Unconditional,
+  // mirroring driveChatSession's finally: the row is terminal, so no concurrent
+  // re-dispatch can have re-claimed it (dispatchRun no-ops while worker_scope is set).
+  try {
+    if (run.goal === "<review>") {
+      if (!run.prUrl) {
+        await setError(runId, "Dispatched <review> run has no prUrl to review.");
+        return;
+      }
+      await runReview(runId, run.prUrl, null);
       return;
     }
-    await runReview(runId, run.prUrl, null);
-    return;
-  }
 
-  if (run.goal === "<execute>") {
-    if (!run.planId) {
-      await setError(runId, "Dispatched <execute> run has no planId to execute.");
+    if (run.goal === "<execute>") {
+      if (!run.planId) {
+        await setError(runId, "Dispatched <execute> run has no planId to execute.");
+        return;
+      }
+      await runExecute(runId, run.planId, null);
       return;
     }
-    await runExecute(runId, run.planId, null);
-    return;
-  }
 
-  // implement (or a resumed run): drive ONE turn and exit. A fresh implement run
-  // reconstructs the task prompt create() would have passed to kickoffFirstTurn; a
-  // resume (orphan re-dispatch) or a follow-up message replays its last user
-  // message, falling back to a bare continue sentinel.
-  // takeover: this worker holds the run's claim (dispatchRun left it `preparing`
-  // with a fresh heartbeat), so append() must adopt it rather than reject it as
-  // an in-flight turn in another process.
-  // fromUserMsg tells us the prompt IS an already-persisted user message (a
-  // follow-up the server inserted, or a replayed one) — so append must not
-  // re-insert it (persistUser=false). A synthesized task prompt / resume sentinel
-  // is persisted as the first user message (persistUser=true).
-  const { text, fromUserMsg } = await dispatchTurnPrompt(run);
-  await kickoffFirstTurn(runId, text, undefined, true, !fromUserMsg);
+    // implement (or a resumed run): drive ONE turn and exit. A fresh implement run
+    // reconstructs the task prompt create() would have passed to kickoffFirstTurn; a
+    // resume (orphan re-dispatch) or a follow-up message replays its last user
+    // message, falling back to a bare continue sentinel.
+    // takeover: this worker holds the run's claim (dispatchRun left it `preparing`
+    // with a fresh heartbeat), so append() must adopt it rather than reject it as
+    // an in-flight turn in another process.
+    // fromUserMsg tells us the prompt IS an already-persisted user message (a
+    // follow-up the server inserted, or a replayed one) — so append must not
+    // re-insert it (persistUser=false). A synthesized task prompt / resume sentinel
+    // is persisted as the first user message (persistUser=true).
+    const { text, fromUserMsg } = await dispatchTurnPrompt(run);
+    await kickoffFirstTurn(runId, text, undefined, true, !fromUserMsg);
+  } finally {
+    // Release the single-turn worker claim now the turn has landed. Does NOT touch
+    // heartbeatAt (the turn is over; staleness is fine). Guarded on the row NOT
+    // being in a lease status: our own turn always lands a non-lease status before
+    // this runs, so a lease status here can only mean a false death report released
+    // our claim mid-turn and a re-dispatched worker re-claimed — clearing THAT
+    // worker's healthy claim would strand it exactly the way this release exists
+    // to prevent.
+    await db
+      .update(agentSessions)
+      .set({ workerScope: null, workerPid: null })
+      .where(
+        and(
+          eq(agentSessions.id, runId),
+          notInArray(agentSessions.status, LEASE_STATUSES)
+        )
+      );
+  }
 }
 
 const DISPATCH_RESUME_PROMPT =
@@ -1795,7 +1836,17 @@ export async function driveChatSession(runId: number): Promise<void> {
             resolve(false);
           };
         });
-        if (timedOut) break;
+        if (timedOut) {
+          // A run_input notify can land in the race between the timeout firing
+          // (which nulled `wake`) and here: its callback set pendingWake but had no
+          // live `wake` to resume us. Don't strand that message — loop back to drain
+          // it instead of exiting on the timeout.
+          if (pendingWake) {
+            pendingWake = false;
+            continue;
+          }
+          break;
+        }
       }
       pendingWake = false;
     }
@@ -1805,12 +1856,37 @@ export async function driveChatSession(runId: number): Promise<void> {
     abort.signal.removeEventListener("abort", onAbort);
     // Release the claim so the next message spawns a fresh worker, and land the
     // run resumable-idle (unless cancel/close already wrote a terminal row).
+    // Guarded on the row NOT being in a lease status, mirroring the single-turn
+    // release in driveDispatchedRun: a lease status here means a false death
+    // report already released our claim and a re-dispatched worker re-claimed —
+    // don't clear the new owner's claim out from under it.
     await db
       .update(agentSessions)
       .set({ workerScope: null, workerPid: null })
-      .where(eq(agentSessions.id, runId));
+      .where(
+        and(
+          eq(agentSessions.id, runId),
+          notInArray(agentSessions.status, LEASE_STATUSES)
+        )
+      );
     const cur = await get(runId);
     if (cur && !isTerminalStatus(cur.status)) await setStatus(runId, "idle");
+    // Final drain guard against a message stranded by the idle-timeout race: a
+    // user message can be persisted (and its run_input NOTIFY fired) in the window
+    // between our last drain and the claim release above. sendMessageToRun saw
+    // isWorkerLive()===true then, so it only NOTIFYed and did NOT dispatch — and
+    // with this worker now exiting, that message would sit unprocessed until some
+    // FUTURE message triggered a dispatch. Re-check for any unprocessed user message
+    // (id > lastProcessed, non-empty) now the claim is released and, if one exists,
+    // fire-and-forget a fresh dispatch so a new worker resumes and drains it. Also
+    // covers a run_input NOTIFY lost entirely. Skipped when cancel/close made the
+    // run terminal — those must not be revived.
+    if (cur && !isTerminalStatus(cur.status)) {
+      const stranded = (await listMessages(runId)).some(
+        (m) => m.role === "user" && m.id > lastProcessed && messageText(m) !== ""
+      );
+      if (stranded) void runDispatch.dispatchRun(runId).catch(() => {});
+    }
   }
 }
 
@@ -1864,8 +1940,12 @@ export async function* sendMessageToRun(opts: {
       }
       // else: a live worker will pick up the run_input notify.
     } else {
-      // Non-chat follow-up: dispatch a single-turn worker (already-claimed is fine
-      // — a turn is already in flight and our message rides the resume).
+      // Non-chat follow-up: dispatch a single-turn worker. If the prior turn is
+      // still in flight the claim is held and dispatchRun returns already-claimed
+      // (harmless — that turn will resume onto this freshly persisted message).
+      // Once the prior turn finished it released its claim (see
+      // driveDispatchedRun's finally), so this dispatch now spawns a fresh worker
+      // to pick up the follow-up instead of no-oping against a ghost claim forever.
       await runDispatch.dispatchRun(runId);
     }
   }

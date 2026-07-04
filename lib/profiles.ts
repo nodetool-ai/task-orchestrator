@@ -9,6 +9,9 @@
 // 'repo_write' / 'repo_read' are markers for the SDK's built-in fs tools;
 // they contribute no factories today (kept for future tightening).
 // 'gh_pr', 'gh_ci' mount the GitHub PR / CI helper extensions.
+// 'gh_pr_ro' mounts the read-only subset of gh_pr (view/diff/comment/review
+// without approve — no pr_merge). Used for review runs, which check out an
+// untrusted third-party PR and must not be able to merge or approve it.
 // 'spawn' mounts the child-spawn extension.
 
 import type { ExtensionFactory } from "./extensions/types";
@@ -46,6 +49,12 @@ const PROFILES: Record<string, ProfileDef> = {
     factories: async (ctx) => {
       const { ghPrExtension } = await import("./extensions/gh-pr");
       return [ghPrExtension({ cwd: ctx.cwd })];
+    },
+  },
+  gh_pr_ro: {
+    factories: async (ctx) => {
+      const { ghPrReadOnlyExtension } = await import("./extensions/gh-pr");
+      return [ghPrReadOnlyExtension({ cwd: ctx.cwd })];
     },
   },
   gh_ci: {

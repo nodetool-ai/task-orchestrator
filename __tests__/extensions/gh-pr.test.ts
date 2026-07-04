@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   filterDiffByFile,
   ghPrExtension,
+  ghPrReadOnlyExtension,
   ownerRepoFromRemote,
   parsePrUrl,
   validatePrUrl,
@@ -211,5 +212,72 @@ describe("ghPrExtension", () => {
     // delete_branch is optional; url + method stay required.
     expect(schema.required).toEqual(expect.arrayContaining(["url", "method"]));
     expect(schema.required).not.toContain("delete_branch");
+  });
+});
+
+describe("ghPrReadOnlyExtension", () => {
+  function makeStub() {
+    const calls: Array<{ name: string; def: any }> = [];
+    const pi: any = {
+      registerTool: (def: any) => { calls.push({ name: def.name, def }); },
+      on: () => {},
+    };
+    return { calls, pi };
+  }
+
+  it("registers view/diff/review/comment but NOT pr_merge", () => {
+    // This is the privilege-boundary fix: a review run checks out an
+    // untrusted third-party PR, so the read-only tool set it's given must
+    // have no way to merge that PR.
+    const { calls, pi } = makeStub();
+    ghPrReadOnlyExtension({ cwd: "/tmp" })(pi);
+    const names = calls.map((c) => c.name).sort();
+    expect(names).toEqual([
+      "gh_pr__pr_comment",
+      "gh_pr__pr_diff",
+      "gh_pr__pr_review",
+      "gh_pr__pr_view",
+    ]);
+    expect(names).not.toContain("gh_pr__pr_merge");
+  });
+
+  it("pr_review's verdict schema excludes 'approve'", () => {
+    // Same reasoning: the reviewer must not be able to GitHub-approve the PR
+    // it's judging. request_changes/comment stay available so it can still
+    // do its actual job of leaving a verdict.
+    const { calls, pi } = makeStub();
+    ghPrReadOnlyExtension({ cwd: "/tmp" })(pi);
+    const review = calls.find((c) => c.name === "gh_pr__pr_review");
+    expect(review).toBeDefined();
+    const verdictSchema = review!.def.parameters.properties.verdict;
+    const literalValues = (verdictSchema.anyOf ?? [verdictSchema]).map(
+      (s: any) => s.const
+    );
+    expect(literalValues).toEqual(expect.arrayContaining(["comment", "request_changes"]));
+    expect(literalValues).not.toContain("approve");
+  });
+
+  it("pr_review refuses verdict='approve' at runtime even if forced past the schema", async () => {
+    const { calls, pi } = makeStub();
+    ghPrReadOnlyExtension({ cwd: "/tmp" })(pi);
+    const review = calls.find((c) => c.name === "gh_pr__pr_review")!;
+    const res = await review.def.execute("id", {
+      url: "https://github.com/some-other-org/some-other-repo/pull/1",
+      verdict: "approve",
+    });
+    // Gated by URL validation first (no registered repos in this stub), but
+    // either way it must never reach `gh pr review --approve`.
+    expect(res.isError).toBe(true);
+  });
+
+  it("the full gh_pr profile is untouched: still exposes pr_merge and an approving pr_review", () => {
+    const { calls, pi } = makeStub();
+    ghPrExtension({ cwd: "/tmp" })(pi);
+    const names = calls.map((c) => c.name);
+    expect(names).toContain("gh_pr__pr_merge");
+    const review = calls.find((c) => c.name === "gh_pr__pr_review")!;
+    const verdictSchema = review.def.parameters.properties.verdict;
+    const literalValues = (verdictSchema.anyOf ?? [verdictSchema]).map((s: any) => s.const);
+    expect(literalValues).toContain("approve");
   });
 });

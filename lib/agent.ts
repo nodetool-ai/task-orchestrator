@@ -47,6 +47,12 @@ declare global {
 // (empty test DBs never enter the filter callback, so the suite stayed green).
 const NON_TERMINAL_BUT_DEAD = ["pending", "preparing", "running", "pushing", "opening_pr"];
 
+// Grace period for pending rows before treating as orphaned. Fresh pending rows
+// are the dispatch queue — owned by the creating process's kickoff or the
+// detached pump in lib/run-dispatch.ts. Only an old one indicates the owning
+// process died before dispatch.
+const PENDING_GRACE_PERIOD_MS = 15 * 60_000; // 15 minutes
+
 if (!globalThis.__agentReaperRan) {
   globalThis.__agentReaperRan = true;
   reapOrphans().catch((err) => {
@@ -65,6 +71,7 @@ if (!globalThis.__agentPrWatcher && PR_POLL_MS > 0) {
 async function reapOrphans() {
   // Implement-style runs in any in-flight status are suspect after a restart.
   // Idle/closed/budget_exhausted/completed/failed/cancelled rows are left alone.
+  const now = new Date();
   const orphans = (
     await db
       .select()
@@ -75,7 +82,14 @@ async function reapOrphans() {
           isNotNull(agentSessions.taskId)
         )
       )
-  ).filter((row) => NON_TERMINAL_BUT_DEAD.includes(row.status));
+  ).filter((row) => {
+    if (!NON_TERMINAL_BUT_DEAD.includes(row.status)) return false;
+    // pending rows are fresh dispatch-queue entries; only reap if genuinely stale
+    if (row.status === "pending") {
+      return now.getTime() - row.startedAt.getTime() > PENDING_GRACE_PERIOD_MS;
+    }
+    return true;
+  });
 
   for (const orphan of orphans) {
     // Never reap a run that is genuinely in flight:
@@ -408,4 +422,10 @@ function safeJson(s: string): unknown {
 function describe(err: unknown): string {
   if (err instanceof Error) return err.message;
   return typeof err === "string" ? err : JSON.stringify(err);
+}
+
+// Test hook: reset the reaper guard and run reapOrphans for testing.
+export async function _reapOrphansForTest(): Promise<void> {
+  globalThis.__agentReaperRan = false;
+  return reapOrphans();
 }
