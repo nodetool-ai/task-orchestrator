@@ -46,11 +46,32 @@ const PG_SCHEMA = process.env.TASK_ORCH_PG_SCHEMA;
 // on first query — so the drizzle instance is still created synchronously here,
 // keeping the `db` export shape stable. Migrations + seeding run out-of-band via
 // initDb() (boot / test setup), not at import time.
+const dbUrl = databaseUrl();
+// Supabase (and any explicit sslmode=require URL) requires TLS; a local dev/CI
+// Postgres does not. Auto-enable so the same code works against both without a
+// separate flag. `ssl: "require"` does TLS without CA verification, which the
+// Supabase poolers accept.
+const needsSsl = /supabase\.(co|com)/i.test(dbUrl) || /[?&]sslmode=require/i.test(dbUrl);
+// Supavisor TRANSACTION mode (port 6543) supports neither prepared statements
+// nor LISTEN/NOTIFY. This app depends on LISTEN/NOTIFY (run_stream + run_input),
+// so the SESSION-mode pooler (port 5432) is required. Guard loudly if a 6543 URL
+// slips in, and at least turn off prepared statements so plain queries survive.
+const isTxnPooler = /pooler\.supabase\.com:6543/i.test(dbUrl);
+if (isTxnPooler) {
+  console.warn(
+    "[db] DATABASE_URL points at the Supabase TRANSACTION pooler (:6543), which " +
+      "does not support LISTEN/NOTIFY — run streaming and worker messaging will " +
+      "silently stop working. Switch to the SESSION pooler (:5432)."
+  );
+}
+
 const client: Client =
   globalThis.__tasksPg ??
-  postgres(databaseUrl(), {
+  postgres(dbUrl, {
     max: 10,
     onnotice: () => {},
+    ...(needsSsl ? { ssl: "require" as const } : {}),
+    ...(isTxnPooler ? { prepare: false } : {}),
     ...(PG_SCHEMA ? { connection: { search_path: PG_SCHEMA } } : {}),
   });
 if (!globalThis.__tasksPg) globalThis.__tasksPg = client;
