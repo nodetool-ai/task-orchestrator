@@ -7,6 +7,7 @@ import { db } from "@/db";
 import { agentEvents, agentSessions, runnerInstances } from "@/db/schema";
 import { isTerminalStatus, type SessionStatus } from "../types";
 import { isWorkerClaimLive, nextLifecycleAction } from "./lifecycle";
+import { nestedDispatchMode } from "./provider";
 import type { CreateRunnerInput, RunnerProvider, RunnerRef, RunnerState } from "./provider";
 import { type FlyClient, type FlyMachine, type FlyMachineConfig, type FlyVolume, makeFlyClient } from "./fly-client";
 
@@ -136,6 +137,12 @@ export function buildFlyWorkerEnv(runId: number): Record<string, string> {
     TASK_ORCH_PG_SCHEMA: envValue("TASK_ORCH_PG_SCHEMA"),
     TASK_ORCH_DETACHED_RUNS: "1",
     TASK_ORCH_INSIDE_WORKER: "1",
+    // Pass the server's RESOLVED nested-dispatch policy (docs/nested-machine-
+    // dispatch.md, Decision 5), not the raw env: workers never get
+    // TASK_ORCH_RUNNER, so the Fly default can't resolve inside them — the
+    // effective value must be handed down so a worker's children (and their
+    // children) inherit the server's policy.
+    TASK_ORCH_NESTED_DISPATCH: nestedDispatchMode(),
     RUN_ID: String(runId),
     SESSION_ROOT: "/mnt/session",
   });

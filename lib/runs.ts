@@ -560,17 +560,14 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     const task = (await repo.getTask(input.taskId!))!;
     const prompt = input.initialPrompt ?? await buildImplementPrompt(task);
     void (async () => {
-      const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
+      const { detachedRunsEnabled } = await import("./run-dispatch");
+      // FIX 7 (M20): the detached worker rebuilds its own prompt via
+      // dispatchTurnPrompt, which synthesizes buildImplementPrompt and would
+      // drop a custom initialPrompt. launchDetached persists the custom prompt as
+      // the run's first user message so dispatchTurnPrompt's backlog replay
+      // (reordered to win over the synthesized prompt) uses it.
       if (detachedRunsEnabled()) {
-        // FIX 7 (M20): the detached worker rebuilds its own prompt via
-        // dispatchTurnPrompt, which synthesizes buildImplementPrompt and would
-        // drop a custom initialPrompt. Persist the custom prompt as the run's first
-        // user message so dispatchTurnPrompt's backlog replay (reordered to win
-        // over the synthesized prompt) uses it. No-op when none was supplied.
-        if (input.initialPrompt) {
-          await persistMessage(run.id, "user", [{ type: "text", text: input.initialPrompt }]);
-        }
-        void dispatchRun(run.id).catch(() => {});
+        await launchDetached(run.id, input.initialPrompt, input.parentRunId ?? null);
       } else await kickoffFirstTurn(run.id, prompt, input.baseBranch);
     })();
   }
@@ -579,15 +576,12 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   // single agent turn against it. Requires a prUrl on the run (validated above).
   if (!input.defer && cwdStrategy === "worktree_at_pr") {
     void (async () => {
-      const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
+      const { detachedRunsEnabled } = await import("./run-dispatch");
+      // FIX 7 (M20): launchDetached persists a custom initialPrompt as the first
+      // user message so driveDispatchedRun's <review> branch can read it back and
+      // pass it to runReview (which would otherwise be dispatched with no prompt).
       if (detachedRunsEnabled()) {
-        // FIX 7 (M20): persist a custom initialPrompt as the first user message so
-        // driveDispatchedRun's <review> branch can read it back and pass it to
-        // runReview (which would otherwise be dispatched with no prompt).
-        if (input.initialPrompt) {
-          await persistMessage(run.id, "user", [{ type: "text", text: input.initialPrompt }]);
-        }
-        void dispatchRun(run.id).catch(() => {});
+        await launchDetached(run.id, input.initialPrompt, input.parentRunId ?? null);
       } else await runReview(run.id, input.prUrl!, input.initialPrompt ?? null);
     })();
   }
@@ -597,20 +591,71 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   // root (no worktree of its own); children make their own worktrees.
   if (!input.defer && goal === "<execute>" && input.planId) {
     void (async () => {
-      const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
+      const { detachedRunsEnabled } = await import("./run-dispatch");
+      // FIX 7 (M20): launchDetached persists a custom initialPrompt as the first
+      // user message so driveDispatchedRun's <execute> branch can read it back and
+      // pass it to runExecute as operator instructions.
       if (detachedRunsEnabled()) {
-        // FIX 7 (M20): persist a custom initialPrompt as the first user message so
-        // driveDispatchedRun's <execute> branch can read it back and pass it to
-        // runExecute as operator instructions.
-        if (input.initialPrompt) {
-          await persistMessage(run.id, "user", [{ type: "text", text: input.initialPrompt }]);
-        }
-        void dispatchRun(run.id).catch(() => {});
+        await launchDetached(run.id, input.initialPrompt, input.parentRunId ?? null);
       } else await runExecute(run.id, input.planId!, input.initialPrompt ?? null);
     })();
   }
 
   return run;
+}
+
+/**
+ * Shared tail of create()'s three detached launch branches: persist any custom
+ * initialPrompt as the run's first user message, then EITHER isolate (park the
+ * row for the server to dispatch onto its own Machine) OR dispatch in-process.
+ *
+ * Isolate (docs/nested-machine-dispatch.md, Decision 1): when this process is a
+ * worker AND the nested-dispatch policy is "isolate", we must NOT call
+ * dispatchRun. A worker holds no Fly credentials and none of the admission /
+ * pending-pump / sweep machinery, so dispatching here falls through to an
+ * in-container spawn inside the parent's Machine — exactly the bug this design
+ * fixes. Instead we leave the freshly-inserted row at status 'pending' (its
+ * initialStatus): that pending row IS the dispatch request. The SERVER's pending
+ * pump claims it, runs admission, and provisions the child its own Fly Machine.
+ * We also emit a runner_deferred event (Decision 6) so the gap between "tool
+ * returned a session id" and "machine created" is visible in the run's event tail.
+ *
+ * Everywhere else — the SERVER (insideWorker() false), and a worker under the
+ * "inline" policy (off-Fly / rollback) — behavior is byte-identical to before:
+ * persist the prompt, then dispatchRun.
+ */
+async function launchDetached(
+  runId: number,
+  initialPrompt: string | null | undefined,
+  parentRunId: number | null
+): Promise<void> {
+  const { dispatchRun, insideWorker, nestedDispatchMode } = await import("./run-dispatch");
+  if (initialPrompt) {
+    await persistMessage(runId, "user", [{ type: "text", text: initialPrompt }]);
+  }
+  if (insideWorker() && nestedDispatchMode() === "isolate") {
+    await emitRunnerDeferred(runId, parentRunId);
+    return; // row stays 'pending'; the server's pump dispatches it to its own Machine
+  }
+  void dispatchRun(runId).catch(() => {});
+}
+
+/**
+ * Observability event marking a worker parking a child at 'pending' for the
+ * server to isolate onto its own Machine (docs/nested-machine-dispatch.md,
+ * Decision 6). Best-effort: an event-mirror failure must never break the launch.
+ */
+async function emitRunnerDeferred(runId: number, parentRunId: number | null): Promise<void> {
+  try {
+    await db.insert(agentEvents).values({
+      sessionId: runId,
+      type: "runner_deferred",
+      payload: JSON.stringify({ parentRunId, reason: "nested_isolate" }),
+      createdAt: new Date(),
+    });
+  } catch {
+    // ignore event mirror failures
+  }
 }
 
 export async function list(filter: ListFilter = {}): Promise<RunRow[]> {

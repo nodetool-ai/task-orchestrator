@@ -63,6 +63,15 @@ function runs(): RunsApi {
   return runsApi;
 }
 
+// Nested-dispatch policy helpers (docs/nested-machine-dispatch.md, Decision 5)
+// live in ./runner/provider — NOT here — because lib/runner/fly.ts also needs
+// nestedDispatchMode (for buildFlyWorkerEnv), and a static value import
+// fly.ts → run-dispatch would close a cycle (run-dispatch → provider → fly →
+// run-dispatch). provider.ts is the shared low-level module both can import.
+// Re-exported here so callers reasoning about dispatch policy find them next to
+// detachedRunsEnabled(); runs.ts's launch branches import them from this module.
+export { insideWorker, nestedDispatchMode, type NestedDispatchMode } from "./runner/provider";
+
 export function detachedRunsEnabled(): boolean {
   if (runnerProviderKindFromEnv() === "fly") return true;
   const v = process.env.TASK_ORCH_DETACHED_RUNS;
