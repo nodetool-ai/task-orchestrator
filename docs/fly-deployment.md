@@ -205,7 +205,7 @@ rolling redeploy).
 | `AUTH_SECRET` | script | Signs session JWTs (Auth.js v5). |
 | `NEXTAUTH_URL` | script | Public origin. |
 | `FLY_API_TOKEN` | script (`fly tokens create deploy`) | Lets the server drive the Machines API for the runner app. |
-| `FLY_APP_NAME` | script | The runner app the server creates Machines in. |
+| `TASK_ORCH_FLY_APP` | script | The runner app the server creates Machines in. (Not `FLY_APP_NAME` — Fly's runtime reserves that name and injects the web Machine's own app name, which would misdirect the Machines API and 403.) |
 | `FLY_RUNNER_IMAGE` | script | `registry.fly.io/<runner-app>:latest`. |
 | `GH_TOKEN` | script | Passed into each runner Machine's env. |
 | `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` | script | Claude auth, passed into each runner Machine. |
@@ -377,7 +377,7 @@ fly secrets set -a $APP --stage \
   AUTH_SECRET="$(openssl rand -base64 32)" \
   NEXTAUTH_URL="https://$APP.fly.dev" \
   FLY_API_TOKEN="$TOKEN" \
-  FLY_APP_NAME="$RUNNER" \
+  TASK_ORCH_FLY_APP="$RUNNER" \
   FLY_RUNNER_IMAGE="registry.fly.io/$RUNNER:latest" \
   TASK_ORCH_FLY_REGION="$REGION" \
   GH_TOKEN="ghp_…" \
@@ -583,7 +583,7 @@ runner app.
 | Server boots then crashes; logs mention `DATABASE_URL is not set` | Postgres wasn't attached. Re-run the script, or `fly postgres attach <db> --app <web>`, then `fly apps restart`. |
 | Health check failing / deploy won't go healthy | Check `fly logs -a <web>`. Usually a bad `DATABASE_URL` or an unreachable DB. Confirm `/api/health` returns `db: true`. |
 | Runs stay `pending` and never start | (a) `TASK_ORCH_MAX_MACHINES` too low — raise it. (b) `FLY_API_TOKEN` lacks Machines perms — mint a fresh `fly tokens create deploy --app <runner>` and reset the secret. (c) The runner image wasn't pushed — re-run stage 4. |
-| Run fails immediately with a spawn error | `FLY_APP_NAME` or `FLY_RUNNER_IMAGE` wrong/missing on the web app (`fly secrets list`). The image must exist at `registry.fly.io/<runner>:latest`. |
+| Run fails immediately with a spawn error, or logs show `Fly API error 403: unauthorized` on `listMachines`/`create` | `TASK_ORCH_FLY_APP` or `FLY_RUNNER_IMAGE` wrong/missing on the web app (`fly secrets list`). The image must exist at `registry.fly.io/<runner>:latest`. Note: the runner app name must be `TASK_ORCH_FLY_APP`, **not** `FLY_APP_NAME` — Fly reserves `FLY_APP_NAME` and force-injects the web Machine's own app name, so the runner client would target the wrong app and 403. |
 | Runner can't reach the database | Bring-your-own DB isn't reachable from the runner app's network, or a Supabase `:6543` URL — switch to the SESSION pooler `:5432`. |
 | Agent can't clone/push or open PRs | Missing/invalid `GH_TOKEN`, or it lacks `repo` scope for the target repos. |
 | Agent turns fail with an auth error | No `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` on the web app (they're passed into runners). |

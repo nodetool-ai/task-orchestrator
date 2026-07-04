@@ -30,6 +30,14 @@ function envValue(key: string): string | undefined {
   return value == null ? undefined : value;
 }
 
+// The runner (pool) app name. NOTE: `FLY_APP_NAME` is reserved by Fly — its
+// runtime injects the *current* Machine's own app name, overriding any secret
+// we stage, so on Fly it always resolves to the web app, not the runner pool.
+// Read `TASK_ORCH_FLY_APP` first; keep `FLY_APP_NAME` only as a local/dev fallback.
+export function runnerAppName(): string | undefined {
+  return process.env.TASK_ORCH_FLY_APP ?? process.env.FLY_APP_NAME;
+}
+
 function compactEnv(entries: Record<string, string | undefined>): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(entries)) {
@@ -163,7 +171,9 @@ export class FlyRunnerProvider implements RunnerProvider {
     let machine: FlyMachine | null = null;
     try {
       volume = await this.flyClient.createVolume({
-        name: `vol-run-${input.runId}`,
+        // Fly volume names allow only [a-z0-9_] (<=30 chars) — no hyphens,
+        // unlike Machine names. runId is numeric, so vol_run_<id> is always valid.
+        name: `vol_run_${input.runId}`,
         region,
         size_gb: sizeGb,
       });
@@ -178,7 +188,7 @@ export class FlyRunnerProvider implements RunnerProvider {
         .values({
           runId: input.runId,
           provider: "fly",
-          flyApp: process.env.FLY_APP_NAME ?? null,
+          flyApp: runnerAppName() ?? null,
           machineId: machine.id,
           volumeId: volume.id,
           region: machine.region || volume.region || region,
@@ -189,7 +199,7 @@ export class FlyRunnerProvider implements RunnerProvider {
           target: runnerInstances.runId,
           set: {
             provider: "fly",
-            flyApp: process.env.FLY_APP_NAME ?? null,
+            flyApp: runnerAppName() ?? null,
             machineId: machine.id,
             volumeId: volume.id,
             region: machine.region || volume.region || region,
