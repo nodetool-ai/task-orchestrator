@@ -1,9 +1,29 @@
 # Task Orchestrator
 
-Plan work, track tasks, and delegate implementation to Claude Agent SDK
-sessions — one self-contained, Postgres-backed system. The Next.js server
-owns the database; API routes, dashboard pages, and the `npm run task` CLI
-share the same code.
+Task Orchestrator is a web app for getting coding work done by AI agents.
+You describe the work — a plan, broken into tasks, each with a checklist
+that defines "done" — then hand a task to a Claude agent. The agent writes
+the code on its own branch, opens a pull request on GitHub, and reports
+back. You watch its progress live, review the result, and merge.
+
+## How it works
+
+1. **Plan.** Create a plan and split it into tasks. Give each task
+   acceptance criteria — a plain checklist of what must be true when
+   the work is finished.
+2. **Delegate.** Press "Run agent" on a task (or use the API or command
+   line). A Claude agent picks it up and starts coding in an isolated
+   copy of your repository, so it never touches your working files.
+3. **Watch.** Follow the agent's activity as it happens: every action,
+   the checklist filling in, and what the run is costing.
+4. **Review.** The agent pushes its branch and opens a pull request.
+   You review it like any teammate's work. Merging it marks the task done.
+
+Everything ships as one self-contained system: the web dashboard, a REST
+API, and a `npm run task` command-line tool all share the same code and a
+single Postgres database.
+
+## Learn more
 
 - **[SCHEMA.md](SCHEMA.md)** — DB schema, state machines, REST surface
 - **[AGENTS.md](AGENTS.md)** — workflow contract for humans and agents
