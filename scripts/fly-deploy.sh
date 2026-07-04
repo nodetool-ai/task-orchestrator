@@ -138,14 +138,19 @@ info "Pushed $RUNNER_IMAGE"
 bold "--- 4/6  Wiring secrets ---"
 # App-scoped token the server uses to create/destroy runner Machines + Volumes.
 info "Minting a Fly API token scoped to $RUNNER_APP…"
-FLY_API_TOKEN="$("$FLY" tokens create deploy --app "$RUNNER_APP" --expiry 8760h --name task-orch-runner 2>/dev/null | tr -d '\n')"
+# Grab only the token line (starts with "FlyV1 "); it has no internal newlines,
+# so this is robust against any flyctl notice printed alongside it.
+FLY_API_TOKEN="$("$FLY" tokens create deploy --app "$RUNNER_APP" --expiry 8760h --name task-orch-runner 2>/dev/null | grep -m1 '^FlyV1 ')"
 [[ -n "$FLY_API_TOKEN" ]] || die "Failed to mint a Fly API token for $RUNNER_APP."
 
 secret_args=(
   AUTH_SECRET="$AUTH_SECRET"
   NEXTAUTH_URL="$NEXTAUTH_URL"
   FLY_API_TOKEN="$FLY_API_TOKEN"
-  FLY_APP_NAME="$RUNNER_APP"
+  # NB: use TASK_ORCH_FLY_APP, NOT FLY_APP_NAME — Fly's runtime reserves
+  # FLY_APP_NAME and injects the web Machine's own app name over any secret,
+  # which would point the runner client at the wrong app (403 unauthorized).
+  TASK_ORCH_FLY_APP="$RUNNER_APP"
   FLY_RUNNER_IMAGE="$RUNNER_IMAGE"
   TASK_ORCH_FLY_REGION="$REGION"
 )
@@ -160,7 +165,9 @@ info "Staged ${#secret_args[@]} secrets on $APP."
 bold "--- 5/6  Deploying the server ---"
 # Migrations apply on boot (instrumentation.ts -> initDb) against the attached DB.
 # The web Machine lands in fly.toml's primary_region (synced to FLY_REGION above).
-"$FLY" deploy --config fly.toml --app "$APP"
+# --ha=false: keep a SINGLE web Machine — the pending-run pump and Fly monitor are
+# process-wide singletons, so a second HA machine would double-dispatch runs.
+"$FLY" deploy --config fly.toml --app "$APP" --ha=false
 
 # ── 6. First user ────────────────────────────────────────────────────────────
 bold "--- 6/6  Admin account ---"

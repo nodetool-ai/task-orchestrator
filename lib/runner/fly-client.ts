@@ -53,9 +53,12 @@ function normalizeOptions(input?: typeof fetch | FlyClientOptions): Required<Fly
   const options: FlyClientOptions = typeof input === "function" ? { fetchImpl: input } : input ?? {};
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const baseUrl = options.baseUrl ?? "https://api.machines.dev/v1";
-  const appName = options.appName ?? process.env.FLY_APP_NAME;
+  // FLY_APP_NAME is reserved by Fly's runtime (it injects each Machine's *own*
+  // app name), so it can't carry the runner-pool app name on Fly. Prefer
+  // TASK_ORCH_FLY_APP; fall back to FLY_APP_NAME for local/dev and tests.
+  const appName = options.appName ?? process.env.TASK_ORCH_FLY_APP ?? process.env.FLY_APP_NAME;
   const apiToken = options.apiToken ?? process.env.FLY_API_TOKEN;
-  if (!appName) throw new Error("FLY_APP_NAME environment variable required");
+  if (!appName) throw new Error("TASK_ORCH_FLY_APP (or FLY_APP_NAME) environment variable required");
   if (!apiToken) throw new Error("FLY_API_TOKEN environment variable required");
   return { fetchImpl, baseUrl, appName, apiToken };
 }

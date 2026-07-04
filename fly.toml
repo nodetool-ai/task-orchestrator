@@ -18,7 +18,9 @@ primary_region = "ams"
 [env]
   # Route agent runs onto Fly Machines (see lib/runner/fly.ts). The runner app
   # name, image, and API token are injected as secrets by fly-deploy.sh
-  # (FLY_APP_NAME, FLY_RUNNER_IMAGE, FLY_API_TOKEN).
+  # (TASK_ORCH_FLY_APP, FLY_RUNNER_IMAGE, FLY_API_TOKEN). NB: the runner app
+  # name uses TASK_ORCH_FLY_APP, not FLY_APP_NAME — Fly reserves FLY_APP_NAME
+  # and injects this Machine's own app name over any secret.
   TASK_ORCH_RUNNER = "fly"
   # Run each agent turn in its own Machine, never in this web process, so a
   # redeploy/restart of the server never kills an in-flight run.

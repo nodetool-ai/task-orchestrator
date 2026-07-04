@@ -14,8 +14,8 @@ function fakeFlyClient(calls: string[] = [], opts: FakeOptions = {}): FlyClient 
   let volumeSeq = 0;
   const machines = new Map((opts.machines ?? []).map((m) => [m.id, m]));
   return {
-    async createVolume() {
-      calls.push("createVolume");
+    async createVolume(input: { name: string }) {
+      calls.push(`createVolume:${input.name}`);
       volumeSeq += 1;
       return { id: `v${volumeSeq}`, region: "ams" };
     },
@@ -70,7 +70,10 @@ describe("FlyRunnerProvider", () => {
     const [row] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
     expect(row.volumeId).toBeTruthy();
     expect(row.machineId).toBe(ref!.handle);
-    expect(calls.slice(0, 3)).toEqual(["createVolume", "createMachine", "createMachineVolume:v1"]);
+    expect(calls.slice(0, 3)).toEqual([`createVolume:vol_run_${run.id}`, "createMachine", "createMachineVolume:v1"]);
+    // Fly volume names allow only [a-z0-9_], max 30 chars — reject hyphens etc.
+    const volName = `vol_run_${run.id}`;
+    expect(volName).toMatch(/^[a-z0-9_]{1,30}$/);
   });
 
   it("fails a leased run whose machine has vanished", async () => {
