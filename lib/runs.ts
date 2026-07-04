@@ -35,7 +35,8 @@ import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, notInArray } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, notInArray, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 
 import { db } from "@/db";
 import { agentEvents, agentMessages, agentSessions } from "@/db/schema";
@@ -81,6 +82,7 @@ runDispatch.__setRunsApi({
   reconcileOrphanedRuns,
   listLeasedRuns,
   handleWorkerDeath,
+  checkTreeLimits,
 });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -275,6 +277,150 @@ function getLock(runId: number): PerRunLock {
 }
 
 // ──────────────────────────────────────────────────────────
+// Tree limits (docs/nested-machine-dispatch.md, Decision 2)
+// ──────────────────────────────────────────────────────────
+// Bound how deep and how large a parent_run_id tree can grow, so a worker that
+// spawns children (and whose children later become real, billable Fly Machines)
+// can't fan out without limit. Checked in create() (friendly, synchronous tool
+// error) AND re-verified in dispatchRun (defense in depth: a worker writing rows
+// directly, bypassing create(), still can't get a Machine past the server-side
+// check). Both call sites funnel through evaluateTreeLimits so the two produce
+// byte-identical messages.
+
+// Read fresh per call (config changes take effect without a restart, matching
+// lib/run-dispatch.ts's intEnv). 0 or negative disables the corresponding check.
+function treeLimitEnv(key: string, dflt: number): number {
+  const raw = process.env[key];
+  if (raw == null || raw === "") return dflt;
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.floor(n) : dflt;
+}
+
+// Hard stop for the parent-chain walks below, paired with a visited-set cycle
+// guard: a self-referential/cyclic parent_run_id graph (shouldn't happen, but
+// nothing enforces it at the DB level) must not hang a create()/dispatchRun call.
+const MAX_PARENT_WALK = 64;
+
+/** A run's own parent_run_id, or null if the run has none — or no longer exists
+ *  (parent_run_id carries no FK, so an ancestor can be deleted out from under
+ *  its descendants). Shared by the parent-chain walks below. */
+async function fetchParentRunId(id: number): Promise<number | null> {
+  const row: { parentRunId: number | null } | undefined = (
+    await db
+      .select({ parentRunId: agentSessions.parentRunId })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, id))
+  )[0];
+  return row?.parentRunId ?? null;
+}
+
+/**
+ * Depth a new run would have if created with `parentRunId` as its parent (root =
+ * depth 0, so a direct child of a root is depth 1). Walks agent_sessions'
+ * parent_run_id chain upward one row at a time — the chain is short in practice,
+ * so a bounded loop reads more plainly here than a recursive CTE. Robust to a
+ * dangling parentRunId: parent_run_id carries no FK, so an ancestor row can be
+ * deleted out from under its descendants; when the walk can't find a row it just
+ * stops there (treats the missing ancestor as if it were the root), rather than
+ * throwing.
+ */
+async function wouldBeDepth(parentRunId: number): Promise<number> {
+  let depth = 1; // the new run sits one level below parentRunId
+  let currentId: number | null = parentRunId;
+  const visited = new Set<number>();
+  for (let i = 0; i < MAX_PARENT_WALK && currentId != null; i++) {
+    if (visited.has(currentId)) break; // cyclic parent_run_id graph
+    visited.add(currentId);
+    const parent = await fetchParentRunId(currentId); // no row (deleted parent) => null, stop here
+    if (parent == null) break;
+    depth++;
+    currentId = parent;
+  }
+  return depth;
+}
+
+/**
+ * Root id of the tree containing `startId` — walks parent_run_id upward until it
+ * finds a run with no parent (or a dangling one; see wouldBeDepth). Same
+ * cycle/iteration bound as wouldBeDepth.
+ */
+async function findTreeRoot(startId: number): Promise<number> {
+  let currentId = startId;
+  const visited = new Set<number>();
+  for (let i = 0; i < MAX_PARENT_WALK; i++) {
+    if (visited.has(currentId)) break;
+    visited.add(currentId);
+    const parent = await fetchParentRunId(currentId);
+    if (parent == null) break;
+    currentId = parent;
+  }
+  return currentId;
+}
+
+/**
+ * Total number of runs (any status) sharing rootId's tree. The tree can fan out
+ * wide (unlike the parent-chain walks above, which are single-path), so this is
+ * a set-based recursive CTE rather than another app-level loop.
+ */
+async function countTreeRuns(rootId: number): Promise<number> {
+  const rows = await db.execute(sql`
+    WITH RECURSIVE tree AS (
+      SELECT id FROM agent_runs WHERE id = ${rootId}
+      UNION ALL
+      SELECT s.id FROM agent_runs s JOIN tree t ON s.parent_run_id = t.id
+    )
+    SELECT count(*)::int AS count FROM tree
+  `);
+  const first = (rows as unknown as Array<{ count: number }>)[0];
+  return Number(first?.count ?? 0);
+}
+
+/**
+ * Depth + tree-size check shared by create() and dispatchRun's re-verify (via
+ * checkTreeLimits below), so both surfaces reject with the exact same message.
+ * `extraTreeRuns` accounts for a run not yet in the table: create() calls this
+ * BEFORE inserting the new row (extraTreeRuns=1, counting the run-to-be), while
+ * checkTreeLimits calls it for a run that already exists (extraTreeRuns=0, it's
+ * already part of the CTE's count).
+ */
+async function evaluateTreeLimits(
+  parentRunId: number,
+  opts: { extraTreeRuns: number }
+): Promise<string | null> {
+  const maxDepth = treeLimitEnv("TASK_ORCH_MAX_RUN_DEPTH", 3);
+  const maxTreeRuns = treeLimitEnv("TASK_ORCH_MAX_TREE_RUNS", 32);
+  if (maxDepth > 0) {
+    const depth = await wouldBeDepth(parentRunId);
+    if (depth > maxDepth) {
+      return `run tree depth ${depth} exceeds TASK_ORCH_MAX_RUN_DEPTH=${maxDepth} (parent_run_id nesting cap; see docs/nested-machine-dispatch.md)`;
+    }
+  }
+  if (maxTreeRuns > 0) {
+    const root = await findTreeRoot(parentRunId);
+    const size = (await countTreeRuns(root)) + opts.extraTreeRuns;
+    if (size > maxTreeRuns) {
+      return `run tree size ${size} exceeds TASK_ORCH_MAX_TREE_RUNS=${maxTreeRuns} (total runs sharing this run's root; see docs/nested-machine-dispatch.md)`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Server-side re-verify for dispatchRun (defense in depth): a worker that writes
+ * run rows directly, bypassing create()'s check, must still not get a Machine
+ * past this. No-op (returns null) for a root run (no parentRunId) — a run that
+ * ever had its parent link removed is not re-checked either, matching create()'s
+ * dangling-parent tolerance. Injected into lib/run-dispatch.ts via __setRunsApi
+ * below (run-dispatch has no static import of this module — see the import-cycle
+ * note by that call).
+ */
+export async function checkTreeLimits(runId: number): Promise<string | null> {
+  const run = await get(runId);
+  if (!run || run.parentRunId == null) return null;
+  return evaluateTreeLimits(run.parentRunId, { extraTreeRuns: 0 });
+}
+
+// ──────────────────────────────────────────────────────────
 // CRUD: create / list / get
 // ──────────────────────────────────────────────────────────
 
@@ -355,6 +501,15 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   }
   const effectiveModel = input.model ?? DEFAULT_MODEL;
 
+  // Tree limits (Decision 2): reject BEFORE inserting, same reasoning as the
+  // worktree-invariant checks above — validating after the insert would leave an
+  // undriveable ghost row behind. Only applies to child runs; a root run (no
+  // parentRunId) has no tree to bound.
+  if (input.parentRunId != null) {
+    const violation = await evaluateTreeLimits(input.parentRunId, { extraTreeRuns: 1 });
+    if (violation) throw new repo.RepoError(violation, 400);
+  }
+
   const inserted = await db
     .insert(agentSessions)
     .values({
@@ -405,17 +560,14 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     const task = (await repo.getTask(input.taskId!))!;
     const prompt = input.initialPrompt ?? await buildImplementPrompt(task);
     void (async () => {
-      const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
+      const { detachedRunsEnabled } = await import("./run-dispatch");
+      // FIX 7 (M20): the detached worker rebuilds its own prompt via
+      // dispatchTurnPrompt, which synthesizes buildImplementPrompt and would
+      // drop a custom initialPrompt. launchDetached persists the custom prompt as
+      // the run's first user message so dispatchTurnPrompt's backlog replay
+      // (reordered to win over the synthesized prompt) uses it.
       if (detachedRunsEnabled()) {
-        // FIX 7 (M20): the detached worker rebuilds its own prompt via
-        // dispatchTurnPrompt, which synthesizes buildImplementPrompt and would
-        // drop a custom initialPrompt. Persist the custom prompt as the run's first
-        // user message so dispatchTurnPrompt's backlog replay (reordered to win
-        // over the synthesized prompt) uses it. No-op when none was supplied.
-        if (input.initialPrompt) {
-          await persistMessage(run.id, "user", [{ type: "text", text: input.initialPrompt }]);
-        }
-        void dispatchRun(run.id).catch(() => {});
+        await launchDetached(run.id, input.initialPrompt, input.parentRunId ?? null);
       } else await kickoffFirstTurn(run.id, prompt, input.baseBranch);
     })();
   }
@@ -424,15 +576,12 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   // single agent turn against it. Requires a prUrl on the run (validated above).
   if (!input.defer && cwdStrategy === "worktree_at_pr") {
     void (async () => {
-      const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
+      const { detachedRunsEnabled } = await import("./run-dispatch");
+      // FIX 7 (M20): launchDetached persists a custom initialPrompt as the first
+      // user message so driveDispatchedRun's <review> branch can read it back and
+      // pass it to runReview (which would otherwise be dispatched with no prompt).
       if (detachedRunsEnabled()) {
-        // FIX 7 (M20): persist a custom initialPrompt as the first user message so
-        // driveDispatchedRun's <review> branch can read it back and pass it to
-        // runReview (which would otherwise be dispatched with no prompt).
-        if (input.initialPrompt) {
-          await persistMessage(run.id, "user", [{ type: "text", text: input.initialPrompt }]);
-        }
-        void dispatchRun(run.id).catch(() => {});
+        await launchDetached(run.id, input.initialPrompt, input.parentRunId ?? null);
       } else await runReview(run.id, input.prUrl!, input.initialPrompt ?? null);
     })();
   }
@@ -442,20 +591,71 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   // root (no worktree of its own); children make their own worktrees.
   if (!input.defer && goal === "<execute>" && input.planId) {
     void (async () => {
-      const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
+      const { detachedRunsEnabled } = await import("./run-dispatch");
+      // FIX 7 (M20): launchDetached persists a custom initialPrompt as the first
+      // user message so driveDispatchedRun's <execute> branch can read it back and
+      // pass it to runExecute as operator instructions.
       if (detachedRunsEnabled()) {
-        // FIX 7 (M20): persist a custom initialPrompt as the first user message so
-        // driveDispatchedRun's <execute> branch can read it back and pass it to
-        // runExecute as operator instructions.
-        if (input.initialPrompt) {
-          await persistMessage(run.id, "user", [{ type: "text", text: input.initialPrompt }]);
-        }
-        void dispatchRun(run.id).catch(() => {});
+        await launchDetached(run.id, input.initialPrompt, input.parentRunId ?? null);
       } else await runExecute(run.id, input.planId!, input.initialPrompt ?? null);
     })();
   }
 
   return run;
+}
+
+/**
+ * Shared tail of create()'s three detached launch branches: persist any custom
+ * initialPrompt as the run's first user message, then EITHER isolate (park the
+ * row for the server to dispatch onto its own Machine) OR dispatch in-process.
+ *
+ * Isolate (docs/nested-machine-dispatch.md, Decision 1): when this process is a
+ * worker AND the nested-dispatch policy is "isolate", we must NOT call
+ * dispatchRun. A worker holds no Fly credentials and none of the admission /
+ * pending-pump / sweep machinery, so dispatching here falls through to an
+ * in-container spawn inside the parent's Machine — exactly the bug this design
+ * fixes. Instead we leave the freshly-inserted row at status 'pending' (its
+ * initialStatus): that pending row IS the dispatch request. The SERVER's pending
+ * pump claims it, runs admission, and provisions the child its own Fly Machine.
+ * We also emit a runner_deferred event (Decision 6) so the gap between "tool
+ * returned a session id" and "machine created" is visible in the run's event tail.
+ *
+ * Everywhere else — the SERVER (insideWorker() false), and a worker under the
+ * "inline" policy (off-Fly / rollback) — behavior is byte-identical to before:
+ * persist the prompt, then dispatchRun.
+ */
+async function launchDetached(
+  runId: number,
+  initialPrompt: string | null | undefined,
+  parentRunId: number | null
+): Promise<void> {
+  const { dispatchRun, insideWorker, nestedDispatchMode } = await import("./run-dispatch");
+  if (initialPrompt) {
+    await persistMessage(runId, "user", [{ type: "text", text: initialPrompt }]);
+  }
+  if (insideWorker() && nestedDispatchMode() === "isolate") {
+    await emitRunnerDeferred(runId, parentRunId);
+    return; // row stays 'pending'; the server's pump dispatches it to its own Machine
+  }
+  void dispatchRun(runId).catch(() => {});
+}
+
+/**
+ * Observability event marking a worker parking a child at 'pending' for the
+ * server to isolate onto its own Machine (docs/nested-machine-dispatch.md,
+ * Decision 6). Best-effort: an event-mirror failure must never break the launch.
+ */
+async function emitRunnerDeferred(runId: number, parentRunId: number | null): Promise<void> {
+  try {
+    await db.insert(agentEvents).values({
+      sessionId: runId,
+      type: "runner_deferred",
+      payload: JSON.stringify({ parentRunId, reason: "nested_isolate" }),
+      createdAt: new Date(),
+    });
+  } catch {
+    // ignore event mirror failures
+  }
 }
 
 export async function list(filter: ListFilter = {}): Promise<RunRow[]> {
@@ -2785,18 +2985,46 @@ export async function countInFlightWorkers(): Promise<number> {
   return rows.length;
 }
 
+const pendingParent = alias(agentSessions, "pending_parent");
+
 /**
- * Ids of runs parked in 'pending' (the dispatch queue), oldest first. A run sits
- * here either freshly created (awaiting its kickoff dispatch) or deferred by the
- * admission gate for lack of host memory; the pending-run pump re-dispatches them.
+ * Ids of runs parked in 'pending' (the dispatch queue). A run sits here either
+ * freshly created (awaiting its kickoff dispatch) or deferred by the admission
+ * gate for lack of host capacity; the pending-run pump re-dispatches them.
+ *
+ * Ordering: pending runs whose PARENT holds a live worker claim come first
+ * (oldest-first among themselves), then every other pending run, oldest-first.
+ * This is NOT just a fairness nicety — dispatchRun's deadlock breaker (see the
+ * "Deadlock breaker (M1)" comment there) admits exactly this set of children
+ * over the cap, so they can never come back as "deferred". The pump
+ * (pumpTick) stops at the FIRST deferred result, on the assumption that a
+ * defer means the host is full and later ids won't fare better either. A
+ * deferred ROOT run sitting ahead of a breaker-eligible child in id order
+ * would trip that early break and starve the child until
+ * TASK_ORCH_MAX_DEFER_MS fails it — even though the child was always
+ * dispatchable. Serving breaker-eligible children first means the pump only
+ * ever hits its early break on the plain root-run tail, where "stop at the
+ * first defer" is actually true.
  */
 export async function listPendingRunIds(): Promise<number[]> {
   const rows = await db
-    .select({ id: agentSessions.id })
+    .select({
+      id: agentSessions.id,
+      parentWorkerScope: pendingParent.workerScope,
+      parentHeartbeatAt: pendingParent.heartbeatAt,
+    })
     .from(agentSessions)
+    .leftJoin(pendingParent, eq(agentSessions.parentRunId, pendingParent.id))
     .where(eq(agentSessions.status, "pending"))
     .orderBy(asc(agentSessions.id));
-  return rows.map((r) => r.id);
+
+  const liveParentChildren: number[] = [];
+  const rest: number[] = [];
+  for (const r of rows) {
+    const parentLive = isWorkerLive({ workerScope: r.parentWorkerScope, heartbeatAt: r.parentHeartbeatAt });
+    (parentLive ? liveParentChildren : rest).push(r.id);
+  }
+  return [...liveParentChildren, ...rest];
 }
 
 async function setError(runId: number, error: string) {

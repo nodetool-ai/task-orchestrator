@@ -46,6 +46,13 @@ type RunsApi = {
     runId: number,
     info: { exitCode: number | null; oomKilled: boolean; containerName: string }
   ) => Promise<void>;
+  /** Re-verify the run-tree depth/size caps (docs/nested-machine-dispatch.md,
+   *  Decision 2) for a run that already has a parentRunId. Returns an error
+   *  message naming the violated limit, or null if the run is fine (including
+   *  root runs, which have no tree to bound). Defense in depth: create()
+   *  already checks this before insert, but a worker writing rows directly
+   *  would bypass that. */
+  checkTreeLimits: (runId: number) => Promise<string | null>;
 };
 let runsApi: RunsApi | null = null;
 export function __setRunsApi(api: RunsApi): void {
@@ -55,6 +62,15 @@ function runs(): RunsApi {
   if (!runsApi) throw new Error("run-dispatch: runs API not initialized");
   return runsApi;
 }
+
+// Nested-dispatch policy helpers (docs/nested-machine-dispatch.md, Decision 5)
+// live in ./runner/provider — NOT here — because lib/runner/fly.ts also needs
+// nestedDispatchMode (for buildFlyWorkerEnv), and a static value import
+// fly.ts → run-dispatch would close a cycle (run-dispatch → provider → fly →
+// run-dispatch). provider.ts is the shared low-level module both can import.
+// Re-exported here so callers reasoning about dispatch policy find them next to
+// detachedRunsEnabled(); runs.ts's launch branches import them from this module.
+export { insideWorker, nestedDispatchMode, type NestedDispatchMode } from "./runner/provider";
 
 export function detachedRunsEnabled(): boolean {
   if (runnerProviderKindFromEnv() === "fly") return true;
@@ -301,6 +317,22 @@ export async function dispatchRun(
     if (runs().isLeaseLive(run)) return { kind: "already-claimed" };
     if (run.workerScope) return { kind: "already-claimed" };
 
+    // Tree-limit re-verify (Decision 2 in docs/nested-machine-dispatch.md):
+    // create() already rejects an over-depth/over-size child before insert, but
+    // that's a courtesy for the common path — a worker could write a child row
+    // directly (or repoint parent_run_id) and skip it entirely. Re-check here,
+    // before the claim, so no row this deep/large ever gets a real worker
+    // (container/Machine). Unlike admission's "defer, retry later" policy, a
+    // tree-limit violation is a permanent rejection: retrying won't shrink the
+    // tree, so fail the run now instead of parking it in 'pending' forever.
+    if (run.parentRunId != null) {
+      const violation = await runs().checkTreeLimits(runId);
+      if (violation) {
+        await runs().failRun(runId, violation);
+        return { kind: "spawn-failed" };
+      }
+    }
+
     if (admissionEnabled()) {
       let decision = await admitFn(runId);
       // Deadlock breaker (M1): a plan-executor run occupies a worker slot for
@@ -493,7 +525,7 @@ async function pumpTick(): Promise<void> {
       // moves the row out of 'pending' itself (so the pump can't re-select it);
       // failRun then emits the status event for the now-failed run.
       const failMsg =
-        "insufficient host memory: the run stayed queued past the maximum wait (TASK_ORCH_MAX_DEFER_MS).";
+        "no worker capacity: the run stayed queued past the maximum wait (TASK_ORCH_MAX_DEFER_MS) — worker slots (machines/memory) stayed full.";
       const failed = await db
         .update(agentSessions)
         .set({ status: "failed", error: failMsg, completedAt: new Date() })
