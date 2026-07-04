@@ -7,6 +7,8 @@ share the same code.
 
 - **[SCHEMA.md](SCHEMA.md)** — DB schema, state machines, REST surface
 - **[AGENTS.md](AGENTS.md)** — workflow contract for humans and agents
+- **[docs/fly-deployment.md](docs/fly-deployment.md)** — one-command deploy of the
+  whole app (server + agent runners + database) to Fly.io
 - **[docs/test-deployment.md](docs/test-deployment.md)** — full containerized
   stack (Postgres + server + Docker workers) for validating the run → PR loop
 
@@ -84,7 +86,27 @@ Unauthenticated browser visitors are redirected to `/login`; API requests
 get a 401. The CLI talks to the DB directly, so the gate doesn't apply
 there.
 
-## Production deployment
+## Deploy to Fly.io (whole app + database, one command)
+
+Run the entire system — web UI, REST API, agent runners, and Postgres — on
+Fly.io. Agent runs execute as ephemeral Fly Machines (one Machine + persistent
+Volume per run) instead of local Docker containers, so no host with a Docker
+socket is required.
+
+```bash
+cp .env.fly.example .env.fly       # fill in GH_TOKEN, a Claude credential, admin login
+set -a; . ./.env.fly; set +a
+./scripts/fly-deploy.sh            # creates apps + Postgres, wires secrets, deploys
+```
+
+The script provisions two Fly apps (the `task-orchestrator` server and a
+`task-orchestrator-runners` pool) plus a Fly Postgres, stages every secret that
+connects them (`DATABASE_URL`, `AUTH_SECRET`, a scoped `FLY_API_TOKEN` for the
+Machines API, model/GitHub creds), and creates your first login. It's
+idempotent — re-run it to redeploy. Full walkthrough + tuning knobs:
+**[docs/fly-deployment.md](docs/fly-deployment.md)**.
+
+## Production deployment (systemd + Docker Compose)
 
 Production runs on `nodetool-api` at `https://tasks.nodetool.ai`. The
 box listens on plain HTTP at `localhost:3000`; a Cloudflare Tunnel

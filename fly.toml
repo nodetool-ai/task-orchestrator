@@ -1,0 +1,60 @@
+# Fly.io config for the Task Orchestrator web server (Next.js).
+#
+# This is the control plane: it serves the dashboard + REST API, applies DB
+# migrations on boot (instrumentation.ts -> initDb), and — with TASK_ORCH_RUNNER=fly —
+# spawns one ephemeral Fly Machine + Volume per agent run in the companion runner
+# app (see fly.runner.toml). Deploy everything (app + runner + Postgres) in one
+# shot with `./scripts/fly-deploy.sh`.
+#
+# The `app` and `primary_region` values below are overwritten by fly-deploy.sh
+# from FLY_APP / FLY_REGION; edit them here if you deploy by hand.
+
+app = "task-orchestrator"
+primary_region = "ams"
+
+[build]
+  dockerfile = "Dockerfile.server"
+
+[env]
+  # Route agent runs onto Fly Machines (see lib/runner/fly.ts). The runner app
+  # name, image, and API token are injected as secrets by fly-deploy.sh
+  # (FLY_APP_NAME, FLY_RUNNER_IMAGE, FLY_API_TOKEN).
+  TASK_ORCH_RUNNER = "fly"
+  # Run each agent turn in its own Machine, never in this web process, so a
+  # redeploy/restart of the server never kills an in-flight run.
+  TASK_ORCH_DETACHED_RUNS = "1"
+  # Cap concurrently-active runner Machines (cost/quota guard). 0 = unlimited.
+  TASK_ORCH_MAX_MACHINES = "4"
+  TASK_ORCH_AGENT_BACKEND = "claude"
+  TASK_ORCH_CHAT_MODEL = "anthropic/claude-opus-4-8"
+  TASK_ORCH_AGENT_MODEL = "anthropic/claude-opus-4-8"
+  # Behind Fly's proxy the app terminates TLS at the edge; trust the forwarded host.
+  AUTH_TRUST_HOST = "true"
+  PORT = "3000"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  # The server runs background lifecycle pumps + the Fly runner monitor, so it
+  # must stay up rather than scale to zero.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "10s"
+    grace_period = "40s"
+    method = "GET"
+    path = "/api/health"
+
+# One server VM is enough (state lives in Postgres). Size for Next SSR + the
+# orchestration loops; raise memory if you drive many concurrent runs.
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"

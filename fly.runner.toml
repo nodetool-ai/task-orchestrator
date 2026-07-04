@@ -1,0 +1,16 @@
+# Fly.io config for the Task Orchestrator RUNNER app.
+#
+# This app is a pool, not a service: it holds the runner image in its registry
+# (registry.fly.io/<app>:latest) and owns the per-run Machines + Volumes that the
+# server (fly.toml) creates on demand via the Machines API. It intentionally
+# declares no [http_service] and is never `fly deploy`-ed into a running machine —
+# fly-deploy.sh builds & pushes the image with `--build-only --push`, and the
+# server creates/destroys the actual run Machines at runtime (lib/runner/fly.ts).
+#
+# `app` is overwritten by fly-deploy.sh from FLY_RUNNER_APP.
+
+app = "task-orchestrator-runners"
+primary_region = "ams"
+
+[build]
+  dockerfile = "Dockerfile.fly-runner"
