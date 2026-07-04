@@ -16,6 +16,8 @@ type FakeOptions = {
   stopMachineFailsFor?: Set<string>;
   /** Volumes returned by listVolumes() (orphan-reaper tests). */
   volumes?: FlyVolume[];
+  /** Volume ids whose destroyVolume call should throw (reaper failure tests). */
+  destroyVolumeFailsFor?: Set<string>;
 };
 
 function fakeFlyClient(calls: string[] = [], opts: FakeOptions = {}): FlyClient {
@@ -31,6 +33,9 @@ function fakeFlyClient(calls: string[] = [], opts: FakeOptions = {}): FlyClient 
     },
     async destroyVolume(id: string) {
       calls.push(`destroyVolume:${id}`);
+      if (opts.destroyVolumeFailsFor?.has(id)) {
+        throw new Error(`fake: destroyVolume rejected for ${id}`);
+      }
       volumes.delete(id);
     },
     async listVolumes() {
@@ -435,6 +440,36 @@ describe("FlyRunnerProvider", () => {
     expect(calls).toContain(`destroyVolume:${leaked}`);
     expect(calls).not.toContain(`destroyVolume:${attached}`);
     expect(calls).not.toContain(`destroyVolume:${liveVol}`);
+  });
+
+  it("a failed reap destroy leaves the runner_instances mapping intact", async () => {
+    const calls: string[] = [];
+    // A "gone" row still carrying a stale (reapable) volumeId. The reaper would
+    // normally clear volumeId after destroying — but only on a CONFIRMED destroy.
+    const run = await create({ goal: "<implement>", defer: true });
+    const staleVol = `vol_run_fail_${run.id}`;
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      machineId: null,
+      volumeId: staleVol,
+      region: "ams",
+      state: "gone",
+    });
+    const old = new Date(Date.now() - 60 * 60_000);
+    const provider = new FlyRunnerProvider(
+      fakeFlyClient(calls, {
+        machines: [],
+        volumes: [{ id: staleVol, region: "ams", name: staleVol, attachedMachineId: null, createdAt: old }],
+        destroyVolumeFailsFor: new Set([staleVol]),
+      })
+    );
+
+    await provider.sweep();
+
+    expect(calls).toContain(`destroyVolume:${staleVol}`);
+    // Destroy failed → mapping must NOT be cleared, so the next sweep retries.
+    const [row] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(row.volumeId).toBe(staleVol);
   });
 
   it("stop() destroys the machine's volume and clears the mapping", async () => {

@@ -9,7 +9,7 @@ import { isTerminalStatus, type SessionStatus } from "../types";
 import { isWorkerClaimLive, nextLifecycleAction } from "./lifecycle";
 import { nestedDispatchMode } from "./provider";
 import type { CreateRunnerInput, RunnerProvider, RunnerRef, RunnerState } from "./provider";
-import { type FlyClient, type FlyMachine, type FlyMachineConfig, type FlyVolume, makeFlyClient } from "./fly-client";
+import { FlyApiError, type FlyClient, type FlyMachine, type FlyMachineConfig, type FlyVolume, makeFlyClient } from "./fly-client";
 
 const DEFAULT_REGION = "ams";
 // Measured default: a repo checkout + npm cache footprint fits comfortably in
@@ -137,6 +137,79 @@ export function isReapableVolume(
   // doc-comment above for why leaks must not be immortal.
   if (vol.createdAt && nowMs - vol.createdAt.getTime() < REAP_MIN_AGE_MS) return false;
   return true;
+}
+
+/**
+ * Destroy LEAKED per-run volumes with the shared `isReapableVolume` guards: an
+ * unattached `vol_run_*` volume no non-"gone" runner_instances row references,
+ * aged past the grace window. Shared by the sweep and the `runners --reap` CLI
+ * so both paths apply the same safety checks. Crash-safe and idempotent — a
+ * second pass finds the already-destroyed volume gone from listVolumes().
+ * Returns the ids actually destroyed.
+ */
+export async function reapOrphanVolumes(flyClient: FlyClient, nowMs: number = Date.now()): Promise<string[]> {
+  let volumes: FlyVolume[];
+  try {
+    volumes = await flyClient.listVolumes();
+  } catch (err) {
+    console.error("[FlyRunnerProvider] reapOrphanVolumes listVolumes failed:", err);
+    return [];
+  }
+
+  // Protect every volumeId still mapped by a non-"gone" runner_instances row —
+  // the run may still resume or is mid-lifecycle. Conservative by design.
+  const mappings = await db
+    .select({ volumeId: runnerInstances.volumeId, state: runnerInstances.state })
+    .from(runnerInstances)
+    .leftJoin(agentSessions, eq(agentSessions.id, runnerInstances.runId));
+  const protectedVolumeIds = new Set<string>();
+  for (const m of mappings) {
+    if (m.volumeId && m.state !== "gone") protectedVolumeIds.add(m.volumeId);
+  }
+
+  const destroyed: string[] = [];
+  for (const vol of volumes) {
+    if (!isReapableVolume(vol, protectedVolumeIds, nowMs)) continue;
+    // Destroy FIRST and only touch the DB/emit events on a CONFIRMED destroy.
+    // If the destroy fails we leave the mapping intact — clearing volumeId on a
+    // still-existing volume would strand a resumable run and lose the pointer we
+    // need to retry — and let the next sweep retry. A 404 means the volume is
+    // already gone: treat it as an idempotent success.
+    try {
+      await flyClient.destroyVolume(vol.id);
+    } catch (err) {
+      if (!(err instanceof FlyApiError && err.status === 404)) {
+        console.error(`[FlyRunnerProvider] reap destroyVolume ${vol.id} failed:`, err);
+        continue;
+      }
+    }
+    destroyed.push(vol.id);
+    try {
+      // A leaked volume may have no run row. emitRunnerEvent needs a runId FK
+      // (agent_events.run_id is NOT-NULL → agent_sessions); only emit when a
+      // runner_instances row still references this volume. Never fabricate one.
+      const [ref] = await db
+        .select({ runId: runnerInstances.runId })
+        .from(runnerInstances)
+        .where(eq(runnerInstances.volumeId, vol.id));
+      if (ref) {
+        await emitRunnerEvent(ref.runId, "runner_volume_reaped", { volumeId: vol.id });
+        // A "gone" row can still carry a stale volumeId — clear it so we don't
+        // re-examine a destroyed volume, and so nothing resumes into it.
+        await db
+          .update(runnerInstances)
+          .set({ volumeId: null })
+          .where(eq(runnerInstances.volumeId, vol.id));
+      } else {
+        console.log(`[FlyRunnerProvider] reaped orphan volume ${vol.id} (no run row)`);
+      }
+    } catch (err) {
+      // Bookkeeping failure after a confirmed destroy must not starve the rest
+      // of the reap pass; the volume is already gone on Fly's side.
+      console.error(`[FlyRunnerProvider] reap bookkeeping failed for volume ${vol.id}:`, err);
+    }
+  }
+  return destroyed;
 }
 
 function lastActivityMs(row: {
@@ -436,61 +509,8 @@ export class FlyRunnerProvider implements RunnerProvider {
     }
   }
 
-  /**
-   * Destroy LEAKED per-run volumes: an unattached `vol_run_*` volume that no
-   * non-"gone" runner_instances row references and that has aged past the grace
-   * window. Crash-safe and idempotent — a second sweep simply finds the already-
-   * destroyed volume gone from listVolumes() and does nothing.
-   */
   private async reapOrphanVolumes(nowMs: number): Promise<void> {
-    let volumes: FlyVolume[];
-    try {
-      volumes = await this.flyClient.listVolumes();
-    } catch (err) {
-      console.error("[FlyRunnerProvider] reapOrphanVolumes listVolumes failed:", err);
-      return;
-    }
-
-    // Protect every volumeId still mapped by a non-"gone" runner_instances row —
-    // the run may still resume or is mid-lifecycle. Conservative by design.
-    const mappings = await db
-      .select({ volumeId: runnerInstances.volumeId, state: runnerInstances.state })
-      .from(runnerInstances)
-      .leftJoin(agentSessions, eq(agentSessions.id, runnerInstances.runId));
-    const protectedVolumeIds = new Set<string>();
-    for (const m of mappings) {
-      if (m.volumeId && m.state !== "gone") protectedVolumeIds.add(m.volumeId);
-    }
-
-    for (const vol of volumes) {
-      if (!isReapableVolume(vol, protectedVolumeIds, nowMs)) continue;
-      try {
-        await this.flyClient.destroyVolume(vol.id).catch((err) => {
-          console.error(`[FlyRunnerProvider] reap destroyVolume ${vol.id} failed:`, err);
-        });
-        // A leaked volume may have no run row. emitRunnerEvent needs a runId FK
-        // (agent_events.run_id is NOT-NULL → agent_sessions); only emit when a
-        // runner_instances row still references this volume. Never fabricate one.
-        const [ref] = await db
-          .select({ runId: runnerInstances.runId })
-          .from(runnerInstances)
-          .where(eq(runnerInstances.volumeId, vol.id));
-        if (ref) {
-          await emitRunnerEvent(ref.runId, "runner_volume_reaped", { volumeId: vol.id });
-          // A "gone" row can still carry a stale volumeId — clear it so we don't
-          // re-examine a destroyed volume, and so nothing resumes into it.
-          await db
-            .update(runnerInstances)
-            .set({ volumeId: null })
-            .where(eq(runnerInstances.volumeId, vol.id));
-        } else {
-          console.log(`[FlyRunnerProvider] reaped orphan volume ${vol.id} (no run row)`);
-        }
-      } catch (err) {
-        // One volume's failure must not starve the rest of the reap pass.
-        console.error(`[FlyRunnerProvider] reap failed for volume ${vol.id}:`, err);
-      }
-    }
+    await reapOrphanVolumes(this.flyClient, nowMs);
   }
 
   startMonitor(): void {

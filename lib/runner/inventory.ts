@@ -107,8 +107,12 @@ export async function collectRunnerInventory(flyClient?: FlyClient): Promise<Run
 
   // A volume is claimed (not orphaned) if any non-"gone" runner_instances row
   // references it — this mirrors the reaper's "leaked volume" predicate.
-  const hasLiveClaim = (volumeId: string): boolean =>
-    instances.some((i) => i.volumeId === volumeId && i.state !== "gone");
+  // Precompute the set of claimed volumeIds once (O(instances)) so the per-volume
+  // orphan check below stays O(1) instead of O(instances * volumes).
+  const claimedVolumeIds = new Set<string>();
+  for (const i of instances) {
+    if (i.volumeId && i.state !== "gone") claimedVolumeIds.add(i.volumeId);
+  }
 
   const rows: RunnerInventoryRow[] = [];
 
@@ -118,7 +122,7 @@ export async function collectRunnerInventory(flyClient?: FlyClient): Promise<Run
     const machineId = vol.attachedMachineId ?? mapping?.machineId ?? null;
     const machineState = machineId ? machineById.get(machineId)?.state ?? null : null;
     const createdAt = mapping?.createdAt ?? vol.createdAt ?? null;
-    const orphan = !vol.attachedMachineId && !hasLiveClaim(vol.id);
+    const orphan = !vol.attachedMachineId && !claimedVolumeIds.has(vol.id);
     rows.push({
       runId: mapping?.runId ?? null,
       machineId,

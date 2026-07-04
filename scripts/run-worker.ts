@@ -13,6 +13,7 @@ import { config } from "dotenv";
 config({ path: ".env.local" });
 
 import { driveDispatchedRun } from "../lib/runs";
+import { insideWorker } from "../lib/runner/provider";
 import { startWorkerLogFlusher } from "../lib/runner/worker-log-store";
 
 async function main() {
@@ -25,12 +26,13 @@ async function main() {
   // Ship the worker's runner.log off the ephemeral Fly volume into Postgres so
   // its debugging history survives the Machine + volume being destroyed. The
   // Fly entrypoint tee's all worker stdout/stderr to $SESSION_ROOT/logs/runner.log;
-  // only start the flusher inside a worker (TASK_ORCH_INSIDE_WORKER) with a
-  // SESSION_ROOT set — i.e. the case where that tee file actually exists.
+  // only start the flusher inside a worker (insideWorker(), which correctly
+  // treats "0"/"false" as off) with a SESSION_ROOT set — i.e. the case where
+  // that tee file actually exists.
   const sessionRoot = process.env.SESSION_ROOT;
   const logPath = sessionRoot ? `${sessionRoot}/logs/runner.log` : null;
   let stopLogFlusher: (() => Promise<void>) | null = null;
-  if (logPath && process.env.TASK_ORCH_INSIDE_WORKER) {
+  if (logPath && insideWorker()) {
     try {
       stopLogFlusher = startWorkerLogFlusher(runId, logPath);
     } catch (e) {

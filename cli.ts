@@ -14,6 +14,7 @@ import { sql } from "./db";
 import { TASK_STATES, isTerminalStatus, type TaskState } from "./lib/types";
 import { assistantText, toolUses, type SdkMessageEnvelope } from "./lib/sdk-message";
 import { collectRunnerInventory } from "./lib/runner/inventory";
+import { reapOrphanVolumes } from "./lib/runner/fly";
 import { makeFlyClient } from "./lib/runner/fly-client";
 
 function isTaskState(s: string): s is TaskState {
@@ -597,11 +598,12 @@ async function cmdRunners(args: Args): Promise<number> {
   );
 
   if (args.reap) {
-    const orphans = inv.rows.filter((r) => r.orphan && r.volumeId);
-    if (orphans.length === 0) {
-      console.log("\nNo orphan volumes to reap.");
-      return 0;
-    }
+    // Delegate to the SAME guarded reaper the sweep uses — it re-lists volumes
+    // and applies isReapableVolume's full safety checks (vol_run_* naming +
+    // 10-min grace window + the non-"gone" mapping protection). The inventory
+    // `orphan` flag is display-only and deliberately NOT used to pick destroy
+    // targets: it lacks those guards and could point at a volume that isn't ours
+    // or is still mid-provision.
     let client;
     try {
       client = makeFlyClient();
@@ -610,19 +612,13 @@ async function cmdRunners(args: Args): Promise<number> {
       console.error(`\nCannot reap — Fly client unavailable: ${message}`);
       return 1;
     }
-    console.log(`\nReaping ${orphans.length} orphan volume(s):`);
-    let reaped = 0;
-    for (const r of orphans) {
-      try {
-        await client.destroyVolume(r.volumeId!);
-        console.log(`  destroyed ${r.volumeId}`);
-        reaped++;
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        console.error(`  failed ${r.volumeId}: ${message}`);
-      }
+    const destroyed = await reapOrphanVolumes(client);
+    if (destroyed.length === 0) {
+      console.log("\nNo orphan volumes to reap.");
+    } else {
+      console.log(`\nReaped ${destroyed.length} orphan volume(s):`);
+      for (const id of destroyed) console.log(`  destroyed ${id}`);
     }
-    console.log(`Reaped ${reaped} orphan volume(s)`);
   }
 
   return 0;

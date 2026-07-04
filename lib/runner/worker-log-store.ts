@@ -12,15 +12,23 @@
 // inside the worker process (scripts/run-worker.ts), where the file exists.
 
 import { eq } from "drizzle-orm";
-import { readFile } from "node:fs/promises";
+import { open, stat } from "node:fs/promises";
 import { db } from "@/db";
 import { agentSessions } from "@/db/schema";
 
 // Stored log tail cap (chars) so the run row stays bounded. Matches
-// run-dispatch's cap; defined locally (no import) so the two log-capture paths
-// stay decoupled — a worker importing lib/run-dispatch would pull in the docker
-// monitor it has no business loading.
-export const WORKER_LOG_MAX_CHARS = 64_000;
+// run-dispatch's cap (64 * 1024); defined locally (no import) so the two
+// log-capture paths stay decoupled — a worker importing lib/run-dispatch would
+// pull in the docker monitor it has no business loading.
+export const WORKER_LOG_MAX_CHARS = 64 * 1024;
+
+// We only ever store the last WORKER_LOG_MAX_CHARS chars, so there's no need to
+// read the whole (potentially huge, chatty-run) file each tick — read only the
+// trailing bytes. A UTF-8 char is at most 4 bytes, so this many bytes always
+// covers at least WORKER_LOG_MAX_CHARS chars; the extra slack absorbs the
+// worst case and a partial multibyte char at the read boundary (which decodes
+// to replacement chars that tailForStorage then slices away).
+const READ_TAIL_BYTES = WORKER_LOG_MAX_CHARS * 4 + 64 * 1024;
 
 // Default flush cadence: often enough that a crash loses little, rare enough
 // that a chatty worker doesn't hammer Postgres with 64KB writes.
@@ -41,16 +49,38 @@ export function tailForStorage(text: string): string {
 }
 
 /**
+ * Read at most the last `maxBytes` of `filePath` as UTF-8. Returns null if the
+ * file is missing/unreadable. Reading only the tail keeps each flush O(maxBytes)
+ * instead of O(file_size) on chatty runs; a partial multibyte char at the start
+ * of the window is left to tailForStorage's char-level slice to discard.
+ */
+async function readFileTail(filePath: string, maxBytes: number): Promise<string | null> {
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    const { size } = await stat(filePath);
+    const start = size > maxBytes ? size - maxBytes : 0;
+    const length = size - start;
+    if (length <= 0) return "";
+    handle = await open(filePath, "r");
+    const buf = Buffer.alloc(length);
+    await handle.read(buf, 0, length, start);
+    return buf.toString("utf8");
+  } catch {
+    return null;
+  } finally {
+    await handle?.close();
+  }
+}
+
+/**
  * Read `filePath` and write its tail into agent_sessions.worker_log for `runId`.
  * Returns true on a successful write, false on any failure (missing/unreadable
  * file, DB error). A log-flush failure must NEVER break the run — every error
  * is swallowed (logged via console.error) so the caller can keep driving.
  */
 export async function flushWorkerLogFromFile(runId: number, filePath: string): Promise<boolean> {
-  let text: string;
-  try {
-    text = await readFile(filePath, "utf8");
-  } catch {
+  const text = await readFileTail(filePath, READ_TAIL_BYTES);
+  if (text == null) {
     // File not created yet, or unreadable — nothing to flush this tick.
     return false;
   }
@@ -80,7 +110,7 @@ export function startWorkerLogFlusher(
   intervalMs: number = DEFAULT_FLUSH_MS
 ): () => Promise<void> {
   // Guard against overlapping flushes: a slow read/write must not stack up
-  // behind the interval (each flush reads the whole file + writes up to 64KB).
+  // behind the interval (each flush reads the file tail + writes up to the cap).
   let inFlight = false;
   const tick = async () => {
     if (inFlight) return;
