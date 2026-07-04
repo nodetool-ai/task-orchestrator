@@ -27,7 +27,7 @@ import { isTerminalStatus, type SessionStatus } from "@/lib/types";
 import type { RunRow, MessageRow } from "@/lib/runs";
 import type { SdkContentBlock, SdkMessageEnvelope } from "@/lib/sdk-message";
 import { SessionStatusPill } from "@/components/session-status-pill";
-import { RunMessage, ToolUseBlock } from "@/components/runs/run-message";
+import { RunMessage, ToolResultBlocks, ToolUseBlock } from "@/components/runs/run-message";
 import { ToolGroup } from "@/components/tool-group";
 import { segmentToolMessages } from "@/lib/tool-grouping";
 import { SystemEventRow } from "@/components/runs/system-event-row";
@@ -649,9 +649,13 @@ export function RunView({
               seg.kind === "tools" ? (
                 <ToolGroup key={`tg-${seg.messages[0].id}`} count={seg.toolCount}>
                   {seg.messages.flatMap((m) =>
-                    m.content
-                      .filter((b) => b.type === "tool_use")
-                      .map((b, bi) => <ToolUseBlock key={`${m.id}-${bi}`} block={b} />)
+                    m.content.map((b, bi) =>
+                      b.type === "tool_use" ? (
+                        <ToolUseBlock key={`${m.id}-${bi}`} block={b} />
+                      ) : b.type === "tool_result" ? (
+                        <ToolResultBlocks key={`${m.id}-${bi}`} blocks={[b]} />
+                      ) : null
+                    )
                   )}
                 </ToolGroup>
               ) : seg.message.role === "system" ? (

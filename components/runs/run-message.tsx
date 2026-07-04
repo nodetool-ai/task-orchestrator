@@ -94,7 +94,7 @@ export function ToolUseBlock({ block }: { block: SdkContentBlock }) {
   );
 }
 
-function ToolResultBlocks({ blocks }: { blocks: SdkContentBlock[] }) {
+export function ToolResultBlocks({ blocks }: { blocks: SdkContentBlock[] }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="px-4">
