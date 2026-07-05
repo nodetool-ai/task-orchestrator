@@ -13,8 +13,10 @@ import { agentEvents, agentSessions } from "@/db/schema";
 import * as repo from "./repo";
 import * as runs from "./runs";
 import { ownerRepoFromRemote } from "./gh-url";
+import { emitInboxEvent } from "./inbox";
 import {
   autofixEnabledFor,
+  mapWebhookToInboxType,
   selectMatchingRunIds,
   type CandidateRun,
   type NormalizedWebhookEvent,
@@ -65,6 +67,23 @@ export async function handleWebhookEvent(
 
   // Record the event on every matched run (durable log + best-effort live push).
   for (const id of matchedIds) await recordEvent(id, event, deliveryId);
+
+  // Inbox events (§3.2): one owner event per matched run (+ automatic
+  // supervisor copy to its parent, handled inside emitInboxEvent). Best-effort
+  // — inbox emission must never break the autofix/merge side effects below.
+  const mapped = mapWebhookToInboxType(event);
+  if (mapped) {
+    for (const id of matchedIds) {
+      void emitInboxEvent({
+        targetRunId: id,
+        type: mapped.type,
+        payload: mapped.payload,
+        sourceKind: "github",
+        sourceId: deliveryId,
+        dedupeKey: deliveryId ? `gh:${deliveryId}:${id}` : undefined,
+      }).catch(() => {});
+    }
+  }
 
   // Side effects operate on full run rows; fetch them newest-first so "the
   // latest run for a task" is easy to pick.
