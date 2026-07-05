@@ -38,9 +38,23 @@ jobs:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - name: fly deploy (runner image, build-only)
-        run: >
-          flyctl deploy --config fly.runner.toml -a task-orchestrator-runners
-          --dockerfile Dockerfile.fly-runner
-          --build-only --push --image-label latest --remote-only
+        # Carry the repo-mirror seed inputs too, so push-to-main rebuilds ship a
+        # fresh seed. Build the flag list in shell so an unset var/secret simply
+        # omits the flag — an empty --build-secret would fail the deploy.
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "${REPO_CACHE_REPOS:-}" ]; then
+            args+=(--build-arg "REPO_CACHE_REPOS=${REPO_CACHE_REPOS}")
+          fi
+          if [ -n "${REPO_CACHE_GH_TOKEN:-}" ]; then
+            args+=(--build-secret "gh_token=${REPO_CACHE_GH_TOKEN}")
+          fi
+          flyctl deploy --config fly.runner.toml -a task-orchestrator-runners \
+            --dockerfile Dockerfile.fly-runner \
+            --build-only --push --image-label latest --remote-only \
+            "${args[@]}"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_RUNNER_API_TOKEN }}
+          REPO_CACHE_REPOS: ${{ vars.REPO_CACHE_REPOS }}
+          REPO_CACHE_GH_TOKEN: ${{ secrets.REPO_CACHE_GH_TOKEN }}

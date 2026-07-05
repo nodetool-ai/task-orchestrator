@@ -1414,7 +1414,10 @@ async function containerCheckoutAt(
   await mkdir(dirname(work), { recursive: true });
   if (!existsSync(join(work, ".git"))) {
     const reference = mirror && existsSync(mirror) ? ["--reference", mirror, "--dissociate"] : [];
-    await sh(["git", "clone", ...reference, url, work], "/");
+    // Blobless partial clone: history blobs are fetched on demand through the
+    // image's git credential helper; pairs with the image-baked blobless mirror
+    // so a cold clone moves only refs/commits/trees plus the checkout's blobs.
+    await sh(["git", "clone", "--filter=blob:none", ...reference, url, work], "/");
   } else {
     await sh(["git", "-C", work, "remote", "set-url", "origin", url], "/").catch(() => {});
   }
@@ -1470,7 +1473,8 @@ async function containerReviewCheckoutAt(
   await mkdir(dirname(work), { recursive: true });
   if (!existsSync(join(work, ".git"))) {
     const reference = mirror && existsSync(mirror) ? ["--reference", mirror, "--dissociate"] : [];
-    await sh(["git", "clone", ...reference, url, work], "/");
+    // Blobless partial clone (see containerCheckoutAt): blobs fetched on demand.
+    await sh(["git", "clone", "--filter=blob:none", ...reference, url, work], "/");
   } else {
     await sh(["git", "-C", work, "remote", "set-url", "origin", url], "/").catch(() => {});
   }

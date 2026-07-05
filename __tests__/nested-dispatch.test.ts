@@ -142,3 +142,20 @@ describe("buildFlyWorkerEnv nested-dispatch passthrough", () => {
     expect(buildFlyWorkerEnv(42).TASK_ORCH_NESTED_DISPATCH).toBe("inline");
   });
 });
+
+describe("buildFlyWorkerEnv REPO_CACHE_DIR", () => {
+  const REPO_CACHE_KNOB = "TASK_ORCH_REPO_CACHE_DIR";
+  afterEach(() => {
+    delete process.env[REPO_CACHE_KNOB];
+  });
+
+  it("defaults to the image-baked cache dir when TASK_ORCH_REPO_CACHE_DIR is unset", () => {
+    delete process.env[REPO_CACHE_KNOB];
+    expect(buildFlyWorkerEnv(42).REPO_CACHE_DIR).toBe("/opt/repo-cache");
+  });
+
+  it("honors a TASK_ORCH_REPO_CACHE_DIR override", () => {
+    process.env[REPO_CACHE_KNOB] = "/custom/cache";
+    expect(buildFlyWorkerEnv(42).REPO_CACHE_DIR).toBe("/custom/cache");
+  });
+});

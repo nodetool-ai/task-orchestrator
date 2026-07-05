@@ -17,17 +17,18 @@ and no single box to size for peak concurrency.
 - [6. What the deploy script does](#6-what-the-deploy-script-does)
 - [7. Database options](#7-database-options)
 - [8. The runner lifecycle](#8-the-runner-lifecycle)
-- [9. Manual / step-by-step deploy](#9-manual--step-by-step-deploy)
-- [10. Day-2 operations](#10-day-2-operations)
-- [11. Scaling & performance](#11-scaling--performance)
-- [12. Custom domains & TLS](#12-custom-domains--tls)
-- [13. GitHub webhooks](#13-github-webhooks)
-- [14. Security model](#14-security-model)
-- [15. Cost model](#15-cost-model)
-- [16. Troubleshooting](#16-troubleshooting)
-- [17. Upgrading & redeploying](#17-upgrading--redeploying)
-- [18. Teardown](#18-teardown)
-- [19. FAQ](#19-faq)
+- [9. Cold-start latency & the warm repo cache](#9-cold-start-latency--the-warm-repo-cache)
+- [10. Manual / step-by-step deploy](#10-manual--step-by-step-deploy)
+- [11. Day-2 operations](#11-day-2-operations)
+- [12. Scaling & performance](#12-scaling--performance)
+- [13. Custom domains & TLS](#13-custom-domains--tls)
+- [14. GitHub webhooks](#14-github-webhooks)
+- [15. Security model](#15-security-model)
+- [16. Cost model](#16-cost-model)
+- [17. Troubleshooting](#17-troubleshooting)
+- [18. Upgrading & redeploying](#18-upgrading--redeploying)
+- [19. Teardown](#19-teardown)
+- [20. FAQ](#20-faq)
 
 ---
 
@@ -245,6 +246,7 @@ Full descriptions are in `.env.docker.example`.
 | `TASK_ORCH_RUNNER_STOP_MS` | `604800000` (7d) | Idle window before a stopped **resumable** run's Machine + Volume is destroyed. Applies to idle/resumable runs (e.g. a chat waiting for the next message); terminal runs use `TASK_ORCH_RUNNER_TERMINAL_MS` instead. |
 | `TASK_ORCH_CHAT_IDLE_MS` | `600000` (10m) | How long a long-lived chat runner waits warm for the next message. |
 | `TASK_ORCH_ARCHIVE_R2` | *(unset)* | If set, cold Volumes are flagged for archival instead of being destroyed with data (archiver is a future component). |
+| `TASK_ORCH_REPO_CACHE_DIR` | `/opt/repo-cache` | Where the runner image bakes its warm repo mirrors (see [§9](#9-cold-start-latency--the-warm-repo-cache)); passed into each run Machine's env as `REPO_CACHE_DIR`. Override only if you changed the bake path in `Dockerfile.fly-runner`. |
 
 ---
 
@@ -264,7 +266,9 @@ troubleshooting and manual operation straightforward.
 4. **Runner image** — `fly deploy --config fly.runner.toml --build-only --push`
    builds `Dockerfile.fly-runner` and pushes it to
    `registry.fly.io/<runner-app>:latest` **without releasing a machine** (the
-   server creates run Machines from this image later).
+   server creates run Machines from this image later). This image also bakes a
+   warm repo cache and a pre-built worker to cut cold-start latency — see
+   [§9](#9-cold-start-latency--the-warm-repo-cache).
 5. **Secrets** — mints an app-scoped `FLY_API_TOKEN` for the runner app
    (`fly tokens create deploy`) and stages every secret from §5.2 on the web app.
 6. **Server deploy** — `fly deploy --config fly.toml`; migrations apply on boot.
@@ -387,7 +391,86 @@ control plane creates Machines and runs the lifecycle), not the runner pool.
 
 ---
 
-## 9. Manual / step-by-step deploy
+## 9. Cold-start latency & the warm repo cache
+
+A brand-new run's Fly Machine boots in ~6s, but historically the worker then
+spent 20+ seconds before the agent could do useful work: `npx tsx` transpiling
+the worker's TypeScript on boot, a full `git clone` of the target repo from
+GitHub, and a recursive `chown` of the freshly-mounted session Volume. The
+runner image now removes that overhead by baking a **warm repo cache** and a
+pre-built worker into `Dockerfile.fly-runner`, so a cold start moves only the
+delta since the image was built.
+
+None of this changes correctness or needs any configuration to be *safe*: every
+optimization degrades gracefully to today's behaviour when its inputs are
+missing. What you configure affects only **how fast** a cold start is and **how
+much data** it moves — never whether a run is correct.
+
+### Warm repo cache
+
+At image-build time `scripts/build-repo-cache.sh` clones each configured repo as
+a bare, blobless mirror (`--filter=blob:none`) into
+`/opt/repo-cache/<owner>_<repo>.git`. It is driven by the `REPO_CACHE_REPOS`
+build arg (a space/comma-separated `owner/repo` list) and a `gh_token` BuildKit
+build **secret** — the token is mounted only for that build step and is never
+written into an image layer.
+
+At run time the worker clones with
+`git clone --reference <mirror> --dissociate --filter=blob:none`, reusing the
+baked objects so a cold start transfers only the commits added since the image
+was built plus the blobs it actually checks out. The mirror is a **seed, not a
+source of truth**: every turn still runs `git fetch --prune origin` against
+GitHub, so a stale image never affects correctness — it only makes that fetch
+larger. If a repo has no mirror in the image (not listed in `REPO_CACHE_REPOS`,
+the build step skipped, or the token missing), the worker transparently falls
+back to today's full clone.
+
+### Pre-built worker
+
+The image also bundles the worker at build time with esbuild
+(`npm run build:worker` → `dist/run-worker.js`), and the entrypoint runs
+`node dist/run-worker.js` instead of `npx tsx scripts/run-worker.ts`. This drops
+several seconds of on-boot TypeScript transpilation from every cold start. If
+the bundle is somehow absent the entrypoint falls back to `tsx`.
+
+### Entrypoint volume handling
+
+`scripts/fly-runner-entry.sh` also trims two per-boot costs on the session
+Volume (`$SESSION_ROOT`):
+
+- The recursive `chown` of `$SESSION_ROOT` now runs **only on the first boot of
+  a Volume**, guarded by the marker file
+  `$SESSION_ROOT/.fly-runner-initialized`. A run resumed onto an existing Volume
+  skips it.
+- If the image ships an optional seed directory `/opt/claude-seed` (for shared
+  agent config — e.g. a pre-provisioned `.claude` with settings and skills), it
+  is copied into the Volume's `claude-home/.claude` **only when that directory is
+  empty**. An existing Volume is never overwritten.
+
+### Keeping the cache fresh
+
+The baked mirror ages with the image, so a nightly workflow
+(`.github/workflows/runner-image-nightly.yml`, cron `03:17 UTC` plus manual
+`workflow_dispatch`) rebuilds and pushes the runner image with a fresh mirror
+seed. The push-to-main deploy workflow passes the same inputs when they are
+configured.
+
+Configure these in the GitHub repo that hosts this project:
+
+| GitHub setting | Kind | Purpose |
+| --- | --- | --- |
+| `REPO_CACHE_REPOS` | Actions **variable** | Space/comma-separated `owner/repo` list of the repos to pre-cache into the image. |
+| `REPO_CACHE_GH_TOKEN` | Actions **secret** | Read-only *contents* token, used **only at build time** to clone the mirrors. |
+| `FLY_RUNNER_API_TOKEN` | Actions **secret** | Existing token the workflow uses to push the image to the runner registry. |
+
+**Failure semantics.** If the nightly build fails — or you set none of the above
+— nothing breaks: runs still work, cold starts just move more data (a larger
+per-run `git fetch`, or a full clone for un-cached repos). A stale or failed
+image is a performance degradation, never a correctness problem.
+
+---
+
+## 10. Manual / step-by-step deploy
 
 If you'd rather not use the script (or want to understand it), here is the
 equivalent by hand. Replace names/regions as needed.
@@ -431,7 +514,7 @@ fly ssh console -a $APP -C "npm run task -- user add you@example.com --password=
 
 ---
 
-## 10. Day-2 operations
+## 11. Day-2 operations
 
 ### Status, logs, shell
 
@@ -481,7 +564,7 @@ web app never interrupts an in-flight run.
 
 ---
 
-## 11. Scaling & performance
+## 12. Scaling & performance
 
 ### Web app
 
@@ -524,7 +607,7 @@ traffic.
 
 ---
 
-## 12. Custom domains & TLS
+## 13. Custom domains & TLS
 
 Fly terminates TLS at its edge; `AUTH_TRUST_HOST=true` (already set) makes
 Auth.js trust the forwarded host.
@@ -542,7 +625,7 @@ Update your GitHub webhook Payload URL to the new origin too (below).
 
 ---
 
-## 13. GitHub webhooks
+## 14. GitHub webhooks
 
 Beyond the built-in merge poller, the orchestrator accepts push-based GitHub
 events for real-time PR/CI feedback (recorded on the session log; a merged PR
@@ -567,7 +650,7 @@ The `/api/github/webhook` and `/api/mcp` routes are exempt from the login gate
 
 ---
 
-## 14. Security model
+## 15. Security model
 
 - **Database is private.** Only the web app's `http_service` is public; Postgres
   and the runners are reachable only over Fly's 6PN. Nothing binds Postgres to a
@@ -592,7 +675,7 @@ and consider a fine-grained PAT.
 
 ---
 
-## 15. Cost model
+## 16. Cost model
 
 You pay Fly for, roughly:
 
@@ -613,7 +696,7 @@ runner app.
 
 ---
 
-## 16. Troubleshooting
+## 17. Troubleshooting
 
 | Symptom | Likely cause & fix |
 | --- | --- |
@@ -637,7 +720,7 @@ lifecycle markers; the raw runner log is on the Machine at
 
 ---
 
-## 17. Upgrading & redeploying
+## 18. Upgrading & redeploying
 
 - **New app code:** pull/merge, then `./scripts/fly-deploy.sh` (rebuilds both
   images and redeploys). Migrations apply on boot.
@@ -645,7 +728,8 @@ lifecycle markers; the raw runner log is on the Machine at
 - **Just the runner image:** `fly deploy --config fly.runner.toml -a <runner>
   --dockerfile Dockerfile.fly-runner --build-only --push --image-label latest`.
   New runs use the new image; existing suspended runs keep their old image until
-  destroyed.
+  destroyed. The nightly workflow rebuilds this image with a fresh warm-cache
+  seed on its own ([§9](#9-cold-start-latency--the-warm-repo-cache)).
 - **Config change (env in `fly.toml`):** edit and `fly deploy`.
 - **Secret change:** `fly secrets set` (auto-redeploys).
 
@@ -654,7 +738,7 @@ in-flight **runs** are unaffected because they're detached.
 
 ---
 
-## 18. Teardown
+## 19. Teardown
 
 Remove everything you created (irreversible — destroys the database):
 
@@ -673,7 +757,7 @@ the web Machine) and let the lifecycle policy clean up idle runners.
 
 ---
 
-## 19. FAQ
+## 20. FAQ
 
 **Can the server and runners be the same app?**
 Not recommended. Keeping them separate lets `fly deploy` manage the web Machine

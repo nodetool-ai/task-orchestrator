@@ -262,6 +262,12 @@ export function buildFlyWorkerEnv(runId: number): Record<string, string> {
     TASK_ORCH_NESTED_DISPATCH: nestedDispatchMode(),
     RUN_ID: String(runId),
     SESSION_ROOT: "/mnt/session",
+    // Point the worker's --reference mirror lookup at the image-baked repo cache.
+    // Operators can override the in-image path via TASK_ORCH_REPO_CACHE_DIR; the
+    // ?? default keeps this entry present through compactEnv (which drops
+    // undefined). Safe when the dir is missing: containerCheckoutAt guards with
+    // existsSync before using the mirror.
+    REPO_CACHE_DIR: envValue("TASK_ORCH_REPO_CACHE_DIR") ?? "/opt/repo-cache",
   });
 }
 
