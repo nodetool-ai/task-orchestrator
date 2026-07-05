@@ -386,6 +386,31 @@ export async function markControlInjected(runId: number, type: string): Promise<
     );
 }
 
+/**
+ * Control rows the platform already enforced (markControlInjected flipped
+ * them pending→injected) but that no digest frame has rendered yet
+ * (run_turn_id IS NULL). The digest builder includes these as "platform
+ * notices" — this is how the next turn learns WHY the previous one ended —
+ * and stamps them via setClaimTurn so they render exactly once. Kept out of
+ * claimInboxEvents on purpose: control facts are enforced by the platform,
+ * only their visibility flows through the digest.
+ */
+export async function takeUnrenderedControlEvents(runId: number): Promise<InboxEvent[]> {
+  const rows = await db
+    .select()
+    .from(inboxEvents)
+    .where(
+      and(
+        eq(inboxEvents.targetRunId, runId),
+        eq(inboxEvents.status, "injected"),
+        sql`${inboxEvents.runTurnId} IS NULL`,
+        inArray(inboxEvents.type, [...CONTROL_TYPES])
+      )
+    )
+    .orderBy(asc(inboxEvents.id));
+  return rows;
+}
+
 /** Quarantine a poison event (§6.5). */
 export async function quarantineEvent(eventId: number, reason: string): Promise<void> {
   await db
@@ -455,7 +480,9 @@ export interface EventEnvelope {
  *  quarantines via quarantineEvent — §6.5). */
 export function toEnvelope(row: InboxEvent): EventEnvelope {
   const serialized = JSON.stringify(row.payload ?? {});
-  if (serialized.length > MAX_PAYLOAD_BYTES) {
+  // Byte length, not string length: .length counts UTF-16 code units, which
+  // undercounts multi-byte UTF-8 payloads against a byte cap.
+  if (Buffer.byteLength(serialized, "utf8") > MAX_PAYLOAD_BYTES) {
     throw new Error(`payload exceeds ${MAX_PAYLOAD_BYTES} bytes`);
   }
   return {
@@ -492,6 +519,40 @@ export type CreateTimerResult =
   | { ok: true; timerId: number; fireAt: Date }
   | { ok: false; error: string };
 
+/**
+ * Count pending timers across the whole tree the run belongs to: walk up
+ * parent_run_id to the root (depth-capped), then a recursive CTE over the
+ * subtree. Enforces TIMER_MAX_PER_TREE so a runaway fan-out can't arm
+ * thousands of timers one under-cap run at a time.
+ */
+async function pendingTreeTimerCount(runId: number): Promise<number> {
+  // Upward walk to the root (parent chains are depth-capped at spawn time).
+  let rootId = runId;
+  const seen = new Set<number>();
+  for (let i = 0; i < 16; i++) {
+    if (seen.has(rootId)) break;
+    seen.add(rootId);
+    const row = (
+      await db
+        .select({ parentRunId: agentSessions.parentRunId })
+        .from(agentSessions)
+        .where(eq(agentSessions.id, rootId))
+    )[0];
+    if (!row || row.parentRunId == null) break;
+    rootId = row.parentRunId;
+  }
+  const rows = (await db.execute(sql`
+    WITH RECURSIVE tree AS (
+      SELECT id FROM ${agentSessions} WHERE id = ${rootId}
+      UNION ALL
+      SELECT a.id FROM ${agentSessions} a JOIN tree t ON a.parent_run_id = t.id
+    )
+    SELECT count(*)::int AS n FROM ${runTimers}
+     WHERE status = 'pending' AND run_id IN (SELECT id FROM tree)
+  `)) as unknown as Array<{ n: number }>;
+  return rows[0]?.n ?? 0;
+}
+
 export async function createTimer(input: CreateTimerInput): Promise<CreateTimerResult> {
   const minutes = Math.max(TIMER_MIN_MINUTES, Math.min(Math.floor(input.minutes), TIMER_MAX_MINUTES));
   const pending = await db
@@ -502,6 +563,12 @@ export async function createTimer(input: CreateTimerInput): Promise<CreateTimerR
     return {
       ok: false,
       error: `Timer cap: this run already has ${TIMER_MAX_PER_RUN} pending timers. Cancel one (timer__cancel) first.`,
+    };
+  }
+  if ((await pendingTreeTimerCount(input.runId)) >= TIMER_MAX_PER_TREE) {
+    return {
+      ok: false,
+      error: `Timer cap: this run tree already has ${TIMER_MAX_PER_TREE} pending timers across all runs. Cancel timers or let some fire first.`,
     };
   }
   const fireAt = new Date(Date.now() + minutes * 60_000);

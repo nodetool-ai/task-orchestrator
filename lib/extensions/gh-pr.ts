@@ -97,10 +97,17 @@ async function checkAndAcquirePrLock(
   runId: number | undefined
 ): Promise<{ ok: true } | { ok: false; result: ReturnType<typeof errResult> }> {
   if (runId == null) {
-    // No caller identity wired in (shouldn't happen for the mutating tool
-    // sets, which always pass runId) — fail open rather than block a call
-    // the guard can't evaluate.
-    return { ok: true };
+    // No caller identity wired in. This guard is a safety belt against
+    // cross-run PR mutations, so it FAILS CLOSED: an unidentifiable caller
+    // must not merge/approve. Production mounts always thread runId
+    // (lib/profiles.ts); hitting this means a miswired mount, not a normal
+    // call path.
+    return {
+      ok: false,
+      result: errResult(
+        `PR ownership guard: this tool was mounted without a caller run id, so ownership of ${prUrl} cannot be verified. Refusing to mutate the PR.`
+      ),
+    };
   }
   const resource = `pr:${prUrl}`;
   const existing = (

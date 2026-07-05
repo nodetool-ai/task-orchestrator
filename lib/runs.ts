@@ -61,6 +61,7 @@ import {
   markControlInjected,
   quarantineEvent,
   setClaimTurn,
+  takeUnrenderedControlEvents,
   toEnvelope,
   type EventEnvelope,
 } from "./inbox";
@@ -3138,9 +3139,20 @@ export async function injectPendingInboxEvents(runId: number): Promise<string | 
   } catch {
     return null; // never block a turn on the inbox
   }
-  if (claimed.length === 0) return null;
+  // Platform notices (§6.6): control rows the platform already enforced
+  // (markControlInjected) but that no digest has rendered yet. They are
+  // unclaimable by design, so without this they would flip pending→injected
+  // invisibly — this is the one path that shows the model WHY its previous
+  // turn ended. Rendered once: setClaimTurn stamps them below.
+  let controlRows: Awaited<ReturnType<typeof takeUnrenderedControlEvents>> = [];
+  try {
+    controlRows = await takeUnrenderedControlEvents(runId);
+  } catch {
+    // visibility only — never block a turn on it
+  }
+  if (claimed.length === 0 && controlRows.length === 0) return null;
   const envelopes: EventEnvelope[] = [];
-  for (const row of claimed) {
+  for (const row of [...controlRows, ...claimed]) {
     try {
       envelopes.push(toEnvelope(row));
     } catch (err) {
