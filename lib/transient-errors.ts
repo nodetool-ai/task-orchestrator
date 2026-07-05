@@ -33,22 +33,29 @@ const TRANSIENT_MESSAGE_RE =
  * network / DB connection reset rather than an application-level failure.
  */
 export function isTransientNetworkError(err: unknown): boolean {
+  // Iterative traversal over the .cause chain and .errors fan-out, with a single
+  // shared `seen` set so a cyclic graph (e.g. err.errors = [err]) terminates
+  // instead of overflowing the stack — important since this runs while handling
+  // an already-problematic process event.
   const seen = new Set<unknown>();
-  let cur: unknown = err;
-  while (cur && typeof cur === "object" && !seen.has(cur)) {
+  const stack: unknown[] = [err];
+  while (stack.length > 0) {
+    const cur = stack.pop();
+    if (!cur || typeof cur !== "object" || seen.has(cur)) continue;
     seen.add(cur);
+
     const code = (cur as { code?: unknown }).code;
     if (typeof code === "string" && TRANSIENT_CODES.has(code)) return true;
     const message = (cur as { message?: unknown }).message;
     if (typeof message === "string" && TRANSIENT_MESSAGE_RE.test(message)) {
       return true;
     }
+
+    const cause = (cur as { cause?: unknown }).cause;
+    if (cause) stack.push(cause);
     // postgres.js / AggregateError bundle sub-errors under `.errors`
     const errors = (cur as { errors?: unknown }).errors;
-    if (Array.isArray(errors) && errors.some(isTransientNetworkError)) {
-      return true;
-    }
-    cur = (cur as { cause?: unknown }).cause;
+    if (Array.isArray(errors)) stack.push(...errors);
   }
   return false;
 }

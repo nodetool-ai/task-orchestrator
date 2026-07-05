@@ -40,6 +40,21 @@ describe("isTransientNetworkError", () => {
     expect(isTransientNetworkError(null)).toBe(false);
     expect(isTransientNetworkError(undefined)).toBe(false);
   });
+
+  it("terminates on a cyclic .errors graph instead of overflowing", () => {
+    const err = new Error("aggregate") as Error & { errors: unknown[] };
+    err.errors = [err]; // self-referential cycle via .errors
+    expect(isTransientNetworkError(err)).toBe(false);
+  });
+
+  it("still finds a transient error reachable through a cyclic .errors graph", () => {
+    const transient = Object.assign(new Error("read ECONNRESET"), {
+      code: "ECONNRESET",
+    });
+    const err = new Error("aggregate") as Error & { errors: unknown[] };
+    err.errors = [err, transient]; // cycle plus a real transient leaf
+    expect(isTransientNetworkError(err)).toBe(true);
+  });
 });
 
 describe("installProcessSafetyNet", () => {

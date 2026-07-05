@@ -69,10 +69,12 @@ const client: Client =
   globalThis.__tasksPg ??
   postgres(dbUrl, {
     max: 10,
-    // Recycle connections proactively so the network/DB never resets a stale
-    // socket out from under us (which surfaces as an unhandled ECONNRESET and
-    // crashes detached workers). Close idle connections after 30s and cap
-    // connection lifetime at 30min; postgres.js reconnects transparently.
+    // Recycle connections proactively to reduce stale-socket resets — an idle
+    // connection dropped by flycast/the DB surfaces as an ECONNRESET on next use
+    // (which can crash detached workers). Closing idle connections after 30s and
+    // capping lifetime at 30min makes that far less likely; postgres.js
+    // reconnects transparently. The worker's process safety net still backstops
+    // any reset that slips through.
     idle_timeout: 30,
     max_lifetime: 60 * 30,
     connect_timeout: 30,
