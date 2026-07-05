@@ -31,6 +31,7 @@ import { SessionStatusPill } from "@/components/session-status-pill";
 import { RunMessage, ToolResultBlocks, ToolUseBlock } from "@/components/runs/run-message";
 import { ToolGroup } from "@/components/tool-group";
 import { segmentToolMessages } from "@/lib/tool-grouping";
+import { humanizeToolName } from "@/lib/builtin-tools";
 import { SystemEventRow } from "@/components/runs/system-event-row";
 import { EventDigestCard, type DigestEnvelope } from "@/components/runs/event-digest-card";
 import { InboxPanel } from "@/components/runs/inbox-panel";
@@ -731,7 +732,19 @@ export function RunView({
           <div className="mx-auto max-w-3xl py-6">
             {segmentToolMessages(visibleMessages).map((seg) =>
               seg.kind === "tools" ? (
-                <ToolGroup key={`tg-${seg.messages[0].id}`} count={seg.toolCount}>
+                <ToolGroup
+                  key={`tg-${seg.messages[0].id}`}
+                  count={seg.toolCount}
+                  toolName={
+                    seg.toolCount === 1
+                      ? humanizeToolName(
+                          seg.messages
+                            .flatMap((m) => m.content)
+                            .find((b) => b.type === "tool_use")?.name
+                        )
+                      : undefined
+                  }
+                >
                   {seg.messages.flatMap((m) =>
                     m.content.map((b, bi) =>
                       b.type === "tool_use" ? (
