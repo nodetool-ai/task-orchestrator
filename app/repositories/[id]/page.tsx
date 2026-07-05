@@ -30,7 +30,7 @@ export default async function RepositoryPage({
   return (
     <article className="mx-auto max-w-3xl space-y-6">
       <Link
-        href="/repositories"
+        href="/settings?tab=repos"
         className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="size-3.5" /> Repositories
