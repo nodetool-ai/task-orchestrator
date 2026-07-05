@@ -315,7 +315,11 @@ Requires:
 - Agent-backend auth. The `claude` backend resolves it like the Claude Code CLI:
   `ANTHROPIC_API_KEY` when set, otherwise the claude.ai subscription (`claude login`,
   or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` for headless hosts). The
-  default `pi` backend has its own auth.
+  default `pi` backend reads per-provider keys (`ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, `GEMINI_API_KEY`, …) or `~/.pi/agent/auth.json`. On the
+  containerized paths (Docker workers, Fly runner Machines) every recognized
+  provider key set on the server is forwarded into the run container, so either
+  backend works there — see `lib/agent-backend/provider-env.ts` for the list.
 - `gh` CLI installed and authenticated for PR creation
 - A `main` branch on `origin` (override per-session via `baseBranch`)
 

@@ -7,8 +7,11 @@
 FROM node:24-bookworm-slim
 
 # git + gh CLI (agents clone/push and open PRs directly with a token).
+# ripgrep + fd-find back the pi backend's grep/find tools; without system
+# binaries pi tries to download them from GitHub at runtime inside every
+# fresh container (slow, and dead on a network-restricted host).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates curl gnupg \
+    && apt-get install -y --no-install-recommends git ca-certificates curl gnupg ripgrep fd-find \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
@@ -22,7 +25,9 @@ WORKDIR /app
 COPY package.json package-lock.json .npmrc ./
 RUN npm ci
 
-# The Claude Agent SDK spawns the `claude` CLI; install it globally.
+# The Claude Agent SDK spawns the `claude` CLI; install it globally. Only the
+# claude backend needs it — the pi backend runs in-process from node_modules —
+# but the image carries both so TASK_ORCH_AGENT_BACKEND picks at dispatch time.
 RUN npm install -g @anthropic-ai/claude-code
 
 COPY . .

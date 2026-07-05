@@ -37,6 +37,7 @@ set -euo pipefail
 #   GH_TOKEN                  GitHub token for clone/push + `gh pr create`
 #   ANTHROPIC_API_KEY        Claude API key  (or …)
 #   CLAUDE_CODE_OAUTH_TOKEN  …claude.ai subscription token (`claude setup-token`)
+#   OPENAI_API_KEY / GEMINI_API_KEY / …  pi-backend provider keys (staged when set)
 #   ADMIN_EMAIL / ADMIN_PASSWORD   first dashboard login to create
 # =============================================================================
 
@@ -158,6 +159,13 @@ secret_args=(
 [[ -n "${ANTHROPIC_API_KEY:-}" ]]        && secret_args+=( ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" )
 [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]  && secret_args+=( CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" )
 [[ -n "${GITHUB_WEBHOOK_SECRET:-}" ]]    && secret_args+=( GITHUB_WEBHOOK_SECRET="$GITHUB_WEBHOOK_SECRET" )
+# Optional pi-backend provider keys (TASK_ORCH_AGENT_BACKEND=pi): whatever the
+# web app holds is forwarded into each runner Machine's env by the server
+# (lib/agent-backend/provider-env.ts). Stage any that are set in the deploy env.
+for key in OPENAI_API_KEY GEMINI_API_KEY GROQ_API_KEY CEREBRAS_API_KEY XAI_API_KEY \
+           OPENROUTER_API_KEY ZAI_API_KEY MISTRAL_API_KEY DEEPSEEK_API_KEY FIREWORKS_API_KEY; do
+  [[ -n "${!key:-}" ]] && secret_args+=( "$key=${!key}" )
+done
 "$FLY" secrets set -a "$APP" --stage "${secret_args[@]}" >/dev/null
 info "Staged ${#secret_args[@]} secrets on $APP."
 
