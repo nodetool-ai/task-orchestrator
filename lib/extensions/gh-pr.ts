@@ -6,6 +6,11 @@
 
 import { spawn } from "node:child_process";
 import { Type } from "typebox";
+import { eq } from "drizzle-orm";
+import { db } from "@/db";
+import { agentSessions, resourceLocks } from "@/db/schema";
+import { isTerminalStatus } from "../types";
+import type { SessionStatus } from "../types";
 import {
   ownerRepoFromRemote,
   parsePrUrl,
@@ -72,6 +77,63 @@ const errResult = (text: string) =>
 
 export interface GhPrExtensionOptions {
   cwd?: string;
+  /** Caller's run id, used by the resource-lock guard (docs/agent-events.md
+   *  §5.2) on mutating tools (merge, approve). Required for ghPrExtension;
+   *  unused by ghPrReadOnlyExtension (no merge tool, approve excluded). */
+  runId?: number;
+}
+
+/**
+ * Resource-lock guard (§5.2): a `pr:<url>` lease in resource_locks answers
+ * "who owns this PR" with a single primary-key lookup instead of a subtree
+ * walk per mutating call. Locked by a live run that isn't the caller ->
+ * refuse, naming the owner. Unlocked, or locked by a run that has since gone
+ * terminal -> proceed and take/refresh the lease for the caller. One shared
+ * helper so both pr_merge and the approving pr_review branch enforce the
+ * exact same rule.
+ */
+async function checkAndAcquirePrLock(
+  prUrl: string,
+  runId: number | undefined
+): Promise<{ ok: true } | { ok: false; result: ReturnType<typeof errResult> }> {
+  if (runId == null) {
+    // No caller identity wired in (shouldn't happen for the mutating tool
+    // sets, which always pass runId) — fail open rather than block a call
+    // the guard can't evaluate.
+    return { ok: true };
+  }
+  const resource = `pr:${prUrl}`;
+  const existing = (
+    await db
+      .select({ ownerRunId: resourceLocks.ownerRunId })
+      .from(resourceLocks)
+      .where(eq(resourceLocks.resource, resource))
+  )[0];
+  if (existing && existing.ownerRunId !== runId) {
+    const ownerRow = (
+      await db
+        .select({ status: agentSessions.status })
+        .from(agentSessions)
+        .where(eq(agentSessions.id, existing.ownerRunId))
+    )[0];
+    const ownerAlive = ownerRow ? !isTerminalStatus(ownerRow.status as SessionStatus) : false;
+    if (ownerAlive) {
+      return {
+        ok: false,
+        result: errResult(
+          `run #${existing.ownerRunId} owns this PR (${prUrl}); append_message it instead of mutating the PR directly.`
+        ),
+      };
+    }
+  }
+  await db
+    .insert(resourceLocks)
+    .values({ resource, ownerRunId: runId })
+    .onConflictDoUpdate({
+      target: resourceLocks.resource,
+      set: { ownerRunId: runId, acquiredAt: new Date() },
+    });
+  return { ok: true };
 }
 
 type Gate = (url: string) => Promise<
@@ -173,7 +235,7 @@ function registerReviewTool(
   reg: BackendRegistrar,
   cwd: string | undefined,
   gate: Gate,
-  opts: { allowApprove: boolean }
+  opts: { allowApprove: boolean; runId?: number }
 ) {
   const verdicts = opts.allowApprove
     ? ([Type.Literal("approve"), Type.Literal("comment"), Type.Literal("request_changes")] as const)
@@ -196,6 +258,10 @@ function registerReviewTool(
       // the read-only variant refuses to shell out an --approve.
       if (verdict === "approve" && !opts.allowApprove) {
         return errResult("verdict='approve' is not permitted from this tool set.");
+      }
+      if (verdict === "approve") {
+        const lock = await checkAndAcquirePrLock(g.parsed.canonical, opts.runId);
+        if (!lock.ok) return lock.result;
       }
       if ((verdict === "comment" || verdict === "request_changes") && !body?.trim()) {
         return errResult(`verdict='${verdict}' requires a non-empty body.`);
@@ -317,7 +383,12 @@ function registerCommentTool(reg: BackendRegistrar, cwd: string | undefined, gat
 }
 
 // gh_pr__pr_merge: mutating, never part of the read-only tool set.
-function registerMergeTool(reg: BackendRegistrar, cwd: string | undefined, gate: Gate) {
+function registerMergeTool(
+  reg: BackendRegistrar,
+  cwd: string | undefined,
+  gate: Gate,
+  runId: number | undefined
+) {
   reg.registerTool({
     name: "gh_pr__pr_merge",
     label: "PR Merge",
@@ -335,6 +406,8 @@ function registerMergeTool(reg: BackendRegistrar, cwd: string | undefined, gate:
     execute: async (_id, { url, method, delete_branch }) => {
       const g = await gate(url);
       if (!g.ok) return g.result;
+      const lock = await checkAndAcquirePrLock(g.parsed.canonical, runId);
+      if (!lock.ok) return lock.result;
       const args = ["pr", "merge", g.parsed.canonical];
       if (method === "merge") args.push("--merge");
       else if (method === "squash") args.push("--squash");
@@ -369,9 +442,9 @@ export const ghPrExtension =
     const cwd = opts.cwd;
     const gate = makeGate();
     registerReadTools(reg, cwd, gate);
-    registerReviewTool(reg, cwd, gate, { allowApprove: true });
+    registerReviewTool(reg, cwd, gate, { allowApprove: true, runId: opts.runId });
     registerCommentTool(reg, cwd, gate);
-    registerMergeTool(reg, cwd, gate);
+    registerMergeTool(reg, cwd, gate, opts.runId);
   };
 
 // Read-only tool set: view, diff, review (no 'approve'), comment. No
@@ -384,7 +457,7 @@ export const ghPrReadOnlyExtension =
     const cwd = opts.cwd;
     const gate = makeGate();
     registerReadTools(reg, cwd, gate);
-    registerReviewTool(reg, cwd, gate, { allowApprove: false });
+    registerReviewTool(reg, cwd, gate, { allowApprove: false, runId: opts.runId });
     registerCommentTool(reg, cwd, gate);
   };
 

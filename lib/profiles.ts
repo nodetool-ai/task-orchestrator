@@ -48,13 +48,13 @@ const PROFILES: Record<string, ProfileDef> = {
   gh_pr: {
     factories: async (ctx) => {
       const { ghPrExtension } = await import("./extensions/gh-pr");
-      return [ghPrExtension({ cwd: ctx.cwd })];
+      return [ghPrExtension({ cwd: ctx.cwd, runId: ctx.runId })];
     },
   },
   gh_pr_ro: {
     factories: async (ctx) => {
       const { ghPrReadOnlyExtension } = await import("./extensions/gh-pr");
-      return [ghPrReadOnlyExtension({ cwd: ctx.cwd })];
+      return [ghPrReadOnlyExtension({ cwd: ctx.cwd, runId: ctx.runId })];
     },
   },
   gh_ci: {
@@ -80,6 +80,20 @@ const PROFILES: Record<string, ProfileDef> = {
 /** Static list of known profile keys for UI pickers and validation. */
 export function listProfiles(): string[] {
   return Object.keys(PROFILES);
+}
+
+/**
+ * Extensions mounted for EVERY run regardless of tools_profile
+ * (docs/agent-events.md §7: "every agent, in every tools profile, can always
+ * go to sleep"). Deliberately NOT a PROFILES entry — timer__*, events__*,
+ * report_result, raise, ask_parent, answer_question must not be strandable
+ * by a profile-string typo the way a missing 'spawn' entry can strand
+ * spawn__*. The runner (lib/runs.ts) calls this unconditionally and appends
+ * the result to whatever resolveProfiles() returns.
+ */
+export async function alwaysOnExtensions(ctx: ProfileContext): Promise<ExtensionFactory[]> {
+  const { eventsExtension } = await import("./extensions/events");
+  return [eventsExtension({ runId: ctx.runId, runRow: ctx.run })];
 }
 
 export interface ResolvedProfile {
