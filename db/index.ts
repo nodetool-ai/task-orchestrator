@@ -69,6 +69,13 @@ const client: Client =
   globalThis.__tasksPg ??
   postgres(dbUrl, {
     max: 10,
+    // Recycle connections proactively so the network/DB never resets a stale
+    // socket out from under us (which surfaces as an unhandled ECONNRESET and
+    // crashes detached workers). Close idle connections after 30s and cap
+    // connection lifetime at 30min; postgres.js reconnects transparently.
+    idle_timeout: 30,
+    max_lifetime: 60 * 30,
+    connect_timeout: 30,
     onnotice: () => {},
     ...(needsSsl ? { ssl: "require" as const } : {}),
     ...(isTxnPooler ? { prepare: false } : {}),

@@ -15,6 +15,12 @@ config({ path: ".env.local" });
 import { driveDispatchedRun } from "../lib/runs";
 import { insideWorker } from "../lib/runner/provider";
 import { startWorkerLogFlusher } from "../lib/runner/worker-log-store";
+import { installProcessSafetyNet } from "../lib/transient-errors";
+
+// A transient reset of a detached DB socket (LISTEN/NOTIFY, best-effort log
+// flush) arrives as an unhandled rejection and would otherwise crash the whole
+// run. Swallow those; real bugs still exit non-zero.
+installProcessSafetyNet({ label: "run-worker" });
 
 async function main() {
   const runId = parseInt(process.argv[2] ?? "", 10);
