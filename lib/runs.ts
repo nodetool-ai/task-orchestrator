@@ -251,6 +251,10 @@ export interface AppendInput {
 
 export interface AppendStreamEvent {
   type: "user_message" | "sdk" | "done" | "error";
+  /** On `user_message` frames: the persisted user/system row. On `sdk` frames:
+   *  the persisted agent/tool row backing the envelope, when one exists — the
+   *  client dedups by its real DB id against the read-only /events tail, which
+   *  delivers the same rows to every viewer (including the sender). */
   message?: MessageRow;
   sdk?: RunEnvelope;
   error?: string;
@@ -960,7 +964,9 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // the turn helper rather than yielding live so the per-message persistence
     // and the SSE stream see the same sequence.
     for (const env of result.envelopes) {
-      yield { type: "sdk", sdk: env };
+      // Persisted envelopes carry their DB row so the client can dedup this
+      // frame against the same row arriving over the read-only /events tail.
+      yield { type: "sdk", sdk: env, message: result.persisted.get(env) };
     }
 
     // Worktree runs sync git after each turn: if the branch gained commits,
@@ -2519,9 +2525,21 @@ export async function* relayRunStream(
           if (r === "user" || r === "system") {
             yield { type: "user_message", message: f.message };
           } else if (r === "agent") {
-            yield { type: "sdk", sdk: { type: "assistant", message: { content: f.message.content } } as RunEnvelope };
+            // Carry the persisted row alongside the envelope: the read-only
+            // /events tail delivers the SAME row (keyed by DB id) to every
+            // viewer including the sender, so without the id the client can't
+            // dedup the two copies and renders the reply twice.
+            yield {
+              type: "sdk",
+              sdk: { type: "assistant", message: { content: f.message.content } } as RunEnvelope,
+              message: f.message,
+            };
           } else if (r === "tool") {
-            yield { type: "sdk", sdk: { type: "user", message: { content: f.message.content } } as RunEnvelope };
+            yield {
+              type: "sdk",
+              sdk: { type: "user", message: { content: f.message.content } } as RunEnvelope,
+              message: f.message,
+            };
           }
         } else {
           const d = f.data as { type?: string; status?: string; error?: string };
@@ -2607,6 +2625,10 @@ interface RunOneTurnArgs {
 
 interface TurnResult {
   envelopes: RunEnvelope[];
+  /** Persisted agent/tool row for each envelope that was written to
+   *  agent_messages — lets append() stamp the real DB id onto its `sdk`
+   *  frames so the client can dedup them against the /events tail. */
+  persisted: Map<RunEnvelope, MessageRow>;
   summary: string | null;
   sdkSessionId: string | null;
   totalCostUsd: number | null;
@@ -2665,6 +2687,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   ];
 
   const envelopes: RunEnvelope[] = [];
+  const persisted = new Map<RunEnvelope, MessageRow>();
   let summary: string | null = null;
   let lastAssistantText: string | null = null;
   let sdkSessionId: string | null = null;
@@ -2689,14 +2712,18 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
 
     if (env.type === "assistant" && env.message?.content) {
       const blocks = env.message.content;
-      if (blocks.length > 0) await persistMessage(run.id, "agent", blocks as any);
+      if (blocks.length > 0) {
+        persisted.set(env, await persistMessage(run.id, "agent", blocks as any));
+      }
       const text = assistantText(blocks as SdkContentBlock[]);
       if (text) lastAssistantText = text;
     }
 
     if (env.type === "user" && env.message?.content) {
       const results = toolResults(env.message.content as SdkContentBlock[]);
-      if (results.length > 0) await persistMessage(run.id, "tool", results as any);
+      if (results.length > 0) {
+        persisted.set(env, await persistMessage(run.id, "tool", results as any));
+      }
     }
 
     if (env.type === "result") {
@@ -2752,6 +2779,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
 
   return {
     envelopes: envelopes as any,
+    persisted,
     summary: summary ?? lastAssistantText ?? outcome.summary,
     // outcome.resumeToken is authoritative (backend-tagged); fall back to the
     // session id observed mid-turn, then the prior token.
