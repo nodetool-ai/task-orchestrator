@@ -25,7 +25,7 @@ export function RunMessage({ role, content }: Props) {
   }
   if (role === "agent") {
     return (
-      <div className="px-4 py-3 text-sm text-foreground space-y-2">
+      <div className="px-4 py-1.5 text-sm text-foreground space-y-2">
         {content.map((block, i) => (
           <ContentBlock key={i} block={block} role={role} />
         ))}

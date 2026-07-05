@@ -547,9 +547,17 @@ export function RunView({
 
   // `status` transitions are conveyed by the header pill — suppress them
   // from the timeline so users don't see `status → running` repeated next
-  // to a "Running" badge that says the same thing.
+  // to a "Running" badge that says the same thing. Also drop blank agent
+  // rows (assistant turns that persisted no visible text and no tool call):
+  // they render as empty padded boxes that both add phantom whitespace and
+  // split otherwise-adjacent tool runs into separate groups.
   const visibleMessages = useMemo(
-    () => messages.filter((m) => !(m.role === "system" && m.systemKind === "status")),
+    () =>
+      messages.filter((m) => {
+        if (m.role === "system" && m.systemKind === "status") return false;
+        if (m.role === "agent") return agentHasVisibleContent(m.content);
+        return true;
+      }),
     [messages]
   );
 
@@ -748,7 +756,7 @@ export function RunView({
             <p className="mt-2 text-muted-foreground">{greeting.subtitle}</p>
           </div>
         ) : (
-          <div className="mx-auto max-w-3xl py-6">
+          <div className="mx-auto max-w-3xl py-4">
             {segmentToolMessages(visibleMessages).map((seg) =>
               seg.kind === "tools" ? (
                 <ToolGroup
@@ -924,6 +932,17 @@ async function consumeSse(
       }
     }
   }
+}
+
+// An agent row is worth showing only if it carries a tool call or some
+// non-whitespace text. Empty/blank assistant turns otherwise render as bare
+// padded boxes that clutter the transcript with phantom gaps.
+function agentHasVisibleContent(content: SdkContentBlock[]): boolean {
+  return content.some(
+    (b) =>
+      b.type === "tool_use" ||
+      (b.type === "text" && typeof b.text === "string" && b.text.trim().length > 0)
+  );
 }
 
 // Concatenated text of a message's text blocks — used to match a just-persisted
