@@ -130,7 +130,11 @@ async function main() {
   console.log("Done.");
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+main()
+  // The postgres-js pool keeps the event loop alive, so exit explicitly once
+  // seeding is done (otherwise `npm run db:seed` hangs after printing "Done.").
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });

@@ -25,6 +25,8 @@ single Postgres database.
 
 ## Learn more
 
+- **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** — fast local setup: one command
+  to get building, testing, and developing (`npm run setup`)
 - **[SCHEMA.md](SCHEMA.md)** — DB schema, state machines, REST surface
 - **[AGENTS.md](AGENTS.md)** — workflow contract for humans and agents
 - **[docs/fly-deployment.md](docs/fly-deployment.md)** — one-command deploy of the
@@ -33,6 +35,11 @@ single Postgres database.
   stack (Postgres + server + Docker workers) for validating the run → PR loop
 
 ## Run
+
+**Fast path:** `npm run setup` installs dependencies, provisions a throwaway
+Postgres, writes `.env.local`, and applies migrations + seeds in one idempotent
+step — then `npm run dev`. See **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** for
+the full setup, test, and troubleshooting guide. The manual steps are below.
 
 The app needs a Postgres instance reachable via `DATABASE_URL`. For local
 dev, a throwaway container is enough — schema migrations apply automatically

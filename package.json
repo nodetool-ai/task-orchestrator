@@ -5,6 +5,10 @@
   "type": "module",
   "description": "Self-contained SQLite-backed task orchestrator with Next.js UI, CLI, REST API, and Claude Agent SDK sessions.",
   "scripts": {
+    "setup": "bash scripts/setup.sh",
+    "db:up": "bash scripts/dev-db.sh up",
+    "db:down": "bash scripts/dev-db.sh down",
+    "db:status": "bash scripts/dev-db.sh status",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
