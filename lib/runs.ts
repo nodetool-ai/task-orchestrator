@@ -3340,6 +3340,30 @@ async function repairAbortedRun(runId: number): Promise<void> {
 }
 
 /**
+ * The status carried by a run's most recent `status` event (with its timestamp),
+ * or null if it has none / the payload won't parse. reconcileOrphanedRuns uses
+ * this to spot a run whose completion EVENT outlived a lost terminal column
+ * write (see the guard below).
+ */
+async function latestEventStatus(
+  runId: number
+): Promise<{ status: string | null; at: Date } | null> {
+  const rows = await db
+    .select({ payload: agentEvents.payload, createdAt: agentEvents.createdAt })
+    .from(agentEvents)
+    .where(and(eq(agentEvents.sessionId, runId), eq(agentEvents.type, "status")))
+    .orderBy(desc(agentEvents.id))
+    .limit(1);
+  if (!rows.length) return null;
+  try {
+    const status = (JSON.parse(rows[0].payload) as { status?: string }).status ?? null;
+    return { status, at: rows[0].createdAt };
+  } catch {
+    return { status: null, at: rows[0].createdAt };
+  }
+}
+
+/**
  * Demote runs left in an active status by a process that died mid-turn (e.g.
  * OOM-killed) — identified by a stale/absent heartbeat. Chat runs go back to
  * `idle` (resumable on the next message); others land `failed`. Safe to call on
@@ -3355,6 +3379,23 @@ export async function reconcileOrphanedRuns(): Promise<number> {
   let reaped = 0;
   for (const row of rows) {
     if (isLeaseLive(row, now)) continue; // fresh lease → owned by a live process
+    // A completion EVENT can outlive a lost terminal column write: if the DB
+    // drops the connection mid-finalize, emitStatus's event insert can land
+    // while the paired `status='completed'` column update is rolled back,
+    // stranding the row in a lease status even though the run actually finished
+    // (and often already opened its PR). Failing it here would clobber real,
+    // delivered work as "interrupted". When the run's MOST RECENT status event
+    // says 'completed', honor that instead — a later 'running'/'preparing' event
+    // means a genuine mid-turn orphan and falls through to the reap below.
+    const lastEvent = await latestEventStatus(row.id);
+    if (lastEvent?.status === "completed") {
+      await db.update(agentSessions)
+        .set({ status: "completed", error: null, completedAt: lastEvent.at })
+        .where(eq(agentSessions.id, row.id));
+      await emitStatus(row.id, "completed", { reconciled: true });
+      reaped++;
+      continue;
+    }
     // Detached mode: a worker that died mid-turn (host reboot / OOM) on a
     // resumable worktree run is handed to a fresh detached worker instead of
     // being failed. A worktree run is resumable — its branch/worktree persist

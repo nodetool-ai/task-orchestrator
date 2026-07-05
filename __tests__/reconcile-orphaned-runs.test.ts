@@ -9,7 +9,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
-import { agentSessions } from "../db/schema";
+import { agentSessions, agentEvents } from "../db/schema";
 import { create, get, reconcileOrphanedRuns } from "../lib/runs";
 import * as dispatch from "../lib/run-dispatch";
 
@@ -71,6 +71,46 @@ describe("reconcileOrphanedRuns", () => {
 
     expect((await get(idle.id))?.status).toBe("idle");
     expect((await get(done.id))?.status).toBe("completed");
+  });
+
+  it("finalizes an orphan as completed when its latest status event is 'completed'", async () => {
+    // Regression: under a DB outage the completion EVENT can land while the
+    // terminal column write is lost, stranding the row in a lease status. The
+    // reaper must not clobber such a run to 'failed' — it already finished.
+    const run = await create({ goal: "<implement>", defer: true });
+    await setRun(run.id, "running", STALE);
+    await db.insert(agentEvents).values({
+      sessionId: run.id,
+      type: "status",
+      payload: JSON.stringify({ status: "completed" }),
+    });
+
+    await reconcileOrphanedRuns();
+
+    const after = await get(run.id);
+    expect(after?.status).toBe("completed");
+    expect(after?.error).toBeNull();
+  });
+
+  it("still fails an orphan whose latest status event is a later 'running' (not the stale completed)", async () => {
+    // A resumed run that completed one turn, then orphaned mid a LATER turn:
+    // the newest status event is 'running', so it is a genuine orphan.
+    const run = await create({ goal: "<implement>", defer: true });
+    await setRun(run.id, "running", STALE);
+    await db.insert(agentEvents).values({
+      sessionId: run.id,
+      type: "status",
+      payload: JSON.stringify({ status: "completed" }),
+    });
+    await db.insert(agentEvents).values({
+      sessionId: run.id,
+      type: "status",
+      payload: JSON.stringify({ status: "running" }),
+    });
+
+    await reconcileOrphanedRuns();
+
+    expect((await get(run.id))?.status).toBe("failed");
   });
 
   it("re-dispatches a stale resumable worktree run when the flag is on", async () => {
