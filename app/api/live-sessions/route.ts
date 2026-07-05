@@ -4,7 +4,8 @@ import * as runsLib from "@/lib/runs";
 import { auth } from "@/auth";
 import { errorResponse } from "@/lib/api";
 import { bucketFor, dedupeLiveByTask, LIVE_BUCKET_PRIORITY } from "@/lib/run-buckets";
-import type { LiveSessionItem } from "@/components/pi/live-sidebar";
+import { groupForStatus } from "@/lib/run-index";
+import type { LiveSessionItem, ChatSidebarItem } from "@/components/pi/live-sidebar";
 
 export const dynamic = "force-dynamic";
 
@@ -19,14 +20,17 @@ export async function GET() {
   try {
     const session = await auth();
     if (!session?.user?.email) {
-      return NextResponse.json({ items: [] satisfies LiveSessionItem[] });
+      return NextResponse.json({
+        items: [] satisfies LiveSessionItem[],
+        chats: [] satisfies ChatSidebarItem[],
+      });
     }
+
+    const allRuns = await runsLib.listRuns();
 
     // Task-scoped runs plus plan executors: an executor run has a planId but
     // no taskId (origin "chat"), so the origin filter alone would hide it.
-    const runs = (await runsLib.listRuns()).filter(
-      (r) => r.origin === "task" || r.goal === "<execute>",
-    );
+    const runs = allRuns.filter((r) => r.origin === "task" || r.goal === "<execute>");
     const items: LiveSessionItem[] = [];
     for (const r of runs) {
       const task = r.taskId ? await repo.getTask(r.taskId) : null;
@@ -74,7 +78,22 @@ export async function GET() {
       return b.startedAt - a.startedAt;
     });
 
-    return NextResponse.json({ items: deduped });
+    // Normal chat conversations (goal '<chat>', or legacy pre-migration-0009
+    // chats): shown as their own section so they're always reachable, not
+    // just while a turn happens to be running. Closed chats are archived and
+    // drop out of the list.
+    const chats: ChatSidebarItem[] = allRuns
+      .filter((r) => r.goal === "<chat>" || r.legacyChatId != null)
+      .filter((r) => groupForStatus(r.status) !== "closed")
+      .map((r) => ({
+        runDbId: r.id,
+        title: r.title || "New chat",
+        running: r.status === "running",
+        startedAt: r.startedAt.getTime(),
+      }))
+      .sort((a, b) => b.startedAt - a.startedAt);
+
+    return NextResponse.json({ items: deduped, chats });
   } catch (e) {
     return errorResponse(e);
   }
