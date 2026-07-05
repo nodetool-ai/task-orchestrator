@@ -153,6 +153,12 @@ export const SESSION_STATUSES = [
   "idle",
   "budget_exhausted",
   "closed",
+  // Event system (docs/agent-events.md §6.1): the run ended its turn waiting
+  // for inbox events — no worker, no heartbeat, woken by emitInboxEvent /
+  // the pump wake sweep. The nuance ('waiting' | 'sleeping' | 'question')
+  // lives in agent_runs.park_reason; the status machinery sees one state.
+  // NOT terminal: like `idle`, a parked run resumes.
+  "parked",
 ] as const;
 export type SessionStatus = (typeof SESSION_STATUSES)[number];
 

@@ -14,6 +14,7 @@ const labels: Record<SessionStatus, string> = {
   idle: "Idle",
   budget_exhausted: "Budget hit",
   closed: "Closed",
+  parked: "Parked",
 };
 
 const tones: Record<SessionStatus, string> = {
@@ -28,6 +29,7 @@ const tones: Record<SessionStatus, string> = {
   idle: "text-muted-foreground",
   budget_exhausted: "text-state-blocked",
   closed: "text-muted-foreground",
+  parked: "text-state-review",
 };
 
 export function SessionStatusPill({
