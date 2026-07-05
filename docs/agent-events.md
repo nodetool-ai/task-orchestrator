@@ -1,6 +1,6 @@
 # Agent event system — design
 
-Status: proposal, revision 2. Companion to the message-passing review on this
+Status: proposal, revision 3. Companion to the message-passing review on this
 branch: today the parent→child path (spawn / append_message) is robust, but the
 child→parent path is pull-only — a parent burns a whole turn (and a worker
 container) busy-polling `await_session`, and if the parent dies its children's
@@ -21,7 +21,14 @@ break, so the design now treats them as four different things:
   having completed (`run_turn_id` on the event links the two)
 - **handled** — an application-level judgment this layer deliberately does NOT
   track with ack timeouts; supervision (watchdog timers, attempt counters,
-  supersession) is the mechanism instead (§4.3, §9)
+  supersession, the silent-skip guard of §6.2) is the mechanism instead
+
+Revision 3 adds the operations-at-scale layer: table partitioning and
+pending-set partial indexes (§1.1), TTL/archival for long-lived daemon runs
+(§11), a control-event class the LLM cannot swallow (§6.6), a flat
+resource-lock table instead of per-call subtree walks (§5.2), the silent-skip
+guard (§6.2), and executor context-growth management via generation rollover
+(§9.1).
 
 Everything composes with the existing machinery rather than replacing it: the
 per-run lock, the heartbeat lease, `dispatchRun`, the pending-run pump
@@ -97,8 +104,14 @@ export const inboxEvents = pgTable(
     injectedAt: ts("injected_at"),
   },
   (t) => ({
-    // The wake scan: "does run X have pending owner-audience events?"
-    targetPendingIdx: index("inbox_target_pending_idx").on(t.targetRunId, t.status, t.id),
+    // PARTIAL index on the pending set only. Every event leaves 'pending'
+    // exactly once, so this index stays proportional to the live backlog
+    // (usually tiny) no matter how large the table grows — the wake scan,
+    // the pump sweep, and the claim subquery all hit it and none of them
+    // degrade with total event volume.
+    targetPendingIdx: index("inbox_target_pending_idx")
+      .on(t.targetRunId, t.audience, t.id)
+      .where(sql`status = 'pending'`),
     dedupeIdx: uniqueIndex("inbox_dedupe_idx").on(t.targetRunId, t.dedupeKey)
       .where(sql`dedupe_key IS NOT NULL`),
     correlationIdx: index("inbox_correlation_idx").on(t.correlationId),
@@ -135,6 +148,35 @@ Design rule: **producers write facts; the delivery layer owns fan-out.** A
 producer emits one logical event; addressing (owner + supervisor copies +
 exception routing) is resolved at insert time by a single `emitInboxEvent()`
 helper so the rules in §5 live in exactly one place.
+
+### 1.1 Operating this as a queue — churn, vacuum, partitions
+
+Postgres with `FOR UPDATE SKIP LOCKED` is a proven queue pattern, but every
+event is a row that gets written once and updated once (`pending → injected`),
+and at scale — hundreds of concurrent children, webhook fan-out, supervisor
+copies — that update churn produces dead tuples faster than default
+autovacuum keeps up, bloating indexes and eventually the 15s pump tick itself.
+Countermeasures from day one, not retrofitted:
+
+- **Partial pending index** (in the schema above): the wake scan, the pump
+  sweep, and the claim subquery all hit an index proportional to the live
+  backlog (usually tiny), never to total event volume — every event leaves
+  `pending` exactly once.
+- **Declarative range partitioning on `created_at` (monthly).** Old
+  partitions are effectively frozen (their rows are all terminal-state), so
+  vacuum work concentrates on the current partition, and retention (§11)
+  becomes `DETACH PARTITION` + archive/drop instead of a million-row DELETE.
+  The primary key becomes `(created_at, id)` — fine, since all lookups are by
+  target/status/dedupe, not bare id.
+- **Table-level autovacuum tuning** on `inbox_events` and `run_timers`
+  (`autovacuum_vacuum_scale_factor ≈ 0.01`, lowered
+  `autovacuum_vacuum_cost_delay`) plus `fillfactor = 85` so the
+  `pending → injected` update is usually a same-page HOT update that doesn't
+  touch indexes at all.
+- **The pump tick is self-limiting:** its sweep query is bounded (`LIMIT`,
+  pending-only partial index) and instrumented; if a tick overruns the
+  interval, ticks coalesce (the existing pump already runs ticks serially)
+  and the overrun is a metric alarm, not a cascade.
 
 ---
 
@@ -361,10 +403,32 @@ in a separate "for your awareness" section. This is how "the parent sees the
 child's PR events" without creating duplicate reasoning: seeing ≠ acting.
 
 Acting is additionally fenced at the tool layer, not just by prompt: `gh_pr__*`
-mutation tools refuse to operate on a PR whose owning run is a live child of
-the caller (`pr_url` match against the caller's subtree) — "your implementor
-owns this PR; message it instead." Belt and suspenders against a supervisor
-copy triggering a parent-side merge that races the child.
+mutation tools refuse to operate on a PR another live run owns — "your
+implementor owns this PR; message it instead." Belt and suspenders against a
+supervisor copy triggering a parent-side merge that races the child.
+
+Ownership is answered by a flat **`resource_locks`** table, not a subtree walk
+per tool call (recursive ancestor/descendant queries on every PR mutation
+would be an easy hot spot as trees multiply, cheap as any one walk is at
+depth ≤ 3):
+
+```ts
+export const resourceLocks = pgTable("resource_locks", {
+  // e.g. 'pr:https://github.com/o/r/pull/42', 'task:T-17'
+  resource: text("resource").primaryKey(),
+  ownerRunId: integer("owner_run_id").notNull()
+    .references(() => agentSessions.id, { onDelete: "cascade" }),
+  acquiredAt: ts("acquired_at").notNull().defaultNow(),
+});
+```
+
+A run acquires the lease when it opens/adopts the PR (or is spawned on a
+task); the lease is released when the run reaches a terminal status with no
+pending rework (the same transitions that emit terminal events — one more
+line in `emitInboxEvent`'s transaction). The mutation guard is then a single
+primary-key lookup: locked by someone else and that someone is alive →
+refuse with the owner's run id; locked by a dead run or unlocked → proceed
+(and take the lease). The table doubles as the UI's "who owns what" view.
 
 ### 5.3 Exception routing
 
@@ -426,6 +490,22 @@ an hour whose turns each end with no tool calls besides re-parking gets a
 `system.wake_loop` supervisor event on its parent and a UI flag, and further
 wakes for `supervisor`-only backlogs are suppressed. Cheap self-wake spam
 (agent sets a 1-minute timer in a loop) is bounded by timer limits (§7).
+
+**Silent-skip guard:** the failure mode the no-`handled`-state gamble (§1)
+actually costs is a *stall*, not a crash — the model reads the digest,
+muses about it, emits no state-mutating tool call, and re-parks; nothing is
+wrong in the database, and the next scheduled wake may be a 45-minute
+watchdog away. So the runner checks at turn end: **woken by ≥1
+owner-audience event + zero state-mutating tool calls this turn** (the
+runner already sees every tool call; mutating vs read-only is a static
+property of each tool) → instead of honoring the agent's park, it arms a
+short system timer (5 min) with note `"re-check: woken but took no action"`
+and lets the park proceed. One free pass — the re-wake digest includes the
+nudge, and a *second* consecutive silent skip emits `system.silent_skip` to
+the parent and the UI. The penalty for an LLM shrug drops from
+watchdog-scale (45 min) to minutes, without pretending the platform can
+judge whether inaction was correct (sometimes it is — hence a nudge and an
+escalation, not a forced action).
 
 ### 6.3 The claim primitive — exactly one way to take events
 
@@ -505,7 +585,7 @@ exponentially per run (tracked on the dispatch attempt, capped, then the run
 is flagged in the UI rather than looped forever). Quarantined events are
 visible in the UI for manual replay after a fix.
 
-### 6.6 Mid-turn reads
+### 6.6 Mid-turn reads — and the control-event class
 
 `events__poll({ types?, max? })` — non-blocking; calls `claimInboxEvents`
 under the same held lock and returns the events as the tool result (which the
@@ -514,6 +594,30 @@ executor that just merged a PR and wants to check whether anything arrived
 meanwhile, without ending its turn. (No blocking `events__wait` tool:
 *parking is how you wait.* A blocking wait inside a turn is exactly the
 pinned-worker pattern being removed.)
+
+**Control events are not claimable — the LLM never processes its own death
+warrant.** If `run.cancel_requested` could be claimed by a mid-turn poll,
+a model that ignored that one entry in the batch would have "swallowed" its
+own cancellation: the event is `injected`, nothing is `pending`, and no
+machinery fires again. So the taxonomy is split into two classes:
+
+- **`notify`** (everything in §3 by default): claimable, digestible,
+  LLM-facing.
+- **`control`** (`run.cancel_requested`, hard `budget_exhausted`, and any
+  future must-enforce type): **excluded from `claimInboxEvents` entirely** —
+  the type filter is applied inside the primitive, not trusted to callers.
+  Control facts are enforced by the platform layer exactly as they are
+  today: the `cancel_requested` flag is polled at heartbeat cadence and
+  aborts the turn (`startHeartbeatWithCancel`), budget gates run in the
+  runner between turns. Their inbox rows exist only to make the enforcement
+  *visible* in the next digest ("your previous turn was aborted: cancel
+  requested by …") — the row is marked `injected` by the platform when the
+  enforcement happens, never claimed by a poll.
+
+Corollary for `child.died` / `budget.warning`: these stay `notify` (the
+parent deciding is the point), but they are **wake-priority** — a mid-turn
+poll that returns them is fine, and if they arrive while parked they always
+wake even when a `supervisor`-suppression (§6.2 wake-loop guard) is active.
 
 ---
 
@@ -654,6 +758,49 @@ Between wakes the executor holds **no worker, no container, no tokens**. A
 plan whose implementors take 40 minutes costs the executor a handful of short
 turns instead of 40 minutes of pinned polling.
 
+### 9.1 Context growth: digest frames accumulate — transcripts must be disposable
+
+Event-driven wakes trade the polling swamp for a new pressure: every wake
+appends a digest frame plus reasoning plus tool calls to one long transcript.
+A 30-task plan with rework loops is easily 60–100 wakes; the executor's
+context grows monotonically and will hit the window mid-plan. Three layers,
+in order of leverage:
+
+1. **Durable state lives outside the transcript — by rule, not hope.** The
+   executor's decisions (attempt counters, blocked reasons, per-task phase)
+   go to task notes; child state is queryable (`list_tasks`, children by
+   `parent_run_id`, `resource_locks`); consumed events keep their rows. The
+   transcript is therefore a *cache* of the executor's working memory, not
+   the system of record — which is what makes the next two layers safe.
+
+2. **Prompt-build-time frame compaction.** Because digests are stored as
+   structured frames rendered at prompt-build time (§6.4), old frames can be
+   compacted without touching storage: frames older than the last K wakes
+   render as one-line summaries ("wake 12: child.result #241 attempt 2 →
+   started review #250") and fully-resolved exchanges (result → review →
+   merged, per `correlation_id`) collapse to their outcome. The rev-2
+   decision to persist data instead of prose is what makes this a renderer
+   feature instead of a migration.
+
+3. **Generation rollover.** When compaction is no longer enough (token count
+   crosses a threshold at turn start), the runner ends the executor run and
+   spawns a **successor generation**: a fresh run, same persona/goal/budget
+   lineage, `resume_of` pointing back, bootstrapped exactly like a replaced
+   executor already is (§9: rebuild from tasks + children + notes — the
+   design requires this rebuild to work anyway, so rollover is the same code
+   path as crash recovery, exercised routinely instead of only in disasters).
+   Mechanics: `agent_runs.superseded_by` on the old run;
+   `emitInboxEvent()` resolves its target **through the supersession chain**
+   (a small follow-the-pointer loop, capped) so in-flight children and
+   webhooks addressed to the old run id land in the successor's inbox;
+   still-`pending` events migrate in the same transaction; `resource_locks`
+   and children's `parent_run_id` re-point. The tree budget already sums
+   across the tree, so a rollover can't launder costs.
+
+Layer 3 is also the answer for daemon-style runs (§11): a triage bot that
+lives for months is not one infinite transcript but a chain of bounded
+generations over durable external state.
+
 ---
 
 ## 10. Failure matrix
@@ -668,6 +815,8 @@ turns instead of 40 minutes of pinned polling.
 | Stale result after rework | n/a (results are prose) | attempt supersession at emit; digest staleness annotations (§4.3) |
 | Wake itself is lost (crash between insert and dispatch) | n/a | durable state "parked + pending" re-swept by the pump every 15s |
 | Poison event | n/a | quarantined to `error` with reason; turn proceeds; dispatch backs off instead of looping (§6.5) |
+| Agent reads event, takes no action | n/a | silent-skip guard: 5-min re-check + nudge, then `system.silent_skip` escalation (§6.2) |
+| Cancel/budget-stop swallowed by the model | n/a (cancel is platform-enforced) | stays platform-enforced: `control`-class events are unclaimable; heartbeat-cadence abort unchanged (§6.6) |
 | Event storm (CI fan-out) | n/a | dedupe keys + digest coalescing: one wake, one frame |
 | Self-wake / timer spam | n/a | timer caps + wake-loop guard (§6.2, §7) |
 | Both sides stuck waiting for each other | append-to-ancestor deadlock guards | parking removes held locks; question deadlines + recorded assumptions make the social version legible (§8) |
@@ -675,7 +824,19 @@ turns instead of 40 minutes of pinned polling.
 ## 11. Retention & observability
 
 - `injected`/`superseded`/`error` events are kept (they're the audit trail of
-  *why* a run acted) and GC'd with the run tree via the existing cascade.
+  *why* a run acted) — but **not forever**. Cascade-with-the-tree alone
+  assumes short-lived trees; a long-lived daemon run would accumulate an
+  unbounded inbox that slowly drags every query that can't stay on the
+  pending-only partial index. So retention is a hard TTL, not a hope:
+  terminal-state events (`injected`/`superseded`/`error`) older than
+  `INBOX_TTL_DAYS` (default 90) are dropped by detaching aged partitions
+  (§1.1) — optionally archived to object storage as JSONL first for
+  compliance-grade audit. `pending` events are exempt from TTL by
+  construction (they live in the current partition; a pending event old
+  enough to age out is itself an alarm — flagged, not silently dropped).
+  The transcript keeps its own copy of every injected envelope (the digest
+  frame), so dropping aged event rows never loses the record of what a run
+  actually saw.
 - The digest frame in the transcript carries event ids, so the UI renders
   "woken by: child.result #241 (attempt 3), gh.ci.completed" on the run page —
   every wake is explainable, and `run_turn_id` links each event to the turn
@@ -696,9 +857,11 @@ crash between claim and frame persist, storm handling, parent-terminal
 races), so nothing turns on wake behavior without having watched the events
 flow first:
 
-1. **Tables + emit.** `inbox_events`, `run_timers`, `emitInboxEvent()`, and
-   producers: status transitions, `handleWorkerDeath`/reaper, webhook
-   handler. Nothing consumes; verify volume, shape, dedupe hits in the UI.
+1. **Tables + emit.** `inbox_events` (partitioned, partial pending index,
+   autovacuum settings — §1.1), `run_timers`, `resource_locks`,
+   `emitInboxEvent()`, and producers: status transitions,
+   `handleWorkerDeath`/reaper, webhook handler. Nothing consumes; verify
+   volume, shape, dedupe hits, and vacuum behavior under load in the UI.
 2. **Shadow mode.** The old polling paths (`await_session`, executor loops)
    keep running the system; a replay checker records, for every polling
    outcome ("await_session #N returned completed"), whether the
@@ -707,12 +870,16 @@ flow first:
    and dedupe behavior get observed here under real load. Exit criterion:
    N days of zero unexplained divergence.
 3. **Park + wake + frames.** `parked` status + `park_reason`, reaper
-   exemption, `claimInboxEvents`, wake-on-insert, pump wake-sweep, digest
-   frames, poison quarantine, `timer__*`, `events__poll`. Opt-in per run
-   tree (env/flag) before default-on.
+   exemption, `claimInboxEvents` (with the `control`-class exclusion baked
+   into the primitive), wake-on-insert, pump wake-sweep, digest frames,
+   poison quarantine, silent-skip guard, `timer__*`, `events__poll`. Opt-in
+   per run tree (env/flag) before default-on.
 4. **Result contract.** `report_result` / `raise` / `ask_parent` /
    `answer_question`, `agent_runs.result` + `attempt` + `pending_question`
    columns, synthesized terminal events, supersession, persona updates.
-5. **Executor v2** on the event loop; `await_session` marked legacy.
+5. **Executor v2** on the event loop, with frame compaction; `await_session`
+   marked legacy. Generation rollover (§9.1) ships here too — it reuses the
+   crash-recovery rebuild, so it should not be deferred to "later".
 6. Later, if scale demands: `LISTEN/NOTIFY` to cut the 15s wake tail to
-   near-zero — an optimization on the same rows, not a redesign.
+   near-zero, TTL archival to object storage — optimizations on the same
+   rows, not a redesign.
