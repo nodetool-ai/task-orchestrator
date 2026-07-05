@@ -3208,39 +3208,10 @@ export async function resolveLegacyChatId(chatId: number): Promise<number | null
 
 // Group key for the /runs UI. Order of buckets is: Active (live work),
 // Idle (chat runs and queued task runs waiting on a worker), Closed.
-export type RunGroup = "active" | "idle" | "closed";
-
-const ACTIVE_STATUSES = new Set<string>([
-  "preparing",
-  "running",
-  "pushing",
-  "opening_pr",
-]);
-const IDLE_STATUSES = new Set<string>(["pending", "idle"]);
-const CLOSED_STATUSES = new Set<string>([
-  "completed",
-  "failed",
-  "cancelled",
-  "closed",
-  "budget_exhausted",
-]);
-
-export function groupForStatus(status: string): RunGroup {
-  if (ACTIVE_STATUSES.has(status)) return "active";
-  if (IDLE_STATUSES.has(status)) return "idle";
-  if (CLOSED_STATUSES.has(status)) return "closed";
-  // Unknown statuses fall into Idle so they're still discoverable rather
-  // than silently dropped.
-  return "idle";
-}
-
-export const RUN_GROUPS: readonly RunGroup[] = ["active", "idle", "closed"] as const;
-
-export const RUN_GROUP_LABEL: Record<RunGroup, string> = {
-  active: "Active",
-  idle: "Idle",
-  closed: "Closed",
-};
+// Lives in lib/run-index.ts (client-safe, no db imports) so the unified
+// /runs index component can share it; re-exported here for server callers.
+export { groupForStatus, RUN_GROUPS, RUN_GROUP_LABEL } from "./run-index";
+export type { RunGroup } from "./run-index";
 
 // ──────────────────────────────────────────────────────────
 // Misc helpers
