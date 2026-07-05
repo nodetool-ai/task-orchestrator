@@ -5,15 +5,19 @@
 // polling endpoint (GET /api/runs/overview) so both produce identical rows.
 
 import * as repo from "./repo";
+import { pendingOwnerCounts } from "./inbox";
 import { listRuns } from "./runs";
 import type { RunIndexRow } from "./run-index";
 
 export async function getRunOverview(): Promise<RunIndexRow[]> {
-  const [runs, repos, tasks, plans] = await Promise.all([
+  const [runs, repos, tasks, plans, pendingEvents] = await Promise.all([
     listRuns(),
     repo.listRepositories(),
     repo.listTasks(),
     repo.listPlans(),
+    // Agent-event visibility (docs/agent-events.md §11): "N queued" badges.
+    // Never let an inbox hiccup take down the whole index.
+    pendingOwnerCounts().catch(() => new Map<number, number>()),
   ]);
   const repoNames = new Map(repos.map((r) => [r.id, r.name]));
   const taskTitles = new Map(tasks.map((t) => [t.id, t.title]));
@@ -38,5 +42,7 @@ export async function getRunOverview(): Promise<RunIndexRow[]> {
     error: r.error,
     startedAt: r.startedAt.toISOString(),
     completedAt: r.completedAt?.toISOString() ?? null,
+    parkReason: r.parkReason,
+    pendingEvents: pendingEvents.get(r.id) ?? 0,
   }));
 }
