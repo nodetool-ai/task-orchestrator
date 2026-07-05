@@ -1,37 +1,46 @@
 // lib/agent-backend/index.ts
 //
-// Backend selection. TASK_ORCH_AGENT_BACKEND picks the active agent SDK adapter
-// (default "pi"). The chosen backend module is dynamically imported so the
-// unused SDK — and its native bits — never load.
+// Backend selection. A run picks its adapter per-run (agent_runs.backend);
+// callers without a run-level choice fall back to TASK_ORCH_AGENT_BACKEND
+// (default "pi"). Backend modules are dynamically imported and cached per id
+// so an unused SDK — and its native bits — never loads.
 
 import type { AgentBackend, BackendId } from "./types";
 
 export * from "./types";
 
-let cached: AgentBackend | null = null;
+const cached = new Map<BackendId, AgentBackend>();
 
-export function resolveBackendId(raw = process.env.TASK_ORCH_AGENT_BACKEND): BackendId {
-  const id = (raw ?? "pi").trim().toLowerCase();
+export const BACKEND_IDS: readonly BackendId[] = ["pi", "claude"];
+
+/** Normalize + validate a backend id. `raw` may be a per-run value; when
+ *  null/undefined the deployment default (TASK_ORCH_AGENT_BACKEND) applies. */
+export function resolveBackendId(
+  raw: string | null | undefined = process.env.TASK_ORCH_AGENT_BACKEND
+): BackendId {
+  const id = (raw ?? process.env.TASK_ORCH_AGENT_BACKEND ?? "pi").trim().toLowerCase();
   if (id === "pi" || id === "claude") return id;
-  throw new Error(
-    `Unknown TASK_ORCH_AGENT_BACKEND='${raw}'. Expected 'pi' or 'claude'.`
-  );
+  throw new Error(`Unknown agent backend '${raw}'. Expected 'pi' or 'claude'.`);
 }
 
-export async function getBackend(): Promise<AgentBackend> {
-  if (cached) return cached;
-  const id = resolveBackendId();
-  if (id === "claude") {
+/** The adapter for `id`; omitted/null falls back to the deployment default. */
+export async function getBackend(id?: string | null): Promise<AgentBackend> {
+  const resolved = resolveBackendId(id);
+  const hit = cached.get(resolved);
+  if (hit) return hit;
+  let backend: AgentBackend;
+  if (resolved === "claude") {
     const { ClaudeBackend } = await import("./claude-backend");
-    cached = new ClaudeBackend();
+    backend = new ClaudeBackend();
   } else {
     const { PiBackend } = await import("./pi-backend");
-    cached = new PiBackend();
+    backend = new PiBackend();
   }
-  return cached;
+  cached.set(resolved, backend);
+  return backend;
 }
 
-/** Clear the cached backend (test-only — lets a test flip the env var). */
+/** Clear the cached backends (test-only — lets a test flip the env var). */
 export function resetBackendCache(): void {
-  cached = null;
+  cached.clear();
 }

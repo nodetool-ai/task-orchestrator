@@ -21,6 +21,7 @@ function makeRun(overrides: Partial<RunRow> = {}): RunRow {
     planId: null,
     repoId: null,
     parentRunId: null,
+    backend: null,
     toolsProfile: "orchestrator,repo_read,gh_pr_ro",
     cwdStrategy: "worktree_at_pr",
     model: null,

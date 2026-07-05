@@ -18,6 +18,7 @@ const bodySchema = z
     // Honored only when the run is first created (the chat box pickers).
     personaId: z.string().min(1).optional(),
     model: z.string().min(1).optional(),
+    backend: z.enum(["pi", "claude"]).nullable().optional(),
     thinkingLevel: z.enum(["low", "medium", "high", "xhigh"]).nullable().optional(),
   })
   .optional();
@@ -35,7 +36,7 @@ export async function POST(
     if (existing) return NextResponse.json({ runId: existing.id, created: false });
 
     const raw = req.headers.get("content-length") === "0" ? {} : await req.json().catch(() => ({}));
-    const { seed = true, personaId, model, thinkingLevel } = bodySchema.parse(raw) ?? {};
+    const { seed = true, personaId, model, backend, thinkingLevel } = bodySchema.parse(raw) ?? {};
 
     const session = await auth();
     const uid = session?.user?.id ? Number(session.user.id) : null;
@@ -47,6 +48,7 @@ export async function POST(
       taskId: id,
       personaId: personaId ?? "implementor",
       model: model ?? undefined,
+      backend: backend ?? undefined,
       thinkingLevel: thinkingLevel ?? undefined,
       userId: uid,
       budget: { maxUsd: IMPLEMENT_DEFAULT_BUDGET_USD },

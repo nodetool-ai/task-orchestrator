@@ -21,7 +21,14 @@ describe("resolveBackendId", () => {
   });
 
   it("throws on an unknown backend id", () => {
-    expect(() => resolveBackendId("gpt")).toThrow(/Unknown TASK_ORCH_AGENT_BACKEND/);
+    expect(() => resolveBackendId("gpt")).toThrow(/Unknown agent backend/);
+  });
+
+  it("falls back to the deployment default on null (a run with no per-run pick)", () => {
+    process.env.TASK_ORCH_AGENT_BACKEND = "claude";
+    expect(resolveBackendId(null)).toBe("claude");
+    delete process.env.TASK_ORCH_AGENT_BACKEND;
+    expect(resolveBackendId(null)).toBe("pi");
   });
 });
 
@@ -38,5 +45,18 @@ describe("getBackend", () => {
     process.env.TASK_ORCH_AGENT_BACKEND = "claude";
     const backend = await getBackend();
     expect(backend.id).toBe("claude");
+  });
+
+  it("serves both backends side by side for per-run selection", async () => {
+    resetBackendCache();
+    delete process.env.TASK_ORCH_AGENT_BACKEND;
+    const pi = await getBackend("pi");
+    const claude = await getBackend("claude");
+    expect(pi.id).toBe("pi");
+    expect(claude.id).toBe("claude");
+    // Per-id caching: same instance on repeat, and the env default is not
+    // clobbered by an earlier per-run override.
+    expect(await getBackend("claude")).toBe(claude);
+    expect((await getBackend(null)).id).toBe("pi");
   });
 });

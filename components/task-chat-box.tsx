@@ -8,6 +8,7 @@ import {
   type PersonaOption,
 } from "@/components/pickers/persona-picker";
 import { ModelPicker } from "@/components/chat/model-picker";
+import { BackendPicker } from "@/components/pickers/backend-picker";
 import { ThinkingLevelPicker, type ThinkingLevel } from "@/components/pickers/thinking-level-picker";
 import { ErrorText } from "@/components/ui/error-text";
 import {
@@ -43,7 +44,7 @@ interface Props {
 export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], className }: Props) {
   const [input, setInput] = useState("");
   const [personaId, setPersonaId] = useState(personas[0]?.id ?? "implementor");
-  const { model, setModel, modelOptions } = useModelOptions();
+  const { model, setModel, modelOptions, backend, setBackend, backendOptions } = useModelOptions();
   const [reasoning, setReasoning] = useState<ThinkingLevel | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -91,7 +92,7 @@ export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], class
       const createRes = await fetch(`/api/tasks/${taskId}/attached-run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ seed: false, personaId, model, thinkingLevel: reasoning }),
+        body: JSON.stringify({ seed: false, personaId, model, backend, thinkingLevel: reasoning }),
       });
       if (!createRes.ok) {
         popup?.close();
@@ -163,6 +164,12 @@ export function TaskChatBox({ taskId, repoId, promptPrefix, personas = [], class
             value={personaId}
             onChange={setPersonaId}
             size="compact"
+          />
+          <BackendPicker
+            value={backend}
+            options={backendOptions}
+            onChange={setBackend}
+            disabled={pending}
           />
           <ModelPicker
             value={model}
