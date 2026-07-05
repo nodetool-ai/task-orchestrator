@@ -23,6 +23,26 @@ RUN npm install -g @anthropic-ai/claude-code
 
 COPY . .
 
+# Pre-bundle the TypeScript worker with esbuild (a devDependency installed by the
+# `npm ci` above) so a run boots via `node dist/run-worker.js` instead of paying
+# tsx's whole-import-graph transpile cost on every cold start.
+RUN npm run build:worker
+
+# Bake blobless bare mirrors of the hot target repos into the image so per-run
+# checkouts fetch only the delta (git clone --reference <mirror> --dissociate).
+# REPO_CACHE_REPOS is a space/comma-separated owner/repo list passed at build
+# time; the GitHub token arrives as a BuildKit secret (never a persisted layer).
+# Both are optional — build-repo-cache.sh exits 0 (seeding nothing) when either
+# is absent, so the image always builds and runs fall back to full clones.
+ARG REPO_CACHE_REPOS=""
+# REPO_CACHE_BUST defeats the remote builder's layer cache for the seeding step:
+# with no new commits, COPY . . (and thus everything after it) cache-hits, and a
+# nightly rebuild would silently ship the same stale mirrors it set out to
+# refresh. The nightly workflow passes a fresh timestamp; consuming it in the
+# RUN below forces that layer (and only from there down) to re-run.
+ARG REPO_CACHE_BUST=""
+RUN --mount=type=secret,id=gh_token REPO_CACHE_BUST="$REPO_CACHE_BUST" bash scripts/build-repo-cache.sh /opt/repo-cache "$REPO_CACHE_REPOS"
+
 RUN git config --system user.email "agent@task-orchestrator.local" \
     && git config --system user.name "Task Orchestrator Agent" \
     && git config --system credential.helper '!f() { echo username=x-access-token; echo "password=${GH_TOKEN}"; }; f'
@@ -30,5 +50,17 @@ RUN git config --system user.email "agent@task-orchestrator.local" \
 COPY scripts/fly-runner-entry.sh /usr/local/bin/fly-runner-entry
 RUN chmod +x /usr/local/bin/fly-runner-entry
 
+# Optional shared agent-config seed. Deployments may bake a .claude directory
+# (settings, skills, etc.) into /opt/claude-seed at build time; the entrypoint
+# copies it onto the session volume only when the volume has none of its own.
+RUN mkdir -p /opt/claude-seed
+
 ENV SESSION_ROOT=/mnt/session
+# Default mirror dir for the worker's --reference lookup (a concurrent change
+# also passes this via Machine env); the seed above lands here.
+ENV REPO_CACHE_DIR=/opt/repo-cache
+# The bundled worker runs from /app/dist, so db/index.ts's import.meta.url-based
+# default migrations-dir would resolve wrong; pin it. Insurance — the worker
+# does not migrate in practice.
+ENV TASK_ORCH_MIGRATIONS_DIR=/app/db/migrations
 ENTRYPOINT ["/usr/local/bin/fly-runner-entry"]
