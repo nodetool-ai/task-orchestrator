@@ -204,6 +204,10 @@ export function checkAppendableStatus(status: string, cwdStrategy: string): stri
   if (status === "closed") {
     return `Run is closed; cannot append. Closed runs are archived and must be forked to continue.`;
   }
+  // 'parked' (docs/agent-events.md §6.1) is intentionally NOT terminal —
+  // isTerminalStatus(status) is false for it, same as 'idle', so a parked run
+  // falls straight through to the `return null` below: appending wakes it,
+  // exactly like a human/agent message waking a sleeping run is supposed to.
   if (
     isTerminalStatus(status as SessionStatus) &&
     !isResumableWorktreeRun(status, cwdStrategy)
@@ -585,6 +589,20 @@ export const spawnExtension =
           return errResult(`Run ${id} not found.`);
         }
         const lastText = await lastAgentText(id);
+        // agent_runs.result / attempt / park_reason / pending_question
+        // (docs/agent-events.md §4/§6/§8) aren't on RunRow yet, so read them
+        // directly — same pattern as the rest of this file's DB-backed helpers.
+        const eventFields = (
+          await db
+            .select({
+              result: agentSessions.result,
+              attempt: agentSessions.attempt,
+              parkReason: agentSessions.parkReason,
+              pendingQuestion: agentSessions.pendingQuestion,
+            })
+            .from(agentSessions)
+            .where(eq(agentSessions.id, id))
+        )[0];
         return ok(
           JSON.stringify(
             {
@@ -598,6 +616,10 @@ export const spawnExtension =
               started_at: run.startedAt.toISOString(),
               completed_at: run.completedAt?.toISOString() ?? null,
               error: run.error,
+              result: eventFields?.result ?? null,
+              attempt: eventFields?.attempt ?? 1,
+              park_reason: eventFields?.parkReason ?? null,
+              pending_question: eventFields?.pendingQuestion ?? null,
             },
             null,
             2

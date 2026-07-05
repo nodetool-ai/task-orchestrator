@@ -12,6 +12,7 @@ import {
   index,
   uniqueIndex,
   check,
+  jsonb,
 } from "drizzle-orm/pg-core";
 
 // Millisecond-epoch timestamps became Postgres `timestamptz` (Date semantics
@@ -239,6 +240,21 @@ export const agentSessions = pgTable(
     // kill, crash before the SDK started, git auth, ...).
     workerLog: text("worker_log"),
     workerExitCode: integer("worker_exit_code"),
+    // ── Event-system columns (docs/agent-events.md) ──────────────────────
+    // Rework generation: incremented by every turn-starting resume of a
+    // terminal-but-resumable child. Terminal inbox events dedupe per attempt.
+    attempt: integer("attempt").notNull().default(1),
+    // Structured result written by report_result/raise (§4). Supersedes the
+    // 200-char `outcome` for new code; `outcome` stays for review verdicts.
+    result: jsonb("result"),
+    // Why a `parked` run is parked: 'waiting' | 'sleeping' | 'question'.
+    parkReason: text("park_reason"),
+    // Open ask_parent exchange (§8): { question_id, question, asked_at,
+    // deadline, state: 'open'|'answered'|'expired', assumption? }.
+    pendingQuestion: jsonb("pending_question"),
+    // Generation rollover (§9.1): the successor run that replaced this one.
+    // emitInboxEvent resolves targets through this chain.
+    supersededBy: integer("superseded_by"),
   },
   (t) => ({
     taskIdx: index("agent_runs_task_idx").on(t.taskId),
@@ -310,6 +326,95 @@ export const agentEvents = pgTable(
     runOrdIdx: index("idx_agent_events_run_id").on(t.sessionId, t.id),
   })
 );
+
+// ──────────────────────────────────────────────────────────────────────────
+// Event system (docs/agent-events.md)
+// ──────────────────────────────────────────────────────────────────────────
+
+// Inbox: events ADDRESSED to a run, whose arrival wakes it. Distinct from
+// agent_events (telemetry stream nothing consumes). Lifecycle:
+// pending → injected | superseded | error. See lib/inbox.ts for the only
+// two mutation paths (emitInboxEvent / claimInboxEvents).
+export const inboxEvents = pgTable(
+  "inbox_events",
+  {
+    id: serial("id").primaryKey(),
+    targetRunId: integer("target_run_id")
+      .notNull()
+      .references(() => agentSessions.id, { onDelete: "cascade" }),
+    // Dotted taxonomy: 'child.result', 'gh.pr.merged', 'timer.fired', ...
+    type: text("type").notNull(),
+    payload: jsonb("payload").notNull().default({}),
+    // 'owner' = operational (wakes, expected to act);
+    // 'supervisor' = informational copy (rides along in the next digest).
+    audience: text("audience").notNull().default("owner"),
+    // 'run' | 'github' | 'timer' | 'task' | 'budget' | 'system' | 'user'
+    sourceKind: text("source_kind").notNull(),
+    sourceId: text("source_id"),
+    correlationId: text("correlation_id"),
+    causationEventId: integer("causation_event_id"),
+    // Rework generation of the source child when sourceKind='run'.
+    attempt: integer("attempt"),
+    // Original target when re-addressed up the parent chain.
+    bubbledFrom: integer("bubbled_from"),
+    // Idempotency key; unique per target (partial index below).
+    dedupeKey: text("dedupe_key"),
+    // pending → injected | superseded | error
+    status: text("status").notNull().default("pending"),
+    // Turn that received this event's digest frame (agent_messages id).
+    runTurnId: integer("run_turn_id"),
+    errorReason: text("error_reason"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    injectedAt: ts("injected_at"),
+  },
+  (t) => ({
+    // PARTIAL index on the pending set: wake scan / pump sweep / claim stay
+    // proportional to the live backlog, never total event volume.
+    targetPendingIdx: index("inbox_target_pending_idx")
+      .on(t.targetRunId, t.audience, t.id)
+      .where(sql`status = 'pending'`),
+    dedupeIdx: uniqueIndex("inbox_dedupe_idx")
+      .on(t.targetRunId, t.dedupeKey)
+      .where(sql`dedupe_key IS NOT NULL`),
+    correlationIdx: index("inbox_correlation_idx").on(t.correlationId),
+  })
+);
+
+// Future events: a timer is a promise of a `timer.fired` inbox event. Fired
+// by the pending-run pump (at-least-once; late after downtime, never lost).
+export const runTimers = pgTable(
+  "run_timers",
+  {
+    id: serial("id").primaryKey(),
+    runId: integer("run_id")
+      .notNull()
+      .references(() => agentSessions.id, { onDelete: "cascade" }),
+    fireAt: ts("fire_at").notNull(),
+    note: text("note"),
+    // Correlates a question-deadline timer with its ask_parent exchange.
+    correlationId: text("correlation_id"),
+    // pending | fired | cancelled
+    status: text("status").notNull().default("pending"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    firedAt: ts("fired_at"),
+  },
+  (t) => ({
+    dueIdx: index("run_timers_due_idx")
+      .on(t.fireAt)
+      .where(sql`status = 'pending'`),
+    runIdx: index("run_timers_run_idx").on(t.runId),
+  })
+);
+
+// Flat resource-ownership leases (§5.2): 'pr:<url>' / 'task:<id>' → owning
+// run. Mutation guards are a primary-key lookup, not a subtree walk.
+export const resourceLocks = pgTable("resource_locks", {
+  resource: text("resource").primaryKey(),
+  ownerRunId: integer("owner_run_id")
+    .notNull()
+    .references(() => agentSessions.id, { onDelete: "cascade" }),
+  acquiredAt: ts("acquired_at").notNull().defaultNow(),
+});
 
 // Maps an external chat conversation (e.g. a Discord DM or guild channel/thread)
 // to a chat run (agent_runs row, goal='<chat>'). One row per (channel,
@@ -413,3 +518,6 @@ export type ChannelThread = typeof channelThreads.$inferSelect;
 export type Repository = typeof repositories.$inferSelect;
 export type Persona = typeof personas.$inferSelect;
 export type PersonaMemory = typeof personaMemories.$inferSelect;
+export type InboxEvent = typeof inboxEvents.$inferSelect;
+export type RunTimer = typeof runTimers.$inferSelect;
+export type ResourceLock = typeof resourceLocks.$inferSelect;

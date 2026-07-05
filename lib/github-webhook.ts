@@ -384,6 +384,90 @@ export function parseWebhookEvent(
 }
 
 // ──────────────────────────────────────────────────────────
+// Inbox event mapping (docs/agent-events.md §3.2)
+// ──────────────────────────────────────────────────────────
+
+/** Pure result of {@link mapWebhookToInboxType}: what to enqueue, if anything. */
+export interface InboxEventMapping {
+  type: string;
+  payload: Record<string, unknown>;
+}
+
+const INBOX_BODY_MAX_CHARS = 2000;
+
+function truncateBody(body: string | null): string | null {
+  if (body == null) return null;
+  return body.length > INBOX_BODY_MAX_CHARS ? body.slice(0, INBOX_BODY_MAX_CHARS) : body;
+}
+
+/**
+ * Pure mapping from a normalized webhook event to the inbox event it should
+ * enqueue (§3.2), or null when the event isn't inbox-worthy. Side-effecting
+ * dispatch (matching runs, calling emitInboxEvent) lives in
+ * lib/github-webhook-handler.ts — this function only decides type + payload.
+ */
+export function mapWebhookToInboxType(event: NormalizedWebhookEvent): InboxEventMapping | null {
+  const base = { pr_url: event.prUrls[0] ?? null, branch: event.branch };
+
+  if (event.merged) {
+    return {
+      type: "gh.pr.merged",
+      payload: { ...base, merged_by: event.actor, sha: event.headSha },
+    };
+  }
+
+  if (event.kind === "ci") {
+    return {
+      type: "gh.ci.completed",
+      payload: {
+        ...base,
+        conclusion: event.ciState,
+        check: event.workflowName,
+        sha: event.headSha,
+        url: event.url,
+      },
+    };
+  }
+
+  if (event.kind === "review") {
+    return {
+      type: "gh.pr.review_submitted",
+      payload: {
+        ...base,
+        state: event.conclusion,
+        reviewer: event.actor,
+        body: truncateBody(event.body),
+      },
+    };
+  }
+
+  if (event.kind === "comment") {
+    return {
+      type: "gh.pr.comment",
+      payload: {
+        ...base,
+        author: event.actor,
+        body: truncateBody(event.body),
+      },
+    };
+  }
+
+  if (event.kind === "pr") {
+    // New commits pushed to the PR branch: GitHub reports this as a
+    // pull_request "synchronize" action, not a distinct push kind.
+    if (event.action === "synchronize") {
+      return { type: "gh.pr.pushed", payload: { ...base, sha: event.headSha } };
+    }
+    // Closed without merging (merged=true was handled above already).
+    if (event.action === "closed") {
+      return { type: "gh.pr.closed", payload: { ...base } };
+    }
+  }
+
+  return null;
+}
+
+// ──────────────────────────────────────────────────────────
 // Run matching
 // ──────────────────────────────────────────────────────────
 

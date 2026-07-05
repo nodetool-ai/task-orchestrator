@@ -52,9 +52,19 @@ import { parsePrUrl, ownerRepoFromRemote } from "./gh-url";
 import { assistantText, toolResults, type SdkContentBlock } from "./sdk-message";
 import type { AgentSessionFull, RepositoryRow, SessionStatus } from "./types";
 import { isTerminalStatus, SESSION_STATUSES } from "./types";
-import { resolveProfiles, type ProfileContext } from "./profiles";
+import { resolveProfiles, alwaysOnExtensions, type ProfileContext } from "./profiles";
 import { type RunEnvelope } from "./pi-event-mapper";
 import { getBackend, type Extension } from "./agent-backend";
+import {
+  claimInboxEvents,
+  emitInboxEvent,
+  markControlInjected,
+  quarantineEvent,
+  setClaimTurn,
+  takeUnrenderedControlEvents,
+  toEnvelope,
+  type EventEnvelope,
+} from "./inbox";
 import { sandboxFactory } from "./extensions/sandbox";
 import { personaPromptFactory } from "./extensions/persona-prompt";
 import { personaMemoryFactory } from "./extensions/persona-memory";
@@ -185,6 +195,12 @@ export interface RunRow {
   workerPid: number | null;
   /** Detached worker (0020): 1 = cross-process cancel requested; the worker aborts at the next poll. */
   cancelRequested: number | null;
+  /** Event system (§4.3): rework generation; bumped when a terminal-but-resumable run starts a new turn. */
+  attempt: number;
+  /** Event system (§4): structured result written by report_result/raise THIS turn, or null. */
+  result: unknown | null;
+  /** Event system (§6.1): why a 'parked' run is parked ('waiting'|'sleeping'|'question'), or null. */
+  parkReason: string | null;
 }
 
 export interface MessageRow {
@@ -823,6 +839,24 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       yield { type: "user_message", message: userMsg };
     }
 
+    // Event system: fresh-turn bookkeeping (docs/agent-events.md §4.3, §6.1).
+    // Resuming a run that sits in a terminal-but-resumable state (a completed
+    // implement child being re-driven via append_message) starts a new rework
+    // ATTEMPT. Every new turn also clears last turn's `result` (a stale report
+    // must not masquerade as this turn's result) and `park_reason` (fresh turn
+    // = fresh intent). Note 'parked' itself needs no special-casing in the
+    // status gates above: it is non-terminal, so a parked run is appendable
+    // exactly like 'idle' — a human/agent message wakes it.
+    const resumesTerminalAttempt =
+      isTerminalStatus(run.status) && isResumableWorktreeRun(run.status, run.cwdStrategy);
+    await db.update(agentSessions)
+      .set({
+        result: null,
+        parkReason: null,
+        ...(resumesTerminalAttempt ? { attempt: sql`${agentSessions.attempt} + 1` } : {}),
+      })
+      .where(eq(agentSessions.id, run.id));
+
     await setStatus(run.id, "running");
 
     // Register the abort handle and bus BEFORE the (seconds-long) worktree prep.
@@ -873,12 +907,24 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       return;
     }
 
+    // Digest injection (§6.4): claim pending inbox events under the per-run
+    // lock and weave the digest into this turn's prompt (as late as possible —
+    // after prep — to shrink the claimed-but-turn-failed window). Best-effort:
+    // an inbox hiccup must never block the user's turn.
+    let effectivePrompt = input.text;
+    try {
+      const digest = await injectPendingInboxEvents(run.id);
+      if (digest) effectivePrompt = `${digest}\n\n${input.text}`;
+    } catch {
+      // pump sweep / next turn retries pending events
+    }
+
     let result: TurnResult;
     try {
       result = await runOneTurn({
         run,
         cwd,
-        prompt: input.text,
+        prompt: effectivePrompt,
         abort,
         author,
         onSdk: (m) => {
@@ -934,13 +980,21 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // Worktree runs (the task's attached session) land at `completed` after each
     // turn — terminal so the executor's await_session resolves, but resumable
     // via the guard above. Chat/none runs land `idle`. Budget caps win.
+    // Turn-end parking contract (§6.1): tools may have written park_reason
+    // (timer__sleep / ask_parent) or result (report_result / raise) mid-turn —
+    // re-read both FRESHLY from the DB and let them steer the landing status
+    // via decideTurnEndStatus (result > budget > park > default).
     const budgetHit = checkBudget(run, result);
     const landsCompleted = isImplementWorktree(run);
-    const nextStatus: SessionStatus = budgetHit
-      ? "budget_exhausted"
-      : landsCompleted
-        ? "completed"
-        : "idle";
+    const turnEnd = await readTurnEndState(run.id);
+    const nextStatus: SessionStatus = decideTurnEndStatus({
+      goal: run.goal,
+      freshStatus: turnEnd.status,
+      parkReason: turnEnd.parkReason,
+      result: turnEnd.result,
+      budgetHit,
+      defaultStatus: landsCompleted ? "completed" : "idle",
+    });
     // Review-style runs surface a structured verdict in `outcome`. Gated on
     // goal so chat/implement append flows are unaffected.
     const outcomeUpdate =
@@ -959,7 +1013,10 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
         outputTokens: result.outputTokens ?? run.outputTokens,
         outcome: outcomeUpdate,
         prUrl: prUrlUpdate,
-        completedAt: budgetHit || landsCompleted ? new Date() : null,
+        // Keep park_reason only when actually parking; clear a stale one that
+        // lost to a result/budget landing. Parked is non-terminal: no completedAt.
+        parkReason: nextStatus === "parked" ? turnEnd.parkReason : null,
+        completedAt: isTerminalStatus(nextStatus) ? new Date() : null,
       })
       .where(
         and(
@@ -971,7 +1028,12 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // ended — emit BEFORE dropping the runner (in the finally) so the bus still
     // exists. Only emit when we actually wrote the row; if a cancel()/close()
     // won the race the update was a no-op and the aborter already emitted.
-    if (finalUpdate.count > 0) await emitStatus(run.id, nextStatus);
+    if (finalUpdate.count > 0) {
+      await emitStatus(run.id, nextStatus);
+      // Child lifecycle producer (§3.1): a terminal landing on a child run
+      // becomes a durable inbox event for its parent. Best-effort by design.
+      if (isTerminalStatus(nextStatus)) void emitTerminalChildEvent(run.id);
+    }
 
     yield { type: "done" };
   } finally {
@@ -1033,6 +1095,20 @@ export async function cancel(id: number): Promise<RunRow> {
     .set({ status: "cancelled", completedAt: new Date(), cancelRequested: 1 })
     .where(eq(agentSessions.id, id));
   await emitStatus(id, "cancelled");
+  // Event system (§6.6): mirror the cancel as a CONTROL-class inbox row — the
+  // model can never claim/swallow it; enforcement stays platform-side (the
+  // heartbeat poll aborts and then markControlInjected acknowledges the row).
+  // Plus the per-run-singleton terminal event for the parent (§3.1).
+  void emitInboxEvent({
+    targetRunId: id,
+    type: "run.cancel_requested",
+    sourceKind: "system",
+    sourceId: String(id),
+    dedupeKey: `cancel:${id}`,
+    payload: { run_id: id },
+    noWake: true,
+  }).catch(() => {});
+  void emitTerminalChildEvent(id);
   closeBus(id);
   // Hard-stop the detached worker as a fallback (the cancel_requested poll aborts
   // it gracefully within a heartbeat; provider stop is the belt). No-op if gone.
@@ -1099,6 +1175,17 @@ export async function close(id: number): Promise<RunRow> {
   await db.update(agentSessions)
     .set({ status: "closed", completedAt: new Date(), cancelRequested: 1 })
     .where(eq(agentSessions.id, id));
+  // Event system (§6.6): close() also flips cancel_requested cross-process, so
+  // mirror it with the same control-class row (deduped with cancel()'s).
+  void emitInboxEvent({
+    targetRunId: id,
+    type: "run.cancel_requested",
+    sourceKind: "system",
+    sourceId: String(id),
+    dedupeKey: `cancel:${id}`,
+    payload: { run_id: id },
+    noWake: true,
+  }).catch(() => {});
   closeBus(id);
   void runDispatch.stopRunner(run.workerScope).catch(() => {});
   if (run.cwdStrategy === "worktree" && run.worktreePath) {
@@ -1211,6 +1298,7 @@ export async function followUp(
       })
       .where(eq(agentSessions.id, runId));
     await emitStatus(runId, "completed");
+    void emitTerminalChildEvent(runId);
   } catch (err) {
     if (!abort.signal.aborted) await setError(runId, describe(err));
   } finally {
@@ -1729,6 +1817,7 @@ async function runReview(
       })
       .where(eq(agentSessions.id, runId));
     await emitStatus(runId, "completed");
+    void emitTerminalChildEvent(runId);
 
     // An approving verdict marks the task done. The outcome is the JSON
     // verdict block extracted above (or a fallback first line, which won't
@@ -1764,7 +1853,8 @@ async function runReview(
     if (!abort.signal.aborted) {
       try {
         const cur = await get(runId);
-        if (cur && !isTerminalStatus(cur.status)) {
+        // 'parked' is a deliberate landing (§6.1), not a missing result.
+        if (cur && !isTerminalStatus(cur.status) && cur.status !== "parked") {
           await setError(runId, "Review turn ended without a result (worker interrupted).");
         }
       } catch {
@@ -1808,6 +1898,12 @@ async function runExecute(
     }
 
     await setStatus(runId, "running");
+    // Event system (§6.1): fresh turn = fresh intent — clear last turn's
+    // park_reason and result before this turn runs (this is how a parked
+    // executor woken by the pump sweep starts clean).
+    await db.update(agentSessions)
+      .set({ parkReason: null, result: null })
+      .where(eq(agentSessions.id, runId));
     // No worktree of its own — operate at the repo root so gh_pr tools shell
     // out against the real checkout. Children create their own worktrees.
     const cwd = await prepareCwd(run);
@@ -1816,7 +1912,16 @@ async function runExecute(
     // replacing it, so the executor never loses its core instructions.
     const base = buildExecutePrompt(plan, await repo.listTasks({ planId }));
     const extra = initialPrompt?.trim();
-    const prompt = extra ? `${base}\n\n## Operator instructions\n\n${extra}` : base;
+    let prompt = extra ? `${base}\n\n## Operator instructions\n\n${extra}` : base;
+    // Digest injection (§6.4): a (re)dispatched executor consumes its pending
+    // inbox events at turn start — the digest frame is persisted and the same
+    // data rides the prompt. Best-effort: never block the turn on the inbox.
+    try {
+      const digest = await injectPendingInboxEvents(runId);
+      if (digest) prompt = `${prompt}\n\n${digest}`;
+    } catch {
+      // pump sweep / next turn retries pending events
+    }
     // Persist the kickoff prompt so a page load shows what this executor was
     // asked to do — the executor is driven server-side, so unlike append()
     // there is no user message row anchoring the transcript.
@@ -1835,28 +1940,45 @@ async function runExecute(
       return;
     }
 
+    // Turn-end parking contract (§6.1): the executor is THE parking consumer —
+    // timer__sleep / ask_parent write park_reason mid-turn, report_result /
+    // raise write result. Re-read both freshly and decide the landing status.
+    const turnEnd = await readTurnEndState(runId);
+    const endStatus = decideTurnEndStatus({
+      goal: "<execute>",
+      freshStatus: turnEnd.status,
+      parkReason: turnEnd.parkReason,
+      result: turnEnd.result,
+      budgetHit: false,
+      defaultStatus: "completed",
+    });
     await db.update(agentSessions)
       .set({
-        status: "completed",
-        completedAt: new Date(),
+        status: endStatus,
+        parkReason: endStatus === "parked" ? turnEnd.parkReason : null,
+        completedAt: isTerminalStatus(endStatus) ? new Date() : null,
         sdkSessionId: result.sdkSessionId ?? run.sdkSessionId,
         totalCostUsd: result.totalCostUsd ?? run.totalCostUsd,
         inputTokens: result.inputTokens ?? run.inputTokens,
         outputTokens: result.outputTokens ?? run.outputTokens,
       })
       .where(eq(agentSessions.id, runId));
-    await emitStatus(runId, "completed");
+    await emitStatus(runId, endStatus);
+    if (isTerminalStatus(endStatus)) void emitTerminalChildEvent(runId);
 
     // Fallback: if the agent drove every task to a terminal state but didn't
-    // close the plan itself, mark the plan done.
+    // close the plan itself, mark the plan done. (Skipped when the executor
+    // parked — it is still mid-plan by its own account.)
     try {
-      const tasks = await repo.listTasks({ planId });
-      const allClosed =
-        tasks.length > 0 &&
-        tasks.every((t) => t.state === "done" || t.state === "cancelled");
-      const planNow = await repo.getPlan(planId);
-      if (allClosed && planNow && planNow.state === "accepted") {
-        await repo.updatePlan(planId, { state: "done" });
+      if (endStatus === "completed") {
+        const tasks = await repo.listTasks({ planId });
+        const allClosed =
+          tasks.length > 0 &&
+          tasks.every((t) => t.state === "done" || t.state === "cancelled");
+        const planNow = await repo.getPlan(planId);
+        if (allClosed && planNow && planNow.state === "accepted") {
+          await repo.updatePlan(planId, { state: "done" });
+        }
       }
     } catch {
       // Best-effort — the agent's own transition_plan is the primary path.
@@ -1877,7 +1999,9 @@ async function runExecute(
     if (!abort.signal.aborted) {
       try {
         const cur = await get(runId);
-        if (cur && !isTerminalStatus(cur.status)) {
+        // 'parked' is a deliberate landing (§6.1) — the executor yielded and
+        // waits for inbox events; it must NOT be failed as result-less.
+        if (cur && !isTerminalStatus(cur.status) && cur.status !== "parked") {
           await setError(runId, "Executor turn ended without a result (worker interrupted).");
         }
       } catch {
@@ -2515,6 +2639,10 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     runId: run.id, run, author, taskId: run.taskId, planId: run.planId, cwd,
   };
   const { factories: profileFactories } = await resolveProfiles(profileSpec, profileCtx);
+  // Always-on extensions (docs/agent-events.md §7): the event/timer/result
+  // tools mount regardless of tools_profile — no profile misconfiguration can
+  // strand an agent without a way to park, report, or be woken.
+  const alwaysOnFactories = await alwaysOnExtensions(profileCtx);
 
   const sandboxDbPath = sandboxDbPathFor(run, cwd);
   const personaForExt = {
@@ -2532,6 +2660,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     personaMemoryFactory(personaForExt, run, repo, cwd),
     sandboxFactory(cwd, sandboxDbPath),
     abortBridgeFactory(abort),
+    ...alwaysOnFactories,
     ...profileFactories,
   ];
 
@@ -2684,6 +2813,366 @@ function checkBudget(run: RunRow, result: TurnResult): boolean {
 }
 
 // ──────────────────────────────────────────────────────────
+// Agent event system: producers + digest injection
+// (docs/agent-events.md §3.1, §4, §6)
+// ──────────────────────────────────────────────────────────
+
+/**
+ * Last assistant text emitted on a run (newest agent row with a non-empty text
+ * block). Backstop for the implicit child.result synthesis (§4.2) when a child
+ * completed without calling report_result. Deliberately replicated here (a
+ * similar helper lives in lib/extensions/spawn.ts) — runs.ts must not import
+ * from the extensions layer.
+ */
+export async function lastAgentText(runId: number): Promise<string | null> {
+  const rows = await db
+    .select({ content: agentMessages.content })
+    .from(agentMessages)
+    .where(and(eq(agentMessages.runId, runId), eq(agentMessages.role, "agent")))
+    .orderBy(desc(agentMessages.id))
+    .limit(50);
+  for (const r of rows) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(r.content);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(parsed)) continue;
+    const text = (parsed as Array<{ type?: string; text?: unknown }>)
+      .filter((b) => b?.type === "text" && typeof b.text === "string")
+      .map((b) => b.text as string)
+      .join("\n")
+      .trim();
+    if (text) return text;
+  }
+  return null;
+}
+
+export interface TerminalChildEventSpec {
+  type: "child.result" | "child.exception" | "child.cancelled" | "child.budget_exhausted";
+  payload: Record<string, unknown>;
+  dedupeKey: string;
+}
+
+/** A raise-tool payload persisted in agent_runs.result ({ code, ... }), or null. */
+function asRaisePayload(result: unknown): Record<string, unknown> | null {
+  if (result == null || typeof result !== "object" || Array.isArray(result)) return null;
+  const r = result as Record<string, unknown>;
+  return typeof r.code === "string" ? r : null;
+}
+
+/**
+ * Pure builder for the terminal child event a run's landing status produces
+ * (§3.1, §4.2). Returns null for non-terminal / 'closed' statuses (closing a
+ * conversation is an archive action, not a child lifecycle fact). `lastText`
+ * is only consulted for the implicit child.result synthesis.
+ * Exported for unit tests.
+ */
+export function buildTerminalChildEvent(
+  row: {
+    id: number;
+    status: string;
+    attempt: number;
+    result: unknown;
+    error: string | null;
+    prUrl: string | null;
+    totalCostUsd: number | null;
+    cwdStrategy: string;
+  },
+  lastText: string | null
+): TerminalChildEventSpec | null {
+  const base: Record<string, unknown> = { run_id: row.id, attempt: row.attempt };
+  switch (row.status) {
+    case "completed": {
+      // report_result wrote a structured result this turn → trustworthy payload;
+      // otherwise synthesize implicit:true with the last agent text (§4.2).
+      const payload: Record<string, unknown> =
+        row.result != null
+          ? { ...base, result: row.result }
+          : { ...base, implicit: true, summary: lastText };
+      payload.pr_url = row.prUrl;
+      payload.total_cost_usd = row.totalCostUsd;
+      return { type: "child.result", payload, dedupeKey: `terminal:${row.id}:${row.attempt}` };
+    }
+    case "failed": {
+      const raised = asRaisePayload(row.result);
+      // Cheap recoverability judgment: a raise payload may carry its own
+      // verdict; otherwise a failed worktree run is resumable (its branch and
+      // worktree persist — isResumableWorktreeRun), everything else is not.
+      const recoverable =
+        raised && typeof raised.recoverable === "boolean"
+          ? raised.recoverable
+          : isResumableWorktreeRun("failed", row.cwdStrategy);
+      const payload: Record<string, unknown> = raised
+        ? { ...base, ...raised, recoverable }
+        : { ...base, code: "unhandled", message: row.error ?? "run failed", recoverable };
+      return { type: "child.exception", payload, dedupeKey: `terminal:${row.id}:${row.attempt}` };
+    }
+    case "cancelled":
+      // Per-run singleton (§4.3): cancellation ends the run, not an attempt.
+      return { type: "child.cancelled", payload: base, dedupeKey: `cancelled:${row.id}` };
+    case "budget_exhausted":
+      return {
+        type: "child.budget_exhausted",
+        payload: { ...base, spent_usd: row.totalCostUsd },
+        dedupeKey: `terminal:${row.id}:${row.attempt}`,
+      };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Emit the terminal child event for a run's CURRENT status to its parent —
+ * the one producer helper every terminal-status write site funnels through
+ * (setStatus / setError / the turn-end paths / cancel). Best-effort by
+ * construction: swallows every error, because event emission must never break
+ * a status write. Dedupe (`terminal:<run>:<attempt>` / `cancelled:<run>`)
+ * makes overlapping call sites idempotent.
+ */
+async function emitTerminalChildEvent(runId: number): Promise<void> {
+  try {
+    const row = await get(runId);
+    if (!row || row.parentRunId == null) return;
+    const needsLastText = row.status === "completed" && row.result == null;
+    const spec = buildTerminalChildEvent(row, needsLastText ? await lastAgentText(runId) : null);
+    if (!spec) return;
+    await emitInboxEvent({
+      targetRunId: row.parentRunId,
+      type: spec.type,
+      payload: spec.payload,
+      sourceKind: "run",
+      sourceId: String(row.id),
+      attempt: row.attempt,
+      dedupeKey: spec.dedupeKey,
+    });
+  } catch {
+    // best-effort: never break the status write that triggered this
+  }
+}
+
+/**
+ * Emit `child.died` (§3.1) — the infrastructure failed; the agent never got
+ * to speak. Called by handleWorkerDeath and by reconcileOrphanedRuns when it
+ * fails a non-resumable orphan. Deduped per (run, worker scope) so the death
+ * monitor and the reaper racing each other produce one event.
+ */
+async function emitChildDied(
+  runId: number,
+  info: { exitCode: number | null; oomKilled: boolean; scopeKey: string; resumable: boolean }
+): Promise<void> {
+  try {
+    const row = (
+      await db
+        .select({
+          parentRunId: agentSessions.parentRunId,
+          attempt: agentSessions.attempt,
+          workerLog: agentSessions.workerLog,
+        })
+        .from(agentSessions)
+        .where(eq(agentSessions.id, runId))
+    )[0];
+    if (!row || row.parentRunId == null) return;
+    const attempt = row.attempt ?? 1;
+    await emitInboxEvent({
+      targetRunId: row.parentRunId,
+      type: "child.died",
+      sourceKind: "run",
+      sourceId: String(runId),
+      attempt,
+      dedupeKey: `died:${runId}:${info.scopeKey}`,
+      payload: {
+        run_id: runId,
+        attempt,
+        exit_code: info.exitCode,
+        oom_killed: info.oomKilled,
+        resumable: info.resumable,
+        worker_log_tail: row.workerLog ? row.workerLog.slice(-2000) : null,
+      },
+    });
+  } catch {
+    // best-effort
+  }
+}
+
+/** Fresh turn-end read of the columns tools mutate mid-turn (§6.1 contract). */
+async function readTurnEndState(
+  runId: number
+): Promise<{ status: SessionStatus; parkReason: string | null; result: unknown }> {
+  const row = (
+    await db
+      .select({
+        status: agentSessions.status,
+        parkReason: agentSessions.parkReason,
+        result: agentSessions.result,
+      })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, runId))
+  )[0];
+  return {
+    status: (row?.status ?? "running") as SessionStatus,
+    parkReason: row?.parkReason ?? null,
+    result: row?.result ?? null,
+  };
+}
+
+export interface TurnEndDecisionInput {
+  goal: string;
+  /** Status re-read from the DB at turn end (a tool may have landed one). */
+  freshStatus: SessionStatus;
+  /** agent_runs.park_reason re-read at turn end. */
+  parkReason: string | null;
+  /** agent_runs.result re-read at turn end. */
+  result: unknown;
+  budgetHit: boolean;
+  /** What the legacy logic would land: 'completed' (implement) or 'idle' (chat). */
+  defaultStatus: SessionStatus;
+}
+
+/**
+ * Turn-end landing decision (§6.1) — the parking contract with the tools
+ * layer, pure so it's unit-testable. Priority:
+ *   1. result written this turn → the tool's terminal status if it already
+ *      wrote one; else failed for raise-shaped payloads ({code}/status:
+ *      'failed'), completed otherwise.
+ *   2. a cancel/close that raced in wins (the caller's WHERE guard is the
+ *      real protection; this keeps the decision honest too).
+ *   3. budget exhaustion beats parking — an exhausted run must not sleep.
+ *   4. park_reason set on a goal-driven (non-chat) run that would otherwise
+ *      land completed/idle → 'parked'. Chat runs keep their idle behavior.
+ *   5. otherwise the legacy default.
+ */
+export function decideTurnEndStatus(i: TurnEndDecisionInput): SessionStatus {
+  if (i.result != null) {
+    if (isTerminalStatus(i.freshStatus)) return i.freshStatus;
+    const r = i.result as { status?: unknown; code?: unknown };
+    const failedish =
+      typeof i.result === "object" &&
+      i.result !== null &&
+      (r.status === "failed" || typeof r.code === "string");
+    return failedish ? "failed" : "completed";
+  }
+  if (i.freshStatus === "cancelled" || i.freshStatus === "closed") return i.freshStatus;
+  if (i.budgetHit) return "budget_exhausted";
+  if (
+    i.parkReason != null &&
+    i.goal !== "<chat>" &&
+    (i.defaultStatus === "completed" || i.defaultStatus === "idle")
+  ) {
+    return "parked";
+  }
+  return i.defaultStatus;
+}
+
+/** The single typed content block a digest frame carries (§6.4). */
+export interface EventDigestBlock {
+  type: "event_digest";
+  events: EventEnvelope[];
+}
+
+/**
+ * Order claimed envelopes into the digest shape: owner events first (the ones
+ * the run must ACT on), then the supervisor section (informational), each in
+ * id (= emit) order. Pure; exported for unit tests.
+ */
+export function buildEventDigestBlock(envelopes: EventEnvelope[]): EventDigestBlock {
+  const byId = (a: EventEnvelope, b: EventEnvelope) => a.event_id - b.event_id;
+  const owner = envelopes.filter((e) => e.audience !== "supervisor").sort(byId);
+  const supervisor = envelopes.filter((e) => e.audience === "supervisor").sort(byId);
+  return { type: "event_digest", events: [...owner, ...supervisor] };
+}
+
+/**
+ * Render a digest frame for the model. System-role agent_messages rows are not
+ * fed back into the SDK prompt today, so the frame's data is ALSO rendered
+ * into the turn's prompt text at prompt-build time (§6.4) — same data, two
+ * surfaces. Pure; exported for unit tests.
+ */
+export function renderEventDigest(block: EventDigestBlock): string {
+  const owner = block.events.filter((e) => e.audience !== "supervisor");
+  const supervisor = block.events.filter((e) => e.audience === "supervisor");
+  const line = (e: EventEnvelope) => {
+    const src = `${e.source.kind}${e.source.id ? ` ${e.source.id}` : ""}`;
+    const att = e.attempt != null ? `, attempt ${e.attempt}` : "";
+    return `- [#${e.event_id}] ${e.type} (${src}${att}, ${e.occurred_at}): ${JSON.stringify(e.payload)}`;
+  };
+  const parts: string[] = [
+    "## Inbox event digest",
+    "New events were delivered to this run while it was parked or between turns.",
+  ];
+  if (owner.length > 0) {
+    parts.push("", "### Addressed to you — act on these:", ...owner.map(line));
+  }
+  if (supervisor.length > 0) {
+    parts.push(
+      "",
+      "### For your awareness (supervisor copies — informational; the owning run acts):",
+      ...supervisor.map(line)
+    );
+  }
+  return parts.join("\n");
+}
+
+/**
+ * Digest injection (§6.4), the one turn-start consumer: claim pending inbox
+ * events (owner + supervisor; control-class rows are excluded inside the
+ * claim primitive), quarantine any poison event (§6.5), persist ONE
+ * agent_messages row (role 'system') carrying a single event_digest block,
+ * stamp the claimed rows with that frame id, and return the rendered digest
+ * text for the turn's prompt. Returns null when nothing was claimable.
+ *
+ * PRECONDITION: the caller is inside the run's turn (per-run lock / owned
+ * runner) — the same invariant claimInboxEvents documents.
+ *
+ * Known window: claimInboxEvents commits its own transaction, so a crash
+ * between the claim and the frame insert leaves those events 'injected' with
+ * no frame (they remain auditable in inbox_events, and the render below still
+ * reaches the model via the returned prompt text on the non-crash paths).
+ * Folding claim + insert into one transaction needs a tx-aware claim
+ * primitive; deliberately deferred rather than duplicating the claim SQL here.
+ */
+export async function injectPendingInboxEvents(runId: number): Promise<string | null> {
+  let claimed;
+  try {
+    claimed = await claimInboxEvents(runId, { audiences: ["owner", "supervisor"] });
+  } catch {
+    return null; // never block a turn on the inbox
+  }
+  // Platform notices (§6.6): control rows the platform already enforced
+  // (markControlInjected) but that no digest has rendered yet. They are
+  // unclaimable by design, so without this they would flip pending→injected
+  // invisibly — this is the one path that shows the model WHY its previous
+  // turn ended. Rendered once: setClaimTurn stamps them below.
+  let controlRows: Awaited<ReturnType<typeof takeUnrenderedControlEvents>> = [];
+  try {
+    controlRows = await takeUnrenderedControlEvents(runId);
+  } catch {
+    // visibility only — never block a turn on it
+  }
+  if (claimed.length === 0 && controlRows.length === 0) return null;
+  const envelopes: EventEnvelope[] = [];
+  for (const row of [...controlRows, ...claimed]) {
+    try {
+      envelopes.push(toEnvelope(row));
+    } catch (err) {
+      // Poison event (§6.5): quarantine with the reason and proceed with the rest.
+      await quarantineEvent(row.id, describe(err)).catch(() => {});
+    }
+  }
+  if (envelopes.length === 0) return null;
+  const block = buildEventDigestBlock(envelopes);
+  try {
+    const frame = await persistMessage(runId, "system", [block as unknown as SdkContentBlock]);
+    await setClaimTurn(envelopes.map((e) => e.event_id), frame.id);
+  } catch {
+    // Frame persistence failed post-claim (see the docstring window); the
+    // digest still reaches the model via the returned prompt text.
+  }
+  return renderEventDigest(block);
+}
+
+// ──────────────────────────────────────────────────────────
 // Persistence helpers
 // ──────────────────────────────────────────────────────────
 
@@ -2707,13 +3196,20 @@ async function persistMessage(
 async function setStatus(runId: number, status: SessionStatus) {
   await db.update(agentSessions).set({ status }).where(eq(agentSessions.id, runId));
   await emitStatus(runId, status);
+  // Child lifecycle producer (§3.1): any terminal transition on a child run
+  // becomes an inbox event for its parent. Deduped per (run, attempt), so the
+  // defensive hook here and the explicit turn-end call sites can't double-emit.
+  if (isTerminalStatus(status)) void emitTerminalChildEvent(runId);
 }
 
 // ──────────────────────────────────────────────────────────
 // Liveness lease (heartbeat) + orphan recovery
 // ──────────────────────────────────────────────────────────
 
-/** Statuses that mean "a turn is in flight"; the only ones a heartbeat covers. */
+/** Statuses that mean "a turn is in flight"; the only ones a heartbeat covers.
+ *  'parked' (like 'idle') is deliberately NOT a lease status: a parked run has
+ *  no worker and no heartbeat and that is HEALTHY (§6.1) — the reaper
+ *  (reconcileOrphanedRuns) and repairAbortedRun therefore never touch it. */
 const LEASE_STATUSES: SessionStatus[] = ["running", "preparing", "pushing", "opening_pr"];
 
 /** How often a live turn bumps its heartbeat. */
@@ -2780,7 +3276,13 @@ function startHeartbeatWithCancel(
   return setInterval(() => {
     void (async () => {
       await touchHeartbeat(runId);
-      if ((await isCancelRequested(runId)) && !abort.signal.aborted) abort.abort();
+      if ((await isCancelRequested(runId)) && !abort.signal.aborted) {
+        abort.abort();
+        // Event system (§6.6): the abort IS the enforcement of the
+        // run.cancel_requested control event — acknowledge its inbox row so
+        // the next digest can show WHY the previous turn ended.
+        void markControlInjected(runId, "run.cancel_requested").catch(() => {});
+      }
     })().catch(() => {});
   }, HEARTBEAT_INTERVAL_MS);
 }
@@ -2881,6 +3383,16 @@ export async function reconcileOrphanedRuns(): Promise<number> {
     if (row.goal === "<chat>") {
       await setStatus(row.id, "idle");
     } else {
+      // §3.1: infra death the reaper is failing (non-resumable orphan) — emit
+      // child.died with forensics, in addition to the child.exception the
+      // setError below produces. Deduped per worker scope against the death
+      // monitor racing this reap.
+      void emitChildDied(row.id, {
+        exitCode: null,
+        oomKilled: false,
+        scopeKey: row.workerScope ?? "lease",
+        resumable: false,
+      });
       await setError(row.id, "Interrupted by a process restart before the turn finished.");
     }
     reaped++;
@@ -2944,6 +3456,15 @@ export async function handleWorkerDeath(
     isImplementWorktree(row) &&
     !!row.sdkSessionId &&
     (containerized ? !!row.branch : !!row.worktreePath && existsSync(row.worktreePath));
+  // §3.1: durable infra-death fact for the parent, whatever policy follows
+  // below (re-dispatch / idle / failed). Deduped per container so the events
+  // monitor and the sweep racing each other produce ONE event, not two.
+  void emitChildDied(runId, {
+    exitCode: info.exitCode,
+    oomKilled: oom,
+    scopeKey: info.containerName,
+    resumable,
+  });
   if (resumable && !oom) {
     // AWAIT the re-dispatch: its atomic claim (status→preparing, fresh heartbeat)
     // must land before this pump tick's later reconcileOrphanedRuns pass runs, or
@@ -3063,6 +3584,9 @@ async function setError(runId: number, error: string) {
     .set({ status: "failed", error, completedAt: new Date() })
     .where(eq(agentSessions.id, runId));
   await emitStatus(runId, "failed", { error });
+  // Child lifecycle producer (§3.1): failed → child.exception for the parent
+  // (code 'unhandled' unless a raise-tool payload sits in agent_runs.result).
+  void emitTerminalChildEvent(runId);
 }
 
 async function emitStatus(runId: number, status: SessionStatus, extra?: Record<string, unknown>) {
@@ -3156,6 +3680,9 @@ function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     workerScope: row.workerScope ?? null,
     workerPid: row.workerPid ?? null,
     cancelRequested: row.cancelRequested ?? null,
+    attempt: row.attempt ?? 1,
+    result: row.result ?? null,
+    parkReason: row.parkReason ?? null,
   };
 }
 

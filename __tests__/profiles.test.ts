@@ -48,6 +48,9 @@ function makeRun(overrides: Partial<RunRow> = {}): RunRow {
     workerScope: null,
     workerPid: null,
     cancelRequested: null,
+    attempt: 1,
+    result: null,
+    parkReason: null,
     ...overrides,
   };
 }
