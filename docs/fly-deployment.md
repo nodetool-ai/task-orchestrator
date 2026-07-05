@@ -328,7 +328,12 @@ Cost control is automatic. The web server's monitor sweeps Fly state every
 `TASK_ORCH_FLY_POLL_MS` and applies this pure policy (`lib/runner/lifecycle.ts`):
 
 The policy distinguishes a **terminal** run (done forever) from an **idle /
-resumable** run (paused, may resume on the next message):
+resumable** run (paused, may resume on the next message). One exception: a
+**plan executor** (`goal='<execute>'`) lands `completed` after every turn but is
+conversational — the operator steers it with follow-up messages — so its
+`completed`/`failed`/`budget_exhausted` states are classified idle/resumable
+(long windows), keeping its checkout and Claude session store warm for a
+next-day "continue". Its `cancelled`/`closed` states stay terminal:
 
 | Run state | Machine state | Idle time | Action |
 | --- | --- | --- | --- |

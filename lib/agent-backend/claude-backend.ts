@@ -25,6 +25,17 @@ import type { RunEnvelope } from "../pi-event-mapper";
 const TAG = "claude:";
 const MCP_SERVER_NAME = "task_orch";
 
+/** The CLI's error when a `--resume <id>` transcript isn't on this machine's
+ *  disk. Surfaced by the SDK as a thrown stream error ("Claude Code returned an
+ *  error result: No conversation found with session ID: <id>"). */
+const RESUME_LOST_RE = /No conversation found with session ID/i;
+
+const RESUME_LOST_NOTE =
+  "Context recovery: this run's previous session transcript is no longer available " +
+  "(its storage was recycled or the run moved machines), so this is a fresh session. " +
+  "Prior conversation history is NOT in your context — re-derive the current state from " +
+  "the prompt, the repository/checkout, and any recorded notes, tasks, or PRs before acting.";
+
 /** Claude names the built-in tools TitleCase (`Read`/`Write`/`Grep`/`Glob`/…) and
  *  passes file paths as `file_path`; pi (and the canonical interceptor seam) use
  *  lowercase names and `path`. Normalize to the shared vocabulary before
@@ -148,7 +159,7 @@ export class ClaudeBackend implements AgentBackend {
     // onAgentStart hooks (abort-bridge) so they observe the same controller.
     for (const fn of collected.agentStartFns) fn({ abort: () => abort.abort() });
 
-    const resume = claudeResumeId(args.resumeToken);
+    let resume = claudeResumeId(args.resumeToken);
 
     // Auth is inherited from the environment, resolved like the Claude Code CLI:
     // ANTHROPIC_API_KEY when set, otherwise the claude.ai subscription (stored
@@ -166,67 +177,115 @@ export class ClaudeBackend implements AgentBackend {
     let turns = 0;
     let sessionId: string | null = null;
 
-    const stream = query({
-      prompt,
-      options: {
-        cwd,
-        model: model.id,
-        // Persona thinkingLevel maps 1:1 onto the SDK's effort levels
-        // ('low' | 'medium' | 'high'); omitted lets the model default apply.
-        ...(thinkingLevel ? { effort: thinkingLevel } : {}),
-        permissionMode: "bypassPermissions",
-        systemPrompt: { type: "preset", preset: "claude_code", ...(append ? { append } : {}) },
-        mcpServers: { [MCP_SERVER_NAME]: server },
-        // Use ONLY our in-process orchestrator server. Without this, the
-        // claude_code preset also loads MCP servers from the ambient Claude
-        // config (~/.claude.json project entries, project .mcp.json, plugins).
-        // A user who has a "task-orchestrator" server pointed at a *remote*
-        // deployment there would have the agent write plans/tasks to that
-        // remote DB — the run reports success but nothing appears in this
-        // instance. strictMcpConfig isolates the run to the tools we pass.
-        strictMcpConfig: true,
-        ...(preToolUse ? { hooks: { PreToolUse: preToolUse } } : {}),
-        abortController: abort,
-        includePartialMessages: true,
-        ...(resume ? { resume } : {}),
-        env: sdkEnv,
-      } as any,
-    });
+    // One attempt with the stored resume id, plus at most one fresh-session
+    // retry when that id's transcript is missing (RESUME_LOST_RE below). The
+    // transcript lives on whichever filesystem ran the previous turn
+    // (~/.claude under the worker's HOME); a run can legally land on a machine
+    // that doesn't have it — its volume was destroyed and recreated, or earlier
+    // turns ran in-process/inline in a different container. The CLI then exits
+    // with "No conversation found with session ID: <id>", which must degrade to
+    // a fresh session (context loss, flagged to the model) rather than fail the
+    // turn: the dispatch layer replays the unanswered user-message backlog as
+    // the prompt, so the fresh session still receives the actual instruction.
+    for (let attempt = 0; ; attempt++) {
+      envelopes.length = 0;
+      summary = null;
+      lastAssistantText = null;
+      inputTokens = null;
+      outputTokens = null;
+      totalCostUsd = null;
+      turns = 0;
+      sessionId = null;
 
-    for await (const msg of stream) {
-      if (abort.signal.aborted) break;
-      if (msg.type === "result") {
-        turns = (msg as any).num_turns ?? turns;
-        // The result envelope also carries the session id; capture it so a
-        // resumed query (which may emit no fresh system/init) still yields a
-        // resume token instead of silently dropping multi-turn continuity.
-        if ((msg as any).session_id) sessionId = (msg as any).session_id;
-      }
-      if (msg.type === "system" && (msg as any).subtype === "init" && (msg as any).session_id) {
-        sessionId = (msg as any).session_id;
-      }
+      // On the fresh-session retry, tell the model its history is gone so it
+      // re-derives state instead of assuming context it no longer has.
+      const appendWithNote =
+        attempt > 0 ? [append, RESUME_LOST_NOTE].filter(Boolean).join("\n\n") : append;
 
-      for (const env of mapClaudeMessage(msg)) {
-        if (env.type === "system" && env.subtype === "init" && env.session_id) {
-          env.session_id = `${TAG}${env.session_id}`;
-        }
-        envelopes.push(env);
-        await onEvent(env);
+      const stream = query({
+        prompt,
+        options: {
+          cwd,
+          model: model.id,
+          // Persona thinkingLevel maps 1:1 onto the SDK's effort levels
+          // ('low' | 'medium' | 'high'); omitted lets the model default apply.
+          ...(thinkingLevel ? { effort: thinkingLevel } : {}),
+          permissionMode: "bypassPermissions",
+          systemPrompt: {
+            type: "preset",
+            preset: "claude_code",
+            ...(appendWithNote ? { append: appendWithNote } : {}),
+          },
+          mcpServers: { [MCP_SERVER_NAME]: server },
+          // Use ONLY our in-process orchestrator server. Without this, the
+          // claude_code preset also loads MCP servers from the ambient Claude
+          // config (~/.claude.json project entries, project .mcp.json, plugins).
+          // A user who has a "task-orchestrator" server pointed at a *remote*
+          // deployment there would have the agent write plans/tasks to that
+          // remote DB — the run reports success but nothing appears in this
+          // instance. strictMcpConfig isolates the run to the tools we pass.
+          strictMcpConfig: true,
+          ...(preToolUse ? { hooks: { PreToolUse: preToolUse } } : {}),
+          abortController: abort,
+          includePartialMessages: true,
+          ...(resume ? { resume } : {}),
+          env: sdkEnv,
+        } as any,
+      });
 
-        if (env.type === "assistant" && env.message?.content) {
-          const text = env.message.content
-            .filter((b: any) => b.type === "text" && typeof b.text === "string")
-            .map((b: any) => b.text)
-            .join("\n").trim();
-          if (text) lastAssistantText = text;
+      try {
+        for await (const msg of stream) {
+          if (abort.signal.aborted) break;
+          if (msg.type === "result") {
+            turns = (msg as any).num_turns ?? turns;
+            // The result envelope also carries the session id; capture it so a
+            // resumed query (which may emit no fresh system/init) still yields a
+            // resume token instead of silently dropping multi-turn continuity.
+            if ((msg as any).session_id) sessionId = (msg as any).session_id;
+          }
+          if (msg.type === "system" && (msg as any).subtype === "init" && (msg as any).session_id) {
+            sessionId = (msg as any).session_id;
+          }
+
+          for (const env of mapClaudeMessage(msg)) {
+            if (env.type === "system" && env.subtype === "init" && env.session_id) {
+              env.session_id = `${TAG}${env.session_id}`;
+            }
+            envelopes.push(env);
+            await onEvent(env);
+
+            if (env.type === "assistant" && env.message?.content) {
+              const text = env.message.content
+                .filter((b: any) => b.type === "text" && typeof b.text === "string")
+                .map((b: any) => b.text)
+                .join("\n").trim();
+              if (text) lastAssistantText = text;
+            }
+            if (env.type === "result") {
+              if (!env.is_error && typeof env.result === "string") summary = env.result.trim() || null;
+              inputTokens = env.usage?.input_tokens ?? inputTokens;
+              outputTokens = env.usage?.output_tokens ?? outputTokens;
+              totalCostUsd = env.total_cost_usd ?? totalCostUsd;
+            }
+          }
         }
-        if (env.type === "result") {
-          if (!env.is_error && typeof env.result === "string") summary = env.result.trim() || null;
-          inputTokens = env.usage?.input_tokens ?? inputTokens;
-          outputTokens = env.usage?.output_tokens ?? outputTokens;
-          totalCostUsd = env.total_cost_usd ?? totalCostUsd;
+      } catch (err) {
+        if (
+          attempt === 0 &&
+          resume &&
+          !abort.signal.aborted &&
+          err instanceof Error &&
+          RESUME_LOST_RE.test(err.message)
+        ) {
+          console.error(
+            `[ClaudeBackend] resume transcript for session ${resume} not found on this machine; retrying with a fresh session`
+          );
+          resume = undefined;
+          continue;
         }
+        throw err;
       }
+      break;
     }
 
     // If the loop exited because of an abort (rather than the SDK throwing),

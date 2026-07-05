@@ -21,6 +21,11 @@ export interface LifecycleInput {
   workerScope?: string | null;
   /** agent_sessions.heartbeat_at for this run. */
   heartbeatAt?: Date | null;
+  /** agent_sessions.goal for this run ('<execute>', '<chat>', a task goal, …).
+   *  Used with runStatus to classify conversational terminal runs (see
+   *  isConversationalTerminal). Optional/undefined keeps the status-only
+   *  classification. */
+  goal?: string | null;
 }
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -55,6 +60,24 @@ export function isWorkerClaimLive(i: { workerScope?: string | null; heartbeatAt?
   );
 }
 
+/** Terminal statuses dispatchRun will happily re-claim for a follow-up turn
+ *  (everything terminal except the hard stops cancelled/closed). */
+const REVIVABLE_TERMINAL_STATUSES = new Set(["completed", "failed", "budget_exhausted"]);
+
+/**
+ * True for a run whose terminal status is conversational, not final. A plan
+ * executor (goal='<execute>') lands `completed` after EVERY turn — that is how
+ * await_session/the UI see the turn finish — but the operator steers it with
+ * follow-up messages between turns. Its machine+volume hold the warm checkout
+ * and the SDK session transcript, so classifying it under the short terminal
+ * window destroys the conversation's memory an hour after each reply; these
+ * runs must age through the long resumable windows instead. cancelled/closed
+ * stay terminal: dispatchRun never revives them.
+ */
+export function isConversationalTerminal(i: { runStatus: string; goal?: string | null }): boolean {
+  return i.goal === "<execute>" && REVIVABLE_TERMINAL_STATUSES.has(i.runStatus);
+}
+
 function isActiveRunStatus(status: string): boolean {
   return (
     status === "pending" ||
@@ -73,7 +96,9 @@ function isActiveRunStatus(status: string): boolean {
  * Terminal runs (completed/failed/cancelled/closed/budget_exhausted) will never
  * resume, so their volume's only unique artifact (runner.log) is being made
  * durable elsewhere and needs no long retention. They get the SHORT window
- * TASK_ORCH_RUNNER_TERMINAL_MS (default 1h):
+ * TASK_ORCH_RUNNER_TERMINAL_MS (default 1h) — EXCEPT conversational terminal
+ * runs (isConversationalTerminal: a plan executor between operator messages),
+ * which are treated as idle/resumable below:
  * - within the window a still-running machine is suspended (stop paying for
  *   compute immediately), otherwise left alone;
  * - past the window it is archived/destroyed regardless of runner state.
@@ -104,8 +129,11 @@ export function nextLifecycleAction(i: LifecycleInput): LifecycleAction {
   // Terminal runs are done forever: no resume is possible, so their volume gets
   // only the short retention window before we archive+destroy. The creating/
   // starting/gone states were already returned above, so any state reaching
-  // here (running/suspended/stopped) is eligible.
-  if (isTerminalStatus(i.runStatus as SessionStatus)) {
+  // here (running/suspended/stopped) is eligible. Conversational terminal runs
+  // (a plan executor between operator messages) are exempt — they fall through
+  // to the long resumable windows below so a next-day follow-up still finds the
+  // machine, checkout, and session transcript intact.
+  if (isTerminalStatus(i.runStatus as SessionStatus) && !isConversationalTerminal(i)) {
     const terminalWindowMs = intEnv("TASK_ORCH_RUNNER_TERMINAL_MS", HOUR_MS);
     if (i.idleMs >= terminalWindowMs) return { kind: "archive-and-destroy" };
     // Still within the short window: stop paying for compute immediately, but
