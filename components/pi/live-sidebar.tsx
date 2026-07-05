@@ -23,6 +23,14 @@ export type LiveSessionItem = {
   reason: string | null;
 };
 
+/** A normal chat conversation (goal '<chat>'), not tied to a task or plan. */
+export type ChatSidebarItem = {
+  runDbId: number;
+  title: string;
+  running: boolean;
+  startedAt: number;
+};
+
 const POLL_MS = 6000;
 const COLLAPSE_KEY = "pi-live-sidebar-collapsed";
 
@@ -45,6 +53,7 @@ export const SIDEBAR_WIDTH_COLLAPSED = 52;
 
 type SidebarState = {
   items: LiveSessionItem[];
+  chats: ChatSidebarItem[];
   loading: boolean;
   error: string | null;
 };
@@ -52,6 +61,7 @@ type SidebarState = {
 function useLiveSessions(enabled: boolean): SidebarState {
   const [state, setState] = React.useState<SidebarState>({
     items: [],
+    chats: [],
     loading: enabled,
     error: null,
   });
@@ -65,9 +75,9 @@ function useLiveSessions(enabled: boolean): SidebarState {
       try {
         const res = await fetch("/api/live-sessions", { cache: "no-store" });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = (await res.json()) as { items: LiveSessionItem[] };
+        const data = (await res.json()) as { items: LiveSessionItem[]; chats: ChatSidebarItem[] };
         if (cancelled) return;
-        setState({ items: data.items, loading: false, error: null });
+        setState({ items: data.items, chats: data.chats ?? [], loading: false, error: null });
       } catch (e) {
         if (cancelled) return;
         setState((prev) => ({
@@ -119,7 +129,7 @@ export function LiveSidebar({ enabled }: { enabled: boolean }) {
 
   // Render nothing while we don't know the mobile state, to keep SSR/CSR stable.
   // The layout reserves space via CSS so this won't cause layout shift on desktop.
-  const { items, error } = useLiveSessions(enabled && !isMobile);
+  const { items, chats, error } = useLiveSessions(enabled && !isMobile);
 
   // ⌘J / Ctrl-J → cycle to next attention-needing run.
   React.useEffect(() => {
@@ -183,7 +193,7 @@ export function LiveSidebar({ enabled }: { enabled: boolean }) {
           gap: 4,
         }}
       >
-        {items.length === 0 && !error && (
+        {items.length === 0 && chats.length === 0 && !error && (
           <EmptyState collapsed={collapsed} />
         )}
         {items.map((item) =>
@@ -197,6 +207,41 @@ export function LiveSidebar({ enabled }: { enabled: boolean }) {
           <div style={{ marginTop: 12, fontSize: 11, color: "var(--s-blocked)" }}>
             sidebar offline: {error}
           </div>
+        )}
+        {chats.length > 0 && (
+          <>
+            {!collapsed && items.length > 0 && (
+              <div
+                style={{
+                  height: 1,
+                  background: "var(--pi-hairline)",
+                  margin: "6px 2px",
+                  flexShrink: 0,
+                }}
+              />
+            )}
+            {!collapsed && (
+              <div
+                style={{
+                  fontSize: 10,
+                  fontWeight: 600,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.08em",
+                  color: "var(--pi-muted-2)",
+                  padding: "4px 6px",
+                }}
+              >
+                Chats
+              </div>
+            )}
+            {chats.map((chatItem) =>
+              collapsed ? (
+                <ChatPip key={chatItem.runDbId} item={chatItem} active={isActive(pathname, chatItem.runDbId)} />
+              ) : (
+                <ChatRow key={chatItem.runDbId} item={chatItem} active={isActive(pathname, chatItem.runDbId)} />
+              )
+            )}
+          </>
         )}
       </div>
       {!collapsed && attentionCount > 0 && <SidebarFooter attention={attentionCount} />}
@@ -461,6 +506,83 @@ function SidebarPip({ item, active }: { item: LiveSessionItem; active: boolean }
       }}
       >
         <StateIcon state={state} size={13} spin={item.bucket === "running"} />
+      </Link>
+    </Tooltip>
+  );
+}
+
+function timeAgo(ms: number): string {
+  const seconds = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function ChatRow({ item, active }: { item: ChatSidebarItem; active: boolean }) {
+  return (
+    <Link
+      href={`/runs/${item.runDbId}`}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "8px 10px",
+        borderRadius: 6,
+        border: "1px solid var(--pi-hairline)",
+        background: active ? "var(--pi-surface-2)" : "var(--pi-surface)",
+        textDecoration: "none",
+        color: "var(--pi-fg)",
+        transition: "border-color 120ms, background 120ms",
+      }}
+    >
+      <Icon name="chat" size={13} />
+      <span
+        style={{
+          flex: 1,
+          minWidth: 0,
+          fontSize: 12,
+          fontWeight: 500,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {item.title}
+      </span>
+      {item.running ? (
+        <StateIcon state="in_progress" size={11} spin />
+      ) : (
+        <span className="pi-mono" style={{ fontSize: 9, color: "var(--pi-muted-2)", flexShrink: 0 }}>
+          {timeAgo(item.startedAt)}
+        </span>
+      )}
+    </Link>
+  );
+}
+
+function ChatPip({ item, active }: { item: ChatSidebarItem; active: boolean }) {
+  return (
+    <Tooltip content={item.title} side="bottom">
+      <Link
+        href={`/runs/${item.runDbId}`}
+        aria-label={item.title}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          height: 32,
+          borderRadius: 6,
+          border: "1px solid var(--pi-hairline)",
+          background: active ? "var(--pi-surface-2)" : "var(--pi-surface)",
+          textDecoration: "none",
+          color: "var(--pi-fg)",
+        }}
+      >
+        <Icon name="chat" size={13} />
       </Link>
     </Tooltip>
   );
