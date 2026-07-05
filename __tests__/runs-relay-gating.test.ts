@@ -105,4 +105,31 @@ describe("relayRunStream cursor gating (FIX 2)", () => {
     expect(events.some((e) => e.type === "sdk" && JSON.stringify(e.sdk).includes("hello back"))).toBe(true);
     expect(events.filter((e) => e.type === "done").length).toBe(1);
   });
+
+  it("stamps the persisted row (real DB id) onto relayed sdk frames", async () => {
+    // The client dedups by DB id against the read-only /events tail, which
+    // delivers the same rows to the sender in parallel. An id-less sdk frame
+    // renders as a second copy of every assistant/tool message.
+    const run = await create({ goal: "<chat>", defer: true });
+    const t0 = Date.now();
+    const ownId = await insertMessage(run.id, "user", "hi", new Date(t0));
+    const agentId = await insertMessage(run.id, "agent", "hello back", new Date(t0 + 100));
+    const [toolRow] = await db
+      .insert(agentMessages)
+      .values({
+        runId: run.id,
+        role: "tool",
+        content: JSON.stringify([{ type: "tool_result", tool_use_id: "t1", content: "ok" }]),
+        createdAt: new Date(t0 + 200),
+      })
+      .returning();
+    await insertEvent(run.id, "turn_done", {}, new Date(t0 + 300));
+
+    const abort = new AbortController();
+    const events = await drain(relayRunStream(run.id, { msgId: 0, evtId: 0 }, abort, ownId));
+
+    const sdkFrames = events.filter((e) => e.type === "sdk");
+    expect(sdkFrames.map((e) => e.message?.id)).toEqual([agentId, toolRow.id]);
+    expect(sdkFrames.map((e) => e.message?.role)).toEqual(["agent", "tool"]);
+  });
 });

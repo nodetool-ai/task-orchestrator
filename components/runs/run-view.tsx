@@ -307,29 +307,11 @@ export function RunView({
     // `agent_messages` (the in-process SDK bus is gone). Append each once,
     // deduped by its real DB id so a reconnect replay can't double it.
     if (event.type === "message" && event.message) {
-      const ui = toUiMessage(event.message);
-      setMessages((prev) => {
-        if (prev.some((m) => m.id === ui.id)) return prev; // already have the real row
-        // A just-persisted USER message is also the one we optimistically rendered
-        // (temp negative id, same text) when the local composer sent it. Swap the
-        // temp id for the real row instead of appending a duplicate — dedup-by-id
-        // can't match a temp id to the real one, which is why the bubble doubled.
-        if (ui.role === "user") {
-          const i = prev.findIndex(
-            (m) => m.id < 0 && m.role === "user" && uiMessageText(m) === uiMessageText(ui)
-          );
-          if (i !== -1) {
-            const next = prev.slice();
-            next[i] = ui;
-            return next;
-          }
-        }
-        return [...prev, ui];
-      });
+      appendPersistedRow(event.message);
       return;
     }
     if (event.type === "sdk" && event.sdk) {
-      mergeSdkEnvelope(event.sdk);
+      mergeSdkEnvelope(event.sdk, event.message);
       return;
     }
     if (event.type === "error") {
@@ -337,7 +319,42 @@ export function RunView({
     }
   }
 
-  function mergeSdkEnvelope(m: SdkMessageEnvelope) {
+  // Append one persisted agent_messages row, keyed by its real DB id. Every
+  // stream that delivers persisted rows funnels through here — the read-only
+  // /events tail AND the POST reply stream — so the same row arriving twice
+  // (the sender receives both streams during a live turn) renders once.
+  function appendPersistedRow(row: MessageRow) {
+    const ui = toUiMessage(row);
+    setMessages((prev) => {
+      if (prev.some((m) => m.id === ui.id)) return prev; // already have the real row
+      // A just-persisted USER message is also the one we optimistically rendered
+      // (temp negative id, same text) when the local composer sent it. Swap the
+      // temp id for the real row instead of appending a duplicate — dedup-by-id
+      // can't match a temp id to the real one, which is why the bubble doubled.
+      if (ui.role === "user") {
+        const i = prev.findIndex(
+          (m) => m.id < 0 && m.role === "user" && uiMessageText(m) === uiMessageText(ui)
+        );
+        if (i !== -1) {
+          const next = prev.slice();
+          next[i] = ui;
+          return next;
+        }
+      }
+      return [...prev, ui];
+    });
+  }
+
+  // SDK envelopes that are backed by a persisted row (the server attaches the
+  // row on `sdk` frames it relayed from the durable stream) go through the
+  // id-deduped path — a temp-id bubble here would double up with the same row
+  // arriving over /events, which is exactly the "duplicated chat messages" bug.
+  // Only id-less envelopes (never-persisted partials) fall back to a temp id.
+  function mergeSdkEnvelope(m: SdkMessageEnvelope, row?: MessageRow) {
+    if (row) {
+      appendPersistedRow(row);
+      return;
+    }
     if (m.type === "assistant" && m.message?.content) {
       const blocks = m.message.content;
       if (blocks.length === 0) return;
@@ -416,16 +433,18 @@ export function RunView({
       await consumeSse(res.body, (event) => {
         if (event.type === "sdk" && event.sdk) {
           delivered = true;
-          mergeSdkEnvelope(event.sdk);
+          mergeSdkEnvelope(event.sdk, event.message);
         } else if (event.type === "error") {
           setErrorMsg(event.error ?? "Unknown error");
           // An error before anything was delivered (e.g. "already in flight")
           // means the message never landed — roll the optimistic bubble back.
           if (!delivered) rollback();
         } else if (event.type === "user_message" && event.message) {
-          // The server persisted the message; the reconciliation effect swaps
-          // the tmp id for the real row on the next refresh.
+          // The server persisted the message. Fold the real row in now: for our
+          // own message this swaps the optimistic tmp-id bubble for the real id,
+          // so the copy arriving over /events dedups instead of doubling.
           delivered = true;
+          appendPersistedRow(event.message);
         }
       });
     } catch (err) {
