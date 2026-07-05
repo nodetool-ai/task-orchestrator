@@ -129,8 +129,11 @@ you can redeploy it freely.
 - A **Fly organization** with a payment method on file (creating apps, Postgres,
   and Machines requires it). Find your org slug with `fly orgs list`.
 - **Credentials** to hand to the agents (you'll be prompted for any you don't set):
-  - `GH_TOKEN` — a GitHub token with `repo` scope, for clone/push over HTTPS and
-    `gh pr create`.
+  - `GH_TOKEN` — a GitHub token with `repo` **and** `workflow` scope, for
+    clone/push over HTTPS and `gh pr create`. The `workflow` scope is required
+    for any push whose diff touches `.github/workflows/*.yml`; without it GitHub
+    rejects the push (classic PAT: check both boxes; fine-grained PAT: Contents +
+    Workflows = Read and write).
   - A Claude credential — **either** `ANTHROPIC_API_KEY` **or** a claude.ai OAuth
     token from `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`).
 - `openssl` on your machine (used to generate `AUTH_SECRET` if you don't supply one).
@@ -713,6 +716,7 @@ runner app.
 | Run fails immediately with a spawn error, or logs show `Fly API error 403: unauthorized` on `listMachines`/`create` | `TASK_ORCH_FLY_APP` or `FLY_RUNNER_IMAGE` wrong/missing on the web app (`fly secrets list`). The image must exist at `registry.fly.io/<runner>:latest`. Note: the runner app name must be `TASK_ORCH_FLY_APP`, **not** `FLY_APP_NAME` — Fly reserves `FLY_APP_NAME` and force-injects the web Machine's own app name, so the runner client would target the wrong app and 403. |
 | Runner can't reach the database | Bring-your-own DB isn't reachable from the runner app's network, or a Supabase `:6543` URL — switch to the SESSION pooler `:5432`. |
 | Agent can't clone/push or open PRs | Missing/invalid `GH_TOKEN`, or it lacks `repo` scope for the target repos. |
+| Push rejected only when it touches `.github/workflows/*.yml` (`refusing to allow … without workflow scope`) | `GH_TOKEN` has `repo` but not `workflow` scope. Add `workflow` to the PAT and `fly secrets set -a <app> GH_TOKEN=…`; new runs pick it up. |
 | Agent turns fail with an auth error | No `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` on the web app (they're passed into runners). |
 | Webhook deliveries return 503 | `GITHUB_WEBHOOK_SECRET` not set. |
 | Login loops / callback errors | `NEXTAUTH_URL` doesn't match the origin you're visiting; set it to the exact public URL and redeploy. |

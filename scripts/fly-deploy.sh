@@ -82,7 +82,7 @@ prompt_secret() {  # var_name  human_label
     printf -v "$var" '%s' "$val"
   fi
 }
-prompt_secret GH_TOKEN "GitHub token (repo scope, for clone/push + PRs) [enter to skip]"
+prompt_secret GH_TOKEN "GitHub token (repo+workflow scope, for clone/push + PRs) [enter to skip]"
 if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
   prompt_secret ANTHROPIC_API_KEY "Anthropic API key (or leave blank to use a claude.ai OAuth token)"
   [[ -z "${ANTHROPIC_API_KEY:-}" ]] && prompt_secret CLAUDE_CODE_OAUTH_TOKEN "claude.ai OAuth token (claude setup-token)"
