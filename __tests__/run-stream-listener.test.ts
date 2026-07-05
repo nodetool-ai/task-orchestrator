@@ -6,7 +6,11 @@
 import { describe, it, expect } from "vitest";
 import { db, schema } from "../db";
 import { create } from "../lib/runs";
-import { subscribeRunStream, type RunStreamEvent } from "../lib/run-stream-listener";
+import {
+  subscribeRunStream,
+  subscribeRunStreamAll,
+  type RunStreamEvent,
+} from "../lib/run-stream-listener";
 
 function waitFor(pred: () => boolean, ms = 2000): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -56,5 +60,65 @@ describe("run-stream LISTEN/NOTIFY", () => {
       .values({ runId: run.id, role: "agent", content: JSON.stringify([{ type: "text", text: "again" }]) });
     await new Promise((r) => setTimeout(r, 200));
     expect(got.length).toBe(countAfterUnsub); // no more callbacks after unsubscribe
+  });
+});
+
+describe("run-stream wildcard (subscribeRunStreamAll)", () => {
+  it("fires for any run and stops after unsubscribe", async () => {
+    const runA = await create({ goal: "<chat>", defer: true });
+    const runB = await create({ goal: "<chat>", defer: true });
+    const got: RunStreamEvent[] = [];
+    const unsub = await subscribeRunStreamAll((ev) => got.push(ev));
+    try {
+      await db
+        .insert(schema.agentEvents)
+        .values({ sessionId: runA.id, type: "status", payload: JSON.stringify({ status: "running" }) });
+      await db
+        .insert(schema.agentMessages)
+        .values({ runId: runB.id, role: "agent", content: JSON.stringify([{ type: "text", text: "hi" }]) });
+      // Wildcard sees BOTH runs, regardless of id.
+      await waitFor(() => got.some((e) => e.runId === runA.id) && got.some((e) => e.runId === runB.id));
+    } finally {
+      unsub();
+    }
+
+    const countAfterUnsub = got.length;
+    await db
+      .insert(schema.agentEvents)
+      .values({ sessionId: runA.id, type: "status", payload: JSON.stringify({ status: "done" }) });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(got.length).toBe(countAfterUnsub); // no more callbacks after unsubscribe
+  });
+
+  it("a throwing wildcard subscriber does not break per-run fan-out (and vice versa)", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    const wildcardGot: RunStreamEvent[] = [];
+    const perRunGot: RunStreamEvent[] = [];
+
+    // A wildcard subscriber that always throws must not starve the others.
+    const unsubThrowingAll = await subscribeRunStreamAll(() => {
+      throw new Error("boom (wildcard)");
+    });
+    // A per-run subscriber that always throws must not starve the others.
+    const unsubThrowingPerRun = await subscribeRunStream(run.id, () => {
+      throw new Error("boom (per-run)");
+    });
+    const unsubGoodAll = await subscribeRunStreamAll((ev) => wildcardGot.push(ev));
+    const unsubGoodPerRun = await subscribeRunStream(run.id, (ev) => perRunGot.push(ev));
+
+    try {
+      await db
+        .insert(schema.agentEvents)
+        .values({ sessionId: run.id, type: "status", payload: JSON.stringify({ status: "running" }) });
+      // Despite the throwing subscribers on both channels, both good ones fire.
+      await waitFor(
+        () => wildcardGot.some((e) => e.runId === run.id) && perRunGot.some((e) => e.runId === run.id)
+      );
+    } finally {
+      unsubThrowingAll();
+      unsubThrowingPerRun();
+      unsubGoodAll();
+      unsubGoodPerRun();
+    }
   });
 });

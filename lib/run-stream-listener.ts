@@ -16,6 +16,8 @@ declare global {
   // eslint-disable-next-line no-var
   var __runStreamSubs: Map<number, Set<Callback>> | undefined;
   // eslint-disable-next-line no-var
+  var __runStreamAllSubs: Set<Callback> | undefined;
+  // eslint-disable-next-line no-var
   var __runStreamListen: Promise<void> | undefined;
   // eslint-disable-next-line no-var
   var __runInputSubs: Map<number, Set<() => void>> | undefined;
@@ -25,6 +27,12 @@ declare global {
 
 const subscribers: Map<number, Set<Callback>> =
   globalThis.__runStreamSubs ?? (globalThis.__runStreamSubs = new Map());
+
+// Wildcard subscribers fire for a notification on ANY run — used by the /runs
+// index SSE feed, which cares about aggregate changes across all runs rather
+// than a single run's tail.
+const allSubscribers: Set<Callback> =
+  globalThis.__runStreamAllSubs ?? (globalThis.__runStreamAllSubs = new Set());
 
 function ensureListening(): Promise<void> {
   if (globalThis.__runStreamListen) return globalThis.__runStreamListen;
@@ -38,12 +46,20 @@ function ensureListening(): Promise<void> {
         return; // ignore malformed payloads
       }
       const set = subscribers.get(ev.runId);
-      if (!set) return;
-      for (const cb of set) {
+      if (set) {
+        for (const cb of set) {
+          try {
+            cb(ev);
+          } catch {
+            // a subscriber throwing must not break fan-out to the others
+          }
+        }
+      }
+      for (const cb of allSubscribers) {
         try {
           cb(ev);
         } catch {
-          // a subscriber throwing must not break fan-out to the others
+          // a wildcard subscriber throwing must not break fan-out either
         }
       }
     });
@@ -78,6 +94,23 @@ export async function subscribeRunStream(runId: number, cb: Callback): Promise<(
     if (!s) return;
     s.delete(cb);
     if (s.size === 0) subscribers.delete(runId);
+  };
+}
+
+/**
+ * Subscribe to run_stream notifications for EVERY run. The callback fires
+ * (best-effort, coalescible) whenever a new agent_event/agent_message is
+ * inserted for any run — including the status mirror-events, so a run's status
+ * transition wakes the listener too. Used by the /runs index feed, which only
+ * cares that *something* changed so it can re-read the aggregate overview.
+ * Returns an unsubscribe fn. Awaiting ensures the LISTEN connection is
+ * established before the first notification can be missed.
+ */
+export async function subscribeRunStreamAll(cb: Callback): Promise<() => void> {
+  await ensureListening();
+  allSubscribers.add(cb);
+  return () => {
+    allSubscribers.delete(cb);
   };
 }
 
