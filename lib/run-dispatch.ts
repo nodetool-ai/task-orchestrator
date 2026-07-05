@@ -6,6 +6,9 @@ import { cpus, totalmem } from "node:os";
 import { join } from "node:path";
 import { db } from "../db";
 import { agentSessions, runnerInstances } from "../db/schema";
+// lib/inbox has no static import of this module (its wake path uses a lazy
+// dynamic import), so this edge is cycle-free.
+import { fireDueTimers, parkedRunsWithPendingEvents } from "./inbox";
 import type { RunRow } from "./runs";
 import { getRunnerProvider, runnerProviderKindFromEnv } from "./runner/provider";
 import { isTerminalStatus } from "./types";
@@ -394,7 +397,8 @@ export async function dispatchRun(
     // be resurrected — a claim landing on them would flip the row to 'preparing'
     // and wipe cancelRequested, silently undoing a cancel that raced this dispatch
     // (runs.cancel() no-ops stopRunner when no container exists yet). Every other
-    // status IS claimable here: 'pending'/'idle', the lease statuses (only reached
+    // status IS claimable here: 'pending'/'idle'/'parked' (a parked run woken by
+    // an inbox event resumes exactly like an idle run), the lease statuses (only reached
     // once isLeaseLive is false — an orphan whose stale claim was cleared), and the
     // resumable terminal statuses (completed/failed/budget_exhausted) for follow-up
     // turns. scope is the claim's ownership token. Also clear any captured worker
@@ -537,10 +541,47 @@ async function pumpTick(): Promise<void> {
     const r = await dispatchRun(id);
     if (r === "deferred") break;
   }
+  // Half 3: fire due timers (docs/agent-events.md §7). Each fired timer becomes
+  // a `timer.fired` inbox event whose emit-time wake dispatches its (parked)
+  // target; late after downtime, never lost.
+  try {
+    await fireDueTimers();
+  } catch {
+    // best-effort
+  }
+  // Half 4: wake sweep (§6.2 belt). A wake lost between event insert and
+  // dispatch (crash, race) is retried here every tick, forever, because the
+  // state — parked + pending owner events — is durable. Bounded (the query
+  // LIMITs and rides the pending-only partial index); continue on error.
+  let parkedIds: number[] = [];
+  try {
+    parkedIds = await parkedRunsWithPendingEvents();
+  } catch {
+    parkedIds = [];
+  }
+  for (const id of parkedIds) {
+    try {
+      // 'parked' is claimable in dispatchRun (its claim excludes only
+      // cancelled/closed), so a parked run resumes exactly like an idle chat
+      // run: the worker's append/resume path injects the event digest.
+      await dispatchRun(id);
+    } catch {
+      // continue with the rest; the next tick retries
+    }
+  }
 }
 
 /** Start the periodic pump (idempotent). No-op off the containerized path or when
- *  the interval is disabled (TASK_ORCH_PENDING_PUMP_MS=0). */
+ *  the interval is disabled (TASK_ORCH_PENDING_PUMP_MS=0).
+ *
+ *  TODO(agent-events): in dev / non-containerized mode this pump never starts,
+ *  so run_timers don't fire and the parked wake sweep (pumpTick halves 3/4)
+ *  never runs. emitInboxEvent's emit-time wake still works there — dispatchRun
+ *  falls through to detachedSpawn (a local tsx run-worker process), which
+ *  drives the append/resume path that injects the digest — but timer-only
+ *  wakes are dev-degraded. Driving an in-process runs.append fallback from
+ *  here would re-entangle run-dispatch with runs.ts (the injected-API split
+ *  exists to prevent exactly that cycle), so it is deliberately deferred. */
 export function startPendingRunPump(): void {
   if (!process.env.TASK_ORCH_WORKER_IMAGE && runnerProviderKindFromEnv() !== "fly") return;
   const ms = pumpIntervalMs();
