@@ -9,6 +9,7 @@ import {
   Cpu,
   FolderClosed,
   GitBranch,
+  Inbox,
   ScrollText,
   Square,
   UserRound,
@@ -31,6 +32,8 @@ import { RunMessage, ToolResultBlocks, ToolUseBlock } from "@/components/runs/ru
 import { ToolGroup } from "@/components/tool-group";
 import { segmentToolMessages } from "@/lib/tool-grouping";
 import { SystemEventRow } from "@/components/runs/system-event-row";
+import { EventDigestCard, type DigestEnvelope } from "@/components/runs/event-digest-card";
+import { InboxPanel } from "@/components/runs/inbox-panel";
 import { PlanningReviewCard } from "@/components/runs/planning-review-card";
 import { useConfirm } from "@/components/ui/dialog-provider";
 import { WorkerLogPanel } from "@/components/runs/worker-log-panel";
@@ -87,6 +90,9 @@ export type SystemKind =
   | "status"
   | "error"
   | "info"
+  // A digest frame persisted at turn start by the agent event system
+  // (docs/agent-events.md §6.4): exactly the events the agent was woken with.
+  | "event_digest"
   // From the legacy `agent_events` types backfilled into agent_messages by
   // migration 0009:
   | "shell"
@@ -138,6 +144,7 @@ export function RunView({
   const [sending, setSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [showWorkerLog, setShowWorkerLog] = useState(false);
+  const [showInbox, setShowInbox] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -549,6 +556,13 @@ export function RunView({
           </span>
           <div className="flex-1" />
           <SessionStatusPill status={status} />
+          {status === "parked" && run.parkReason && (
+            <Tooltip content="Why this run is parked — it wakes when an addressed event arrives">
+              <span className="text-[11px] text-state-review shrink-0">
+                {run.parkReason}
+              </span>
+            </Tooltip>
+          )}
           {run.prUrl && (
             <a
               className="text-xs text-muted-foreground underline decoration-muted-foreground/40 hover:text-foreground hover:decoration-foreground shrink-0"
@@ -559,6 +573,19 @@ export function RunView({
               PR ↗
             </a>
           )}
+          <button
+            type="button"
+            onClick={() => setShowInbox((v) => !v)}
+            title="Agent events addressed to this run (inbox, timers, wake trail)"
+            className={
+              "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] transition-colors shrink-0 " +
+              (showInbox
+                ? "border-foreground/30 bg-muted/60 text-foreground"
+                : "border-border/60 bg-background/60 text-muted-foreground hover:text-foreground hover:bg-muted/40")
+            }
+          >
+            <Inbox className="size-3" /> Events
+          </button>
           <button
             type="button"
             onClick={() => setShowWorkerLog((v) => !v)}
@@ -687,6 +714,7 @@ export function RunView({
           </div>
         )}
 
+        {showInbox && <InboxPanel runId={run.id} />}
         {showWorkerLog && <WorkerLogPanel runId={run.id} />}
       </header>
 
@@ -715,13 +743,23 @@ export function RunView({
                   )}
                 </ToolGroup>
               ) : seg.message.role === "system" ? (
-                <SystemEventRow
-                  key={seg.message.id}
-                  when={seg.message.createdAt ?? new Date()}
-                  kind={seg.message.systemKind ?? "info"}
-                  payload={seg.message.systemPayload ?? {}}
-                  content={seg.message.content}
-                />
+                seg.message.systemKind === "event_digest" ? (
+                  <EventDigestCard
+                    key={seg.message.id}
+                    when={seg.message.createdAt ?? new Date()}
+                    events={
+                      (seg.message.systemPayload?.events as DigestEnvelope[]) ?? []
+                    }
+                  />
+                ) : (
+                  <SystemEventRow
+                    key={seg.message.id}
+                    when={seg.message.createdAt ?? new Date()}
+                    kind={seg.message.systemKind ?? "info"}
+                    payload={seg.message.systemPayload ?? {}}
+                    content={seg.message.content}
+                  />
+                )
               ) : (
                 <RunMessage
                   key={seg.message.id}

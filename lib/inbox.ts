@@ -15,10 +15,16 @@
 // the runner (waking a parked run) goes through a lazy dynamic import so
 // runs.ts / run-dispatch.ts can import us without a cycle.
 
-import { and, asc, eq, inArray, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lt, sql } from "drizzle-orm";
 
 import { db } from "@/db";
-import { agentSessions, inboxEvents, runTimers, type InboxEvent } from "@/db/schema";
+import {
+  agentSessions,
+  inboxEvents,
+  runTimers,
+  type InboxEvent,
+  type RunTimer,
+} from "@/db/schema";
 import { isTerminalStatus, type SessionStatus } from "./types";
 
 // ────────────────────────────────────────
@@ -432,6 +438,46 @@ export async function pendingOwnerCount(runId: number): Promise<number> {
       )
     );
   return rows[0]?.n ?? 0;
+}
+
+/**
+ * Pending owner-audience counts for ALL runs in one grouped query — the /runs
+ * index "N queued" badges (§11). Stays on the pending partial index, so cost
+ * tracks the live backlog, not total event volume.
+ */
+export async function pendingOwnerCounts(): Promise<Map<number, number>> {
+  const rows = await db
+    .select({ runId: inboxEvents.targetRunId, n: sql<number>`count(*)::int` })
+    .from(inboxEvents)
+    .where(and(eq(inboxEvents.status, "pending"), eq(inboxEvents.audience, "owner")))
+    .groupBy(inboxEvents.targetRunId);
+  return new Map(rows.map((r) => [r.runId, r.n]));
+}
+
+/**
+ * Recent inbox events addressed to a run, newest first — the run page's
+ * traceability panel (§11). Read-only: every lifecycle state is included
+ * (pending/injected/superseded/error) so the UI can show what a run saw,
+ * what's queued, and what was quarantined or superseded.
+ */
+export async function listRunInboxEvents(runId: number, limit = 200): Promise<InboxEvent[]> {
+  return db
+    .select()
+    .from(inboxEvents)
+    .where(eq(inboxEvents.targetRunId, runId))
+    .orderBy(desc(inboxEvents.id))
+    .limit(Math.max(1, Math.min(limit, 500)));
+}
+
+/** A run's timers, newest first — rendered alongside the inbox so a parked
+ *  run's "wake me in 45m" watchdog is visible and explainable. */
+export async function listRunTimers(runId: number, limit = 50): Promise<RunTimer[]> {
+  return db
+    .select()
+    .from(runTimers)
+    .where(eq(runTimers.runId, runId))
+    .orderBy(desc(runTimers.id))
+    .limit(Math.max(1, Math.min(limit, 200)));
 }
 
 /**

@@ -15,6 +15,7 @@ import {
   Sparkles,
   Workflow,
   X,
+  Zap,
 } from "lucide-react";
 
 import {
@@ -398,6 +399,7 @@ function RootRow({ node }: { node: RunTreeNode }) {
             <span className="font-mono text-[11px] text-muted-foreground">{goalTag}</span>
           )}
           <SessionStatusPill status={run.status} />
+          <EventBadges run={run} />
           {run.taskId && kindForRun(run) === "agent" && (
             <span className="font-mono text-[11px] text-muted-foreground">{run.taskId}</span>
           )}
@@ -448,6 +450,7 @@ function ChildRow({ node, depth }: { node: RunTreeNode; depth: number }) {
           <span className="font-mono text-[11px] text-muted-foreground">{goalTag}</span>
         )}
         <SessionStatusPill status={run.status} />
+        <EventBadges run={run} />
         {run.error && (
           <span className="min-w-0 truncate text-state-blocked">{run.error}</span>
         )}
@@ -468,6 +471,28 @@ function ChildRow({ node, depth }: { node: RunTreeNode; depth: number }) {
 // ──────────────────────────────────────────────────────────
 // Small pieces
 // ──────────────────────────────────────────────────────────
+
+// Agent-event visibility (docs/agent-events.md §11): why a parked run is
+// parked, and how many owner-audience events are queued to wake it — so
+// "parked (sleeping, 3 events queued)" is readable straight off the index.
+function EventBadges({ run }: { run: RunIndexRow }) {
+  return (
+    <>
+      {run.status === "parked" && run.parkReason && (
+        <span className="text-[11px] text-state-review">{run.parkReason}</span>
+      )}
+      {run.pendingEvents > 0 && (
+        <span
+          className="inline-flex items-center gap-1 rounded-md border border-state-progress/30 bg-state-progress/10 px-1.5 py-0.5 text-[11px] text-state-progress tabular-nums"
+          title="Pending inbox events addressed to this run — delivery wakes it"
+        >
+          <Zap className="size-3" />
+          {run.pendingEvents} queued
+        </span>
+      )}
+    </>
+  );
+}
 
 function PrLink({ href }: { href: string }) {
   return (

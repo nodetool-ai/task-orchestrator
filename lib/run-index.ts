@@ -75,6 +75,10 @@ export interface RunIndexRow {
   error: string | null;
   startedAt: string;
   completedAt: string | null;
+  /** Why a 'parked' run is parked ('waiting'|'sleeping'|'question'), or null. */
+  parkReason: string | null;
+  /** Pending owner-audience inbox events queued for this run (will wake it). */
+  pendingEvents: number;
 }
 
 export interface RunTreeNode {
