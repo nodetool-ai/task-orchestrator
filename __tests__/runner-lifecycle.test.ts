@@ -138,4 +138,57 @@ describe("nextLifecycleAction", () => {
       expect(action.kind).toBe("none");
     });
   });
+
+  // A plan executor lands `completed` after EVERY turn but is conversational —
+  // the operator steers it with follow-up messages. Its completed/failed/
+  // budget_exhausted states must age through the LONG resumable windows (its
+  // machine+volume hold the warm checkout and the SDK transcript), while
+  // cancelled/closed remain hard-terminal.
+  describe("conversational terminal runs (plan executor)", () => {
+    it("keeps a completed executor's stopped machine past the 1h terminal window", () => {
+      expect(
+        nextLifecycleAction({
+          runStatus: "completed",
+          runnerState: "stopped",
+          idleMs: 2 * H,
+          goal: "<execute>",
+        }).kind,
+      ).toBe("none");
+    });
+
+    it("gives every revivable executor status the resumable ladder", () => {
+      for (const status of ["completed", "failed", "budget_exhausted"]) {
+        // 2h: stopped stays; running is suspended (cost control, fast resume).
+        expect(
+          nextLifecycleAction({ runStatus: status, runnerState: "stopped", idleMs: 2 * H, goal: "<execute>" }).kind,
+        ).toBe("none");
+        expect(
+          nextLifecycleAction({ runStatus: status, runnerState: "running", idleMs: 2 * H, goal: "<execute>" }).kind,
+        ).toBe("suspend");
+        // 3d: suspended → stop. 8d: stopped → archive-and-destroy.
+        expect(
+          nextLifecycleAction({ runStatus: status, runnerState: "suspended", idleMs: 3 * D, goal: "<execute>" }).kind,
+        ).toBe("stop");
+        expect(
+          nextLifecycleAction({ runStatus: status, runnerState: "stopped", idleMs: 8 * D, goal: "<execute>" }).kind,
+        ).toBe("archive-and-destroy");
+      }
+    });
+
+    it("still hard-reclaims a cancelled/closed executor after the terminal window", () => {
+      for (const status of ["cancelled", "closed"]) {
+        expect(
+          nextLifecycleAction({ runStatus: status, runnerState: "stopped", idleMs: H + 60_000, goal: "<execute>" }).kind,
+        ).toBe("archive-and-destroy");
+      }
+    });
+
+    it("does not extend the window for completed non-executor runs", () => {
+      for (const goal of [null, undefined, "<chat>", "implement task"]) {
+        expect(
+          nextLifecycleAction({ runStatus: "completed", runnerState: "stopped", idleMs: 2 * H, goal }).kind,
+        ).toBe("archive-and-destroy");
+      }
+    });
+  });
 });

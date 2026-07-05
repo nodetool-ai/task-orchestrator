@@ -1952,11 +1952,22 @@ export async function driveDispatchedRun(runId: number): Promise<void> {
         await setError(runId, "Dispatched <execute> run has no planId to execute.");
         return;
       }
-      // FIX 7b (M20): feed a custom initialPrompt (persisted by create() as the
-      // first user message) into runExecute as operator instructions. runExecute
-      // persists its own SYSTEM scaffold prompt — a different role than our user
-      // row — so the two don't duplicate.
-      await runExecute(runId, run.planId, await firstUserMessageText(runId));
+      // Operator instructions for this turn: the UNANSWERED user backlog first.
+      // A follow-up message to a completed executor ("continue with merging")
+      // re-dispatches it through here — feeding only the FIRST user message
+      // would replay the original instructions and silently drop what the
+      // operator just said. The backlog is exactly the not-yet-answered
+      // messages; on a fresh executor it IS the first message (the custom
+      // initialPrompt create() persisted, FIX 7b/M20), and on an orphan
+      // re-dispatch with nothing new it's empty → fall back to that first
+      // message, preserving the old behavior. runExecute persists its own
+      // SYSTEM scaffold prompt — a different role than our user rows — so
+      // nothing duplicates.
+      await runExecute(
+        runId,
+        run.planId,
+        unansweredUserBacklogText(await listMessages(runId)) ?? (await firstUserMessageText(runId))
+      );
       return;
     }
 
@@ -2020,6 +2031,23 @@ function messageText(m: MessageRow): string {
     .trim();
 }
 
+/**
+ * Concatenated text of the UNANSWERED user-message backlog — every user message
+ * newer than the most recent 'agent'-role reply, joined with blank lines — or
+ * null when everything has been answered. Pure over the rows so it's directly
+ * unit-testable. Used by dispatchTurnPrompt (implement follow-ups) and by
+ * driveDispatchedRun's <execute> branch (operator steering of a plan executor).
+ */
+export function unansweredUserBacklogText(msgs: MessageRow[]): string | null {
+  let lastAgentId = 0;
+  for (const m of msgs) if (m.role === "agent" && m.id > lastAgentId) lastAgentId = m.id;
+  const backlog = msgs
+    .filter((m) => m.role === "user" && m.id > lastAgentId)
+    .map(messageText)
+    .filter((t) => t !== "");
+  return backlog.length > 0 ? backlog.join("\n\n") : null;
+}
+
 async function dispatchTurnPrompt(run: RunRow): Promise<{ text: string; fromUserMsg: boolean }> {
   // FIX 3b/FIX 7a: replay the UNANSWERED user-message backlog first — every
   // user message newer than the most recent 'agent'-role reply, concatenated
@@ -2033,13 +2061,8 @@ async function dispatchTurnPrompt(run: RunRow): Promise<{ text: string; fromUser
   // These rows are already in the DB, so the caller must NOT re-persist them
   // (fromUserMsg=true → kickoffFirstTurn passes persistUser=false).
   const msgs = await listMessages(run.id);
-  let lastAgentId = 0;
-  for (const m of msgs) if (m.role === "agent" && m.id > lastAgentId) lastAgentId = m.id;
-  const backlog = msgs
-    .filter((m) => m.role === "user" && m.id > lastAgentId)
-    .map(messageText)
-    .filter((t) => t !== "");
-  if (backlog.length > 0) return { text: backlog.join("\n\n"), fromUserMsg: true };
+  const backlogText = unansweredUserBacklogText(msgs);
+  if (backlogText != null) return { text: backlogText, fromUserMsg: true };
 
   // First turn of a fresh implement worktree run with no persisted messages:
   // rebuild the task prompt (synthesized, not yet persisted → caller persists it).
@@ -2621,7 +2644,11 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
 function isMissingSessionError(err: unknown): boolean {
   const msg = describe(err).toLowerCase();
   if (!/session|resume|conversation/.test(msg)) return false;
-  return /not ?found|no such|missing|invalid|does ?n'?o?t ?exist|doesn'?t exist|unknown|cannot find|could not find|no longer|unrecogni[sz]ed|expired/.test(
+  // "no conversation found with session id" is the Claude CLI's exact wording
+  // when a --resume transcript isn't on this machine's disk; it matches none of
+  // the generic missing-ness phrases below ("found" without a preceding "not"),
+  // which let the production failure slip past this net.
+  return /not ?found|no (conversation|session) found|no such|missing|invalid|does ?n'?o?t ?exist|doesn'?t exist|unknown|cannot find|could not find|no longer|unrecogni[sz]ed|expired/.test(
     msg
   );
 }

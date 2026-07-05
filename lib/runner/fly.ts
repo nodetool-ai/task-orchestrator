@@ -485,6 +485,7 @@ export class FlyRunnerProvider implements RunnerProvider {
         lastSuspendedAt: runnerInstances.lastSuspendedAt,
         archivedUri: runnerInstances.archivedUri,
         runStatus: agentSessions.status,
+        runGoal: agentSessions.goal,
         workerScope: agentSessions.workerScope,
         heartbeatAt: agentSessions.heartbeatAt,
         completedAt: agentSessions.completedAt,
@@ -604,6 +605,7 @@ export class FlyRunnerProvider implements RunnerProvider {
       workerScope: string | null;
       heartbeatAt: Date | null;
       completedAt: Date | null;
+      runGoal?: string | null;
     },
     runnerState: RunnerState,
     runStatus: SessionStatus,
@@ -617,6 +619,9 @@ export class FlyRunnerProvider implements RunnerProvider {
       idleMs,
       workerScope: row.workerScope,
       heartbeatAt: row.heartbeatAt,
+      // Lets the policy exempt conversational terminal runs (a plan executor
+      // between operator messages) from the short terminal retention window.
+      goal: row.runGoal,
     });
     if (action.kind === "none") return;
 
