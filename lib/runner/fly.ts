@@ -200,6 +200,10 @@ export async function reapOrphanVolumes(flyClient: FlyClient, nowMs: number = Da
           .update(runnerInstances)
           .set({ volumeId: null })
           .where(eq(runnerInstances.volumeId, vol.id));
+        // The transcript died with this volume — clear the run's SDK resume
+        // token so a later revival starts a fresh SDK session instead of
+        // resuming into a transcript that no longer exists.
+        await clearSdkSession(ref.runId);
       } else {
         console.log(`[FlyRunnerProvider] reaped orphan volume ${vol.id} (no run row)`);
       }
@@ -226,6 +230,25 @@ function lastActivityMs(row: {
     row.lastStartedAt?.getTime() ?? 0,
     row.createdAt.getTime()
   );
+}
+
+/**
+ * Clear a run's stored SDK resume token. Call this whenever the run's volume is
+ * destroyed: the Claude Agent SDK's conversation transcript lives on that volume
+ * (HOME=$SESSION_ROOT/claude-home, see scripts/fly-runner-entry.sh), so once the
+ * volume is gone the resume id (agent_sessions.sdk_session_id, replayed as
+ * `resume: <id>` by the Claude backend) dangles — resuming it either errors
+ * ("no conversation found") or silently starts fresh against a transcript that
+ * no longer exists. Clearing it lets the next turn knowingly start a fresh SDK
+ * session. Best-effort: a bookkeeping failure must never break the sweep/reap/
+ * stop path that already destroyed the volume on Fly's side.
+ */
+async function clearSdkSession(runId: number): Promise<void> {
+  try {
+    await db.update(agentSessions).set({ sdkSessionId: null }).where(eq(agentSessions.id, runId));
+  } catch (err) {
+    console.error(`[FlyRunnerProvider] clearSdkSession failed for run ${runId}:`, err);
+  }
 }
 
 async function emitRunnerEvent(runId: number, type: string, payload: Record<string, unknown> = {}): Promise<void> {
@@ -413,6 +436,10 @@ export class FlyRunnerProvider implements RunnerProvider {
       // volume forever.
       console.error("[FlyRunnerProvider] resume cold-recover failed:", err);
       await this.updateInstance(runId, { machineId: null, volumeId: null, state: "gone" });
+      // The volume is concluded gone → its transcript is unrecoverable; drop the
+      // stale SDK resume token so the next create() + turn starts a fresh SDK
+      // session instead of dangling.
+      await clearSdkSession(runId);
       return null;
     }
   }
@@ -430,6 +457,9 @@ export class FlyRunnerProvider implements RunnerProvider {
       if (row.volumeId) await this.flyClient.destroyVolume(row.volumeId).catch(() => {});
       await this.releaseRunClaimIfCurrent(row.runId, handle);
       await this.updateInstance(row.runId, { state: "gone", machineId: null, volumeId: null });
+      // The volume (and its SDK transcript) is gone — clear the stale resume
+      // token so a later revival starts a fresh SDK session.
+      if (row.volumeId) await clearSdkSession(row.runId);
       await emitRunnerEvent(row.runId, "runner_failed", { machineId: handle, reason: "stopped" });
     }
   }
@@ -645,6 +675,9 @@ export class FlyRunnerProvider implements RunnerProvider {
       // dispatch would resume() into a dead machine/volume instead of creating
       // fresh ones.
       await this.updateInstance(row.runId, { state: "gone", machineId: null, volumeId: null });
+      // The volume (and its SDK transcript) is gone — clear the stale resume
+      // token so a later revival starts a fresh SDK session instead of dangling.
+      if (row.volumeId) await clearSdkSession(row.runId);
       await emitRunnerEvent(row.runId, "runner_destroyed", {
         machineId: row.machineId,
         volumeId: row.volumeId,

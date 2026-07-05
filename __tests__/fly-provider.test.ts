@@ -500,4 +500,94 @@ describe("FlyRunnerProvider", () => {
     expect(row.machineId).toBeNull();
     expect(row.volumeId).toBeNull();
   });
+
+  it("archive-and-destroy sweep clears the run's stale SDK resume token", async () => {
+    // TERMINAL_MS=0 → any terminal run's running machine takes the archive-and-
+    // destroy branch immediately (no 1h window to wait out).
+    vi.stubEnv("TASK_ORCH_RUNNER_TERMINAL_MS", "0");
+    const run = await create({ goal: "<implement>", defer: true });
+    const machineId = `m-ad-${run.id}`;
+    const volumeId = `v-ad-${run.id}`;
+    // Terminal run carrying a stored SDK resume token that points at the
+    // transcript living on this volume.
+    await db.update(agentSessions)
+      .set({ status: "completed", sdkSessionId: "sdk-ad" })
+      .where(eq(agentSessions.id, run.id));
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      machineId,
+      volumeId,
+      region: "ams",
+      state: "running",
+    });
+    const provider = new FlyRunnerProvider(
+      fakeFlyClient([], { machines: [{ id: machineId, state: "started", region: "ams" }] })
+    );
+
+    await provider.sweep();
+
+    const [row] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(row.state).toBe("gone");
+    expect(row.volumeId).toBeNull();
+    // Volume (and its transcript) destroyed → the dangling resume token is cleared.
+    const [session] = await db.select().from(agentSessions).where(eq(agentSessions.id, run.id));
+    expect(session.sdkSessionId).toBeNull();
+  });
+
+  it("reapOrphanVolumes clears the run's SDK resume token after destroying its volume", async () => {
+    const calls: string[] = [];
+    const run = await create({ goal: "<implement>", defer: true });
+    await db.update(agentSessions)
+      .set({ sdkSessionId: "sdk-reap" })
+      .where(eq(agentSessions.id, run.id));
+    // A "gone" row still carrying a stale (reapable) volumeId — unprotected, so
+    // the reaper destroys the volume and runs its bookkeeping against this run.
+    const staleVol = `vol_run_reap_${run.id}`;
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      machineId: null,
+      volumeId: staleVol,
+      region: "ams",
+      state: "gone",
+    });
+    const old = new Date(Date.now() - 60 * 60_000);
+    const provider = new FlyRunnerProvider(
+      fakeFlyClient(calls, {
+        machines: [],
+        volumes: [{ id: staleVol, region: "ams", name: staleVol, attachedMachineId: null, createdAt: old }],
+      })
+    );
+
+    await provider.sweep();
+
+    expect(calls).toContain(`destroyVolume:${staleVol}`);
+    const [row] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(row.volumeId).toBeNull();
+    const [session] = await db.select().from(agentSessions).where(eq(agentSessions.id, run.id));
+    expect(session.sdkSessionId).toBeNull();
+  });
+
+  it("stop() clears the run's SDK resume token when it destroys the volume", async () => {
+    const calls: string[] = [];
+    const run = await create({ goal: "<implement>", defer: true });
+    const machineId = `m-stopsdk-${run.id}`;
+    const volumeId = `v-stopsdk-${run.id}`;
+    await db.update(agentSessions)
+      .set({ status: "running", workerScope: machineId, sdkSessionId: "sdk-stop" })
+      .where(eq(agentSessions.id, run.id));
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      machineId,
+      volumeId,
+      region: "ams",
+      state: "running",
+    });
+    const provider = new FlyRunnerProvider(fakeFlyClient(calls));
+
+    await provider.stop(machineId);
+
+    expect(calls).toContain(`destroyVolume:${volumeId}`);
+    const [session] = await db.select().from(agentSessions).where(eq(agentSessions.id, run.id));
+    expect(session.sdkSessionId).toBeNull();
+  });
 });
