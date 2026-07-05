@@ -50,6 +50,10 @@ export function EventDigestCard({
   );
   const owner = rows.filter((e) => e.audience !== "supervisor");
   const supervisor = rows.filter((e) => e.audience === "supervisor");
+  // Old/malformed frames may lack event_id; fall back to the list position so
+  // React keys stay unique and stable within a render.
+  const keyFor = (e: DigestEnvelope, i: number) =>
+    typeof e.event_id === "number" ? `e-${e.event_id}` : `i-${i}`;
 
   return (
     <div className="mx-4 my-2 rounded-md border border-state-review/30 bg-card/40 text-[11px]">
@@ -64,8 +68,8 @@ export function EventDigestCard({
       </div>
       {owner.length > 0 && (
         <div className="divide-y divide-border/40">
-          {owner.map((e) => (
-            <EnvelopeRow key={e.event_id} envelope={e} />
+          {owner.map((e, i) => (
+            <EnvelopeRow key={keyFor(e, i)} envelope={e} />
           ))}
         </div>
       )}
@@ -76,8 +80,8 @@ export function EventDigestCard({
             For awareness — informational; the owning run acts
           </div>
           <div className="divide-y divide-border/40">
-            {supervisor.map((e) => (
-              <EnvelopeRow key={e.event_id} envelope={e} />
+            {supervisor.map((e, i) => (
+              <EnvelopeRow key={keyFor(e, i)} envelope={e} />
             ))}
           </div>
         </div>
@@ -100,9 +104,11 @@ function EnvelopeRow({ envelope: e }: { envelope: DigestEnvelope }) {
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
           <code className="font-mono text-foreground">{e.type}</code>
-          <span className="font-mono text-[10px] text-muted-foreground/80 tabular-nums">
-            #{e.event_id}
-          </span>
+          {typeof e.event_id === "number" && (
+            <span className="font-mono text-[10px] text-muted-foreground/80 tabular-nums">
+              #{e.event_id}
+            </span>
+          )}
           {CONTROL_TYPES.has(e.type) && (
             <span className="inline-flex items-center gap-1 rounded bg-state-blocked/10 px-1.5 py-0.5 text-[10px] text-state-blocked">
               <ShieldAlert className="size-3" /> platform-enforced

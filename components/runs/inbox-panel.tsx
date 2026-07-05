@@ -58,16 +58,22 @@ const TIMER_TONE: Record<TimerRow["status"], string> = {
 // was withheld (superseded stale attempts), and what was quarantined
 // (status=error + reason) — plus the run's timers. Traceability, not control:
 // the panel is read-only.
+type StatusFilter = "all" | InboxEventRow["status"];
+
+const FILTERS: StatusFilter[] = ["all", "pending", "injected", "superseded", "error"];
+
 export function InboxPanel({ runId }: { runId: number }) {
   const [data, setData] = useState<InboxResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState<StatusFilter>("all");
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/runs/${runId}/inbox`);
+      // Live diagnostics: always bypass HTTP caches so "refresh" is a refresh.
+      const res = await fetch(`/api/runs/${runId}/inbox`, { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setData((await res.json()) as InboxResponse);
     } catch (e) {
@@ -84,6 +90,9 @@ export function InboxPanel({ runId }: { runId: number }) {
   const events = data?.events ?? [];
   const timers = data?.timers ?? [];
   const pending = events.filter((e) => e.status === "pending").length;
+  const visibleEvents = filter === "all" ? events : events.filter((e) => e.status === filter);
+  const countFor = (f: StatusFilter) =>
+    f === "all" ? events.length : events.filter((e) => e.status === f).length;
 
   return (
     <div className="mt-3 rounded-lg border border-border/60 bg-background/60 text-[11px]">
@@ -97,6 +106,30 @@ export function InboxPanel({ runId }: { runId: number }) {
             {pending} pending
           </span>
         )}
+        <div
+          role="tablist"
+          aria-label="Filter events by status"
+          className="ml-2 inline-flex rounded border border-border/60 bg-secondary/40 p-0.5"
+        >
+          {FILTERS.map((f) => (
+            <button
+              key={f}
+              type="button"
+              role="tab"
+              aria-selected={filter === f}
+              onClick={() => setFilter(f)}
+              className={cn(
+                "rounded px-1.5 py-0.5 text-[10px] transition-colors",
+                filter === f
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {f}
+              <span className="ml-1 tabular-nums text-muted-foreground">{countFor(f)}</span>
+            </button>
+          ))}
+        </div>
         <button
           type="button"
           onClick={() => void load()}
@@ -149,9 +182,14 @@ export function InboxPanel({ runId }: { runId: number }) {
               </div>
             )}
             <div className="divide-y divide-border/40">
-              {events.map((e) => (
+              {visibleEvents.map((e) => (
                 <EventRow key={e.id} e={e} />
               ))}
+              {visibleEvents.length === 0 && events.length > 0 && (
+                <p className="px-3 py-2 text-muted-foreground/60">
+                  No {filter} events for this run.
+                </p>
+              )}
             </div>
           </>
         )}
