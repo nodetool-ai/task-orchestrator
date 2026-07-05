@@ -12,10 +12,8 @@ const NAV: { id: string; href: string; label: string; icon: React.ComponentProps
   { id: "floor", href: "/", label: "Floor", icon: "factory" },
   { id: "plans", href: "/plans", label: "Plans", icon: "plans" },
   { id: "tasks", href: "/tasks", label: "Tasks", icon: "tasks" },
-  { id: "repos", href: "/repositories", label: "Repos", icon: "repos" },
   { id: "runs", href: "/runs", label: "Runs", icon: "chat" },
-  { id: "personas", href: "/personas", label: "Personas", icon: "personas" },
-  { id: "tokens", href: "/tokens", label: "Tokens", icon: "tokens" },
+  { id: "settings", href: "/settings", label: "Settings", icon: "settings" },
 ];
 
 function isActive(href: string, pathname: string): boolean {

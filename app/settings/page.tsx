@@ -1,0 +1,172 @@
+import Link from "next/link";
+import { FolderGit2 } from "lucide-react";
+import * as repo from "@/lib/repo";
+import { NewRepositoryForm } from "@/components/repositories/repository-form";
+import { PersonaEditor, type PersonaDto } from "@/components/persona-editor";
+import { ApiTokensManager } from "@/components/api-tokens-manager";
+import { CodeBlock } from "@/components/ui/code-block";
+import { EmptyState } from "@/components/ui/empty-state";
+import { formatDate, relativeDate } from "@/lib/utils";
+import { SettingsTabs } from "@/components/settings/settings-tabs";
+
+export const dynamic = "force-dynamic";
+
+export default async function SettingsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ tab?: string }>;
+}) {
+  const { tab } = await searchParams;
+  const [repositories, personaRows] = await Promise.all([
+    repo.listRepositories(),
+    repo.listPersonas(),
+  ]);
+
+  const personas: PersonaDto[] = personaRows.map((p) => ({
+    id: p.id,
+    name: p.name,
+    description: p.description,
+    systemPrompt: p.systemPrompt,
+    thinkingLevel: p.thinkingLevel,
+    toolsProfile: p.toolsProfile,
+    budgetMaxTurns: p.budgetMaxTurns,
+    budgetMaxSeconds: p.budgetMaxSeconds,
+  }));
+
+  return (
+    <div style={{ padding: "20px 20px 80px", maxWidth: 1480, margin: "0 auto" }}>
+      <header className="mb-6 space-y-1">
+        <h1 className="text-xl font-semibold tracking-tight">Settings</h1>
+        <p className="text-sm text-muted-foreground">
+          Repositories, personas, and API tokens for this workspace.
+        </p>
+      </header>
+
+      <SettingsTabs
+        initialTab={tab}
+        repos={
+          <div className="space-y-6">
+            <header className="flex items-baseline justify-between">
+              <div>
+                <h2 className="text-base font-semibold tracking-tight">Repositories</h2>
+                <p className="text-sm text-muted-foreground">
+                  Git checkouts the orchestrator drives. Each plan and chat picks one.
+                </p>
+              </div>
+              <NewRepositoryForm />
+            </header>
+
+            {repositories.length === 0 ? (
+              <EmptyState>No repositories configured.</EmptyState>
+            ) : (
+              <div className="divide-y divide-border/60 rounded-lg border border-border/60 bg-card/40">
+                {repositories.map((r) => (
+                  <Link
+                    key={r.id}
+                    href={`/repositories/${r.id}`}
+                    className="block px-4 py-3 hover:bg-muted/40 transition-colors"
+                  >
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <FolderGit2 className="size-3.5 text-muted-foreground" />
+                      <span className="text-sm font-medium">{r.name}</span>
+                      <span className="font-mono text-[11px] text-muted-foreground">{r.id}</span>
+                      <span className="font-mono text-[11px] text-muted-foreground">
+                        default: {r.defaultBranch}
+                      </span>
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-muted-foreground font-mono">
+                      {r.localPath ? (
+                        <span>local: {r.localPath}</span>
+                      ) : (
+                        <span className="text-state-blocked">local path not set</span>
+                      )}
+                      {r.remote && <span>remote: {r.remote}</span>}
+                      <span>created {formatDate(r.createdAt)}</span>
+                      <span>· {relativeDate(r.updatedAt)}</span>
+                    </div>
+                    {r.description && (
+                      <div className="mt-1 text-xs text-muted-foreground">{r.description}</div>
+                    )}
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
+        }
+        personas={
+          <div className="space-y-6">
+            <header className="space-y-1">
+              <h2 className="text-base font-semibold tracking-tight">Personas</h2>
+              <p className="text-sm text-muted-foreground">
+                Each persona bundles a system prompt, tools profile, and budget
+                defaults. The model is chosen per-run when you launch the agent.
+                Skills are loaded automatically from the project
+                (<code>.pi/skills/</code>, <code>.agents/skills/</code>) — no
+                per-persona setup needed. Edits saved here override the seed in{" "}
+                <code>lib/personas/*.ts</code>.
+              </p>
+            </header>
+
+            {personas.length === 0 ? (
+              <EmptyState>No personas configured.</EmptyState>
+            ) : (
+              <ul className="space-y-4">
+                {personas.map((p) => (
+                  <PersonaEditor key={p.id} persona={p} />
+                ))}
+              </ul>
+            )}
+          </div>
+        }
+        tokens={
+          <div className="space-y-6">
+            <header className="space-y-1">
+              <h2 className="text-base font-semibold tracking-tight">API tokens</h2>
+              <p className="text-sm text-muted-foreground">
+                Tokens authenticate the MCP server at <code>POST /api/mcp</code>. Pass{" "}
+                <code>Authorization: Bearer tot_…</code>. Each token inherits its owner&apos;s
+                permissions; revoke any time.
+              </p>
+
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="rounded-md border border-border/60 bg-card/40 p-3 text-xs space-y-1.5">
+                  <div className="font-medium">Claude Code (CLI):</div>
+                  <CodeBlock tone="muted" className="border-0 bg-transparent p-0">{`claude mcp add --transport http \\
+  task-orchestrator \\
+  https://tasks.nodetool.ai/api/mcp \\
+  --header "Authorization: Bearer tot_…"`}</CodeBlock>
+                </div>
+
+                <div className="rounded-md border border-border/60 bg-card/40 p-3 text-xs space-y-1.5">
+                  <div className="font-medium">Claude Desktop:</div>
+                  <CodeBlock tone="muted" className="border-0 bg-transparent p-0">{`{
+  "mcpServers": {
+    "task-orchestrator": {
+      "type": "http",
+      "url": "https://tasks.nodetool.ai/api/mcp",
+      "headers": { "Authorization": "Bearer tot_…" }
+    }
+  }
+}`}</CodeBlock>
+                </div>
+
+                <div className="rounded-md border border-border/60 bg-card/40 p-3 text-xs space-y-1.5">
+                  <div className="font-medium">Cursor (~/.cursor/mcp.json):</div>
+                  <CodeBlock tone="muted" className="border-0 bg-transparent p-0">{`{
+  "mcpServers": {
+    "task-orchestrator": {
+      "url": "https://tasks.nodetool.ai/api/mcp",
+      "headers": { "Authorization": "Bearer tot_…" }
+    }
+  }
+}`}</CodeBlock>
+                </div>
+              </div>
+            </header>
+            <ApiTokensManager />
+          </div>
+        }
+      />
+    </div>
+  );
+}

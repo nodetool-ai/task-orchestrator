@@ -113,7 +113,7 @@ function CommandPalette({ items }: { items: CmdItem[] }) {
                 onPick(filtered[0]);
               }
             }}
-            placeholder="Search runs, tasks, plans, or run a command…"
+            placeholder="Jump to…"
             style={{
               flex: 1,
               background: "transparent",
