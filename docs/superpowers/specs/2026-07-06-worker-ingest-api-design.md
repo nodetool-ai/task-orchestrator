@@ -312,6 +312,28 @@ an availability story, or (b) replacing the worker's `DATABASE_URL` with a
 narrowly-privileged Postgres role (per-run row-level security on the handful
 of remaining tables).
 
+**End-state recommendation (v2 review): Option B — scoped role + RLS.**
+Two reasons beyond taste. *Latency:* the residual traffic is the fast path —
+context reads, stream tailing, 20s heartbeats — where a persistent TCP
+Postgres connection beats an HTTP round-trip per operation; funneling it
+through the single web Machine would also re-create the availability coupling
+this design spends Decision 5 avoiding. *Capability:* the worker's `run_input`
+wake-up is LISTEN/NOTIFY — it needs a persistent Postgres session (the reason
+`docs/fly-deployment.md` mandates the session pooler) and cannot move to plain
+request/response HTTP at all. Option B keeps workers close to the metal
+without exposing the vault. The end-state design must be honest about what
+RLS requires to be a real boundary, though: a shared role plus a settable
+session variable (`SET app.run_id = …`) is *not* one — the untrusted code
+holding the credential can simply SET a different run id. It takes a per-run
+identity (e.g. `CREATE ROLE run_<id>_gen_<n> LOGIN` minted at provisioning,
+policies keyed on `current_user`, dropped on revocation — which also gives
+Option B a revocation story equivalent to the generation bump), with the
+operational surface that implies (role lifecycle, session-pooler
+compatibility, cleanup). That design is out of scope here; this tier's ingest
+API remains the right first step regardless — it removes the high-value
+content writes now, and its generation check, idempotency ledger, and
+server-side write observability are things RLS alone does not provide.
+
 ## Decision 5 — Failure semantics (open question 4)
 
 Worker-side client policy, per op:
@@ -355,9 +377,14 @@ keeps heartbeating and the reaper stays away. The failure matrix:
 | down | down | Worker retries both; if >5 min, lease expires and the reaper reclaims. Late replay by the original worker is harmless: `opId` dedup + terminal guards + the generation check rejecting the superseded writer. |
 
 `strict` mode (API-only, no DB fallback) exists in the flag from day one but
-is a **post-`DATABASE_URL`-drop** posture; flipping it requires the final-step
-design above (heartbeats over API + a lease long enough to ride out deploys +
-the dedicated-secret rotation window).
+is a **post-`DATABASE_URL`-drop** posture. Under Decision 4's recommended
+end-state (Option B, scoped role + RLS) it may never be flipped at all: the
+worker keeps a narrowly-scoped DB credential for the residual fast-path
+traffic, and the fallback for content writes simply narrows to that scoped
+credential. `strict` only becomes relevant if the end-state design instead
+chooses API-for-everything — which would additionally require heartbeats over
+API, a lease long enough to ride out deploys, and the dedicated-secret
+rotation window.
 
 ## Decision 6 — run_stream relaying is unaffected (open question 5)
 
@@ -465,7 +492,8 @@ the API.
 - `GH_TOKEN` removal from worker env (Tier 0 residual; askpass socket or
   root-owned credential file — separate design).
 - Worker log flusher migration.
-- The `DATABASE_URL` end-state choice: API-for-everything vs scoped Postgres
-  role + RLS (Decision 4).
+- The `DATABASE_URL` end-state design: recommendation recorded (Decision 4,
+  Option B — per-run scoped Postgres role + RLS); the per-run role mechanics
+  (minting, pooler compatibility, lifecycle) need their own spec.
 - Heartbeat error surfacing (incident 3 root fix).
 - Per-op-continue carve-out for independent telemetry ops (Decision 2).
