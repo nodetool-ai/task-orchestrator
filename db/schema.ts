@@ -108,6 +108,9 @@ export const tasks = pgTable(
     stateIdx: index("tasks_state_idx").on(t.state),
     assigneeIdx: index("tasks_assignee_idx").on(t.assignee),
     repoIdx: index("tasks_repo_idx").on(t.repoId),
+    // The webhook matcher and the ~20s PR-sync poller look tasks up by pr_url;
+    // index it so those stay indexed equality lookups, not table scans.
+    prUrlIdx: index("tasks_pr_url_idx").on(t.prUrl),
   })
 );
 

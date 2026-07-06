@@ -80,7 +80,7 @@ describe("parent wake on child (supervisor) events", () => {
       type: "task.state_changed",
       sourceKind: "task",
       sourceId: "t1",
-      payload: { state: "done" },
+      payload: { state: "merged" },
     });
 
     expect(spy).toHaveBeenCalledWith(parent);

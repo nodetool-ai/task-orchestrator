@@ -976,9 +976,13 @@ export async function deleteTask(id: string) {
  * a transition is also warranted.
  */
 export async function setTaskPr(taskId: string, prUrl: string): Promise<void> {
+  // Store the canonical form so getTaskByPrUrl (and the frequent PR-sync poller)
+  // can do an indexed equality lookup instead of scanning + canonicalizing every
+  // row. Fall back to the raw value only if it doesn't parse as a PR url.
+  const canonical = canonicalizePrUrl(prUrl) ?? prUrl;
   await db
     .update(tasks)
-    .set({ prUrl, updatedAt: new Date() })
+    .set({ prUrl: canonical, updatedAt: new Date() })
     .where(eq(tasks.id, taskId));
 }
 
@@ -993,6 +997,18 @@ export async function setTaskPr(taskId: string, prUrl: string): Promise<void> {
 export async function getTaskByPrUrl(prUrl: string): Promise<TaskFull | null> {
   const key = canonicalizePrUrl(prUrl);
   if (!key) return null;
+  // Fast path: indexed equality against the canonical value setTaskPr stores
+  // (tasks_pr_url_idx). Avoids scanning + canonicalizing every PR-backed task on
+  // each webhook delivery and every ~20s poll tick.
+  const [hit] = await db
+    .select({ id: tasks.id })
+    .from(tasks)
+    .where(eq(tasks.prUrl, key))
+    .orderBy(asc(tasks.id))
+    .limit(1);
+  if (hit) return getTask(hit.id);
+  // Legacy fallback: rows written before canonicalize-on-write may hold a
+  // non-canonical url; scan + canonicalize to match those.
   const rows = await db
     .select({ id: tasks.id, prUrl: tasks.prUrl })
     .from(tasks)

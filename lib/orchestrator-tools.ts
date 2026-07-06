@@ -13,10 +13,21 @@ import { parsePrUrl } from "./gh-url";
 import {
   PLAN_STATES,
   TASK_STATES,
+  TASK_TRANSITIONS,
   isTerminalStatus,
   type PlanState,
   type TaskState,
 } from "./types";
+
+// Derived from TASK_TRANSITIONS so the transition_task description can never
+// drift from the actual allowed edges (a hardcoded list silently goes stale
+// when the state machine changes — as it did once already).
+const ALLOWED_TASK_TRANSITIONS_TEXT = (
+  Object.entries(TASK_TRANSITIONS) as [TaskState, TaskState[]][]
+)
+  .filter(([, to]) => to.length > 0)
+  .map(([from, to]) => `${from}→${to.join("/")}`)
+  .join(", ");
 import type { TaskFull, PlanFull, AgentSessionFull, AttachmentMeta } from "./types";
 
 // ──────────────────────────────────────────────────────
@@ -652,7 +663,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "transition_task",
     label: "Transition Task",
     description:
-      "Change a task's state with optional note and assignee. Allowed: todo→in_progress/cancelled, in_progress→testing/blocked/cancelled, testing→passing/failing/merged/blocked/cancelled, failing→testing/blocked/cancelled, passing→merged/testing/failing/cancelled, blocked→in_progress/testing/cancelled. merged and cancelled are terminal. Going to in_progress requires an assignee. Going to merged requires all acceptance criteria checked. Note: testing/passing/failing/merged are normally driven from the PR's real GitHub/CI state, not set by hand.",
+      `Change a task's state with optional note and assignee. Allowed: ${ALLOWED_TASK_TRANSITIONS_TEXT}. merged and cancelled are terminal. Going to in_progress requires an assignee. Going to merged requires all acceptance criteria checked. Note: testing/passing/failing/merged are normally driven from the PR's real GitHub/CI state, not set by hand.`,
     parameters: Type.Object({
       id: Type.Optional(Type.String()),
       state: Type.Union(TASK_STATES.map((s) => Type.Literal(s)) as [ReturnType<typeof Type.Literal>, ...ReturnType<typeof Type.Literal>[]]),
