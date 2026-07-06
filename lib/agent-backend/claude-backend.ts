@@ -19,6 +19,7 @@ import { mapClaudeMessage } from "./claude-event-mapper";
 import { collectExtensions, composeSystemPrompt, runInterceptors } from "./collect";
 import { toZodRawShape } from "./typebox-to-zod";
 import { interceptorToolName, isFileTool } from "../builtin-tools";
+import { scrubClaudeCliEnv } from "./env-scrub";
 import type { AgentBackend, RunTurnArgs, TurnOutcome } from "./types";
 import type { RunEnvelope } from "../pi-event-mapper";
 
@@ -165,8 +166,16 @@ export class ClaudeBackend implements AgentBackend {
     // ANTHROPIC_API_KEY when set, otherwise the claude.ai subscription (stored
     // OAuth from `claude login`, or CLAUDE_CODE_OAUTH_TOKEN). The SDK's `env`
     // REPLACES the subprocess environment (no merge), so spread process.env to
-    // keep PATH/HOME/the key/etc., then layer any caller-supplied env.
-    const sdkEnv: Record<string, string | undefined> = { ...process.env, ...args.env };
+    // keep PATH/HOME/the key/etc., then layer any caller-supplied env, then
+    // scrub: the CLI process (and everything it spawns outside a bash tool
+    // call, which the env-scrub extension already covers) has no legitimate
+    // need for DATABASE_URL or non-Anthropic provider credentials — only its
+    // own Anthropic/Claude auth vars. Applied AFTER the spread so a caller-
+    // supplied args.env entry is respected but still subject to the scrub.
+    const sdkEnv: Record<string, string | undefined> = scrubClaudeCliEnv({
+      ...process.env,
+      ...args.env,
+    });
 
     const envelopes: RunEnvelope[] = [];
     let summary: string | null = null;
