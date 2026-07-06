@@ -12,6 +12,7 @@ import { and, asc, desc, eq, isNotNull, or } from "drizzle-orm";
 
 import { db } from "@/db";
 import { agentMessages, agentSessions } from "@/db/schema";
+import { deriveTitle, generateChatTitle } from "./chat-title";
 import * as repo from "./repo";
 import * as runs from "./runs";
 import type { SdkContentBlock } from "./sdk-message";
@@ -204,33 +205,61 @@ export async function* runChat({
     return;
   }
 
-  // Auto-title the chat from the first user message.
+  // Auto-title the chat from its first user message. Set a deterministic
+  // derived title synchronously so the UI updates immediately, then let a fast
+  // model upgrade it to a concise, human-friendly title in the background — the
+  // upgrade overlaps the turn (no added latency) and is awaited before the
+  // generator returns so it survives the request lifetime. See lib/chat-title.ts.
+  let titleUpgrade: Promise<void> | null = null;
   if (chat.title === "New chat") {
-    const title = userText.trim().slice(0, 60).replace(/\s+/g, " ");
-    if (title) await renameChat(chatId, title);
+    const derived = deriveTitle(userText);
+    if (derived) {
+      await renameChat(chatId, derived);
+      titleUpgrade = upgradeTitle(chatId, userText, derived);
+    }
   }
 
   // Chat runs are agent_runs with goal='<chat>'; sendMessageToRun routes the turn
   // through a long-lived worker container in the real deploy (root server can't run
   // the agent), falling back to in-process append() in dev. Frame contract unchanged.
-  for await (const event of runs.sendMessageToRun({
-    runId: chatId,
-    role: "user",
-    text: userText,
-    author: author ?? "chat",
-    abort,
-  })) {
-    if (event.type === "user_message" && event.message) {
-      yield { type: "user_message", message: messageToChatRow(event.message) };
-    } else if (event.type === "sdk") {
-      yield { type: "sdk", sdk: event.sdk };
-    } else if (event.type === "done") {
-      yield { type: "done" };
-      return;
-    } else if (event.type === "error") {
-      yield { type: "error", error: event.error };
-      return;
+  try {
+    for await (const event of runs.sendMessageToRun({
+      runId: chatId,
+      role: "user",
+      text: userText,
+      author: author ?? "chat",
+      abort,
+    })) {
+      if (event.type === "user_message" && event.message) {
+        yield { type: "user_message", message: messageToChatRow(event.message) };
+      } else if (event.type === "sdk") {
+        yield { type: "sdk", sdk: event.sdk };
+      } else if (event.type === "done") {
+        yield { type: "done" };
+        return;
+      } else if (event.type === "error") {
+        yield { type: "error", error: event.error };
+        return;
+      }
     }
+  } finally {
+    // Let the (overlapping) title upgrade finish inside the request lifetime so
+    // it isn't torn down by a serverless teardown after the stream closes.
+    if (titleUpgrade) await titleUpgrade;
+  }
+}
+
+// Best-effort upgrade of an auto-derived title to a model-generated one. Only
+// overwrites when the stored title is still the exact `derived` value we set —
+// so a rename the user made mid-turn is never clobbered. Never throws.
+async function upgradeTitle(chatId: number, userText: string, derived: string): Promise<void> {
+  try {
+    const generated = await generateChatTitle(userText);
+    if (!generated || generated === derived) return;
+    const current = await getChat(chatId);
+    if (current?.title === derived) await renameChat(chatId, generated);
+  } catch {
+    // Titling is cosmetic; never let it disturb the turn.
   }
 }
 
