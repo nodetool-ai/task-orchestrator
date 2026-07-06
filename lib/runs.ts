@@ -51,7 +51,7 @@ import {
 import { parsePrUrl, ownerRepoFromRemote } from "./gh-url";
 import { assistantText, toolResults, type SdkContentBlock } from "./sdk-message";
 import type { AgentSessionFull, RepositoryRow, SessionStatus } from "./types";
-import { isTerminalStatus, SESSION_STATUSES } from "./types";
+import { isTerminalStatus, LEASE_STATUSES, SESSION_STATUSES } from "./types";
 import { isTransientNetworkError } from "./transient-errors";
 import { resolveProfiles, alwaysOnExtensions, type ProfileContext } from "./profiles";
 import { type RunEnvelope } from "./pi-event-mapper";
@@ -59,7 +59,6 @@ import { getBackend, resolveBackendId, type Extension } from "./agent-backend";
 import {
   claimInboxEvents,
   emitInboxEvent,
-  markControlInjected,
   quarantineEvent,
   setClaimTurn,
   takeUnrenderedControlEvents,
@@ -80,6 +79,14 @@ import { linkSharedWorktreeArtifacts } from "./worktree-env";
 // (no cycle), avoiding the webpack-minified boot TDZ a runs ↔ run-dispatch cycle
 // would otherwise produce.
 import * as runDispatch from "./run-dispatch";
+// The worker ⇄ orchestrator transport seam (lib/worker): every interaction a
+// run worker has with orchestrator state goes through runTransport(), so the
+// same code drives a turn against Postgres directly (db transport — the
+// default, and the only mode for this web-server process) or against the
+// /api/worker HTTP + SSE protocol (external workers with no DB access).
+// The import is cycle-safe: lib/worker/index only pulls types + the logger at
+// module init and loads the transport implementations lazily.
+import { contentText, runTransport } from "./worker";
 
 // Inject this module's helpers into run-dispatch (see the comment above). `get`,
 // `isLeaseLive`, and `setError` are hoisted function declarations, so they are
@@ -784,18 +791,11 @@ export async function list(filter: ListFilter = {}): Promise<RunRow[]> {
 const TERMINAL_STATUS_LIST: SessionStatus[] = SESSION_STATUSES.filter(isTerminalStatus);
 
 export async function get(id: number): Promise<RunRow | null> {
-  const row = (await db.select().from(agentSessions).where(eq(agentSessions.id, id)))[0];
-  return row ? hydrateRun(row) : null;
+  return (await runTransport()).getRun(id);
 }
 
 export async function listMessages(runId: number): Promise<MessageRow[]> {
-  return (
-    await db
-      .select()
-      .from(agentMessages)
-      .where(eq(agentMessages.runId, runId))
-      .orderBy(asc(agentMessages.id))
-  ).map(hydrateMessage);
+  return (await runTransport()).listMessages(runId);
 }
 
 /**
@@ -920,13 +920,11 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // exactly like 'idle' — a human/agent message wakes it.
     const resumesTerminalAttempt =
       isTerminalStatus(run.status) && isResumableWorktreeRun(run.status, run.cwdStrategy);
-    await db.update(agentSessions)
-      .set({
-        result: null,
-        parkReason: null,
-        ...(resumesTerminalAttempt ? { attempt: sql`${agentSessions.attempt} + 1` } : {}),
-      })
-      .where(eq(agentSessions.id, run.id));
+    await (await runTransport()).patchRun(run.id, {
+      result: null,
+      parkReason: null,
+      incrementAttempt: resumesTerminalAttempt,
+    });
 
     await setStatus(run.id, "running");
 
@@ -984,7 +982,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // an inbox hiccup must never block the user's turn.
     let effectivePrompt = input.text;
     try {
-      const digest = await injectPendingInboxEvents(run.id);
+      const digest = await (await runTransport()).claimInboxDigest(run.id);
       if (digest) effectivePrompt = `${digest}\n\n${input.text}`;
     } catch {
       // pump sweep / next turn retries pending events
@@ -1085,7 +1083,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // stops a cancel()/close() that raced the turn end from being resurrected.
     // Retries: the worker (driveDispatchedRun) is about to exit, so a transient
     // DB blip re-acknowledges the atomic, guarded finalize a few times.
-    await applyStatusTx(run.id, nextStatus, {
+    await (await runTransport()).applyStatus(run.id, nextStatus, {
       set: {
         sdkSessionId: result.sdkSessionId ?? run.sdkSessionId,
         totalCostUsd: result.totalCostUsd ?? run.totalCostUsd,
@@ -1098,7 +1096,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
         parkReason: nextStatus === "parked" ? turnEnd.parkReason : null,
         completedAt: isTerminalStatus(nextStatus) ? new Date() : null,
       },
-      guard: notInArray(agentSessions.status, ["cancelled", "closed"]),
+      guard: "not-cancelled-closed",
       retries: FINALIZE_RETRIES,
     });
 
@@ -1387,21 +1385,22 @@ export async function followUp(
 /**
  * Resolve the repo a run belongs to: explicit repoId > task's repo > default
  * repo. Shared by repoRoot/repoDefaultBranch, which differ only in which
- * field of the resolved repo they read.
+ * field of the resolved repo they read. The chain runs on the transport
+ * (server-side in HTTP worker mode).
  */
-async function resolveRepo(run: { repoId: string | null; taskId: string | null }): Promise<RepositoryRow | null> {
-  if (run.repoId) {
-    const r = await repo.getRepository(run.repoId);
-    if (r) return r;
-  }
-  if (run.taskId) {
-    const r = await repo.resolveRepoForTask(run.taskId);
-    if (r) return r;
-  }
-  return await repo.defaultRepo();
+async function resolveRepo(run: {
+  id: number;
+  repoId: string | null;
+  taskId: string | null;
+}): Promise<RepositoryRow | null> {
+  return (await runTransport()).resolveRepo(run.id);
 }
 
-async function repoRoot(run: { repoId: string | null; taskId: string | null }): Promise<string> {
+async function repoRoot(run: {
+  id: number;
+  repoId: string | null;
+  taskId: string | null;
+}): Promise<string> {
   const r = await resolveRepo(run);
   return r?.localPath ? resolve(r.localPath) : ORCHESTRATOR_ROOT;
 }
@@ -1461,9 +1460,7 @@ async function prepareCwd(run: RunRow): Promise<string> {
       await containerCheckoutAt(run, sessionWork, run.branch);
     }
     if (run.worktreePath !== sessionWork) {
-      await db.update(agentSessions)
-        .set({ worktreePath: sessionWork })
-        .where(eq(agentSessions.id, run.id));
+      await (await runTransport()).patchRun(run.id, { worktreePath: sessionWork });
     }
     return validateCwd(sessionWork, { runId: run.id, repoId: run.repoId });
   }
@@ -1530,7 +1527,11 @@ export function worktreeBranchName(run: { id: number; taskId: string | null }): 
 }
 
 /** The base branch a task's worktree branches from / merges in. */
-async function repoDefaultBranch(run: { repoId: string | null; taskId: string | null }): Promise<string> {
+async function repoDefaultBranch(run: {
+  id: number;
+  repoId: string | null;
+  taskId: string | null;
+}): Promise<string> {
   return (await resolveRepo(run))?.defaultBranch ?? "main";
 }
 
@@ -1675,16 +1676,18 @@ async function ensureWorktreeBranch(run: RunRow, baseBranch?: string): Promise<R
     await sh(["git", "worktree", "add", "-b", branch, worktreePath, base], root);
     await linkSharedWorktreeArtifacts(worktreePath, root);
   }
-  const taskRepoId = run.taskId ? (await repo.getTask(run.taskId))?.repoId ?? null : null;
-  await db.update(agentSessions)
-    .set({ branch, worktreePath, repoId: run.repoId ?? taskRepoId })
-    .where(eq(agentSessions.id, run.id));
+  const transport = await runTransport();
+  const task = run.taskId ? await transport.getTask(run.taskId) : null;
+  await transport.patchRun(run.id, {
+    branch,
+    worktreePath,
+    repoId: run.repoId ?? task?.repoId ?? null,
+  });
   // Task-attached (implement) runs move their task to in_progress; taskless chat
   // worktrees have nothing to transition.
-  const task = run.taskId ? await repo.getTask(run.taskId) : null;
   if (run.taskId && task && (task.state === "todo" || task.state === "blocked")) {
     try {
-      await repo.transitionTask(run.taskId, {
+      await transport.transitionTask(run.taskId, {
         state: "in_progress",
         assignee: task.assignee ?? "claude-agent",
         note: `Started agent run #${run.id}.`,
@@ -1733,17 +1736,18 @@ async function gitSyncAfterTurn(
   await sh(["git", "push", "-u", "origin", run.branch], cwd);
   if (run.prUrl) return run.prUrl;
   if (!run.taskId) return null;
-  const task = await repo.getTask(run.taskId);
+  const transport = await runTransport();
+  const task = await transport.getTask(run.taskId);
   if (!task) return null;
   const prUrl = await openPr({ task, branch: run.branch, baseBranch: base, worktreePath: cwd, summary });
   if (prUrl) {
     try {
-      await repo.transitionTask(run.taskId, {
+      await transport.transitionTask(run.taskId, {
         state: "review",
         note: `Agent finished. PR: ${prUrl}`,
       });
     } catch (err) {
-      await repo.addNote(run.taskId, "claude-agent", `Could not transition to review: ${describe(err)}`);
+      await transport.addTaskNote(run.taskId, "claude-agent", `Could not transition to review: ${describe(err)}`);
     }
   }
   return prUrl ?? run.prUrl;
@@ -1845,9 +1849,7 @@ async function runReview(
       await linkSharedWorktreeArtifacts(worktreePath, root);
     }
 
-    await db.update(agentSessions)
-      .set({ branch, worktreePath })
-      .where(eq(agentSessions.id, runId));
+    await (await runTransport()).patchRun(runId, { branch, worktreePath });
     run = (await get(runId))!;
 
     await setStatus(runId, "running");
@@ -1875,8 +1877,9 @@ async function runReview(
     const outcome = extractReviewOutcome(result.summary);
 
     // Atomic completion (status + event), worker path → retry the guarded
-    // finalize on a transient DB blip before this single-turn worker exits.
-    await applyStatusTx(runId, "completed", {
+    // finalize on a transient blip before this single-turn worker exits.
+    const transport = await runTransport();
+    await transport.applyStatus(runId, "completed", {
       set: {
         completedAt: new Date(),
         outcome,
@@ -1885,7 +1888,7 @@ async function runReview(
         inputTokens: result.inputTokens ?? run.inputTokens,
         outputTokens: result.outputTokens ?? run.outputTokens,
       },
-      guard: notInArray(agentSessions.status, TERMINAL_STATUSES),
+      guard: "not-terminal",
       retries: FINALIZE_RETRIES,
     });
 
@@ -1894,12 +1897,12 @@ async function runReview(
     // parse — so a non-approve outcome simply leaves the task untouched).
     if (run.taskId && parseReviewVerdict(outcome) === "approve") {
       try {
-        await repo.transitionTask(run.taskId, {
+        await transport.transitionTask(run.taskId, {
           state: "done",
           note: `Review run #${runId} approved the PR.`,
         });
       } catch (err) {
-        await repo.addNote(
+        await transport.addTaskNote(
           run.taskId,
           "claude-reviewer",
           `Review approved but could not transition task to done: ${describe(err)}`
@@ -1960,7 +1963,8 @@ async function runExecute(
   let run = (await get(runId))!;
 
   try {
-    const plan = await repo.getPlan(planId);
+    const transport = await runTransport();
+    const plan = await transport.getPlan(planId);
     if (!plan) {
       await setError(runId, `Plan ${planId} disappeared before execution could start`);
       runners.delete(runId);
@@ -1971,23 +1975,21 @@ async function runExecute(
     // Event system (§6.1): fresh turn = fresh intent — clear last turn's
     // park_reason and result before this turn runs (this is how a parked
     // executor woken by the pump sweep starts clean).
-    await db.update(agentSessions)
-      .set({ parkReason: null, result: null })
-      .where(eq(agentSessions.id, runId));
+    await transport.patchRun(runId, { parkReason: null, result: null });
     // No worktree of its own — operate at the repo root so gh_pr tools shell
     // out against the real checkout. Children create their own worktrees.
     const cwd = await prepareCwd(run);
     // The execute scaffold (orchestration loop + task list) always runs; an
     // operator-supplied prompt is appended as steering guidance rather than
     // replacing it, so the executor never loses its core instructions.
-    const base = buildExecutePrompt(plan, await repo.listTasks({ planId }));
+    const base = buildExecutePrompt(plan, await transport.listTasks({ planId }));
     const extra = initialPrompt?.trim();
     let prompt = extra ? `${base}\n\n## Operator instructions\n\n${extra}` : base;
     // Digest injection (§6.4): a (re)dispatched executor consumes its pending
     // inbox events at turn start — the digest frame is persisted and the same
     // data rides the prompt. Best-effort: never block the turn on the inbox.
     try {
-      const digest = await injectPendingInboxEvents(runId);
+      const digest = await transport.claimInboxDigest(runId);
       if (digest) prompt = `${prompt}\n\n${digest}`;
     } catch {
       // pump sweep / next turn retries pending events
@@ -2024,9 +2026,9 @@ async function runExecute(
     });
     // Atomic landing (status + event) with the terminal no-op guard. endStatus
     // may be non-terminal (parked) — the guard only bites once the row is already
-    // terminal, and applyStatusTx fires the child event only for terminal
+    // terminal, and the landing fires the child event only for terminal
     // landings. Worker path → retry the guarded finalize on a transient blip.
-    await applyStatusTx(runId, endStatus, {
+    await transport.applyStatus(runId, endStatus, {
       set: {
         parkReason: endStatus === "parked" ? turnEnd.parkReason : null,
         completedAt: isTerminalStatus(endStatus) ? new Date() : null,
@@ -2035,7 +2037,7 @@ async function runExecute(
         inputTokens: result.inputTokens ?? run.inputTokens,
         outputTokens: result.outputTokens ?? run.outputTokens,
       },
-      guard: notInArray(agentSessions.status, TERMINAL_STATUSES),
+      guard: "not-terminal",
       retries: FINALIZE_RETRIES,
     });
 
@@ -2044,13 +2046,13 @@ async function runExecute(
     // parked — it is still mid-plan by its own account.)
     try {
       if (endStatus === "completed") {
-        const tasks = await repo.listTasks({ planId });
+        const tasks = await transport.listTasks({ planId });
         const allClosed =
           tasks.length > 0 &&
           tasks.every((t) => t.state === "done" || t.state === "cancelled");
-        const planNow = await repo.getPlan(planId);
+        const planNow = await transport.getPlan(planId);
         if (allClosed && planNow && planNow.state === "accepted") {
-          await repo.updatePlan(planId, { state: "done" });
+          await transport.updatePlanState(planId, "done");
         }
       }
     } catch {
@@ -2182,34 +2184,14 @@ export async function driveDispatchedRun(runId: number): Promise<void> {
     const { text, fromUserMsg } = await dispatchTurnPrompt(run);
     await kickoffFirstTurn(runId, text, undefined, true, !fromUserMsg);
   } finally {
-    // Release the single-turn worker claim now the turn has landed. Does NOT touch
-    // heartbeatAt (the turn is over; staleness is fine). Guarded on the row NOT
-    // being in a lease status: our own turn always lands a non-lease status before
-    // this runs, so a lease status here can only mean a false death report released
-    // our claim mid-turn and a re-dispatched worker re-claimed — clearing THAT
-    // worker's healthy claim would strand it exactly the way this release exists
-    // to prevent.
-    await db
-      .update(agentSessions)
-      .set({ workerScope: null, workerPid: null })
-      .where(
-        and(
-          eq(agentSessions.id, runId),
-          notInArray(agentSessions.status, LEASE_STATUSES)
-        )
-      );
-    // FIX 3a (M7): a newer non-empty user message arrived while this turn ran — it
-    // was rejected as "already-claimed" and would otherwise never be processed.
-    // Now the claim is released, fire-and-forget a fresh dispatch so a new worker
-    // picks it up (mirrors driveChatSession's finally). Skipped when cancel/close
-    // made the run terminal — those must not be revived.
-    const cur = await get(runId);
-    if (cur && cur.status !== "cancelled" && cur.status !== "closed") {
-      const newer = (await listMessages(runId)).some(
-        (m) => m.role === "user" && m.id > priorUserId && messageText(m) !== ""
-      );
-      if (newer) void runDispatch.dispatchRun(runId).catch(() => {});
-    }
+    // Release the single-turn worker claim now the turn has landed (one
+    // transport op: clear the claim guarded on a non-lease status, then
+    // re-dispatch if a newer non-empty user message was stranded while this
+    // turn held the claim — FIX 3a (M7). In HTTP mode both halves run
+    // server-side, where the re-dispatch belongs). Does NOT touch heartbeatAt
+    // (the turn is over; staleness is fine). Skipped re-dispatch when
+    // cancel/close made the run terminal — those must not be revived.
+    await (await runTransport()).releaseClaim(runId, { lastProcessedUserMsgId: priorUserId });
   }
 }
 
@@ -2218,14 +2200,10 @@ const DISPATCH_RESUME_PROMPT =
 
 /** Extract the concatenated text of a message's content blocks. */
 function messageText(m: MessageRow): string {
-  return m.content
-    .map((b) =>
-      b.type === "text" && typeof (b as { text?: unknown }).text === "string"
-        ? (b as { text: string }).text
-        : ""
-    )
-    .join("")
-    .trim();
+  // Shared definition of "is this message empty" — the transport's
+  // claim-release stranded check uses the same helper, and the two paths must
+  // agree on whether a follow-up message warrants a re-dispatch.
+  return contentText(m.content);
 }
 
 /**
@@ -2264,7 +2242,7 @@ async function dispatchTurnPrompt(run: RunRow): Promise<{ text: string; fromUser
   // First turn of a fresh implement worktree run with no persisted messages:
   // rebuild the task prompt (synthesized, not yet persisted → caller persists it).
   if (!run.sdkSessionId && run.taskId) {
-    const task = await repo.getTask(run.taskId);
+    const task = await (await runTransport()).getTask(run.taskId);
     if (task) return { text: await buildImplementPrompt(task), fromUserMsg: false };
   }
   // Resume with nothing new to say (orphan re-dispatch): a bare continue sentinel.
@@ -2308,9 +2286,7 @@ function chatIdleMs(): number {
  *  lives on). Rides the existing run_stream NOTIFY as a plain agent_events row. */
 async function emitTurnDone(runId: number): Promise<void> {
   try {
-    await db
-      .insert(agentEvents)
-      .values({ sessionId: runId, type: "turn_done", payload: "{}", createdAt: new Date() });
+    await (await runTransport()).appendEvent(runId, "turn_done", {});
   } catch {
     // best-effort: a missed marker just falls back to the relay's safety timeout.
   }
@@ -2325,7 +2301,7 @@ async function emitTurnDone(runId: number): Promise<void> {
  * message re-dispatches a fresh worker that resumes via sdkSessionId.
  */
 export async function driveChatSession(runId: number): Promise<void> {
-  const { subscribeRunInput } = await import("./run-stream-listener");
+  const transport = await runTransport();
   const idleMs = chatIdleMs();
   const abort = new AbortController();
   // Keep the heartbeat fresh even while idle-waiting (so reconcile can't reap a
@@ -2336,12 +2312,7 @@ export async function driveChatSession(runId: number): Promise<void> {
   // SDK session already contains those turns. Each completed turn emits exactly one
   // turn_done and messages are drained in id order, so the turn_done count is the
   // number of already-processed user messages. (A fresh chat has 0 → start at 0.)
-  const priorTurns = (
-    await db
-      .select({ id: agentEvents.id })
-      .from(agentEvents)
-      .where(and(eq(agentEvents.sessionId, runId), eq(agentEvents.type, "turn_done")))
-  ).length;
+  const priorTurns = await transport.countEvents(runId, "turn_done");
   const priorUserIds = (await listMessages(runId))
     .filter((m) => m.role === "user")
     .map((m) => m.id)
@@ -2350,7 +2321,9 @@ export async function driveChatSession(runId: number): Promise<void> {
     priorTurns > 0 && priorTurns <= priorUserIds.length ? priorUserIds[priorTurns - 1] : 0;
   let pendingWake = false;
   let wake: (() => void) | null = null;
-  const unsub = await subscribeRunInput(runId, () => {
+  // New-user-message wakeups: Postgres LISTEN 'run_input' in db mode, the
+  // /control SSE channel in http mode.
+  const unsub = await transport.subscribeInput(runId, () => {
     pendingWake = true;
     wake?.();
     wake = null;
@@ -2421,39 +2394,23 @@ export async function driveChatSession(runId: number): Promise<void> {
     clearInterval(heartbeat);
     unsub();
     abort.signal.removeEventListener("abort", onAbort);
-    // Release the claim so the next message spawns a fresh worker, and land the
-    // run resumable-idle (unless cancel/close already wrote a terminal row).
-    // Guarded on the row NOT being in a lease status, mirroring the single-turn
-    // release in driveDispatchedRun: a lease status here means a false death
-    // report already released our claim and a re-dispatched worker re-claimed —
-    // don't clear the new owner's claim out from under it.
-    await db
-      .update(agentSessions)
-      .set({ workerScope: null, workerPid: null })
-      .where(
-        and(
-          eq(agentSessions.id, runId),
-          notInArray(agentSessions.status, LEASE_STATUSES)
-        )
-      );
-    const cur = await get(runId);
-    if (cur && !isTerminalStatus(cur.status)) await setStatus(runId, "idle");
-    // Final drain guard against a message stranded by the idle-timeout race: a
-    // user message can be persisted (and its run_input NOTIFY fired) in the window
-    // between our last drain and the claim release above. sendMessageToRun saw
-    // isWorkerLive()===true then, so it only NOTIFYed and did NOT dispatch — and
-    // with this worker now exiting, that message would sit unprocessed until some
-    // FUTURE message triggered a dispatch. Re-check for any unprocessed user message
-    // (id > lastProcessed, non-empty) now the claim is released and, if one exists,
-    // fire-and-forget a fresh dispatch so a new worker resumes and drains it. Also
-    // covers a run_input NOTIFY lost entirely. Skipped when cancel/close made the
-    // run terminal — those must not be revived.
-    if (cur && !isTerminalStatus(cur.status)) {
-      const stranded = (await listMessages(runId)).some(
-        (m) => m.role === "user" && m.id > lastProcessed && messageText(m) !== ""
-      );
-      if (stranded) void runDispatch.dispatchRun(runId).catch(() => {});
-    }
+    // Release the claim so the next message spawns a fresh worker, land the run
+    // resumable-idle (unless cancel/close already wrote a terminal row), and
+    // drain any message stranded by the idle-timeout race: a user message can
+    // be persisted (its wake fired) in the window between our last drain and
+    // this release — sendMessageToRun saw isWorkerLive()===true then, so it
+    // only notified and did NOT dispatch, and with this worker exiting that
+    // message would sit unprocessed forever. releaseClaim re-checks for an
+    // unprocessed non-empty user message (id > lastProcessed) after the
+    // release and fires a fresh dispatch if one exists (server-side in HTTP
+    // mode). The claim clear itself stays guarded on a non-lease status,
+    // mirroring the single-turn release: a lease status here means a false
+    // death report already released our claim and a re-dispatched worker
+    // re-claimed — don't clear the new owner's claim out from under it.
+    await transport.releaseClaim(runId, {
+      lastProcessedUserMsgId: lastProcessed,
+      idleIfNonTerminal: true,
+    });
   }
 }
 
@@ -2725,7 +2682,7 @@ interface TurnResult {
 async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   const { run, cwd, prompt, abort, author, onSdk } = args;
 
-  const persona = await repo.getPersona(run.personaId ?? "implementor");
+  const persona = await (await runTransport()).getPersona(run.personaId ?? "implementor");
   if (!persona) {
     throw new Error(
       `Persona '${run.personaId ?? "implementor"}' not found; ` +
@@ -2764,7 +2721,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
 
   const extensions: Extension[] = [
     personaPromptFactory(personaForExt),
-    personaMemoryFactory(personaForExt, run, repo, cwd),
+    personaMemoryFactory(personaForExt, run, cwd),
     sandboxFactory(cwd, sandboxDbPath),
     // Registered unconditionally for every run (worker AND in-process
     // server), regardless of persona/goal/backend/tools_profile — see
@@ -2799,9 +2756,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
 
     if (env.type === "system" && env.subtype === "init" && env.session_id) {
       sdkSessionId = env.session_id;
-      await db.update(agentSessions)
-        .set({ sdkSessionId })
-        .where(eq(agentSessions.id, run.id));
+      await (await runTransport()).patchRun(run.id, { sdkSessionId });
     }
 
     if (env.type === "assistant" && env.message?.content) {
@@ -3304,42 +3259,29 @@ async function persistMessage(
   role: MessageRow["role"],
   content: SdkContentBlock[]
 ): Promise<MessageRow> {
-  const inserted = await db
-    .insert(agentMessages)
-    .values({
-      runId,
-      role,
-      content: JSON.stringify(content),
-      createdAt: new Date(),
-    })
-    .returning();
-  return hydrateMessage(inserted[0]);
+  return (await runTransport()).appendMessage(runId, role, content);
 }
 
 async function setStatus(runId: number, status: SessionStatus) {
-  // Terminal transitions are atomic + idempotent (applyStatusTx also fires the
-  // child lifecycle event on a landed write). Non-terminal transitions keep the
-  // cheap two-step write — there is no paired-event atomicity to protect and a
-  // lost non-terminal mirror is self-healing.
-  if (isTerminalStatus(status)) {
-    await applyStatusTx(runId, status, {
-      guard: notInArray(agentSessions.status, TERMINAL_STATUSES),
-    });
-    return;
+  // Terminal transitions are atomic + idempotent (the transport's applyStatus
+  // also fires the child lifecycle event on a landed write). Non-terminal
+  // transitions keep the cheap two-step write — there is no paired-event
+  // atomicity to protect and a lost non-terminal mirror is self-healing.
+  await (await runTransport()).setStatus(runId, status);
+  if (!isTerminalStatus(status)) {
+    // The live-bus mirror for non-terminal transitions stays in THIS process —
+    // it feeds in-process SSE subscribers of the turn being driven here.
+    // (Terminal transitions emit inside applyStatusTx on a landed write.)
+    runners.get(runId)?.bus.emit("event", { type: "status", status });
   }
-  await db.update(agentSessions).set({ status }).where(eq(agentSessions.id, runId));
-  await emitStatus(runId, status);
 }
 
 // ──────────────────────────────────────────────────────────
 // Liveness lease (heartbeat) + orphan recovery
 // ──────────────────────────────────────────────────────────
 
-/** Statuses that mean "a turn is in flight"; the only ones a heartbeat covers.
- *  'parked' (like 'idle') is deliberately NOT a lease status: a parked run has
- *  no worker and no heartbeat and that is HEALTHY (§6.1) — the reaper
- *  (reconcileOrphanedRuns) and repairAbortedRun therefore never touch it. */
-const LEASE_STATUSES: SessionStatus[] = ["running", "preparing", "pushing", "opening_pr"];
+// LEASE_STATUSES ("a turn is in flight") moved to lib/types.ts — it is shared
+// with the worker transport's claim-release guard and must not fork.
 
 /** How often a live turn bumps its heartbeat. */
 const HEARTBEAT_INTERVAL_MS = 20_000;
@@ -3351,11 +3293,10 @@ const HEARTBEAT_INTERVAL_MS = 20_000;
  */
 export const HEARTBEAT_STALE_MS = 5 * 60_000;
 
-/** Bump a run's heartbeat to now. Best-effort; a missed bump just risks a reap. */
+/** Bump a run's heartbeat to now (and learn the cancel verdict — discarded
+ *  here). Best-effort; a missed bump just risks a reap. */
 async function touchHeartbeat(runId: number): Promise<void> {
-  await db.update(agentSessions)
-    .set({ heartbeatAt: new Date() })
-    .where(eq(agentSessions.id, runId));
+  await (await runTransport()).heartbeat(runId);
 }
 
 /**
@@ -3366,8 +3307,8 @@ async function touchHeartbeat(runId: number): Promise<void> {
  * turn is never mistaken for an orphan by isLeaseLive()/reconcileOrphanedRuns().
  */
 function startHeartbeat(runId: number): ReturnType<typeof setInterval> {
-  // touchHeartbeat is async now; keep it fire-and-forget but swallow rejections
-  // so a transient DB blip can't surface as an unhandled rejection.
+  // The beat is async I/O (DB or HTTP); keep it fire-and-forget but swallow
+  // rejections so a transient blip can't surface as an unhandled rejection.
   void touchHeartbeat(runId).catch(() => {});
   return setInterval(() => void touchHeartbeat(runId).catch(() => {}), HEARTBEAT_INTERVAL_MS);
 }
@@ -3375,7 +3316,9 @@ function startHeartbeat(runId: number): ReturnType<typeof setInterval> {
 /**
  * Fresh read of the cross-process cancel flag. cancel() sets `cancel_requested`
  * on the row; a detached worker (which can't see the web process's
- * AbortController) polls this at heartbeat cadence to abort its own turn.
+ * AbortController) learns it via the heartbeat answer (or the /control SSE
+ * push in HTTP mode) and aborts its own turn. Kept as a direct read for the
+ * server-side callers and tests that inspect the flag.
  */
 export async function isCancelRequested(runId: number): Promise<boolean> {
   const row = (await db
@@ -3386,11 +3329,11 @@ export async function isCancelRequested(runId: number): Promise<boolean> {
 }
 
 /**
- * Like startHeartbeat, but the same interval that keeps the liveness lease fresh
- * also polls the cross-process cancel flag and aborts the turn when it flips.
- * Used by the workers a detached run process actually executes in
+ * Like startHeartbeat, but the same beat that keeps the liveness lease fresh
+ * also carries back the cross-process cancel verdict and aborts the turn when
+ * it flips. Used by the workers a detached run process actually executes in
  * (append/runReview/runExecute) so a UI/`/stop` cancel — which only writes the
- * DB flag cross-process — still stops the turn within one heartbeat interval.
+ * flag on the server — still stops the turn within one heartbeat interval.
  * Callers thread their turn's AbortController through `abort`.
  */
 function startHeartbeatWithCancel(
@@ -3398,19 +3341,19 @@ function startHeartbeatWithCancel(
   abort: AbortController
 ): ReturnType<typeof setInterval> {
   void touchHeartbeat(runId).catch(() => {});
-  // The interval body is async and does DB I/O (touchHeartbeat + isCancelRequested);
-  // wrap it so a transient DB blip can't surface as an unhandled rejection (which,
-  // with no global handler, can crash the worker under Node's default). Mirrors the
-  // guard on startHeartbeat above.
+  // The interval body is async I/O; wrap it so a transient blip can't surface
+  // as an unhandled rejection (which, with no global handler, can crash the
+  // worker under Node's default). Mirrors the guard on startHeartbeat above.
   return setInterval(() => {
     void (async () => {
-      await touchHeartbeat(runId);
-      if ((await isCancelRequested(runId)) && !abort.signal.aborted) {
+      const transport = await runTransport();
+      const { cancelRequested } = await transport.heartbeat(runId);
+      if (cancelRequested && !abort.signal.aborted) {
         abort.abort();
         // Event system (§6.6): the abort IS the enforcement of the
         // run.cancel_requested control event — acknowledge its inbox row so
         // the next digest can show WHY the previous turn ended.
-        void markControlInjected(runId, "run.cancel_requested").catch(() => {});
+        void transport.ackCancel(runId).catch(() => {});
       }
     })().catch(() => {});
   }, HEARTBEAT_INTERVAL_MS);
@@ -3459,10 +3402,8 @@ async function repairAbortedRun(runId: number): Promise<void> {
   // Not in a lease status → cancel()/interrupt()/close() already handled it.
   if (!LEASE_STATUSES.includes(cur.status)) return;
   if (cur.goal === "<chat>" || cur.cwdStrategy === "none") {
-    await db.update(agentSessions)
-      .set({ status: "idle", completedAt: null })
-      .where(eq(agentSessions.id, runId));
-    await emitStatus(runId, "idle");
+    await (await runTransport()).patchRun(runId, { completedAt: null });
+    await setStatus(runId, "idle");
   } else {
     await setError(runId, "Turn aborted before it finished (client disconnected).");
   }
@@ -3899,10 +3840,12 @@ export async function setError(runId: number, error: string, opts?: { retries?: 
   // (or completed/cancelled) run a no-op — no re-fired event, no error overwrite.
   // reconcileOrphanedRuns only ever calls this on LEASE_STATUSES rows, so the
   // guard never blocks a legitimate reap. emitTerminalChildEvent is fired inside
-  // applyStatusTx, gated on the write actually landing.
-  await applyStatusTx(runId, "failed", {
+  // the landing write, gated on it actually landing. Routed through the
+  // transport: setError runs on worker exit paths, which in HTTP mode must not
+  // touch the DB.
+  await (await runTransport()).applyStatus(runId, "failed", {
     set: { error, completedAt: new Date() },
-    guard: notInArray(agentSessions.status, TERMINAL_STATUSES),
+    guard: "not-terminal",
     extra: { error },
     retries: opts?.retries,
   });
@@ -3959,7 +3902,7 @@ export function emitRunEvent(runId: number, type: string, payload: unknown): voi
 // Hydration
 // ──────────────────────────────────────────────────────────
 
-function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
+export function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
   return {
     id: row.id,
     goal: row.goal,

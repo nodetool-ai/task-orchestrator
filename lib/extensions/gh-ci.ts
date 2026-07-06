@@ -6,6 +6,7 @@
 import { spawn } from "node:child_process";
 import { Type } from "typebox";
 import { validatePrUrl, type ParsedPrUrl } from "../gh-url";
+import { runTransport } from "@/lib/worker";
 import type { ExtensionFactory } from "./types";
 
 interface GhResult {
@@ -138,7 +139,9 @@ export const ghCiExtension =
       | { ok: true; parsed: ParsedPrUrl; matched: { id: string; name: string } }
       | { ok: false; result: ReturnType<typeof errResult> }
     > {
-      const v = await validatePrUrl(url);
+      // Repo-remote gating reads through the transport so HTTP workers never
+      // touch the repositories table directly.
+      const v = await validatePrUrl(url, async () => (await runTransport()).listRepoRemotes());
       if ("error" in v) return { ok: false, result: errResult(v.error) };
       return { ok: true, parsed: v.parsed, matched: v.matched };
     }

@@ -11,10 +11,11 @@
 // worker_log INCREMENTALLY during the run and once more at terminal, from
 // inside the worker process (scripts/run-worker.ts), where the file exists.
 
-import { eq } from "drizzle-orm";
 import { open, stat } from "node:fs/promises";
-import { db } from "@/db";
-import { agentSessions } from "@/db/schema";
+import { runTransport } from "@/lib/worker";
+import { createLogger } from "@/lib/worker/log";
+
+const log = createLogger("worker-log-store");
 
 // Stored log tail cap (chars) so the run row stays bounded. Matches
 // run-dispatch's cap (64 * 1024); defined locally (no import) so the two
@@ -73,10 +74,12 @@ async function readFileTail(filePath: string, maxBytes: number): Promise<string 
 }
 
 /**
- * Read `filePath` and write its tail into agent_sessions.worker_log for `runId`.
- * Returns true on a successful write, false on any failure (missing/unreadable
- * file, DB error). A log-flush failure must NEVER break the run — every error
- * is swallowed (logged via console.error) so the caller can keep driving.
+ * Read `filePath` and ship its tail into agent_runs.worker_log for `runId`,
+ * via the worker transport (direct Postgres, or POST /api/worker/runs/:id/log
+ * for an HTTP-mode worker). Returns true on a successful write, false on any
+ * failure (missing/unreadable file, write error). A log-flush failure must
+ * NEVER break the run — every error is swallowed (logged) so the caller can
+ * keep driving.
  */
 export async function flushWorkerLogFromFile(runId: number, filePath: string): Promise<boolean> {
   const text = await readFileTail(filePath, READ_TAIL_BYTES);
@@ -85,13 +88,10 @@ export async function flushWorkerLogFromFile(runId: number, filePath: string): P
     return false;
   }
   try {
-    await db
-      .update(agentSessions)
-      .set({ workerLog: tailForStorage(text) })
-      .where(eq(agentSessions.id, runId));
+    await (await runTransport()).writeWorkerLog(runId, tailForStorage(text));
     return true;
   } catch (err) {
-    console.error(`[worker-log-store] flush failed for run ${runId}:`, err);
+    log.warn("flush failed", { runId, error: err as Error });
     return false;
   }
 }

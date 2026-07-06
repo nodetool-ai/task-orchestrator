@@ -16,6 +16,7 @@ import { create, get, sendMessageToRun } from "../lib/runs";
 import * as dispatch from "../lib/run-dispatch";
 
 const ENV_KEYS = [
+  "TASK_ORCH_WORKER_ALLOW_DB",
   "TASK_ORCH_INSIDE_WORKER",
   "TASK_ORCH_NESTED_DISPATCH",
   "TASK_ORCH_RUNNER",
@@ -41,6 +42,7 @@ afterEach(() => {
 
 function workerIsolateEnv() {
   process.env.TASK_ORCH_INSIDE_WORKER = "1";
+  process.env.TASK_ORCH_WORKER_ALLOW_DB = "1"; // test-only: simulated worker in the orchestrator process
   process.env.TASK_ORCH_NESTED_DISPATCH = "isolate";
 }
 

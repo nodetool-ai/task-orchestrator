@@ -13,6 +13,7 @@ import { fireDueTimers, parkedRunsWithPendingEvents } from "./inbox";
 import type { RunRow } from "./runs";
 import { getRunnerProvider, runnerProviderKindFromEnv, insideWorker, nestedDispatchMode } from "./runner/provider";
 import { isTerminalStatus } from "./types";
+import { workerDispatchEnv } from "./worker/token";
 
 // Spawns the worker for a run and returns a truthy "pid" on success or null on
 // failure. May be async (the Docker API is): dispatchRun awaits it.
@@ -636,8 +637,11 @@ export const defaultSpawn: SpawnFn = async (runId, scope) => {
 export function buildWorkerContainerConfig(runId: number, scope: string): Record<string, unknown> {
   const image = process.env.TASK_ORCH_WORKER_IMAGE!;
   const pass = (k: string) => `${k}=${process.env[k] ?? ""}`;
+  // Worker HTTP protocol (docs/worker-http-api.md): every worker gets a
+  // run-scoped API token and talks to /api/worker over HTTP + SSE. Workers
+  // hold NO database credentials — DATABASE_URL is deliberately absent.
   const env = [
-    pass("DATABASE_URL"),
+    ...Object.entries(workerDispatchEnv(runId)).map(([k, v]) => `${k}=${v}`),
     pass("GH_TOKEN"),
     // Agent credentials for BOTH backends: the Claude auth pair plus every pi
     // provider key set on the server, so a worker dispatched with
@@ -710,16 +714,25 @@ export async function dockerSpawn(runId: number, scope: string): Promise<number 
   return 1; // sentinel: container started (not a host pid). cancel() uses the name.
 }
 
-// Dev fallback: a detached `tsx scripts/run-worker.ts <id>` on the host, talking
-// to the same DATABASE_URL. No restart-survival, but dev doesn't redeploy.
+// Dev fallback: a detached `tsx scripts/run-worker.ts <id>` on the host,
+// speaking the worker HTTP protocol against this server (TASK_ORCH_WORKER_API_URL,
+// or NEXTAUTH_URL in dev) with a run-scoped token and NO database credentials —
+// the same contract as the container paths. No restart-survival, but dev
+// doesn't redeploy.
 function detachedSpawn(runId: number, _scope: string): number | null {
   const node = process.execPath;
   const tsx =
     process.env.TASK_ORCH_TSX_CLI || join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
   if (!existsSync(tsx)) throw new Error(`tsx CLI not found at ${tsx} (set TASK_ORCH_TSX_CLI to override)`);
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    TASK_ORCH_INSIDE_WORKER: "1",
+    ...workerDispatchEnv(runId),
+  };
+  delete env.DATABASE_URL;
   const child = nodeSpawn(node, [tsx, "scripts/run-worker.ts", String(runId)], {
     cwd: process.cwd(),
-    env: { ...process.env, TASK_ORCH_INSIDE_WORKER: "1" },
+    env,
     detached: true,
     stdio: "ignore",
   });

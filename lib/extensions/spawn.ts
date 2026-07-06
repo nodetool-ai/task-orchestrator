@@ -5,6 +5,12 @@
 //   - spawn__get_run
 //   - spawn__append_message
 //
+// EXECUTION MODEL: the tool bodies live in SPAWN_TOOLS (server-executable
+// registry entries, resolved by lib/worker/server-tools) — child runs are
+// created, messaged, and dispatched ON THE ORCHESTRATOR, never inside the
+// calling worker (workers hold no database access and no dispatch
+// credentials). The extension factory registers transport-backed wrappers.
+//
 // Pure helpers re-exported for direct unit testing.
 
 import { Type } from "typebox";
@@ -20,6 +26,8 @@ import type { RunRow, CwdStrategy, AppendStreamEvent } from "../runs";
 import { isTerminalStatus } from "../types";
 import type { SessionStatus } from "../types";
 import { listProfiles } from "../profiles";
+import type { OrchestratorTool, OrchestratorToolResult } from "../orchestrator-tools";
+import { runTransport } from "@/lib/worker";
 import type { ExtensionFactory } from "./types";
 
 // ────────────────────────────────────────
@@ -340,11 +348,27 @@ async function lastAgentText(runId: number): Promise<string | null> {
 }
 
 // ────────────────────────────────────────
-// Extension factory
+// Server-executable tool registry
 // ────────────────────────────────────────
 
-const ok = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined });
-const errResult = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined, isError: true });
+const ok = (text: string): OrchestratorToolResult => ({
+  content: [{ type: "text" as const, text }],
+});
+const errResult = (text: string): OrchestratorToolResult => ({
+  content: [{ type: "text" as const, text }],
+  isError: true,
+});
+
+/** Resolve the calling run for a spawn tool; ctx.runId comes from the worker
+ *  token (HTTP) or the in-process mount — never from tool params. */
+async function callerRun(ctx: { runId?: number }): Promise<RunRow | null> {
+  if (typeof ctx.runId !== "number" || ctx.runId <= 0) return null;
+  return runs.get(ctx.runId);
+}
+
+const NO_RUN = errResult(
+  "Spawn tools need a caller run context (mounted without a run id — this is a bug in the mount, not your call)."
+);
 
 /**
  * Drain an AppendStreamEvent generator (from runs.append or
@@ -415,15 +439,8 @@ function timedOutResult(runIdArg: number, seconds: number, rootId: number) {
   );
 }
 
-export interface SpawnExtensionOptions {
-  runId: number;
-  runRow: RunRow;
-}
-
-export const spawnExtension =
-  ({ runId, runRow }: SpawnExtensionOptions): ExtensionFactory =>
-  (reg) => {
-    reg.registerTool({
+export const SPAWN_TOOLS: OrchestratorTool[] = [
+    {
       name: "spawn__spawn_agent",
       label: "Spawn Agent",
       description:
@@ -462,7 +479,10 @@ export const spawnExtension =
         title: Type.Optional(Type.String()),
         initial_prompt: Type.Optional(Type.String()),
       }),
-      execute: async (_id, args) => {
+      execute: async (args: any, ctx) => {
+        const runRow = await callerRun(ctx);
+        if (!runRow) return NO_RUN;
+        const runId = runRow.id;
         // 1. Persona validation BEFORE the depth/budget checks (cheap fail first).
         const validIds = await repo.listPersonaIds();
         if (!validIds.includes(args.persona)) {
@@ -575,15 +595,15 @@ export const spawnExtension =
           )
         );
       },
-    });
+    },
 
-    reg.registerTool({
+    {
       name: "spawn__get_run",
       label: "Get Run",
       description:
         "Look up a run by id and return its current status, outcome, and last agent text. Used to poll a previously spawned child.",
       parameters: Type.Object({ id: Type.Integer({ minimum: 1 }) }),
-      execute: async (_id, { id }) => {
+      execute: async ({ id }: { id: number }, _ctx) => {
         const run = await runs.get(id);
         if (!run) {
           return errResult(`Run ${id} not found.`);
@@ -626,9 +646,9 @@ export const spawnExtension =
           )
         );
       },
-    });
+    },
 
-    reg.registerTool({
+    {
       name: "spawn__append_message",
       label: "Append Message",
       description:
@@ -649,7 +669,10 @@ export const spawnExtension =
           })
         ),
       }),
-      execute: async (_id, args) => {
+      execute: async (args: any, ctx) => {
+        const runRow = await callerRun(ctx);
+        if (!runRow) return NO_RUN;
+        const runId = runRow.id;
         // 0. Self / ancestor guard. runs.append grabs the per-run lock BEFORE
         //    any status/liveness check, and the caller's own in-flight turn
         //    holds that lock for the whole turn. Appending to self — or to a
@@ -868,5 +891,31 @@ export const spawnExtension =
         const latestText = await lastAgentText(args.run_id);
         return awaitedResult(after, latestText);
       },
-    });
+    },
+];
+
+// ────────────────────────────────────────
+// Extension factory (transport-backed wrappers)
+// ────────────────────────────────────────
+
+export interface SpawnExtensionOptions {
+  runId: number;
+}
+
+export const spawnExtension =
+  ({ runId }: SpawnExtensionOptions): ExtensionFactory =>
+  (reg) => {
+    for (const tool of SPAWN_TOOLS) {
+      reg.registerTool({
+        name: tool.name,
+        label: tool.label,
+        description: tool.description,
+        parameters: tool.parameters,
+        execute: async (_id, params) => {
+          const transport = await runTransport();
+          const r = await transport.callTool(runId, tool.name, params, { author: "agent" });
+          return { content: r.content, details: undefined, isError: r.isError ?? false };
+        },
+      });
+    }
   };

@@ -16,6 +16,7 @@ import { buildFlyWorkerEnv } from "../lib/runner/fly";
 import { create, get } from "../lib/runs";
 
 const KNOBS = [
+  "TASK_ORCH_WORKER_ALLOW_DB",
   "TASK_ORCH_NESTED_DISPATCH",
   "TASK_ORCH_RUNNER",
   "TASK_ORCH_INSIDE_WORKER",
@@ -78,6 +79,7 @@ describe("create() launch branches: nested-dispatch isolate", () => {
   it("worker + isolate: parks 'pending', persists the prompt, emits runner_deferred, does NOT dispatch", async () => {
     process.env.TASK_ORCH_DETACHED_RUNS = "1";
     process.env.TASK_ORCH_INSIDE_WORKER = "1";
+    process.env.TASK_ORCH_WORKER_ALLOW_DB = "1"; // test-only: simulated worker in the orchestrator process
     process.env.TASK_ORCH_NESTED_DISPATCH = "isolate";
     const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
 
@@ -107,6 +109,7 @@ describe("create() launch branches: nested-dispatch isolate", () => {
   it("worker + inline: dispatches (no parking, no runner_deferred)", async () => {
     process.env.TASK_ORCH_DETACHED_RUNS = "1";
     process.env.TASK_ORCH_INSIDE_WORKER = "1";
+    process.env.TASK_ORCH_WORKER_ALLOW_DB = "1"; // test-only: simulated worker in the orchestrator process
     process.env.TASK_ORCH_NESTED_DISPATCH = "inline";
     const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
 
@@ -186,6 +189,7 @@ describe("remoteRunnerEnabled inside workers", () => {
     // A Fly worker: gets INSIDE_WORKER + NESTED_DISPATCH from buildFlyWorkerEnv,
     // but deliberately NOT TASK_ORCH_RUNNER / TASK_ORCH_WORKER_IMAGE.
     process.env.TASK_ORCH_INSIDE_WORKER = "1";
+    process.env.TASK_ORCH_WORKER_ALLOW_DB = "1"; // test-only: simulated worker in the orchestrator process
     process.env.TASK_ORCH_NESTED_DISPATCH = "isolate";
     delete process.env.TASK_ORCH_RUNNER;
     delete process.env.TASK_ORCH_WORKER_IMAGE;
@@ -196,6 +200,7 @@ describe("remoteRunnerEnabled inside workers", () => {
 
   it("keeps an inline-mode worker on the in-process path", () => {
     process.env.TASK_ORCH_INSIDE_WORKER = "1";
+    process.env.TASK_ORCH_WORKER_ALLOW_DB = "1"; // test-only: simulated worker in the orchestrator process
     process.env.TASK_ORCH_NESTED_DISPATCH = "inline";
     delete process.env.TASK_ORCH_RUNNER;
     delete process.env.TASK_ORCH_WORKER_IMAGE;

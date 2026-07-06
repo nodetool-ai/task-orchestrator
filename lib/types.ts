@@ -162,6 +162,14 @@ export const SESSION_STATUSES = [
 ] as const;
 export type SessionStatus = (typeof SESSION_STATUSES)[number];
 
+/** Statuses that mean "a turn is in flight" — the only ones a heartbeat lease
+ *  covers. 'parked' (like 'idle') is deliberately NOT a lease status: a parked
+ *  run has no worker and no heartbeat and that is HEALTHY (§6.1). Single
+ *  source of truth for runs.ts (lease/orphan logic) and the worker transport
+ *  (claim-release guard) — the two must never drift, or a claim release could
+ *  clear a healthy worker's claim mid-turn. */
+export const LEASE_STATUSES: SessionStatus[] = ["running", "preparing", "pushing", "opening_pr"];
+
 export interface AgentSessionFull {
   id: number;
   taskId: string;

@@ -42,6 +42,12 @@ export default auth((req) => {
   if (path === "/api/github/webhook") {
     return NextResponse.next();
   }
+  // /api/worker/* authenticates via run-scoped HMAC bearer tokens
+  // (lib/worker/token), not a browser session. Bypass the gate so external
+  // run workers can reach the worker protocol.
+  if (path.startsWith("/api/worker/")) {
+    return NextResponse.next();
+  }
 
   if (req.auth) return NextResponse.next();
 

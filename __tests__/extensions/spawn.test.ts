@@ -449,14 +449,7 @@ describe("spawnExtension", () => {
 
   it("registers spawn_agent, get_run, append_message", () => {
     const { calls, pi } = makeStub();
-    const fakeRow: any = {
-      id: 0,
-      parentRunId: null,
-      budgetMaxUsd: null,
-      repoId: null,
-      userId: null,
-    };
-    spawnExtension({ runId: 0, runRow: fakeRow })(pi);
+    spawnExtension({ runId: 0 })(pi);
     expect(calls.map((c) => c.name).sort()).toEqual([
       "spawn__append_message",
       "spawn__get_run",

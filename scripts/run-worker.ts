@@ -16,6 +16,10 @@ import { driveDispatchedRun } from "../lib/runs";
 import { insideWorker } from "../lib/runner/provider";
 import { startWorkerLogFlusher } from "../lib/runner/worker-log-store";
 import { installProcessSafetyNet } from "../lib/transient-errors";
+import { httpTransportConfigured } from "../lib/worker";
+import { createLogger } from "../lib/worker/log";
+
+const log = createLogger("run-worker");
 
 // A transient reset of a detached DB socket (LISTEN/NOTIFY, best-effort log
 // flush) arrives as an unhandled rejection and would otherwise crash the whole
@@ -28,6 +32,12 @@ async function main() {
     console.error("[run-worker] usage: run-worker <runId>");
     process.exit(2);
   }
+
+  log.info("worker starting", {
+    runId,
+    transport: httpTransportConfigured() ? "http" : "db",
+    pid: process.pid,
+  });
 
   // Ship the worker's runner.log off the ephemeral Fly volume into Postgres so
   // its debugging history survives the Machine + volume being destroyed. The
@@ -50,8 +60,9 @@ async function main() {
   let exitCode = 0;
   try {
     await driveDispatchedRun(runId);
+    log.info("worker finished", { runId });
   } catch (e) {
-    console.error("[run-worker] fatal:", e instanceof Error ? e.stack : e);
+    log.error("worker fatal", { runId, error: e instanceof Error ? (e.stack ?? e.message) : String(e) });
     exitCode = 1;
   } finally {
     // Terminal flush of runner.log — wraps BOTH the success and the catch path

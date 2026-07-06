@@ -326,6 +326,24 @@ Requires:
 Agents can also inspect their own PR and fetch CI results on demand via the
 `gh_pr` / `gh_ci` tools (`ci_runs`, `ci_logs`, `ci_rerun`, `pr_view`, …).
 
+## Worker HTTP + SSE protocol
+
+Run workers talk to the orchestrator EXCLUSIVELY over an HTTP + SSE protocol
+(`/api/worker/*`) — **workers have no database access, ever**. Each
+dispatched worker receives the server's worker-reachable base URL
+(`TASK_ORCH_WORKER_API_URL`, falling back to `NEXTAUTH_URL` in dev) plus a
+run-scoped HMAC bearer token; `DATABASE_URL` is never passed, dispatch fails
+loudly if the URL is unconfigured, and a worker process that tries to touch
+Postgres throws at the call site. New user messages and cross-process
+cancels are pushed over an SSE control channel, and every
+orchestrator-state tool an agent can call — the 37 orchestrator tools, the
+event/timer tools, planning gates, child-spawn, persona memory — executes
+server-side via `POST /api/worker/runs/:id/tools/call`. Both ends emit
+structured logs (`TASK_ORCH_LOG_LEVEL=debug`, `TASK_ORCH_LOG_FORMAT=json`)
+so the whole worker ⇄ server conversation is observable. Full protocol,
+endpoint table, and external-worker guide:
+[docs/worker-http-api.md](docs/worker-http-api.md).
+
 ## GitHub webhooks (PR & CI feedback)
 
 Beyond the 60s merge poller, the orchestrator accepts push-based GitHub events

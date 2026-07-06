@@ -1,7 +1,7 @@
 // lib/extensions/planning.ts
 //
 // Gate tools and interceptor for the planning-agent flow. Instantiated per
-// turn with the run context (runId, current planningStage, planId).
+// turn with the run context (runId, current planningStage).
 //
 // Registers three tools that only the planning persona should use:
 //   propose_spec          — valid in gathering / spec_review
@@ -13,6 +13,13 @@
 //   - task_orch__create_task / update_task / transition_task are denied unless
 //     stage is committing or done
 //   - each gate tool is denied outside its valid stages
+//
+// EXECUTION MODEL: the tool bodies live in PLANNING_TOOLS (server-executable
+// registry entries, resolved by lib/worker/server-tools) and read/write
+// orchestrator state server-side — workers hold no database access. The
+// factory registers transport-backed wrappers and mirrors the stage
+// transitions locally after a successful call so the interceptor's gates see
+// within-turn stage changes without a round-trip.
 
 import { Type } from "typebox";
 import { eq, desc } from "drizzle-orm";
@@ -20,6 +27,8 @@ import { db } from "@/db";
 import { agentMessages, agentSessions } from "@/db/schema";
 import * as repo from "../repo";
 import type { PlanFull } from "../types";
+import type { OrchestratorTool, OrchestratorToolResult } from "../orchestrator-tools";
+import { runTransport } from "@/lib/worker";
 import type { ExtensionFactory } from "./types";
 import type { RunRow } from "../runs";
 
@@ -29,6 +38,14 @@ export interface PlanningExtensionOptions {
   runId: number;
   run: RunRow;
 }
+
+const ok = (text: string): OrchestratorToolResult => ({
+  content: [{ type: "text" as const, text }],
+});
+const errResult = (text: string): OrchestratorToolResult => ({
+  content: [{ type: "text" as const, text }],
+  isError: true,
+});
 
 /** Scan the message log (newest first) for the latest propose_spec tool_use
  *  and return its spec_markdown. Returns null if not found. */
@@ -67,156 +84,186 @@ async function findLatestSpecMarkdown(runId: number): Promise<string | null> {
   return null;
 }
 
+/** Server-side view of the fields the planning tools key on. */
+async function planningRunFields(
+  runId: number
+): Promise<{ stage: PlanningStage; title: string | null; repoId: string | null } | null> {
+  const row = (
+    await db
+      .select({
+        planningStage: agentSessions.planningStage,
+        title: agentSessions.title,
+        repoId: agentSessions.repoId,
+      })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, runId))
+  )[0];
+  if (!row) return null;
+  return {
+    stage: (row.planningStage as PlanningStage | null) ?? "gathering",
+    title: row.title,
+    repoId: row.repoId,
+  };
+}
+
+// ────────────────────────────────────────
+// Server-executable tool registry
+// ────────────────────────────────────────
+
+export const PLANNING_TOOLS: OrchestratorTool[] = [
+  {
+    name: "propose_spec",
+    label: "Propose Spec",
+    description:
+      "Present the drafted spec to the user for review. Valid in gathering and spec_review stages. " +
+      "After calling this, stop and wait — do not create the plan until the user approves.",
+    parameters: Type.Object({
+      title: Type.String({ minLength: 1, description: "Short title for the spec / plan." }),
+      spec_markdown: Type.String({
+        minLength: 1,
+        description: "Full spec in Markdown. Becomes the plan body on approval.",
+      }),
+      open_questions: Type.Optional(
+        Type.Array(Type.String(), {
+          description: "Optional questions still open for the user to answer.",
+        })
+      ),
+    }),
+    execute: async (_params, ctx) => {
+      if (!ctx.runId) return errResult("propose_spec needs a run context.");
+      const fields = await planningRunFields(ctx.runId);
+      if (!fields) return errResult(`Run ${ctx.runId} not found.`);
+      // Advance gathering → spec_review (stays spec_review on re-propose).
+      if (fields.stage === "gathering") await repo.setPlanningStage(ctx.runId, "spec_review");
+      return ok(
+        "Spec shown to the user for review. Stop now — do not create the plan " +
+          "until they approve (the approve action advances the stage to building_plan)."
+      );
+    },
+  },
+
+  {
+    name: "commit_spec_as_plan",
+    label: "Commit Spec as Plan",
+    description:
+      "Save the approved spec as a draft plan (body = spec markdown). Valid only in building_plan stage. " +
+      "Returns the new plan id. Call propose_implementation_plan immediately after.",
+    parameters: Type.Object({
+      title: Type.Optional(
+        Type.String({ description: "Plan title. Defaults to the title from propose_spec." })
+      ),
+    }),
+    execute: async (params: { title?: string }, ctx) => {
+      if (!ctx.runId) return errResult("commit_spec_as_plan needs a run context.");
+      const fields = await planningRunFields(ctx.runId);
+      if (!fields) return errResult(`Run ${ctx.runId} not found.`);
+      const specMarkdown = await findLatestSpecMarkdown(ctx.runId);
+      if (!specMarkdown) {
+        return errResult(
+          "Error: no propose_spec call found in message history — cannot determine spec body."
+        );
+      }
+
+      // Derive title from params or the run title.
+      const title = params.title?.trim() || fields.title || "Untitled Plan";
+      const repoIds = fields.repoId ? [fields.repoId] : undefined;
+
+      let plan: PlanFull;
+      try {
+        plan = await repo.createPlan({ title, body: specMarkdown, state: "draft", repoIds });
+      } catch (err) {
+        return errResult(
+          `Error creating plan: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+
+      // Write the new plan id onto the run row so orchestrator tools default to it.
+      await db
+        .update(agentSessions)
+        .set({ planId: plan.id })
+        .where(eq(agentSessions.id, ctx.runId));
+
+      return ok(
+        `Created draft plan ${plan.id}: "${plan.title}". Now call propose_implementation_plan with the task breakdown.`
+      );
+    },
+  },
+
+  {
+    name: "propose_implementation_plan",
+    label: "Propose Implementation Plan",
+    description:
+      "Present the proposed task breakdown to the user for review. Valid in building_plan and plan_review stages. " +
+      "After calling this, stop — do not create tasks until the user approves.",
+    parameters: Type.Object({
+      tasks: Type.Array(
+        Type.Object({
+          title: Type.String({ minLength: 1 }),
+          body: Type.String({ description: "Task description / context." }),
+          criteria: Type.Array(Type.String(), {
+            description: "Acceptance criteria (2–4 items).",
+          }),
+          dependencies: Type.Optional(
+            Type.Array(Type.String(), {
+              description: "Task titles this task depends on.",
+            })
+          ),
+          estimate: Type.Optional(
+            Type.String({ description: "Rough size estimate (e.g. S / M / L / XL)." })
+          ),
+        }),
+        { minItems: 1 }
+      ),
+    }),
+    execute: async (_params, ctx) => {
+      if (!ctx.runId) return errResult("propose_implementation_plan needs a run context.");
+      const fields = await planningRunFields(ctx.runId);
+      if (!fields) return errResult(`Run ${ctx.runId} not found.`);
+      // Advance building_plan → plan_review (stays plan_review on re-propose).
+      if (fields.stage === "building_plan") {
+        await repo.setPlanningStage(ctx.runId, "plan_review");
+      }
+      return ok(
+        "Implementation plan shown to the user for review. Stop now — do not create tasks " +
+          "until they approve (the approve action advances the stage to committing)."
+      );
+    },
+  },
+];
+
+// ────────────────────────────────────────
+// Extension factory (transport-backed wrappers + hard gates)
+// ────────────────────────────────────────
+
 export const planningExtension =
   (opts: PlanningExtensionOptions): ExtensionFactory =>
   (reg) => {
     // Mutable stage so within-turn changes are visible to the interceptor.
+    // Initialized from the run row at mount; mirrored locally after each
+    // successful gate tool (the server advanced the persisted stage).
     let stage: PlanningStage =
       (opts.run.planningStage as PlanningStage | null) ?? "gathering";
 
-    const setStage = async (s: PlanningStage) => {
-      stage = s;
-      await repo.setPlanningStage(opts.runId, s);
-    };
-
-    // ── propose_spec ─────────────────────────────────────────────────────────
-    reg.registerTool({
-      name: "propose_spec",
-      label: "Propose Spec",
-      description:
-        "Present the drafted spec to the user for review. Valid in gathering and spec_review stages. " +
-        "After calling this, stop and wait — do not create the plan until the user approves.",
-      parameters: Type.Object({
-        title: Type.String({ minLength: 1, description: "Short title for the spec / plan." }),
-        spec_markdown: Type.String({
-          minLength: 1,
-          description: "Full spec in Markdown. Becomes the plan body on approval.",
-        }),
-        open_questions: Type.Optional(
-          Type.Array(Type.String(), {
-            description: "Optional questions still open for the user to answer.",
-          })
-        ),
-      }),
-      execute: async (_id, _params) => {
-        // Advance gathering → spec_review (stays spec_review on re-propose).
-        if (stage === "gathering") await setStage("spec_review");
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text:
-                "Spec shown to the user for review. Stop now — do not create the plan " +
-                "until they approve (the approve action advances the stage to building_plan).",
-            },
-          ],
-        };
-      },
-    });
-
-    // ── commit_spec_as_plan ───────────────────────────────────────────────────
-    reg.registerTool({
-      name: "commit_spec_as_plan",
-      label: "Commit Spec as Plan",
-      description:
-        "Save the approved spec as a draft plan (body = spec markdown). Valid only in building_plan stage. " +
-        "Returns the new plan id. Call propose_implementation_plan immediately after.",
-      parameters: Type.Object({
-        title: Type.Optional(
-          Type.String({ description: "Plan title. Defaults to the title from propose_spec." })
-        ),
-      }),
-      execute: async (_id, params) => {
-        const specMarkdown = await findLatestSpecMarkdown(opts.runId);
-        if (!specMarkdown) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: "Error: no propose_spec call found in message history — cannot determine spec body.",
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        // Derive title from params or the run title.
-        const title = params.title?.trim() || opts.run.title || "Untitled Plan";
-        const repoIds = opts.run.repoId ? [opts.run.repoId] : undefined;
-
-        let plan: PlanFull;
-        try {
-          plan = await repo.createPlan({ title, body: specMarkdown, state: "draft", repoIds });
-        } catch (err) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Error creating plan: ${err instanceof Error ? err.message : String(err)}`,
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        // Write the new plan id onto the run row so orchestrator tools default to it.
-        await db.update(agentSessions)
-          .set({ planId: plan.id })
-          .where(eq(agentSessions.id, opts.runId));
-
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Created draft plan ${plan.id}: "${plan.title}". Now call propose_implementation_plan with the task breakdown.`,
-            },
-          ],
-        };
-      },
-    });
-
-    // ── propose_implementation_plan ───────────────────────────────────────────
-    reg.registerTool({
-      name: "propose_implementation_plan",
-      label: "Propose Implementation Plan",
-      description:
-        "Present the proposed task breakdown to the user for review. Valid in building_plan and plan_review stages. " +
-        "After calling this, stop — do not create tasks until the user approves.",
-      parameters: Type.Object({
-        tasks: Type.Array(
-          Type.Object({
-            title: Type.String({ minLength: 1 }),
-            body: Type.String({ description: "Task description / context." }),
-            criteria: Type.Array(Type.String(), {
-              description: "Acceptance criteria (2–4 items).",
-            }),
-            dependencies: Type.Optional(
-              Type.Array(Type.String(), {
-                description: "Task titles this task depends on.",
-              })
-            ),
-            estimate: Type.Optional(
-              Type.String({ description: "Rough size estimate (e.g. S / M / L / XL)." })
-            ),
-          }),
-          { minItems: 1 }
-        ),
-      }),
-      execute: async (_id, _params) => {
-        // Advance building_plan → plan_review (stays plan_review on re-propose).
-        if (stage === "building_plan") await setStage("plan_review");
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text:
-                "Implementation plan shown to the user for review. Stop now — do not create tasks " +
-                "until they approve (the approve action advances the stage to committing).",
-            },
-          ],
-        };
-      },
-    });
+    for (const tool of PLANNING_TOOLS) {
+      reg.registerTool({
+        name: tool.name,
+        label: tool.label,
+        description: tool.description,
+        parameters: tool.parameters,
+        execute: async (_id, params) => {
+          const transport = await runTransport();
+          const r = await transport.callTool(opts.runId, tool.name, params, { author: "agent" });
+          if (!r.isError) {
+            // Mirror the server-side stage transitions for the interceptor.
+            if (tool.name === "propose_spec" && stage === "gathering") stage = "spec_review";
+            if (tool.name === "propose_implementation_plan" && stage === "building_plan") {
+              stage = "plan_review";
+            }
+          }
+          return { content: r.content, details: undefined, isError: r.isError ?? false };
+        },
+      });
+    }
 
     // ── interceptor: hard gates ───────────────────────────────────────────────
     reg.interceptToolCall((event) => {
