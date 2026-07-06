@@ -41,13 +41,20 @@ export const STATE_LABEL: Record<TaskState | PlanState, string> = {
   done: "Done",
 };
 
+// A merged PR is authoritative and GitHub CI can flip between pass/fail at any
+// time, so every non-terminal PR-backed state must accept ALL states the GitHub
+// sync can derive ({testing, failing, passing, blocked, merged} — see
+// prToTaskState). Otherwise applyTaskStateFromPr / transitionTask hit an illegal
+// edge and silently no-op, stranding a task forever (e.g. a PR merged while a
+// non-required check is red would never move `failing` → `merged`). `todo` is
+// the only exception: it has no PR yet, so it just advances to in_progress.
 export const TASK_TRANSITIONS: Record<TaskState, TaskState[]> = {
   todo: ["in_progress", "cancelled"],
-  in_progress: ["testing", "blocked", "cancelled"],
+  in_progress: ["testing", "failing", "passing", "merged", "blocked", "cancelled"],
   testing: ["passing", "failing", "merged", "blocked", "cancelled"],
-  failing: ["testing", "blocked", "cancelled"],
-  passing: ["merged", "testing", "failing", "cancelled"],
-  blocked: ["in_progress", "testing", "cancelled"],
+  failing: ["testing", "passing", "merged", "blocked", "cancelled"],
+  passing: ["merged", "testing", "failing", "blocked", "cancelled"],
+  blocked: ["in_progress", "testing", "failing", "passing", "merged", "cancelled"],
   merged: [],
   cancelled: [],
 };

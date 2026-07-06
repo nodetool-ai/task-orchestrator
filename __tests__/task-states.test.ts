@@ -12,6 +12,7 @@ import {
   TASK_BOARD_STATES,
   TASK_STATES,
   TASK_TRANSITIONS,
+  type TaskState,
 } from "../lib/types";
 
 describe("TASK_STATES", () => {
@@ -34,7 +35,14 @@ describe("TASK_STATES", () => {
 describe("TASK_TRANSITIONS", () => {
   it("encodes the new lifecycle edges", () => {
     expect(TASK_TRANSITIONS.todo).toEqual(["in_progress", "cancelled"]);
-    expect(TASK_TRANSITIONS.in_progress).toEqual(["testing", "blocked", "cancelled"]);
+    expect(TASK_TRANSITIONS.in_progress).toEqual([
+      "testing",
+      "failing",
+      "passing",
+      "merged",
+      "blocked",
+      "cancelled",
+    ]);
     expect(TASK_TRANSITIONS.testing).toEqual([
       "passing",
       "failing",
@@ -42,14 +50,48 @@ describe("TASK_TRANSITIONS", () => {
       "blocked",
       "cancelled",
     ]);
-    expect(TASK_TRANSITIONS.failing).toEqual(["testing", "blocked", "cancelled"]);
-    expect(TASK_TRANSITIONS.passing).toEqual(["merged", "testing", "failing", "cancelled"]);
-    expect(TASK_TRANSITIONS.blocked).toEqual(["in_progress", "testing", "cancelled"]);
+    expect(TASK_TRANSITIONS.failing).toEqual([
+      "testing",
+      "passing",
+      "merged",
+      "blocked",
+      "cancelled",
+    ]);
+    expect(TASK_TRANSITIONS.passing).toEqual([
+      "merged",
+      "testing",
+      "failing",
+      "blocked",
+      "cancelled",
+    ]);
+    expect(TASK_TRANSITIONS.blocked).toEqual([
+      "in_progress",
+      "testing",
+      "failing",
+      "passing",
+      "merged",
+      "cancelled",
+    ]);
   });
 
   it("makes merged and cancelled terminal", () => {
     expect(TASK_TRANSITIONS.merged).toEqual([]);
     expect(TASK_TRANSITIONS.cancelled).toEqual([]);
+  });
+
+  // Invariant that prevents CRITICAL stranding: a merged PR is authoritative and
+  // CI can flip pass/fail anytime, so every non-terminal PR-backed state must
+  // accept every state prToTaskState can derive. Otherwise applyTaskStateFromPr
+  // silently no-ops and the task never reaches merged (e.g. a PR merged while a
+  // non-required check is red would strand a `failing` task forever).
+  it("lets every non-terminal PR-backed state reach all GitHub-derived states", () => {
+    const ghDerivable: TaskState[] = ["testing", "failing", "passing", "blocked", "merged"];
+    for (const from of ["in_progress", "testing", "failing", "passing", "blocked"] as TaskState[]) {
+      for (const to of ghDerivable) {
+        if (to === from) continue;
+        expect(TASK_TRANSITIONS[from]).toContain(to);
+      }
+    }
   });
 
   it("has no keys for the removed review/done task states", () => {
