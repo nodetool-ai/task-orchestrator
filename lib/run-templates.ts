@@ -9,6 +9,7 @@
 
 import type { AttachmentMeta, PlanFull, TaskFull } from "./types";
 import * as repo from "./repo";
+import { runTransport } from "./worker";
 
 /**
  * Render an "Attachments" section listing images/artifacts on a task or plan.
@@ -134,7 +135,9 @@ export async function buildImplementPrompt(task: TaskFull): Promise<string> {
   // snapshot of sibling tasks so the agent knows what's already shipped
   // and what's still open. The agent can fetch more detail via
   // mcp__task_orch__get_plan / get_task; this is proactive lookahead.
-  const plan = await repo.getPlan(task.planId);
+  // Via the transport: buildImplementPrompt also runs inside dispatched
+  // workers (dispatchTurnPrompt), which in HTTP mode have no DB access.
+  const plan = await (await runTransport()).getPlan(task.planId);
   if (plan) {
     lines.push("");
     lines.push(`# Parent plan: ${plan.id} — ${plan.title}`);

@@ -41,33 +41,34 @@ declare global {
 // the default `public` schema.
 const PG_SCHEMA = process.env.TASK_ORCH_PG_SCHEMA;
 
-// A single lazily-connecting postgres.js client, reused across HMR / module
-// reloads via globals. Unlike better-sqlite3, the connection is async and opens
-// on first query — so the drizzle instance is still created synchronously here,
-// keeping the `db` export shape stable. Migrations + seeding run out-of-band via
-// initDb() (boot / test setup), not at import time.
-const dbUrl = databaseUrl();
-// Supabase (and any explicit sslmode=require URL) requires TLS; a local dev/CI
-// Postgres does not. Auto-enable so the same code works against both without a
-// separate flag. `ssl: "require"` does TLS without CA verification, which the
-// Supabase poolers accept.
-const needsSsl = /supabase\.(co|com)/i.test(dbUrl) || /[?&]sslmode=require/i.test(dbUrl);
-// Supavisor TRANSACTION mode (port 6543) supports neither prepared statements
-// nor LISTEN/NOTIFY. This app depends on LISTEN/NOTIFY (run_stream + run_input),
-// so the SESSION-mode pooler (port 5432) is required. Guard loudly if a 6543 URL
-// slips in, and at least turn off prepared statements so plain queries survive.
-const isTxnPooler = /pooler\.supabase\.com:6543/i.test(dbUrl);
-if (isTxnPooler) {
-  console.warn(
-    "[db] DATABASE_URL points at the Supabase TRANSACTION pooler (:6543), which " +
-      "does not support LISTEN/NOTIFY — run streaming and worker messaging will " +
-      "silently stop working. Switch to the SESSION pooler (:5432)."
-  );
-}
-
-const client: Client =
-  globalThis.__tasksPg ??
-  postgres(dbUrl, {
+// A single lazily-CREATED and lazily-connecting postgres.js client, reused
+// across HMR / module reloads via globals. Creation is deferred to first use
+// (behind the proxies below) so that a process which never touches the DB —
+// an HTTP-mode worker speaking the /api/worker protocol — can run WITHOUT
+// DATABASE_URL. Any accidental direct DB access in such a worker then fails
+// loudly at the exact call site with an actionable message instead of at
+// import time. Migrations + seeding run out-of-band via initDb() (boot / test
+// setup), not at import time.
+function createClient(): Client {
+  const dbUrl = databaseUrl();
+  // Supabase (and any explicit sslmode=require URL) requires TLS; a local dev/CI
+  // Postgres does not. Auto-enable so the same code works against both without a
+  // separate flag. `ssl: "require"` does TLS without CA verification, which the
+  // Supabase poolers accept.
+  const needsSsl = /supabase\.(co|com)/i.test(dbUrl) || /[?&]sslmode=require/i.test(dbUrl);
+  // Supavisor TRANSACTION mode (port 6543) supports neither prepared statements
+  // nor LISTEN/NOTIFY. This app depends on LISTEN/NOTIFY (run_stream + run_input),
+  // so the SESSION-mode pooler (port 5432) is required. Guard loudly if a 6543 URL
+  // slips in, and at least turn off prepared statements so plain queries survive.
+  const isTxnPooler = /pooler\.supabase\.com:6543/i.test(dbUrl);
+  if (isTxnPooler) {
+    console.warn(
+      "[db] DATABASE_URL points at the Supabase TRANSACTION pooler (:6543), which " +
+        "does not support LISTEN/NOTIFY — run streaming and worker messaging will " +
+        "silently stop working. Switch to the SESSION pooler (:5432)."
+    );
+  }
+  return postgres(dbUrl, {
     max: 10,
     // Recycle connections proactively to reduce stale-socket resets — an idle
     // connection dropped by flycast/the DB surfaces as an ECONNRESET on next use
@@ -83,13 +84,64 @@ const client: Client =
     ...(isTxnPooler ? { prepare: false } : {}),
     ...(PG_SCHEMA ? { connection: { search_path: PG_SCHEMA } } : {}),
   });
-if (!globalThis.__tasksPg) globalThis.__tasksPg = client;
+}
 
-export const db: DB = globalThis.__tasksDb ?? drizzle(client, { schema });
-if (!globalThis.__tasksDb) globalThis.__tasksDb = db;
+function ensureClient(): Client {
+  if (!globalThis.__tasksPg) {
+    if (!process.env.DATABASE_URL && process.env.TASK_ORCH_WORKER_API_URL) {
+      // The one misconfiguration this proxy exists to catch: an HTTP-mode
+      // worker (no DATABASE_URL) reached a code path that still talks to
+      // Postgres directly. Name the situation instead of "DATABASE_URL is
+      // not set".
+      throw new Error(
+        "Direct database access attempted in an HTTP-mode worker (DATABASE_URL " +
+          "is unset; TASK_ORCH_WORKER_API_URL is set). This code path has not " +
+          "been routed through the worker transport (lib/worker) yet — see " +
+          "docs/worker-http-api.md."
+      );
+    }
+    globalThis.__tasksPg = createClient();
+  }
+  return globalThis.__tasksPg;
+}
+
+function ensureDb(): DB {
+  if (!globalThis.__tasksDb) {
+    globalThis.__tasksDb = drizzle(ensureClient(), { schema });
+  }
+  return globalThis.__tasksDb;
+}
+
+// The public `db` / `sql` exports keep their historical shapes (a drizzle
+// instance and a callable postgres.js client) but defer construction to first
+// use via proxies. postgres.js clients are callable tagged-template functions
+// with methods (listen/unsafe/end), so the sql proxy needs both traps.
+export const db: DB = new Proxy({} as DB, {
+  get(_t, prop) {
+    const real = ensureDb();
+    const v = (real as unknown as Record<PropertyKey, unknown>)[prop];
+    return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(real) : v;
+  },
+  has(_t, prop) {
+    return prop in (ensureDb() as object);
+  },
+});
 
 /** Raw postgres.js client — for LISTEN/NOTIFY and the migrator. */
-export const sql = client;
+export const sql: Client = new Proxy(function () {} as unknown as Client, {
+  get(_t, prop) {
+    const real = ensureClient();
+    const v = (real as unknown as Record<PropertyKey, unknown>)[prop];
+    return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(real) : v;
+  },
+  apply(_t, _this, args) {
+    const real = ensureClient();
+    return (real as unknown as (...a: unknown[]) => unknown)(...args);
+  },
+  has(_t, prop) {
+    return prop in (ensureClient() as object);
+  },
+});
 export { schema };
 
 let initPromise: Promise<void> | null = null;
@@ -105,7 +157,7 @@ export function initDb(): Promise<void> {
       if (PG_SCHEMA) {
         // Test isolation: create the per-worker schema and keep its migration
         // journal inside it, so parallel workers never share migration state.
-        await client.unsafe(`CREATE SCHEMA IF NOT EXISTS "${PG_SCHEMA}"`);
+        await sql.unsafe(`CREATE SCHEMA IF NOT EXISTS "${PG_SCHEMA}"`);
       }
       await migrate(db, {
         migrationsFolder: MIGRATIONS_DIR,
