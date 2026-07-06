@@ -176,7 +176,9 @@ function hydrateTask(
   notes: TaskFull["notes"],
   criteria: TaskFull["criteria"],
   attachmentMetas: AttachmentMeta[],
-  prUrl: string | null = null
+  // Latest run's PR, inferred from agent_sessions — only used as a fallback
+  // when the task's own (explicit, tool-set) pr_url column is unset.
+  inferredPrUrl: string | null = null
 ): TaskFull {
   return {
     id: row.id,
@@ -188,7 +190,7 @@ function hydrateTask(
     estimate: row.estimate,
     tags: safeJsonArray(row.tags),
     repoId: row.repoId,
-    prUrl,
+    prUrl: row.prUrl ?? inferredPrUrl ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     dependencies: deps,
@@ -963,6 +965,20 @@ export async function transitionTask(id: string, input: TransitionInput): Promis
 
 export async function deleteTask(id: string) {
   await db.delete(tasks).where(eq(tasks.id, id));
+}
+
+/**
+ * Record a task's explicit PR link (set_task_pr tool). This is the
+ * authoritative source hydrateTask reads first — distinct from the
+ * session-derived "latest run's PR" fallback used until an implementor
+ * actually calls the tool. Does not touch task state; callers decide whether
+ * a transition is also warranted.
+ */
+export async function setTaskPr(taskId: string, prUrl: string): Promise<void> {
+  await db
+    .update(tasks)
+    .set({ prUrl, updatedAt: new Date() })
+    .where(eq(tasks.id, taskId));
 }
 
 // ──────────────────────────────────────────────────────────

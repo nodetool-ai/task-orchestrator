@@ -71,7 +71,7 @@ describe("POST /api/mcp", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(Array.isArray(body.result.tools)).toBe(true);
-    expect(body.result.tools.length).toBe(36);
+    expect(body.result.tools.length).toBe(37);
     const names = body.result.tools.map((t: { name: string }) => t.name);
     expect(names).toContain("list_plans");
     expect(names).not.toContain("start_review");

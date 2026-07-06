@@ -1,6 +1,6 @@
 // lib/orchestrator-tools.ts
 //
-// Shared registry of the 36 orchestrator tool definitions.
+// Shared registry of the 37 orchestrator tool definitions.
 // The pi extension consumes this and registers each with the task_orch__ prefix.
 // The MCP server consumes this directly (bare names).
 
@@ -9,6 +9,7 @@ import * as repo from "./repo";
 import * as agentLib from "./agent";
 import * as runs from "./runs";
 import { parseReviewVerdict } from "./run-templates";
+import { parsePrUrl } from "./gh-url";
 import {
   PLAN_STATES,
   TASK_STATES,
@@ -666,6 +667,50 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       );
       if ("_error" in result) return errResult(`Error: ${result._error}`);
       return ok(`Task ${result.id} → ${result.state}.`);
+    },
+  },
+
+  {
+    name: "set_task_pr",
+    label: "Set Task PR",
+    description:
+      "Record this task's pull request URL. Call this every time you open (or re-open) a PR for a task — it's the durable link the orchestrator, CI polling, and the UI use to find the task's PR. If the task is in_progress, this also advances it to testing (PR opened, awaiting CI). Idempotent and never forces a state it hasn't earned: todo, blocked, testing, failing, passing, and merged are left exactly as they are — only pr_url is updated.",
+    parameters: Type.Object({
+      task_id: Type.Optional(Type.String()),
+      pr_url: Type.String({ minLength: 1 }),
+    }),
+    execute: async ({ task_id, pr_url }, ctx) => {
+      const taskId = resolveTaskId(task_id, ctx);
+      if (!taskId) return errResult("Error: task id required");
+      const parsed = parsePrUrl(pr_url);
+      if (!parsed) {
+        return errResult(
+          `Error: Could not parse PR url '${pr_url}'. Expected https://github.com/<owner>/<repo>/pull/<n> or <owner>/<repo>#<n>.`
+        );
+      }
+      const result = await safe(async () => {
+        const task = await repo.getTask(taskId);
+        if (!task) throw new repo.RepoError(`Task ${taskId} not found`, 404);
+        await repo.setTaskPr(taskId, parsed.canonical);
+        // Only in_progress → testing is a real "PR just opened" advance.
+        // - todo can't jump straight to testing anyway (TASK_TRANSITIONS
+        //   requires todo → in_progress first) — leave it alone rather than
+        //   fake a state it hasn't earned.
+        // - blocked → testing IS a legal edge in TASK_TRANSITIONS, but a
+        //   human/agent put it there on purpose; a PR link showing up must
+        //   not silently un-block it.
+        // - testing/failing/passing/merged already reflect real PR/CI state;
+        //   re-affirming it here would be a lie at best, a race at worst.
+        if (task.state === "in_progress") {
+          await repo.transitionTask(taskId, {
+            state: "testing",
+            note: `PR opened: ${parsed.canonical}`,
+          });
+        }
+        return task;
+      });
+      if ("_error" in result) return errResult(`Error: ${result._error}`);
+      return ok(`Task ${taskId} pr_url set to ${parsed.canonical}.`);
     },
   },
 

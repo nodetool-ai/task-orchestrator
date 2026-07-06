@@ -109,9 +109,9 @@ export interface TaskFull {
   estimate: string | null;
   tags: string[];
   repoId: string | null;
-  /** PR url of the task's most recent agent run that opened one, for display
-   *  (null if no run has opened a PR yet). A task can span several runs/PRs;
-   *  this is the latest. */
+  /** The task's PR link. Authoritative once set explicitly via the
+   *  set_task_pr tool (persisted on tasks.pr_url); until then, falls back to
+   *  the most recent agent run that opened one. Null if neither exists. */
   prUrl: string | null;
   createdAt: Date;
   updatedAt: Date;
