@@ -14,7 +14,7 @@
 // CLI script can use it without dragging in the agent runner and SDK.
 
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readlink, rm, symlink } from "node:fs/promises";
+import { lstat, mkdir, readdir, readlink, rm, symlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 export interface SharedArtifact {
@@ -27,10 +27,92 @@ export interface SharedArtifact {
   whenMissingAtRoot: "create" | "skip";
 }
 
+// `.next` is a single top-level cache. `node_modules` is handled separately by
+// the node_modules-tree linker below (a monorepo has one at the root AND one per
+// workspace, e.g. web/node_modules, packages/*/node_modules), so it is NOT in
+// this list — linkSharedWorktreeArtifacts links the whole tree, not just the root.
 export const SHARED_WORKTREE_ARTIFACTS: SharedArtifact[] = [
-  { name: "node_modules", whenMissingAtRoot: "skip" },
   { name: ".next", whenMissingAtRoot: "create" },
 ];
+
+// How deep to walk when discovering node_modules dirs. Covers root (0),
+// web/electron (1), packages/<pkg> (2), and one level of nesting beyond — deep
+// enough for the workspace layouts we bake, shallow enough to stay cheap.
+const NODE_MODULES_SCAN_MAX_DEPTH = 4;
+// Directories never worth descending into while discovering node_modules dirs.
+const SCAN_PRUNE_DIRS = new Set([".git", ".worktrees", ".next", ".turbo", "dist"]);
+
+/**
+ * Discover every `node_modules` directory under `baseDir`, returned as paths
+ * relative to `baseDir` (e.g. "node_modules", "web/node_modules",
+ * "packages/websocket/node_modules"). Prunes at each `node_modules` (records it,
+ * never descends into its contents) and skips build/vcs dirs, so this is cheap
+ * even when the trees themselves are multi-GB. Order is stable (sorted).
+ */
+export async function discoverNodeModulesDirs(baseDir: string): Promise<string[]> {
+  const found: string[] = [];
+  async function walk(dir: string, rel: string, depth: number): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return; // unreadable dir → nothing to discover here
+    }
+    for (const e of entries) {
+      if (!e.isDirectory() && !e.isSymbolicLink()) continue;
+      if (e.name === "node_modules") {
+        found.push(rel ? join(rel, "node_modules") : "node_modules");
+        continue; // never descend into a node_modules
+      }
+      if (depth >= NODE_MODULES_SCAN_MAX_DEPTH) continue;
+      if (e.name.startsWith(".") || SCAN_PRUNE_DIRS.has(e.name)) continue;
+      if (!e.isDirectory()) continue; // don't follow non-node_modules symlinks
+      await walk(join(dir, e.name), rel ? join(rel, e.name) : e.name, depth + 1);
+    }
+  }
+  await walk(baseDir, "", 0);
+  return found.sort();
+}
+
+/**
+ * Symlink every `node_modules` directory from `fromDir` into `toDir` at the same
+ * relative path, idempotently and with the same repair/never-clobber semantics
+ * as the shared-artifact linker. Used two ways:
+ *   • prewarm (image) → per-run checkout root: baked deps become present.
+ *   • checkout root → worktree: worktrees inherit the whole install, not just the
+ *     top-level node_modules (a monorepo needs web/, packages/* linked too).
+ * A worktree that ran `isolate-env` (real private node_modules) is never
+ * clobbered. Best-effort per dir: a failure is logged, not thrown. Returns the
+ * relative paths actually linked (or already correct).
+ */
+export async function linkNodeModulesTree(fromDir: string, toDir: string): Promise<string[]> {
+  if (resolve(fromDir) === resolve(toDir)) return [];
+  const dirs = await discoverNodeModulesDirs(fromDir);
+  const linked: string[] = [];
+  await Promise.all(
+    dirs.map(async (rel) => {
+      const target = join(fromDir, rel);
+      const linkPath = join(toDir, rel);
+      try {
+        const existing = await lstat(linkPath).catch(() => null);
+        if (existing) {
+          if (!existing.isSymbolicLink()) return; // real private dir — never clobber
+          if (await linkPointsAt(linkPath, target)) {
+            linked.push(rel);
+            return;
+          }
+          await rm(linkPath, { force: true }); // stale/wrong/dangling → replace
+        }
+        await mkdir(dirname(linkPath), { recursive: true });
+        await symlinkSharedTarget(target, linkPath);
+        linked.push(rel);
+      } catch (err) {
+        console.warn(`[worktree-env] failed to link node_modules ${rel} into ${toDir}: ${describe(err)}`);
+      }
+    })
+  );
+  return linked.sort();
+}
 
 /**
  * Link each shared artifact from the repo root into a worktree, idempotently.
@@ -56,15 +138,18 @@ export async function linkSharedWorktreeArtifacts(
   // where the worktree path resolves to the repo root) — that would create a
   // self-referential link.
   if (resolve(worktreePath) === resolve(root)) return;
-  await Promise.all(
-    SHARED_WORKTREE_ARTIFACTS.map((artifact) =>
+  await Promise.all([
+    // The full node_modules tree (root + every nested workspace dir), so a
+    // worktree of a monorepo can resolve deps at every level, not just the root.
+    linkNodeModulesTree(root, worktreePath).then(() => undefined),
+    ...SHARED_WORKTREE_ARTIFACTS.map((artifact) =>
       linkOneSharedArtifact(artifact, worktreePath, root).catch((err) => {
         console.warn(
           `[worktree-env] failed to link shared ${artifact.name} into ${worktreePath}: ${describe(err)}`
         );
       })
-    )
-  );
+    ),
+  ]);
 }
 
 /**
@@ -79,8 +164,13 @@ export async function linkSharedWorktreeArtifacts(
 export async function unlinkSharedWorktreeArtifacts(
   worktreePath: string
 ): Promise<string[]> {
+  // node_modules is a whole tree of symlinks (root + nested workspaces); remove
+  // every one that is currently a symlink so the caller's fresh `npm install`
+  // repopulates a fully private tree. Real private dirs are left untouched.
+  const nmDirs = await discoverNodeModulesDirs(worktreePath);
+  const artifactNames = SHARED_WORKTREE_ARTIFACTS.map((a) => a.name);
   const unlinked = await Promise.all(
-    SHARED_WORKTREE_ARTIFACTS.map(async ({ name }) => {
+    [...nmDirs, ...artifactNames].map(async (name) => {
       const linkPath = join(worktreePath, name);
       const st = await lstat(linkPath).catch(() => null);
       if (!st?.isSymbolicLink()) return null; // absent or a real private dir

@@ -71,6 +71,7 @@ import { personaPromptFactory } from "./extensions/persona-prompt";
 import { personaMemoryFactory } from "./extensions/persona-memory";
 import { abortBridgeFactory } from "./extensions/abort-bridge";
 import { linkSharedWorktreeArtifacts } from "./worktree-env";
+import { applyPrewarmToCheckout } from "./prewarm";
 // Namespace import (not `await import`) because reconcileOrphanedRuns() is
 // synchronous, and calling through the namespace (runDispatch.dispatchRun) keeps
 // vi.spyOn(dispatch, "dispatchRun") observable for the reconcile/routing tests.
@@ -1591,6 +1592,10 @@ async function containerCheckoutAt(
       await sh(["git", "-C", work, "checkout", "-B", branch, `origin/${def}`], "/");
     }
   }
+  // Link the image-baked node_modules tree (full `npm ci` + Playwright) into this
+  // checkout when it is the prewarmed repo, so the agent starts with deps ready
+  // instead of paying a cold install. No-op off Fly / for other repos. Best-effort.
+  await applyPrewarmToCheckout(work);
   return work;
 }
 
