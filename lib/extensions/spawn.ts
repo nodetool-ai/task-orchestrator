@@ -761,6 +761,11 @@ export const spawnExtension =
         // same AppendStreamEvent frames from the durable run_stream — so the
         // child's turn runs in ITS OWN admitted container, not ours. The
         // in-process path below is kept for dev / non-remote mode.
+        // Inside an isolate-mode WORKER, remoteRunnerEnabled() is also true
+        // (run-dispatch honors TASK_ORCH_INSIDE_WORKER + TASK_ORCH_NESTED_DISPATCH),
+        // and sendMessageToRun parks the child at 'pending' for the SERVER to
+        // dispatch onto the child's own Machine instead of calling dispatchRun —
+        // a worker holds no Fly credentials (deferRunForServerDispatch in lib/runs.ts).
         if (runDispatch.remoteRunnerEnabled()) {
           // The relay controller governs only OUR tail of the child's stream:
           // aborting it unsubscribes the relay but does NOT kill the child turn,

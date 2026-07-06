@@ -35,7 +35,7 @@ import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, notInArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, notInArray, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 
 import { db } from "@/db";
@@ -705,6 +705,41 @@ async function emitRunnerDeferred(runId: number, parentRunId: number | null): Pr
   } catch {
     // ignore event mirror failures
   }
+}
+
+/**
+ * Park a run at 'pending' as a dispatch request for the SERVER's pump — the
+ * worker-side counterpart of dispatchRun for FOLLOW-UP messages, mirroring
+ * launchDetached's isolate deferral for child creation (the pending row IS the
+ * dispatch request; docs/nested-machine-dispatch.md Decision 1). A worker holds
+ * no Fly credentials, so it must never dispatch/resume Machines itself.
+ *
+ * Guarded single conditional UPDATE: a row with a live claim (workerScope set
+ * AND heartbeat fresher than HEARTBEAT_STALE_MS) is left alone — the in-flight
+ * turn drains the freshly persisted message, same as dispatchRun's
+ * "already-claimed". heartbeatAt is stamped because pumpTick measures the
+ * pending episode from it (TASK_ORCH_MAX_DEFER_MS).
+ */
+export async function deferRunForServerDispatch(
+  runId: number,
+  parentRunId: number | null
+): Promise<boolean> {
+  const staleBefore = new Date(Date.now() - HEARTBEAT_STALE_MS);
+  const parked = await db.update(agentSessions)
+    .set({ status: "pending", heartbeatAt: new Date(), workerScope: null, workerPid: null })
+    .where(and(
+      eq(agentSessions.id, runId),
+      notInArray(agentSessions.status, ["cancelled", "closed"]),
+      or(
+        isNull(agentSessions.workerScope),
+        isNull(agentSessions.heartbeatAt),
+        lt(agentSessions.heartbeatAt, staleBefore)
+      )
+    ))
+    .returning({ id: agentSessions.id });
+  if (parked.length === 0) return false;
+  await emitRunnerDeferred(runId, parentRunId);
+  return true;
 }
 
 export async function list(filter: ListFilter = {}): Promise<RunRow[]> {
@@ -2457,19 +2492,28 @@ export async function* sendMessageToRun(opts: {
   // ignore any close marker that precedes our own user_message frame.
   const ownMsg = await persistMessage(runId, role, [{ type: "text", text }]);
 
+  const workerIsolate = runDispatch.insideWorker() && runDispatch.nestedDispatchMode() === "isolate";
+
   const fresh = await get(runId);
   if (fresh) {
     if (run.goal === "<chat>") {
       if (!isWorkerLive(fresh)) {
-        // Clear a dead worker's stale claim so dispatchRun can re-claim (idle chat
-        // rows aren't a lease status, so reconcile never cleared it).
-        if (fresh.workerScope) {
-          await db
-            .update(agentSessions)
-            .set({ workerScope: null, workerPid: null })
-            .where(eq(agentSessions.id, runId));
+        if (workerIsolate) {
+          // Worker context: no Fly credentials — park the row for the server's
+          // pump instead of dispatching (deferRunForServerDispatch re-checks the
+          // claim atomically, so the isWorkerLive read above going stale is safe).
+          await deferRunForServerDispatch(runId, run.parentRunId ?? null);
+        } else {
+          // Clear a dead worker's stale claim so dispatchRun can re-claim (idle chat
+          // rows aren't a lease status, so reconcile never cleared it).
+          if (fresh.workerScope) {
+            await db
+              .update(agentSessions)
+              .set({ workerScope: null, workerPid: null })
+              .where(eq(agentSessions.id, runId));
+          }
+          await runDispatch.dispatchRun(runId);
         }
-        await runDispatch.dispatchRun(runId);
       }
       // else: a live worker will pick up the run_input notify.
     } else {
@@ -2479,7 +2523,16 @@ export async function* sendMessageToRun(opts: {
       // Once the prior turn finished it released its claim (see
       // driveDispatchedRun's finally), so this dispatch now spawns a fresh worker
       // to pick up the follow-up instead of no-oping against a ghost claim forever.
-      await runDispatch.dispatchRun(runId);
+      if (workerIsolate) {
+        // Worker context (e.g. an executor's spawn__append_message): park the
+        // child at 'pending' for the server to dispatch onto the child's OWN
+        // Machine. Running this turn in-process would put the child's build
+        // tooling inside the parent's Machine — the 2026-07-05 incident where
+        // one typecheck OOM wedged the parent and every in-flight child.
+        await deferRunForServerDispatch(runId, run.parentRunId ?? null);
+      } else {
+        await runDispatch.dispatchRun(runId);
+      }
     }
   }
 
@@ -3462,15 +3515,18 @@ export async function reconcileOrphanedRuns(): Promise<number> {
     // via isImplementWorktree, since the row is still in a *lease* status and
     // isResumableWorktreeRun only accepts post-reap terminal statuses). Clear
     // the stale claim first so dispatchRun can re-claim the row.
-    // Containerized workers re-clone from the repo-cache, so the branch (pushed
-    // to GitHub) + an SDK session is enough — the host worktree is gone with the
-    // dead container. Host/dev mode still requires the on-disk worktree.
-    const containerized = !!process.env.TASK_ORCH_WORKER_IMAGE;
+    // Remote runners (Fly Machines and Docker workers) re-clone from the branch
+    // pushed to GitHub, so branch + SDK session is enough — the worktree lives
+    // on the (dead/remote) worker, not here. On Fly especially, worktreePath is
+    // a runner-Machine volume path (/mnt/session/repo) that NEVER exists on the
+    // server, so an existsSync gate would wrongly fail every resumable orphan.
+    // Host/dev mode still requires the on-disk worktree.
+    const remote = runDispatch.remoteRunnerEnabled();
     const resumable =
       runDispatch.detachedRunsEnabled() &&
       isImplementWorktree(row) &&
       !!row.sdkSessionId &&
-      (containerized ? !!row.branch : !!row.worktreePath && existsSync(row.worktreePath));
+      (remote ? !!row.branch : !!row.worktreePath && existsSync(row.worktreePath));
     if (resumable) {
       await db.update(agentSessions)
         .set({ workerScope: null })
@@ -3492,7 +3548,19 @@ export async function reconcileOrphanedRuns(): Promise<number> {
         scopeKey: row.workerScope ?? "lease",
         resumable: false,
       });
-      await setError(row.id, "Interrupted by a process restart before the turn finished.");
+      // Say what we actually observed (a lost heartbeat), not a guessed cause —
+      // "process restart" sent incident debugging down the wrong path more than
+      // once. Include the forensics we have: heartbeat age, the worker scope
+      // (= machine/container name), and any PR the run delivered before dying.
+      const beatAge = row.heartbeatAt
+        ? `last heartbeat ${Math.max(0, Math.round((now - row.heartbeatAt.getTime()) / 60_000))} min ago`
+        : "no heartbeat recorded";
+      const delivered = row.prUrl ? ` Work delivered before the interruption: ${row.prUrl}` : "";
+      await setError(
+        row.id,
+        `Worker heartbeat lost — turn interrupted mid-flight (${beatAge}; scope ${row.workerScope ?? "none"}). ` +
+          `The worker process or its machine died or hung.${delivered}`
+      );
     }
     reaped++;
   }

@@ -129,4 +129,59 @@ describe("reconcileOrphanedRuns", () => {
     delete process.env.TASK_ORCH_DETACHED_RUNS;
     vi.restoreAllMocks();
   });
+
+  it("re-dispatches a stale Fly-runner run via its pushed branch (no server-local worktree)", async () => {
+    // Regression: on Fly the worktree lives on the runner Machine's volume
+    // (/mnt/session/repo) — a path that never exists on the SERVER. The old
+    // predicate gated branch-based resumability on TASK_ORCH_WORKER_IMAGE
+    // (the Docker path), so on Fly every orphan failed instead of resuming.
+    process.env.TASK_ORCH_RUNNER = "fly";
+    const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
+    try {
+      const run = await create({ goal: "<implement>", defer: true });
+      await db.update(agentSessions)
+        .set({
+          status: "running",
+          heartbeatAt: STALE,
+          sdkSessionId: "sess-fly-1",
+          branch: "claude/t-0001-1",
+          worktreePath: "/mnt/session/repo", // runner Machine path; absent on the server
+        })
+        .where(eq(agentSessions.id, run.id));
+
+      await reconcileOrphanedRuns();
+
+      expect(spy).toHaveBeenCalledWith(run.id);
+      expect((await get(run.id))?.status).not.toBe("failed");
+    } finally {
+      delete process.env.TASK_ORCH_RUNNER;
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("labels a genuine orphan with heartbeat forensics, not 'process restart'", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
+    await setRun(run.id, "running", STALE);
+
+    await reconcileOrphanedRuns();
+
+    const after = await get(run.id);
+    expect(after?.status).toBe("failed");
+    expect(after?.error).toMatch(/heartbeat lost/i);
+    expect(after?.error).toMatch(/\d+ min ago/);
+    expect(after?.error).not.toMatch(/process restart/i);
+  });
+
+  it("mentions the delivered PR in the failure label when the run has one", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
+    await db.update(agentSessions)
+      .set({ status: "running", heartbeatAt: STALE, prUrl: "https://github.com/o/r/pull/7" })
+      .where(eq(agentSessions.id, run.id));
+
+    await reconcileOrphanedRuns();
+
+    const after = await get(run.id);
+    expect(after?.status).toBe("failed");
+    expect(after?.error).toContain("https://github.com/o/r/pull/7");
+  });
 });

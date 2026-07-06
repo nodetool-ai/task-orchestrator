@@ -288,6 +288,23 @@ there), and the existing `runner_*` agent events
   parent (indent or tree affordance) and show each child's runner state chip
   from `runner_instances`. No schema change needed.
 
+## Follow-up turns (2026-07-06)
+
+Child *creation* deferral (Decision 1) alone was not enough: a parent
+executor's `spawn__append_message` to a finished child used to fall into the
+in-process append path inside Fly workers, because `remoteRunnerEnabled()`
+could not see the worker context (workers get neither `TASK_ORCH_RUNNER` nor
+`TASK_ORCH_WORKER_IMAGE`). The child's follow-up turn then ran inside the
+parent's Machine — one child's typecheck OOM wedged the parent and every
+in-flight sibling (incident 2026-07-05, runs #40/#41 and #43/#50/#57/#58).
+
+Now: `remoteRunnerEnabled()` is true inside isolate-mode workers, and
+`sendMessageToRun` in a worker parks the target run at `pending`
+(`deferRunForServerDispatch`) — the same "pending row is the dispatch
+request" contract as creation. The server's pump claims it and resumes the
+child's own Machine (suspended Machines resume; destroyed ones re-clone from
+the pushed branch and fall back to a fresh SDK session).
+
 ---
 
 ## Phased rollout

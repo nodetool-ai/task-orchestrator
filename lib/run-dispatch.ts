@@ -11,7 +11,7 @@ import { AGENT_CREDENTIAL_ENV_KEYS } from "./agent-backend/provider-env";
 // dynamic import), so this edge is cycle-free.
 import { fireDueTimers, parkedRunsWithPendingEvents } from "./inbox";
 import type { RunRow } from "./runs";
-import { getRunnerProvider, runnerProviderKindFromEnv } from "./runner/provider";
+import { getRunnerProvider, runnerProviderKindFromEnv, insideWorker, nestedDispatchMode } from "./runner/provider";
 import { isTerminalStatus } from "./types";
 
 // Spawns the worker for a run and returns a truthy "pid" on success or null on
@@ -74,7 +74,8 @@ function runs(): RunsApi {
 // run-dispatch). provider.ts is the shared low-level module both can import.
 // Re-exported here so callers reasoning about dispatch policy find them next to
 // detachedRunsEnabled(); runs.ts's launch branches import them from this module.
-export { insideWorker, nestedDispatchMode, type NestedDispatchMode } from "./runner/provider";
+export { insideWorker, nestedDispatchMode };
+export type { NestedDispatchMode } from "./runner/provider";
 
 export function detachedRunsEnabled(): boolean {
   if (runnerProviderKindFromEnv() === "fly") return true;
@@ -82,8 +83,15 @@ export function detachedRunsEnabled(): boolean {
   return !!v && v !== "0" && v.toLowerCase() !== "false";
 }
 
-/** True when the server must route user turns through an out-of-process runner. */
+/** True when the server must route user turns through an out-of-process runner.
+ *  Also true INSIDE an isolate-mode worker: there, turns are remote by policy —
+ *  the worker holds no Fly credentials, so append paths must defer to the
+ *  server (see runs.sendMessageToRun) rather than drive a child in-process.
+ *  Workers never receive TASK_ORCH_RUNNER / TASK_ORCH_WORKER_IMAGE (see
+ *  lib/runner/provider.ts:77), so the env-based check alone is always false
+ *  in exactly the environment that most needs the remote path. */
 export function remoteRunnerEnabled(): boolean {
+  if (insideWorker() && nestedDispatchMode() === "isolate") return true;
   return detachedRunsEnabled() && (runnerProviderKindFromEnv() === "fly" || !!process.env.TASK_ORCH_WORKER_IMAGE);
 }
 
