@@ -149,10 +149,15 @@ async function pollMergedPrs(): Promise<void> {
     })
     .from(agentSessions)
     .innerJoin(tasks, eq(tasks.id, agentSessions.taskId))
-    // `review` is the happy path; `in_progress` catches tasks whose
-    // review-transition failed or whose PR a human merged early. Both states
-    // can transition directly to `done`.
-    .where(and(isNotNull(agentSessions.prUrl), inArray(tasks.state, ["in_progress", "review"])));
+    // testing/passing/failing are the PR-open states (the happy path);
+    // `in_progress` catches tasks whose PR-transition failed or whose PR a
+    // human merged early. All of these can still reach `merged`.
+    .where(
+      and(
+        isNotNull(agentSessions.prUrl),
+        inArray(tasks.state, ["in_progress", "testing", "passing", "failing"])
+      )
+    );
 
   // Group every PR-bearing run by task. A task can have more than one run with
   // a PR (e.g. a stale run plus a follow-up that opened a different PR), and the
@@ -176,7 +181,7 @@ async function pollMergedPrs(): Promise<void> {
       if (!info || info.state !== "MERGED") continue;
       try {
         await repo.transitionTask(taskId, {
-          state: "done",
+          state: "merged",
           note: `PR merged: ${r.prUrl}`,
           // A merged PR is authoritative — close the task even if acceptance
           // criteria were never checked off, rather than stranding it open.
@@ -194,7 +199,7 @@ async function pollMergedPrs(): Promise<void> {
           await repo.addNote(
             taskId,
             "claude-agent",
-            `PR merged but could not transition to done: ${describe(err)}`
+            `PR merged but could not transition to merged: ${describe(err)}`
           );
         } catch {
           // ignore

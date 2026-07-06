@@ -57,19 +57,19 @@ function splitSettled<T>(results: PromiseSettledResult<T>[]) {
 }
 
 describe("transitionTask concurrency (M17a)", () => {
-  it("serializes two concurrent transitions out of 'review': exactly one wins, the loser is rejected, the winner's terminal state survives", async () => {
+  it("serializes two concurrent transitions out of 'testing': exactly one wins, the loser is rejected, the winner's terminal state survives", async () => {
     await repo.createPlan({ id: "P-race", title: "Race", date: "2026-01-15" });
     const task = await repo.createTask({ planId: "P-race", title: "T", date: "2026-01-15" });
     await repo.transitionTask(task.id, { state: "in_progress", assignee: "alice" });
-    await repo.transitionTask(task.id, { state: "review" });
+    await repo.transitionTask(task.id, { state: "testing" });
 
-    // Verified failure scenario: a human cancels (review→cancelled) while the
-    // PR-merge poller marks done (review→done, bypassCriteria). Both are legal
-    // *from* review, but done and cancelled are mutually exclusive terminal
-    // states — whichever commits first must make the other illegal.
+    // Verified failure scenario: a human cancels (testing→cancelled) while the
+    // PR-merge poller marks merged (testing→merged, bypassCriteria). Both are
+    // legal *from* testing, but merged and cancelled are mutually exclusive
+    // terminal states — whichever commits first must make the other illegal.
     const results = await Promise.allSettled([
       repo.transitionTask(task.id, { state: "cancelled" }),
-      repo.transitionTask(task.id, { state: "done", bypassCriteria: true }),
+      repo.transitionTask(task.id, { state: "merged", bypassCriteria: true }),
     ]);
 
     const { fulfilled, rejected } = splitSettled(results);
@@ -79,34 +79,34 @@ describe("transitionTask concurrency (M17a)", () => {
     expect((rejected[0].reason as Error).message).toMatch(/Cannot transition/);
 
     const winnerState = fulfilled[0].value.state;
-    expect(["cancelled", "done"]).toContain(winnerState);
+    expect(["cancelled", "merged"]).toContain(winnerState);
 
     // No lost update / no composite state: the row reflects exactly the
-    // winner, not a state the state machine forbids reaching from 'review'
+    // winner, not a state the state machine forbids reaching from 'testing'
     // via both branches.
     const final = await repo.getTask(task.id);
     expect(final!.state).toBe(winnerState);
   });
 
-  it("re-derives the done-criteria gate from the locked row under concurrent calls", async () => {
+  it("re-derives the merged-criteria gate from the locked row under concurrent calls", async () => {
     await repo.createPlan({ id: "P-crit", title: "Crit", date: "2026-01-15" });
     const task = await repo.createTask({ planId: "P-crit", title: "T", date: "2026-01-15" });
     await repo.addCriterion(task.id, "ship it");
     await repo.transitionTask(task.id, { state: "in_progress", assignee: "alice" });
-    await repo.transitionTask(task.id, { state: "review" });
+    await repo.transitionTask(task.id, { state: "testing" });
 
-    // One racer bypasses criteria to force done; the other tries a plain
-    // done (no bypass), which must be rejected by the criteria gate whether
+    // One racer bypasses criteria to force merged; the other tries a plain
+    // merged (no bypass), which must be rejected by the criteria gate whether
     // it runs before the winner commits (sees the criterion still open on
     // the locked row) or after (the criterion is still open — nothing here
-    // ever marks it done — so the gate re-derived from the now-`done` row
+    // ever marks it done — so the gate re-derived from the now-`merged` row
     // still correctly rejects). The buggy pre-fix version read criteria
     // once via getTask() outside any lock, so this only exercises the fix
     // meaningfully together with the composite-transition test above; kept
     // here as a direct regression check on the gate itself.
     const results = await Promise.allSettled([
-      repo.transitionTask(task.id, { state: "done", bypassCriteria: true }),
-      repo.transitionTask(task.id, { state: "done" }),
+      repo.transitionTask(task.id, { state: "merged", bypassCriteria: true }),
+      repo.transitionTask(task.id, { state: "merged" }),
     ]);
     const { fulfilled, rejected } = splitSettled(results);
     expect(fulfilled).toHaveLength(1);
@@ -114,7 +114,7 @@ describe("transitionTask concurrency (M17a)", () => {
     expect(rejected[0].reason).toBeInstanceOf(repo.RepoError);
 
     const final = await repo.getTask(task.id);
-    expect(final!.state).toBe("done");
+    expect(final!.state).toBe("merged");
   });
 });
 

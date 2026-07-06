@@ -3,9 +3,11 @@ import type { CwdStrategy } from "./runs";
 export const TASK_STATES = [
   "todo",
   "in_progress",
-  "review",
+  "testing",
+  "failing",
+  "passing",
+  "merged",
   "blocked",
-  "done",
   "cancelled",
 ] as const;
 export type TaskState = (typeof TASK_STATES)[number];
@@ -13,26 +15,40 @@ export type TaskState = (typeof TASK_STATES)[number];
 export const PLAN_STATES = ["draft", "proposed", "accepted", "done", "cancelled"] as const;
 export type PlanState = (typeof PLAN_STATES)[number];
 
-export const TASK_BOARD_STATES = ["todo", "in_progress", "review", "blocked", "done"] as const;
+export const TASK_BOARD_STATES = [
+  "todo",
+  "in_progress",
+  "testing",
+  "failing",
+  "passing",
+  "blocked",
+] as const;
 
 export const STATE_LABEL: Record<TaskState | PlanState, string> = {
   todo: "Todo",
   in_progress: "In progress",
-  review: "In review",
+  testing: "Testing",
+  failing: "Failing",
+  passing: "Passing",
+  merged: "Merged",
   blocked: "Blocked",
-  done: "Done",
   cancelled: "Cancelled",
+  // Plan states (draft/proposed/accepted/done/cancelled). `done` is a PLAN
+  // terminal — tasks no longer use it; do not remove.
   draft: "Draft",
   proposed: "Proposed",
   accepted: "Accepted",
+  done: "Done",
 };
 
 export const TASK_TRANSITIONS: Record<TaskState, TaskState[]> = {
   todo: ["in_progress", "cancelled"],
-  in_progress: ["review", "done", "blocked", "cancelled"],
-  review: ["in_progress", "done", "cancelled"],
-  blocked: ["in_progress", "cancelled"],
-  done: [],
+  in_progress: ["testing", "blocked", "cancelled"],
+  testing: ["passing", "failing", "merged", "blocked", "cancelled"],
+  failing: ["testing", "blocked", "cancelled"],
+  passing: ["merged", "testing", "failing", "cancelled"],
+  blocked: ["in_progress", "testing", "cancelled"],
+  merged: [],
   cancelled: [],
 };
 

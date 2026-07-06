@@ -176,6 +176,7 @@ export function initDb(): Promise<void> {
       });
       await seedDefaultRepo();
       await seedRequiredPersonas();
+      await migrateLegacyTaskStates();
       await syncDefaultRepoFromEnv();
     })();
   }
@@ -199,6 +200,20 @@ async function seedDefaultRepo(): Promise<void> {
       .onConflictDoNothing();
   } catch (err) {
     console.warn("db: failed to seed R-default repository:", err);
+  }
+}
+
+// The task state machine dropped the `review` and `done` task states in favor of
+// the GitHub-driven testing/failing/passing/merged lifecycle. `tasks.state` is a
+// plain text column (no DB enum), so no DDL is needed — just remap existing rows.
+// Idempotent: reruns on every boot are a no-op once no legacy rows remain. NEVER
+// touch `plans` — plan `done` is a separate, still-valid plan terminal.
+export async function migrateLegacyTaskStates(): Promise<void> {
+  try {
+    await db.update(schema.tasks).set({ state: "testing" }).where(eq(schema.tasks.state, "review"));
+    await db.update(schema.tasks).set({ state: "merged" }).where(eq(schema.tasks.state, "done"));
+  } catch (err) {
+    console.warn("db: failed to migrate legacy task states:", err);
   }
 }
 

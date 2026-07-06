@@ -50,7 +50,7 @@ async function main() {
   const tasks = [
     {
       title: "SQLite + Drizzle schema (plans, tasks, notes, criteria, deps)",
-      state: "done" as const,
+      state: "merged" as const,
       criteria: [
         "Five tables with FKs and cascades",
         "Initial SQL migration applied on first boot",
@@ -60,7 +60,7 @@ async function main() {
     },
     {
       title: "Repo layer with state-transition enforcement",
-      state: "done" as const,
+      state: "merged" as const,
       criteria: [
         "createPlan / createTask / updateTask",
         "transitionTask rejects invalid moves",
@@ -70,7 +70,7 @@ async function main() {
     },
     {
       title: "REST API under app/api/{plans,tasks}",
-      state: "done" as const,
+      state: "merged" as const,
       criteria: [
         "GET/POST collections, PATCH/DELETE items",
         "Zod-validated request bodies",
@@ -80,7 +80,7 @@ async function main() {
     },
     {
       title: "Linear-style UI (Kanban + detail pages)",
-      state: "done" as const,
+      state: "merged" as const,
       criteria: [
         "Dashboard groups tasks by state",
         "Task detail shows criteria, notes, deps",
@@ -114,13 +114,13 @@ async function main() {
     });
     ids.push(task.id);
     console.log(`  + ${task.id}  ${task.title}`);
-    if (t.state === "done") {
-      // Tick all criteria, then move through review → done.
+    if (t.state === "merged") {
+      // Tick all criteria, then move through testing → merged.
       const full = (await repo.getTask(task.id))!;
       for (const c of full.criteria) await repo.updateCriterion(c.id, { done: true });
       await repo.transitionTask(task.id, { state: "in_progress", assignee: "claude" });
-      await repo.transitionTask(task.id, { state: "review" });
-      await repo.transitionTask(task.id, { state: "done" });
+      await repo.transitionTask(task.id, { state: "testing" });
+      await repo.transitionTask(task.id, { state: "merged" });
     } else if (t.state === "in_progress") {
       await repo.transitionTask(task.id, { state: "in_progress", assignee: t.assignee });
     }

@@ -75,20 +75,22 @@ describe("classifyRun", () => {
     expect(classifyRun("budget_exhausted", null, "blocked")).toBe("blocked");
   });
 
-  it("completed run with an open PR is review only while the task awaits review", () => {
-    expect(classifyRun("completed", PR, "review")).toBe("review");
+  it("completed run with an open PR is review only while the task's PR is open", () => {
+    expect(classifyRun("completed", PR, "testing")).toBe("review");
+    expect(classifyRun("completed", PR, "passing")).toBe("review");
+    expect(classifyRun("completed", PR, "failing")).toBe("review");
   });
 
-  it("completed run whose task is done/cancelled is shipped, not review", () => {
+  it("completed run whose task is merged/cancelled is shipped, not review", () => {
     // Regression: previously any run with a prUrl was filed as review, so completed
-    // (PR merged → task done) runs lingered in the live sidebar as 'in review'.
-    expect(classifyRun("completed", PR, "done")).toBe("shipped");
+    // (PR merged → task merged) runs lingered in the live sidebar as 'in review'.
+    expect(classifyRun("completed", PR, "merged")).toBe("shipped");
     expect(classifyRun("completed", PR, "cancelled")).toBe("shipped");
   });
 
   it("completed run without a PR is shipped", () => {
-    expect(classifyRun("completed", null, "done")).toBe("shipped");
-    expect(classifyRun("completed", null, "review")).toBe("shipped");
+    expect(classifyRun("completed", null, "merged")).toBe("shipped");
+    expect(classifyRun("completed", null, "testing")).toBe("shipped");
   });
 
   it("unknown status belongs to no bucket", () => {
@@ -101,11 +103,11 @@ describe("bucketFor (live sidebar)", () => {
     expect(bucketFor("running", null, "in_progress")).toBe("running");
     expect(bucketFor("opening_pr", null, "in_progress")).toBe("review");
     expect(bucketFor("failed", null, "blocked")).toBe("blocked");
-    expect(bucketFor("completed", PR, "review")).toBe("review");
+    expect(bucketFor("completed", PR, "testing")).toBe("review");
   });
 
   it("drops shipped runs — they are not live", () => {
-    expect(bucketFor("completed", PR, "done")).toBeNull();
-    expect(bucketFor("completed", null, "done")).toBeNull();
+    expect(bucketFor("completed", PR, "merged")).toBeNull();
+    expect(bucketFor("completed", null, "merged")).toBeNull();
   });
 });

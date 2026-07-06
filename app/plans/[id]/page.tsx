@@ -36,7 +36,7 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
   const planChats = (await listRuns({ planId: plan.id })).slice(0, 8);
   const chatPromptPrefix = buildPlanChatPromptPrefix(plan, tasks);
 
-  const groupOrder: TaskState[] = [...TASK_BOARD_STATES, "cancelled"];
+  const groupOrder: TaskState[] = [...TASK_BOARD_STATES, "merged", "cancelled"];
 
   return (
     <article className="mx-auto max-w-3xl">
@@ -59,7 +59,7 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
         <div className="ml-auto flex items-center gap-2">
           <ExecutePlanButton
             planId={plan.id}
-            openTaskCount={tasks.filter((t) => t.state !== "done" && t.state !== "cancelled").length}
+            openTaskCount={tasks.filter((t) => t.state !== "merged" && t.state !== "cancelled").length}
           />
           <DeleteButton
             endpoint={`/api/plans/${plan.id}`}

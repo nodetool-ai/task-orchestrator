@@ -651,7 +651,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "transition_task",
     label: "Transition Task",
     description:
-      "Change a task's state with optional note and assignee. Allowed: todo→in_progress/cancelled, in_progress→review/done/blocked/cancelled, review→in_progress/done/cancelled, blocked→in_progress/cancelled. Going to in_progress requires an assignee. Going to done requires all acceptance criteria checked.",
+      "Change a task's state with optional note and assignee. Allowed: todo→in_progress/cancelled, in_progress→testing/blocked/cancelled, testing→passing/failing/merged/blocked/cancelled, failing→testing/blocked/cancelled, passing→merged/testing/failing/cancelled, blocked→in_progress/testing/cancelled. merged and cancelled are terminal. Going to in_progress requires an assignee. Going to merged requires all acceptance criteria checked. Note: testing/passing/failing/merged are normally driven from the PR's real GitHub/CI state, not set by hand.",
     parameters: Type.Object({
       id: Type.Optional(Type.String()),
       state: Type.Union(TASK_STATES.map((s) => Type.Literal(s)) as [ReturnType<typeof Type.Literal>, ...ReturnType<typeof Type.Literal>[]]),

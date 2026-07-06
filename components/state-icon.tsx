@@ -35,7 +35,9 @@ export function StateIcon({
           <path d="M8 2.5a5.5 5.5 0 015.5 5.5h-5.5z" fill="currentColor" />
         </svg>
       );
-    case "review":
+    case "testing":
+    case "failing":
+    case "passing":
       return (
         <svg {...common} className={cn("text-state-review shrink-0", className)}>
           <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth={stroke} />
@@ -49,6 +51,7 @@ export function StateIcon({
           <path d="M5.5 8h5" stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" />
         </svg>
       );
+    case "merged":
     case "done":
     case "accepted":
       return (

@@ -124,10 +124,16 @@ async function applyMerge(
     seenTasks.add(run.taskId);
     const task = await repo.getTask(run.taskId);
     if (!task) continue;
-    if (task.state !== "in_progress" && task.state !== "review") continue;
+    if (
+      task.state !== "in_progress" &&
+      task.state !== "testing" &&
+      task.state !== "passing" &&
+      task.state !== "failing"
+    )
+      continue;
     try {
       await repo.transitionTask(run.taskId, {
-        state: "done",
+        state: "merged",
         note: `PR merged: ${event.prUrls[0] ?? run.prUrl ?? "(unknown)"}`,
         // A merged PR is authoritative — close it even if criteria were never
         // ticked, matching the merge poller's behavior.
@@ -141,13 +147,13 @@ async function applyMerge(
           payload: JSON.stringify({ url: event.prUrls[0] ?? run.prUrl }),
           createdAt: new Date(),
         });
-      actions.push(`task ${run.taskId} → done (merged)`);
+      actions.push(`task ${run.taskId} → merged`);
     } catch (err) {
       try {
         await repo.addNote(
           run.taskId,
           "github-webhook",
-          `PR merged but could not transition to done: ${describe(err)}`
+          `PR merged but could not transition to merged: ${describe(err)}`
         );
       } catch {
         // ignore

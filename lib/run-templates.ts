@@ -63,7 +63,7 @@ export const EXECUTE_PER_TASK_BUDGET_USD = IMPLEMENT_DEFAULT_BUDGET_USD + REVIEW
  * persona's system prompt; this supplies the situational data.
  */
 export function buildExecutePrompt(plan: PlanFull, tasks: TaskFull[]): string {
-  const open = tasks.filter((t) => t.state !== "done" && t.state !== "cancelled");
+  const open = tasks.filter((t) => t.state !== "merged" && t.state !== "cancelled");
   const lines: string[] = [
     `# Execute plan ${plan.id}: ${plan.title}`,
     "",
@@ -74,7 +74,7 @@ export function buildExecutePrompt(plan: PlanFull, tasks: TaskFull[]): string {
     `## Tasks (${open.length} open of ${tasks.length})`,
   ];
   if (open.length === 0) {
-    lines.push("All tasks are already done or cancelled — just transition the plan to done.");
+    lines.push("All tasks are already merged or cancelled — just transition the plan to done.");
   }
   for (const t of tasks) {
     const deps = t.dependencies.length ? ` deps:[${t.dependencies.join(", ")}]` : "";

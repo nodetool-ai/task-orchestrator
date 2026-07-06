@@ -343,8 +343,9 @@ export async function planProgress(planId: string): Promise<PlanProgress> {
     .where(eq(tasks.planId, planId));
   const active = all.filter((t) => t.state !== "cancelled");
   const total = active.length;
-  const done = active.filter((t) => t.state === "done").length;
-  const open = active.filter((t) => t.state !== "done").length;
+  // `merged` is the sole success terminal — the completion count for a plan.
+  const done = active.filter((t) => t.state === "merged").length;
+  const open = active.filter((t) => t.state !== "merged").length;
   const pct = total === 0 ? 0 : Math.round((done / total) * 100);
   return { total, done, pct, open };
 }
@@ -366,7 +367,7 @@ export async function planProgressBatch(planIds: string[]): Promise<Map<string, 
     if (r.state === "cancelled") continue;
     const p = out.get(r.planId)!;
     p.total += Number(r.n);
-    if (r.state === "done") p.done += Number(r.n);
+    if (r.state === "merged") p.done += Number(r.n);
   }
   for (const p of out.values()) {
     p.open = p.total - p.done;
@@ -542,9 +543,11 @@ export async function taskCountsByState(): Promise<Record<TaskState, number>> {
   const out: Record<TaskState, number> = {
     todo: 0,
     in_progress: 0,
-    review: 0,
+    testing: 0,
+    failing: 0,
+    passing: 0,
+    merged: 0,
     blocked: 0,
-    done: 0,
     cancelled: 0,
   };
   for (const r of rows) out[r.state as TaskState] = Number(r.n);
@@ -930,7 +933,7 @@ export async function transitionTask(id: string, input: TransitionInput): Promis
     if (input.state === "in_progress" && !assignee) {
       throw new RepoError("Going to in_progress requires an assignee", 400);
     }
-    if (input.state === "done" && !input.bypassCriteria) {
+    if (input.state === "merged" && !input.bypassCriteria) {
       // Re-read criteria inside the tx too — otherwise a concurrent
       // updateCriterion could race the same way the transition itself did.
       const criteriaRows = await tx
@@ -940,7 +943,7 @@ export async function transitionTask(id: string, input: TransitionInput): Promis
       const openCriteria = criteriaRows.filter((c) => !c.done).length;
       if (openCriteria > 0) {
         throw new RepoError(
-          `Cannot mark done: ${openCriteria} acceptance criteria still open`,
+          `Cannot mark merged: ${openCriteria} acceptance criteria still open`,
           400
         );
       }

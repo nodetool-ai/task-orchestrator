@@ -164,8 +164,8 @@ describe("transitionTask", () => {
     id = (await repo.createTask({ planId: "P-test", title: "T", date: "2026-01-15" })).id;
   });
 
-  it("rejects invalid transition (todo → done)", async () => {
-    await expect(repo.transitionTask(id, { state: "done" })).rejects.toThrow(/Cannot transition/);
+  it("rejects invalid transition (todo → merged)", async () => {
+    await expect(repo.transitionTask(id, { state: "merged" })).rejects.toThrow(/Cannot transition/);
   });
 
   it("requires assignee to enter in_progress", async () => {
@@ -178,27 +178,30 @@ describe("transitionTask", () => {
     expect(t.assignee).toBe("alice");
   });
 
-  it("rejects done while criteria are open", async () => {
+  it("rejects merged while criteria are open", async () => {
     await repo.addCriterion(id, "ship it");
     await repo.transitionTask(id, { state: "in_progress", assignee: "alice" });
-    await expect(repo.transitionTask(id, { state: "done" })).rejects.toThrow(/criteria/);
+    await repo.transitionTask(id, { state: "testing" });
+    await expect(repo.transitionTask(id, { state: "merged" })).rejects.toThrow(/criteria/);
   });
 
-  it("bypassCriteria forces done past open criteria", async () => {
+  it("bypassCriteria forces merged past open criteria", async () => {
     await repo.addCriterion(id, "ship it");
     await repo.transitionTask(id, { state: "in_progress", assignee: "alice" });
-    const after = await repo.transitionTask(id, { state: "done", bypassCriteria: true });
-    expect(after.state).toBe("done");
+    await repo.transitionTask(id, { state: "testing" });
+    const after = await repo.transitionTask(id, { state: "merged", bypassCriteria: true });
+    expect(after.state).toBe("merged");
   });
 
-  it("permits done when every criterion is checked", async () => {
+  it("permits merged when every criterion is checked", async () => {
     await repo.addCriterion(id, "ship it");
     await repo.addCriterion(id, "tests pass");
     const t = (await repo.getTask(id))!;
     for (const c of t.criteria) await repo.updateCriterion(c.id, { done: true });
     await repo.transitionTask(id, { state: "in_progress", assignee: "alice" });
-    const after = await repo.transitionTask(id, { state: "done" });
-    expect(after.state).toBe("done");
+    await repo.transitionTask(id, { state: "testing" });
+    const after = await repo.transitionTask(id, { state: "merged" });
+    expect(after.state).toBe("merged");
   });
 
   it("appends a note on every state change", async () => {
@@ -216,9 +219,10 @@ describe("transitionTask", () => {
     expect(after.notes[0].body).toMatch(/in_progress/);
   });
 
-  it("locks done as a terminal state", async () => {
+  it("locks merged as a terminal state", async () => {
     await repo.transitionTask(id, { state: "in_progress", assignee: "alice" });
-    await repo.transitionTask(id, { state: "done" });
+    await repo.transitionTask(id, { state: "testing" });
+    await repo.transitionTask(id, { state: "merged", bypassCriteria: true });
     await expect(repo.transitionTask(id, { state: "in_progress", assignee: "alice" })).rejects.toThrow(
       /terminal/
     );
@@ -293,7 +297,8 @@ describe("plan progress", () => {
     const b = await repo.createTask({ planId: "P-test", title: "B", date: "2026-01-15" });
     const c = await repo.createTask({ planId: "P-test", title: "C", date: "2026-01-15" });
     await repo.transitionTask(a.id, { state: "in_progress", assignee: "x" });
-    await repo.transitionTask(a.id, { state: "done" });
+    await repo.transitionTask(a.id, { state: "testing" });
+    await repo.transitionTask(a.id, { state: "merged", bypassCriteria: true });
     await repo.transitionTask(c.id, { state: "cancelled" });
     void b;
     const prog = await repo.planProgress("P-test");
