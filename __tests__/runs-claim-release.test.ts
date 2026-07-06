@@ -177,7 +177,11 @@ describe("env-scrub extension is registered for every run (Tier 0)", () => {
     const cap: { prompt?: string; extensions?: any[] } = {};
     vi.spyOn(backend, "getBackend").mockResolvedValue(capturingBackend(cap));
     vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
-    const run = await create({ goal: "adhoc", cwdStrategy: "none", defer: true });
+    // A checkout run (worktree): Bash is legitimately available, so env-scrub's
+    // command mutation is the interceptor decision. (A cwd=none run denies Bash
+    // outright via the tool-policy interceptor, so env-scrub's bash scrub is moot
+    // there — see __tests__/extensions/tool-policy.test.ts.)
+    const run = await create({ goal: "adhoc", cwdStrategy: "worktree", defer: true });
     await insertUser(run.id, "go");
     await claim(run.id);
 
