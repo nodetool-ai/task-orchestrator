@@ -179,8 +179,12 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
               }
             }
           }
-          // Server closed (deploy, idle timeout) — reconnect.
+          // Server closed (deploy, idle timeout) — reconnect after a short
+          // pause. Without the pause, a server that accepts and immediately
+          // closes the stream (misbehaving proxy, instant idle timeout) would
+          // spin this loop as fast as fetch round-trips allow.
           log.debug("control stream ended; reconnecting", { runId });
+          if (!stopped) await new Promise((r) => setTimeout(r, SSE_RECONNECT_MS[0]));
         } catch (err) {
           if (stopped || abort.signal.aborted) return;
           const ms = SSE_RECONNECT_MS[Math.min(failures, SSE_RECONNECT_MS.length - 1)];
@@ -232,13 +236,18 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
     },
 
     async applyStatus(runId, status, o: ApplyStatusOpts = {}) {
-      // The server-side write is CAS-guarded, so retrying an ambiguous failure
-      // is safe (a replay after a landed write matches 0 rows → applied:false,
-      // which callers already treat as "someone finalized").
+      // Two retry layers, both safe because the server-side write is
+      // CAS-guarded (a replay after a landed write matches 0 rows →
+      // applied:false, which callers already treat as "someone finalized"):
+      //   • `retries` travels in the BODY so a transient server-side DB error
+      //     is retried next to the DB (finalizeWithRetry semantics — the
+      //     client only sees an opaque 500 for those);
+      //   • the same count is used client-side for network-level failures
+      //     (connection refused, dropped response).
       const { applied } = await request<{ applied: boolean }>(
         "POST",
         `runs/${runId}/status`,
-        { mode: "cas", status, set: o.set, guard: o.guard, extra: o.extra },
+        { mode: "cas", status, set: o.set, guard: o.guard, extra: o.extra, retries: o.retries },
         { retries: o.retries ?? 0 }
       );
       return applied;

@@ -16,7 +16,7 @@
 import { authorizeWorkerRequest } from "./token";
 import { dbTransport } from "./db-transport";
 import { createLogger } from "./log";
-import { isTerminalStatus, SESSION_STATUSES, TASK_STATES, type SessionStatus } from "../types";
+import { SESSION_STATUSES, TASK_STATES, type SessionStatus } from "../types";
 import type { ApplyStatusOpts, WireStatusGuard } from "./protocol";
 
 const log = createLogger("worker-api");
@@ -108,15 +108,23 @@ async function route(
   if (!auth.ok) return json(auth.status, { error: auth.error });
   sawRun(auth.runId);
 
+  // Note: Next's catch-all params (and the tests' adapter) hand us segments
+  // that are ALREADY percent-decoded — do not decode again.
   if (root === "runs") {
     const runId = parseRunId(id);
     if (runId == null) bad("Bad run id");
     return routeRun(req, method, runId, rest);
   }
-  if (root === "tasks" && id) return routeTask(req, method, auth.runId, decodeURIComponent(id), rest);
-  if (root === "plans" && id) return routePlan(req, method, auth.runId, decodeURIComponent(id), rest);
+  if (root === "tasks" && id) return routeTask(req, method, auth.runId, id, rest);
+  if (root === "plans" && id) return routePlan(req, method, auth.runId, id, rest);
   if (root === "personas" && id && method === "GET" && rest.length === 0) {
-    const persona = await dbTransport.getPersona(decodeURIComponent(id));
+    // Read scope: a worker token only sees its own run's persona.
+    const run = await requireRun(auth.runId);
+    const allowed = run.personaId ?? "implementor";
+    if (id !== allowed) {
+      throw new HttpError(403, `Run ${auth.runId} does not use persona ${id}`);
+    }
+    const persona = await dbTransport.getPersona(id);
     return json(200, { persona });
   }
   throw new HttpError(404, `No such worker endpoint: ${method} ${path.join("/")}`);
@@ -126,6 +134,33 @@ function parseRunId(raw: string | undefined): number | undefined {
   if (!raw) return undefined;
   const n = parseInt(raw, 10);
   return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+async function requireRun(runId: number) {
+  const run = await dbTransport.getRun(runId);
+  if (!run) throw new HttpError(404, `Run ${runId} not found`);
+  return run;
+}
+
+/**
+ * The task/plan ids a worker token may READ: the run's own task, the run's own
+ * plan, and the run's task's parent plan (buildImplementPrompt needs it).
+ * Writes are scoped tighter still (own task / own plan only) at the write
+ * sites. Everything else is 403 — a leaked run token must not become a board
+ * crawler; the deliberately broader orchestrator-tool surface stays available
+ * via tools/call, which is the same power an in-process agent has.
+ */
+async function runReadScope(
+  tokenRunId: number
+): Promise<{ taskId: string | null; planIds: Set<string> }> {
+  const run = await requireRun(tokenRunId);
+  const planIds = new Set<string>();
+  if (run.planId) planIds.add(run.planId);
+  if (run.taskId) {
+    const task = await dbTransport.getTask(run.taskId);
+    if (task?.planId) planIds.add(task.planId);
+  }
+  return { taskId: run.taskId, planIds };
 }
 
 async function routeRun(
@@ -174,23 +209,26 @@ async function routeRun(
     const status = body.status as SessionStatus;
     if (!SESSION_STATUSES.includes(status)) bad(`Unknown status: ${String(body.status)}`);
     if (body.mode === "set") {
-      if (isTerminalStatus(status)) {
-        // setStatus's terminal branch is applyStatus(not-terminal); accept it
-        // here so both transports behave identically.
-        const applied = await dbTransport.applyStatus(runId, status, { guard: "not-terminal" });
-        return json(200, { applied });
-      }
+      // Single implementation: dbTransport.setStatus already routes terminal
+      // statuses through the guarded applyStatus internally.
       await dbTransport.setStatus(runId, status);
       return json(200, { applied: true });
     }
     const guard = body.guard as WireStatusGuard | undefined;
     if (guard !== undefined && !GUARDS.includes(guard)) bad(`Unknown guard: ${String(guard)}`);
+    // Worker exit paths thread FINALIZE-style retries through the wire so a
+    // transient DB error during the landing is retried HERE, next to the DB —
+    // the guarded write is idempotent, and the client can't distinguish a
+    // transient server-side DB blip from a real failure (both are 500s).
+    const retries =
+      typeof body.retries === "number" && Number.isFinite(body.retries)
+        ? Math.max(0, Math.min(5, Math.floor(body.retries)))
+        : 0;
     const opts: ApplyStatusOpts = {
       set: body.set as ApplyStatusOpts["set"],
       guard,
       extra: body.extra as ApplyStatusOpts["extra"],
-      // Server-side retries stay 0: the HTTP client owns retry policy, and a
-      // guarded replay is idempotent.
+      retries,
     };
     const applied = await dbTransport.applyStatus(runId, status, opts);
     return json(200, { applied });
@@ -253,13 +291,20 @@ async function routeTask(
 ): Promise<Response> {
   const sub = rest.join("/");
   if (sub === "" && method === "GET") {
-    return json(200, { task: await dbTransport.getTask(taskId) });
+    // Read scope: the run's own task, or a sibling task in the run's plan
+    // (executors read their plan's tasks).
+    const scope = await runReadScope(tokenRunId);
+    const task = await dbTransport.getTask(taskId);
+    if (task && task.id !== scope.taskId && !scope.planIds.has(task.planId)) {
+      throw new HttpError(403, `Run ${tokenRunId} is not scoped to task ${taskId}`);
+    }
+    return json(200, { task });
   }
   // Writes are limited to the token run's OWN task — a worker token must not
   // be able to steer arbitrary board state.
   if ((sub === "transition" || sub === "notes") && method === "POST") {
-    const run = await dbTransport.getRun(tokenRunId);
-    if (!run || run.taskId !== taskId) {
+    const run = await requireRun(tokenRunId);
+    if (run.taskId !== taskId) {
       throw new HttpError(403, `Run ${tokenRunId} is not attached to task ${taskId}`);
     }
     const body = await readBody(req);
@@ -290,6 +335,14 @@ async function routePlan(
   rest: string[]
 ): Promise<Response> {
   const sub = rest.join("/");
+  if (sub === "" || (sub === "tasks" && method === "GET")) {
+    // Read scope: the run's own plan, or the run's task's parent plan
+    // (buildImplementPrompt renders plan context for implement runs).
+    const scope = await runReadScope(tokenRunId);
+    if (!scope.planIds.has(planId)) {
+      throw new HttpError(403, `Run ${tokenRunId} is not scoped to plan ${planId}`);
+    }
+  }
   if (sub === "" && method === "GET") {
     return json(200, { plan: await dbTransport.getPlan(planId) });
   }
@@ -297,8 +350,8 @@ async function routePlan(
     return json(200, { tasks: await dbTransport.listTasks({ planId }) });
   }
   if (sub === "state" && method === "POST") {
-    const run = await dbTransport.getRun(tokenRunId);
-    if (!run || run.planId !== planId) {
+    const run = await requireRun(tokenRunId);
+    if (run.planId !== planId) {
       throw new HttpError(403, `Run ${tokenRunId} is not attached to plan ${planId}`);
     }
     const { state } = await readBody(req);
@@ -322,10 +375,13 @@ async function routePlan(
 // intermediaries from idling the connection out.
 
 async function controlStream(req: Request, runId: number): Promise<Response> {
-  const run = await dbTransport.getRun(runId);
-  if (!run) throw new HttpError(404, `Run ${runId} not found`);
+  await requireRun(runId);
 
   const { subscribeRunStream } = await import("../run-stream-listener");
+  // Narrow one-column read for the cancel checks below — this fires on every
+  // run_stream wake plus a safety poll, per connected worker; a full-row
+  // getRun there would be pure waste.
+  const { isCancelRequested } = await import("../runs");
   const clog = log.child({ runId, channel: "control" });
 
   const stream = new ReadableStream<Uint8Array>({
@@ -378,8 +434,7 @@ async function controlStream(req: Request, runId: number): Promise<Response> {
       const checkCancel = async () => {
         if (closed || cancelSent) return;
         try {
-          const cur = await dbTransport.getRun(runId);
-          if (cur?.cancelRequested === 1) {
+          if (await isCancelRequested(runId)) {
             cancelSent = true;
             clog.info("pushing cancel to worker");
             send({ type: "cancel" });

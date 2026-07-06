@@ -212,21 +212,44 @@ export interface RunTransport {
   ): Promise<ToolCallResult>;
 }
 
+// ── shared content helpers ──────────────────────────────────────────────────
+
+/**
+ * Concatenated text of a message's content blocks. THE definition of "is this
+ * message empty" used by both the chat-loop drain (runs.ts messageText) and
+ * the claim-release stranded-message check (db-transport) — a fork here would
+ * make the two paths disagree on whether to re-dispatch a follow-up message.
+ */
+export function contentText(content: SdkContentBlock[]): string {
+  return content
+    .map((b) =>
+      b.type === "text" && typeof (b as { text?: unknown }).text === "string"
+        ? (b as { text: string }).text
+        : ""
+    )
+    .join("")
+    .trim();
+}
+
 // ── wire (de)serialization ──────────────────────────────────────────────────
 
-/** Keys that carry timestamps in wire payloads (RunRow, MessageRow, TaskFull,
- *  PlanFull, RepositoryRow). JSON.stringify already turns Dates into ISO
- *  strings; this is the reverse map applied by the HTTP client. */
-const DATE_KEY = /At$/;
+/** The exact timestamp keys the wire payloads carry (RunRow, MessageRow,
+ *  TaskFull/notes, PlanFull, RepositoryRow, PersonaRecord). Deliberately a
+ *  closed list: arbitrary `*At`-suffixed keys inside agent-authored jsonb
+ *  (run.result, message content, tool payloads) must NOT be revived, or the
+ *  http transport would hand callers different shapes than the db transport. */
+const DATE_KEYS = new Set(["createdAt", "updatedAt", "startedAt", "completedAt", "heartbeatAt"]);
+
+/** Subtrees that carry agent/user-authored JSON — never descended into. */
+const OPAQUE_KEYS = new Set(["content", "result", "payload", "params", "outcome"]);
 
 const ISO_DATE =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$/;
 
 /**
- * Recursively revive ISO-8601 strings under `*At` keys (createdAt, updatedAt,
- * startedAt, completedAt, heartbeatAt, …) back into Date objects. Applied to
- * every JSON payload the HTTP transport receives, so both transports hand the
- * exact same shapes to callers.
+ * Recursively revive ISO-8601 strings under the known timestamp keys back into
+ * Date objects. Applied to every JSON payload the HTTP transport receives, so
+ * both transports hand the exact same shapes to callers.
  */
 export function reviveDates<T>(value: T): T {
   return reviveAny(value, false) as T;
@@ -239,7 +262,9 @@ function reviveAny(value: unknown, keyIsDate: boolean): unknown {
   if (Array.isArray(value)) return value.map((v) => reviveAny(v, false));
   if (value !== null && typeof value === "object") {
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) out[k] = reviveAny(v, DATE_KEY.test(k));
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = OPAQUE_KEYS.has(k) ? v : reviveAny(v, DATE_KEYS.has(k));
+    }
     return out;
   }
   return value;

@@ -2,8 +2,7 @@
 
 How run workers talk to the orchestrator. Replaces "every worker holds
 `DATABASE_URL` and writes Postgres directly" with a typed protocol that can run
-over two transports; introduced 2026-07 (branch
-`claude/worker-postgres-http-sse`).
+over two transports; introduced 2026-07.
 
 ## Why
 
@@ -137,6 +136,14 @@ These run inside the worker process and still require `DATABASE_URL` (i.e.
 keep passing it, or avoid these features on HTTP-only workers). Each fails
 loudly via the lazy-db guard if hit without it:
 
+- **`lib/extensions/events.ts` — the always-on event tools** (`report_result`,
+  `raise`, `events__poll`/`emit`, `timer__*`, `ask_parent`,
+  `answer_question`). These mount in every turn and write
+  `agent_runs`/`run_timers` directly, so this is the highest-priority phase-2
+  item: an HTTP-only worker whose agent calls one of them fails that tool call
+  (the turn itself survives; the tool returns the lazy-db error). Until they
+  are routed server-side, pass `DATABASE_URL` to workers whose agents use the
+  event system (executors and parent/child trees especially).
 - `lib/extensions/planning.ts` (planning runs write plan/planning-stage rows),
 - `lib/extensions/persona-memory.ts` (persona memory reads/writes),
 - `lib/extensions/spawn.ts` + nested Machine dispatch (child runs dispatched

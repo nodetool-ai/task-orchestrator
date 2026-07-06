@@ -336,7 +336,9 @@ worker at all**. Each dispatched worker then receives that URL plus a
 run-scoped HMAC bearer token instead of `DATABASE_URL`; new user messages
 and cross-process cancels are pushed to it over an SSE control channel, and
 the 37 orchestrator tools execute server-side via
-`POST /api/worker/runs/:id/tools/call`. Both ends emit structured logs
+`POST /api/worker/runs/:id/tools/call`. (The always-on event tools —
+`report_result`, `events__*`, `timer__*` — still need direct DB access; see
+the phase-2 list in the doc below.) Both ends emit structured logs
 (`TASK_ORCH_LOG_LEVEL=debug`, `TASK_ORCH_LOG_FORMAT=json`) so the whole
 worker ⇄ server conversation is observable. Full protocol, endpoint table,
 and external-worker guide: [docs/worker-http-api.md](docs/worker-http-api.md).

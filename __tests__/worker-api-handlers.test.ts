@@ -214,6 +214,25 @@ describe("worker API domain plane", () => {
     expect(forbidden.status).toBe(403);
   });
 
+  it("403s reads outside the run's task/plan scope", async () => {
+    const planA = await repo.createPlan({ title: "Scoped plan", date: "2026-07-06" });
+    const taskA = await repo.createTask({ planId: planA.id, title: "mine", date: "2026-07-06" });
+    const planB = await repo.createPlan({ title: "Unrelated plan", date: "2026-07-06" });
+    const taskB = await repo.createTask({ planId: planB.id, title: "other", date: "2026-07-06" });
+    const run = await create({ goal: "<implement>", taskId: taskA.id, defer: true });
+
+    // Own task + its parent plan: allowed.
+    expect((await call(run.id, "GET", `tasks/${taskA.id}`)).status).toBe(200);
+    expect((await call(run.id, "GET", `plans/${planA.id}`)).status).toBe(200);
+    // Foreign task/plan: forbidden, even read-only.
+    expect((await call(run.id, "GET", `tasks/${taskB.id}`)).status).toBe(403);
+    expect((await call(run.id, "GET", `plans/${planB.id}`)).status).toBe(403);
+    expect((await call(run.id, "GET", `plans/${planB.id}/tasks`)).status).toBe(403);
+    // Persona reads are scoped to the run's own persona.
+    expect((await call(run.id, "GET", `personas/implementor`)).status).toBe(200);
+    expect((await call(run.id, "GET", `personas/reviewer`)).status).toBe(403);
+  });
+
   it("executes orchestrator tools server-side with the token run's context", async () => {
     const plan = await repo.createPlan({ title: "Tool plan", date: "2026-07-06" });
     const run = await create({ goal: "<chat>", defer: true });

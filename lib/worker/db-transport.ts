@@ -13,15 +13,22 @@
 // state (the live bus, the child-event producers). That back-edge is a LAZY
 // dynamic import (memoized) so module init stays acyclic.
 
-import { and, count, eq, notInArray, sql } from "drizzle-orm";
+import { and, count, eq, gt, notInArray, sql } from "drizzle-orm";
 import { db } from "../../db";
 import { agentEvents, agentMessages, agentSessions } from "../../db/schema";
 import * as repo from "../repo";
 import { markControlInjected } from "../inbox";
 import { subscribeRunInput } from "../run-stream-listener";
-import { SESSION_STATUSES, isTerminalStatus, type PlanState, type SessionStatus } from "../types";
+import {
+  LEASE_STATUSES,
+  SESSION_STATUSES,
+  isTerminalStatus,
+  type PlanState,
+  type SessionStatus,
+} from "../types";
 import { WORKER_LOG_MAX_CHARS } from "../runner/worker-log-store";
 import { createLogger } from "./log";
+import { contentText } from "./protocol";
 import type {
   ApplyStatusOpts,
   HeartbeatResult,
@@ -32,13 +39,10 @@ import type {
   TaskTransitionInput,
   WireStatusGuard,
 } from "./protocol";
-import type { SdkContentBlock } from "../sdk-message";
 
 const log = createLogger("worker-transport-db");
 
 const TERMINAL_STATUSES: SessionStatus[] = SESSION_STATUSES.filter(isTerminalStatus);
-/** Mirrors runs.ts LEASE_STATUSES (module-private there): "a turn is in flight". */
-const LEASE_STATUSES: SessionStatus[] = ["running", "preparing", "pushing", "opening_pr"];
 
 // Lazy, memoized back-edge into lib/runs.ts (see the module docstring).
 type RunsModule = typeof import("../runs");
@@ -81,18 +85,6 @@ function statusSetToColumns(set: StatusSet | undefined) {
   if ("error" in set) out.error = set.error;
   if ("completedAt" in set) out.completedAt = toDate(set.completedAt);
   return out;
-}
-
-/** Extract the concatenated text of a message's content blocks (stranded-message check). */
-function contentText(content: SdkContentBlock[]): string {
-  return content
-    .map((b) =>
-      b.type === "text" && typeof (b as { text?: unknown }).text === "string"
-        ? (b as { text: string }).text
-        : ""
-    )
-    .join("")
-    .trim();
 }
 
 export const dbTransport: RunTransport = {
@@ -185,17 +177,13 @@ export const dbTransport: RunTransport = {
   },
 
   async heartbeat(runId): Promise<HeartbeatResult> {
-    await db
+    // One round-trip: bump the lease AND read back the cancel flag.
+    const rows = await db
       .update(agentSessions)
       .set({ heartbeatAt: new Date() })
-      .where(eq(agentSessions.id, runId));
-    const row = (
-      await db
-        .select({ c: agentSessions.cancelRequested })
-        .from(agentSessions)
-        .where(eq(agentSessions.id, runId))
-    )[0];
-    return { cancelRequested: row?.c === 1 };
+      .where(eq(agentSessions.id, runId))
+      .returning({ c: agentSessions.cancelRequested });
+    return { cancelRequested: rows[0]?.c === 1 };
   },
 
   async ackCancel(runId) {
@@ -222,12 +210,36 @@ export const dbTransport: RunTransport = {
     // Stranded-message drain: a non-empty user message that arrived while the
     // exiting worker held the claim was rejected by dispatchRun
     // ("already-claimed") — with the claim now released, re-dispatch so a fresh
-    // worker picks it up. Skipped when cancel/close made the run terminal.
-    if (cur.status === "cancelled" || cur.status === "closed") return;
-    const msgs = await this.listMessages(runId);
-    const stranded = msgs.some(
-      (m) => m.role === "user" && m.id > lastProcessedUserMsgId && contentText(m.content) !== ""
-    );
+    // worker picks it up. The re-dispatch gate matches the exiting loop's own
+    // semantics (judged on the PRE-idle status):
+    //   • chat exit (idleIfNonTerminal): never resurrect ANY terminal landing —
+    //     a failed/budget_exhausted/cancelled chat must not re-dispatch itself
+    //     in a loop over the same stranded message;
+    //   • single-turn exit: only cancel/close block it — a completed implement
+    //     run with a mid-turn follow-up is deliberately revived (FIX 3a/M7).
+    const allowRedispatch = idleIfNonTerminal
+      ? !isTerminalStatus(cur.status)
+      : cur.status !== "cancelled" && cur.status !== "closed";
+    if (!allowRedispatch) return;
+    // Targeted read: only user rows newer than the watermark (not the whole
+    // conversation) — this runs on every worker exit.
+    const newerUserRows = await db
+      .select({ content: agentMessages.content })
+      .from(agentMessages)
+      .where(
+        and(
+          eq(agentMessages.runId, runId),
+          eq(agentMessages.role, "user"),
+          gt(agentMessages.id, lastProcessedUserMsgId)
+        )
+      );
+    const stranded = newerUserRows.some((r) => {
+      try {
+        return contentText(JSON.parse(r.content)) !== "";
+      } catch {
+        return false;
+      }
+    });
     if (stranded) {
       log.info("stranded user message after release; re-dispatching", { runId });
       const dispatch = await import("../run-dispatch");

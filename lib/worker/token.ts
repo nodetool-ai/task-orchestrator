@@ -85,9 +85,20 @@ export function verifyWorkerToken(
 export function workerDispatchEnv(runId: number): Record<string, string> | null {
   const apiUrl = process.env.TASK_ORCH_WORKER_API_URL;
   if (!apiUrl) return null;
+  let token: string;
+  try {
+    token = mintWorkerToken(runId);
+  } catch {
+    // Without this context the failure surfaces upstream as an opaque
+    // "spawn returned no pid" — name the actual misconfiguration.
+    throw new Error(
+      "TASK_ORCH_WORKER_API_URL is set (HTTP worker mode) but no token signing " +
+        "secret is configured — set TASK_ORCH_WORKER_API_SECRET or AUTH_SECRET."
+    );
+  }
   return {
     TASK_ORCH_WORKER_API_URL: apiUrl,
-    TASK_ORCH_WORKER_TOKEN: mintWorkerToken(runId),
+    TASK_ORCH_WORKER_TOKEN: token,
   };
 }
 

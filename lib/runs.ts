@@ -51,7 +51,7 @@ import {
 import { parsePrUrl, ownerRepoFromRemote } from "./gh-url";
 import { assistantText, toolResults, type SdkContentBlock } from "./sdk-message";
 import type { AgentSessionFull, RepositoryRow, SessionStatus } from "./types";
-import { isTerminalStatus, SESSION_STATUSES } from "./types";
+import { isTerminalStatus, LEASE_STATUSES, SESSION_STATUSES } from "./types";
 import { isTransientNetworkError } from "./transient-errors";
 import { resolveProfiles, alwaysOnExtensions, type ProfileContext } from "./profiles";
 import { type RunEnvelope } from "./pi-event-mapper";
@@ -59,7 +59,6 @@ import { getBackend, resolveBackendId, type Extension } from "./agent-backend";
 import {
   claimInboxEvents,
   emitInboxEvent,
-  markControlInjected,
   quarantineEvent,
   setClaimTurn,
   takeUnrenderedControlEvents,
@@ -87,7 +86,7 @@ import * as runDispatch from "./run-dispatch";
 // /api/worker HTTP + SSE protocol (external workers with no DB access).
 // The import is cycle-safe: lib/worker/index only pulls types + the logger at
 // module init and loads the transport implementations lazily.
-import { runTransport } from "./worker";
+import { contentText, runTransport } from "./worker";
 
 // Inject this module's helpers into run-dispatch (see the comment above). `get`,
 // `isLeaseLive`, and `setError` are hoisted function declarations, so they are
@@ -2201,14 +2200,10 @@ const DISPATCH_RESUME_PROMPT =
 
 /** Extract the concatenated text of a message's content blocks. */
 function messageText(m: MessageRow): string {
-  return m.content
-    .map((b) =>
-      b.type === "text" && typeof (b as { text?: unknown }).text === "string"
-        ? (b as { text: string }).text
-        : ""
-    )
-    .join("")
-    .trim();
+  // Shared definition of "is this message empty" — the transport's
+  // claim-release stranded check uses the same helper, and the two paths must
+  // agree on whether a follow-up message warrants a re-dispatch.
+  return contentText(m.content);
 }
 
 /**
@@ -3285,11 +3280,8 @@ async function setStatus(runId: number, status: SessionStatus) {
 // Liveness lease (heartbeat) + orphan recovery
 // ──────────────────────────────────────────────────────────
 
-/** Statuses that mean "a turn is in flight"; the only ones a heartbeat covers.
- *  'parked' (like 'idle') is deliberately NOT a lease status: a parked run has
- *  no worker and no heartbeat and that is HEALTHY (§6.1) — the reaper
- *  (reconcileOrphanedRuns) and repairAbortedRun therefore never touch it. */
-const LEASE_STATUSES: SessionStatus[] = ["running", "preparing", "pushing", "opening_pr"];
+// LEASE_STATUSES ("a turn is in flight") moved to lib/types.ts — it is shared
+// with the worker transport's claim-release guard and must not fork.
 
 /** How often a live turn bumps its heartbeat. */
 const HEARTBEAT_INTERVAL_MS = 20_000;
