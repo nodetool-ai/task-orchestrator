@@ -10,8 +10,14 @@ FROM node:24-bookworm-slim
 # ripgrep + fd-find back the pi backend's grep/find tools; without system
 # binaries pi tries to download them from GitHub at runtime inside every
 # fresh container (slow, and dead on a network-restricted host).
+# The rest is media/document/database tooling agent runs reach for: ffmpeg +
+# yt-dlp for A/V, poppler-utils/qpdf/pandoc for PDF and doc conversion,
+# postgresql-client for DB access, and zip/unzip/jq for general file wrangling.
+# Baked in so runs don't pay per-execution install overhead.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates curl gnupg ripgrep fd-find \
+      ffmpeg jq zip unzip poppler-utils qpdf pandoc postgresql-client \
+      python3 python3-venv \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
@@ -29,6 +35,20 @@ RUN npm ci
 # claude backend needs it — the pi backend runs in-process from node_modules —
 # but the image carries both so TASK_ORCH_AGENT_BACKEND picks at dispatch time.
 RUN npm install -g @anthropic-ai/claude-code
+
+# Python tooling for document/media workflows, isolated in a venv on PATH:
+# yt-dlp (downloads), pypdf/pdfplumber/pypdfium2 (PDF read/parse), reportlab
+# (PDF generation).
+RUN python3 -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir \
+       yt-dlp pypdf pdfplumber pypdfium2 reportlab \
+    && rm -rf /root/.cache
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Node document libraries available to agent scripts via NODE_PATH resolution:
+# pdf-lib (PDF manipulation) and docx (Word generation).
+RUN npm install -g pdf-lib docx && npm cache clean --force
+ENV NODE_PATH=/usr/local/lib/node_modules
 
 COPY . .
 
