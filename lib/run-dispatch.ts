@@ -43,6 +43,10 @@ type RunsApi = {
   failPendingRun: (runId: number, error: string) => Promise<boolean>;
   /** Count runs holding a worker slot (worker_scope set + a lease status). */
   countInFlightWorkers: () => Promise<number>;
+  /** Drive a claimed run to completion IN THIS process (in-server cwd=none path). */
+  driveDispatchedRun: (runId: number) => Promise<void>;
+  /** Count in-server runs (cwd=none) currently DRIVING with a fresh claim. */
+  countInServerRuns: () => Promise<number>;
   /** Ids of runs parked in 'pending', oldest first (the dispatch queue). */
   listPendingRunIds: () => Promise<number[]>;
   /** Reap stale leases (OOM-killed / dead workers); re-dispatches resumable ones. */
@@ -85,6 +89,25 @@ export function detachedRunsEnabled(): boolean {
   if (runnerProviderKindFromEnv() === "fly") return true;
   const v = process.env.TASK_ORCH_DETACHED_RUNS;
   return !!v && v !== "0" && v.toLowerCase() !== "false";
+}
+
+/** True when a run executes in the orchestrator process itself rather than on a
+ *  dispatched worker Machine: the repo-less (cwd_strategy="none") lightweight
+ *  class — plan executors, chat, planners. They hold no checkout and no fs/shell
+ *  tools (cwd=none tool policy), so the server env is not exposed to the agent,
+ *  and an executor parks between turns rather than holding a resident container.
+ *  Kill switch: TASK_ORCH_DISABLE_IN_SERVER_RUNS=1 routes them back to workers. */
+export function runsInServer(run: { cwdStrategy: string }): boolean {
+  const off = process.env.TASK_ORCH_DISABLE_IN_SERVER_RUNS;
+  if (off && off !== "0" && off.toLowerCase() !== "false") return false;
+  return run.cwdStrategy === "none";
+}
+
+/** Max concurrently-DRIVING in-server runs. The orchestrator is a single
+ *  (--ha=false) machine, so cap resident in-process agent turns to protect it;
+ *  over the cap, a run defers to 'pending' and the pump retries when a slot frees. */
+function inServerMax(): number {
+  return intEnv("TASK_ORCH_IN_SERVER_MAX", 4);
 }
 
 /** True when the server must route user turns through an out-of-process runner.
@@ -326,12 +349,17 @@ export async function dispatchRun(
   // reservation count seen by the next caller already includes this claim. The
   // spawn itself (a slow Docker round-trip) runs OUTSIDE the lock.
   const outcome = await withAdmissionLock<
-    { kind: Exclude<DispatchResult, "spawned"> } | { kind: "claimed"; scope: string }
+    { kind: Exclude<DispatchResult, "spawned"> } | { kind: "claimed"; scope: string; inServer: boolean }
   >(async () => {
     const run = await runs().get(runId);
     if (!run) return { kind: "not-found" };
     if (runs().isLeaseLive(run)) return { kind: "already-claimed" };
     if (run.workerScope) return { kind: "already-claimed" };
+
+    // Repo-less (cwd=none) runs execute in THIS orchestrator process rather than
+    // on a dispatched worker Machine (see runsInServer). They skip the worker
+    // admission gate and are bounded by their own in-server capacity gate below.
+    const inServer = runsInServer(run);
 
     // Tree-limit re-verify (Decision 2 in docs/nested-machine-dispatch.md):
     // create() already rejects an over-depth/over-size child before insert, but
@@ -349,7 +377,7 @@ export async function dispatchRun(
       }
     }
 
-    if (admissionEnabled()) {
+    if (admissionEnabled() && !inServer) {
       let decision = await admitFn(runId);
       // Deadlock breaker (M1): a plan-executor run occupies a worker slot for
       // its ENTIRE turn (countInFlightWorkers/flyAdmit count it the whole
@@ -404,6 +432,26 @@ export async function dispatchRun(
       }
     }
 
+    // In-server capacity gate: bound resident in-process agent turns on the single
+    // orchestrator machine. Over the cap, park for the pump exactly like the worker
+    // admission defer (same fields, same stampEpisode logic).
+    if (inServer) {
+      const active = await runs().countInServerRuns();
+      if (active >= inServerMax()) {
+        const stampEpisode = run.status !== "pending";
+        await db
+          .update(agentSessions)
+          .set({
+            status: "pending",
+            workerScope: null,
+            workerPid: null,
+            ...(stampEpisode ? { heartbeatAt: new Date() } : {}),
+          })
+          .where(eq(agentSessions.id, runId));
+        return { kind: "deferred" };
+      }
+    }
+
     const scope = `run-${runId}-${nonce()}`;
     // Atomic claim: only succeeds if worker_scope is still NULL AND the status is
     // still claimable. 'cancelled'/'closed' are terminal decisions that must NEVER
@@ -441,10 +489,24 @@ export async function dispatchRun(
         )
       );
     if (claimed.count === 0) return { kind: "already-claimed" };
-    return { kind: "claimed", scope };
+    return { kind: "claimed", scope, inServer };
   });
 
   if (outcome.kind !== "claimed") return outcome.kind;
+
+  if (outcome.inServer) {
+    // Drive the turn in THIS (orchestrator) process — no worker Machine. The
+    // claim is held (workerScope set by the atomic claim above); driveDispatchedRun
+    // keeps the heartbeat fresh and releases the claim in its finally.
+    await db
+      .update(agentSessions)
+      .set({ workerPid: process.pid })
+      .where(and(eq(agentSessions.id, runId), eq(agentSessions.workerScope, outcome.scope)));
+    void runs().driveDispatchedRun(runId).catch((err) => {
+      console.error(`[dispatch] in-server drive failed for run ${runId}:`, err);
+    });
+    return "spawned";
+  }
 
   // Start the worker through the selected provider. A throw/null must NOT leave
   // the run wedged in 'preparing' with no error — mark it failed and release the

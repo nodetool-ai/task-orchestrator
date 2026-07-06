@@ -35,7 +35,7 @@ import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, notInArray, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 
 import { db } from "@/db";
@@ -100,6 +100,8 @@ runDispatch.__setRunsApi({
   failRun: setError,
   failPendingRun,
   countInFlightWorkers,
+  driveDispatchedRun,
+  countInServerRuns,
   listPendingRunIds,
   reconcileOrphanedRuns,
   listLeasedRuns,
@@ -3664,6 +3666,25 @@ export async function countInFlightWorkers(): Promise<number> {
     .from(agentSessions)
     .where(
       and(
+        isNotNull(agentSessions.workerScope),
+        // In-server (cwd=none) runs drive in the orchestrator process — they are
+        // not resident worker Machines and must not consume the worker budget.
+        ne(agentSessions.cwdStrategy, "none"),
+        gt(agentSessions.heartbeatAt, new Date(Date.now() - HEARTBEAT_STALE_MS))
+      )
+    );
+  return rows.length;
+}
+
+/** In-server runs currently DRIVING a turn (cwd=none, claimed, fresh heartbeat).
+ *  Bounds resident in-process agents on the single orchestrator machine. */
+export async function countInServerRuns(): Promise<number> {
+  const rows = await db
+    .select({ id: agentSessions.id })
+    .from(agentSessions)
+    .where(
+      and(
+        eq(agentSessions.cwdStrategy, "none"),
         isNotNull(agentSessions.workerScope),
         gt(agentSessions.heartbeatAt, new Date(Date.now() - HEARTBEAT_STALE_MS))
       )
