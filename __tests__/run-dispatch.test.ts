@@ -64,4 +64,24 @@ describe("dispatchRun", () => {
     expect(row.status).toBe("failed");
     expect(row.error).toMatch(/did not start/);
   });
+
+  // Regression (run 58): reviving a failed/completed run for a follow-up turn or
+  // restart must clear the PRIOR attempt's terminal artifacts. Otherwise the
+  // freshly-claimed, now-running row still carries a stale `error` and a past
+  // `completed_at`, so a live run reads as failed in the UI.
+  it("clears a prior attempt's error and completed_at when it re-claims the run", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
+    // Simulate a run that failed a previous turn.
+    await db
+      .update(agentSessions)
+      .set({ status: "failed", error: "Interrupted by a process restart", completedAt: new Date() })
+      .where(eq(agentSessions.id, run.id));
+
+    const result = await dispatchRun(run.id, { spawn: () => 4242 });
+    expect(result).toBe("spawned");
+    const row = (await get(run.id))!;
+    expect(row.status).toBe("preparing");
+    expect(row.error).toBeNull();
+    expect(row.completedAt).toBeNull();
+  });
 });

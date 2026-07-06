@@ -413,9 +413,13 @@ export async function dispatchRun(
     // an inbox event resumes exactly like an idle run), the lease statuses (only reached
     // once isLeaseLive is false — an orphan whose stale claim was cleared), and the
     // resumable terminal statuses (completed/failed/budget_exhausted) for follow-up
-    // turns. scope is the claim's ownership token. Also clear any captured worker
-    // log/exit code from a PRIOR container so the run view never pairs this fresh
-    // attempt's live container with a dead one's "exit 137".
+    // turns. scope is the claim's ownership token. Also clear every PRIOR
+    // attempt's terminal artifact so the freshly-claimed run never displays a
+    // dead attempt's state: the worker log/exit code (so the run view can't pair
+    // this live container with a dead one's "exit 137"), AND the error/
+    // completed_at (so a revived run reads as running, not as its last failure —
+    // run 58 was actively running while still showing "Interrupted by a process
+    // restart" and a completed_at hours in the past).
     const claimed = await db
       .update(agentSessions)
       .set({
@@ -425,6 +429,8 @@ export async function dispatchRun(
         heartbeatAt: new Date(),
         workerLog: null,
         workerExitCode: null,
+        error: null,
+        completedAt: null,
       })
       .where(
         and(
