@@ -24,6 +24,7 @@ import { seedPersonas } from "../db/seed-personas";
 import * as repo from "../lib/repo";
 import * as backend from "../lib/agent-backend";
 import * as dispatch from "../lib/run-dispatch";
+import { collectExtensions, runInterceptors } from "../lib/agent-backend/collect";
 
 // Minimal backend stub: emit one assistant message + a result and return.
 function fakeBackend() {
@@ -106,11 +107,12 @@ describe("close() cross-process stop (BUG 3)", () => {
 });
 
 // A backend that records the prompt it was driven with and the cost it reports.
-function capturingBackend(capture: { prompt?: string }, totalCostUsd: number | null = null) {
+function capturingBackend(capture: { prompt?: string; extensions?: any[] }, totalCostUsd: number | null = null) {
   return {
     id: "fake",
     async runTurn(args: any) {
       capture.prompt = args.prompt;
+      capture.extensions = args.extensions;
       args.onEvent({ type: "result", is_error: false, result: "ok", usage: {} });
       return { summary: "ok", resumeToken: "s", turns: 1, inputTokens: 0, outputTokens: 0, totalCostUsd };
     },
@@ -167,6 +169,27 @@ describe("dispatchTurnPrompt backlog + initial-prompt preference (FIX 3b / FIX 7
 
     expect(cap.prompt).toBe("custom kickoff prompt");
     expect(cap.prompt).not.toContain("Synthesized Title");
+  });
+});
+
+describe("env-scrub extension is registered for every run (Tier 0)", () => {
+  it("strips DATABASE_URL et al from a bash command for an ordinary run, regardless of persona/backend", async () => {
+    const cap: { prompt?: string; extensions?: any[] } = {};
+    vi.spyOn(backend, "getBackend").mockResolvedValue(capturingBackend(cap));
+    vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
+    const run = await create({ goal: "adhoc", cwdStrategy: "none", defer: true });
+    await insertUser(run.id, "go");
+    await claim(run.id);
+
+    await driveDispatchedRun(run.id);
+
+    expect(cap.extensions).toBeTruthy();
+    const collected = await collectExtensions(cap.extensions!);
+    const decision = await runInterceptors(collected.interceptors, "bash", { command: "printenv DATABASE_URL" });
+    expect(decision).not.toBeNull();
+    expect((decision as any).input.command).toContain("unset ");
+    expect((decision as any).input.command).toContain("DATABASE_URL");
+    expect((decision as any).input.command).toContain("printenv DATABASE_URL");
   });
 });
 

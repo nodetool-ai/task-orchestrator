@@ -66,6 +66,7 @@ import {
   type EventEnvelope,
 } from "./inbox";
 import { sandboxFactory } from "./extensions/sandbox";
+import { envScrubFactory } from "./extensions/env-scrub";
 import { personaPromptFactory } from "./extensions/persona-prompt";
 import { personaMemoryFactory } from "./extensions/persona-memory";
 import { abortBridgeFactory } from "./extensions/abort-bridge";
@@ -2763,6 +2764,15 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     personaPromptFactory(personaForExt),
     personaMemoryFactory(personaForExt, run, repo, cwd),
     sandboxFactory(cwd, sandboxDbPath),
+    // Registered unconditionally for every run (worker AND in-process
+    // server), regardless of persona/goal/backend/tools_profile — see
+    // lib/agent-backend/env-scrub.ts for the incident this closes. Listed
+    // after sandboxFactory: each interceptor prepends to the command the
+    // prior one produced, and the interceptor chain executes outermost
+    // (last-registered) prefix first, so `unset ...` runs before the
+    // TASK_ORCH_DB export — though the two prefixes touch disjoint var sets,
+    // so the order has no functional effect either way.
+    envScrubFactory,
     abortBridgeFactory(abort),
     ...alwaysOnFactories,
     ...profileFactories,
