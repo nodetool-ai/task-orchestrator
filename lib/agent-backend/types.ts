@@ -11,7 +11,6 @@
 
 import type { TSchema } from "typebox";
 import type { RunEnvelope } from "../pi-event-mapper";
-import type { CanonicalTool } from "../builtin-tools";
 
 /** A content block a tool may return (text | image | …). Permissive on purpose. */
 export type ContentBlock = { type: string; [k: string]: unknown };
@@ -91,10 +90,6 @@ export interface RunTurnArgs {
   /** Extra env for tool subprocesses (optional; the sandbox bash hook also
    *  injects TASK_ORCH_DB, so this is belt-and-suspenders). */
   env?: Record<string, string>;
-  /** Built-in tools to withhold from the agent this turn (fs/shell family for
-   *  cwd=none runs; the mutating file tools for read-only checkouts). Canonical
-   *  names; each backend maps them to its own vocabulary. */
-  disallowedBuiltins?: CanonicalTool[];
   /** Called for every mapped RunEnvelope as the turn streams. May be async (it
    *  persists the envelope to the DB); backends MUST await it so per-envelope
    *  persistence stays in stream order. */
