@@ -14,6 +14,7 @@ import { and, asc, desc, eq, gt, inArray, isNotNull, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { agentEvents, agentSessions, tasks } from "@/db/schema";
 import * as repo from "./repo";
+import { insideWorker } from "./runner/provider";
 import * as runs from "./runs";
 import {
   isTerminalStatus,
@@ -30,6 +31,13 @@ const DEFAULT_MODEL = process.env.TASK_ORCH_AGENT_MODEL ?? "claude-sonnet-4-6";
 //
 // These need to run regardless of whether anyone imports lib/runs.ts, so
 // they live here on the legacy module that every API route already touches.
+//
+// ORCHESTRATOR-ONLY: both jobs read the DB directly. Under the HTTP-worker
+// architecture (#98) a run worker (TASK_ORCH_INSIDE_WORKER=1) holds no DB
+// access — the db guard throws on every call — so firing these inside a worker
+// only spams caught "reaper/pr watcher failed" errors and wastes a poll timer.
+// Reaping orphans and polling merged PRs are control-plane duties anyway; gate
+// them so they run on the server only.
 // ──────────────────────────────────────────────────────────
 
 declare global {
@@ -53,7 +61,7 @@ const NON_TERMINAL_BUT_DEAD = ["pending", "preparing", "running", "pushing", "op
 // process died before dispatch.
 const PENDING_GRACE_PERIOD_MS = 15 * 60_000; // 15 minutes
 
-if (!globalThis.__agentReaperRan) {
+if (!insideWorker() && !globalThis.__agentReaperRan) {
   globalThis.__agentReaperRan = true;
   reapOrphans().catch((err) => {
     console.error("agent: reaper failed:", err);
@@ -61,7 +69,7 @@ if (!globalThis.__agentReaperRan) {
 }
 
 const PR_POLL_MS = Number(process.env.TASK_ORCH_PR_POLL_MS ?? 60_000);
-if (!globalThis.__agentPrWatcher && PR_POLL_MS > 0) {
+if (!insideWorker() && !globalThis.__agentPrWatcher && PR_POLL_MS > 0) {
   globalThis.__agentPrWatcher = setInterval(() => {
     pollMergedPrs().catch((err) => console.error("agent: pr watcher failed:", err));
   }, PR_POLL_MS);

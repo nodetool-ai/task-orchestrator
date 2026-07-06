@@ -153,7 +153,7 @@ export async function buildImplementPrompt(task: TaskFull): Promise<string> {
           : body;
       lines.push(capped);
     }
-    const siblings = (await repo
+    const siblings = (await (await runTransport())
       .listTasks({ planId: plan.id }))
       .filter((t) => t.id !== task.id);
     if (siblings.length > 0) {
