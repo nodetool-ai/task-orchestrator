@@ -585,8 +585,13 @@ async function pumpTick(): Promise<void> {
   } catch {
     // best-effort
   }
-  // Half 2: drain the deferred queue, oldest first. Stop at the first defer (the
-  // host is full); the next tick retries.
+  // Half 2: drain the deferred queue, oldest first. There are TWO independent
+  // capacity pools — worker slots (machines/memory) and in-server slots
+  // (TASK_ORCH_IN_SERVER_MAX) — and both defer into this one 'pending' queue.
+  // A defer means only THAT pool is full, so we stop dispatching that pool but
+  // keep scanning for runs of the other pool (a global break would let a
+  // head-of-line run blocked on one full pool starve runs behind it that the
+  // other, free pool could serve). The next tick retries whatever stays queued.
   let ids: number[];
   try {
     ids = await runs().listPendingRunIds();
@@ -595,12 +600,16 @@ async function pumpTick(): Promise<void> {
   }
   const maxDeferMs = intEnv("TASK_ORCH_MAX_DEFER_MS", DEFAULT_MAX_DEFER_MS);
   const now = Date.now();
+  let workerPoolFull = false;
+  let inServerPoolFull = false;
   for (const id of ids) {
     const run = await runs().get(id);
     if (!run || run.status !== "pending") continue;
+    const inServer = runsInServer(run);
     // Time in THIS pending episode: heartbeatAt is stamped when a run is deferred
     // into pending (dispatchRun's defer branch); a run born pending has no stamp
-    // and is measured from startedAt (≈ its enqueue time).
+    // and is measured from startedAt (≈ its enqueue time). The deadline is checked
+    // regardless of pool-full state so a run stuck past MAX_DEFER always fails.
     const pendingSince = run.heartbeatAt ?? run.startedAt;
     if (maxDeferMs > 0 && pendingSince && now - pendingSince.getTime() > maxDeferMs) {
       // Atomically take the terminal transition in ONE guarded write (status
@@ -610,14 +619,23 @@ async function pumpTick(): Promise<void> {
       // must not clobber its healthy claim into 'failed'. Previously this was two
       // writes (a raw CAS UPDATE then a separate failRun) for one transition; a
       // connection death between them could land the event without the column
-      // write and let the reaper mislabel the run.
-      const failMsg =
-        "no worker capacity: the run stayed queued past the maximum wait (TASK_ORCH_MAX_DEFER_MS) — worker slots (machines/memory) stayed full.";
+      // write and let the reaper mislabel the run. The message names the pool the
+      // run was actually waiting on.
+      const failMsg = inServer
+        ? "no in-server capacity: the run stayed queued past the maximum wait (TASK_ORCH_MAX_DEFER_MS) — in-server slots (TASK_ORCH_IN_SERVER_MAX) stayed full."
+        : "no worker capacity: the run stayed queued past the maximum wait (TASK_ORCH_MAX_DEFER_MS) — worker slots (machines/memory) stayed full.";
       await runs().failPendingRun(id, failMsg);
       continue;
     }
+    // This run's pool already deferred this tick — skip it, but keep scanning so
+    // the other pool still drains. Stop entirely once BOTH pools are full.
+    if (inServer ? inServerPoolFull : workerPoolFull) continue;
     const r = await dispatchRun(id);
-    if (r === "deferred") break;
+    if (r === "deferred") {
+      if (inServer) inServerPoolFull = true;
+      else workerPoolFull = true;
+      if (inServerPoolFull && workerPoolFull) break;
+    }
   }
   // Half 3: fire due timers (docs/agent-events.md §7). Each fired timer becomes
   // a `timer.fired` inbox event whose emit-time wake dispatches its (parked)
