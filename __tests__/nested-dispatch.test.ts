@@ -11,7 +11,7 @@ import { and, eq } from "drizzle-orm";
 import { db } from "../db";
 import { agentEvents, agentMessages, agentSessions } from "../db/schema";
 import * as dispatch from "../lib/run-dispatch";
-import { nestedDispatchMode } from "../lib/run-dispatch";
+import { nestedDispatchMode, remoteRunnerEnabled } from "../lib/run-dispatch";
 import { buildFlyWorkerEnv } from "../lib/runner/fly";
 import { create, get } from "../lib/runs";
 
@@ -20,6 +20,7 @@ const KNOBS = [
   "TASK_ORCH_RUNNER",
   "TASK_ORCH_INSIDE_WORKER",
   "TASK_ORCH_DETACHED_RUNS",
+  "TASK_ORCH_WORKER_IMAGE",
 ];
 afterEach(() => {
   for (const k of KNOBS) delete process.env[k];
@@ -157,5 +158,29 @@ describe("buildFlyWorkerEnv REPO_CACHE_DIR", () => {
   it("honors a TASK_ORCH_REPO_CACHE_DIR override", () => {
     process.env[REPO_CACHE_KNOB] = "/custom/cache";
     expect(buildFlyWorkerEnv(42).REPO_CACHE_DIR).toBe("/custom/cache");
+  });
+});
+
+describe("remoteRunnerEnabled inside workers", () => {
+  it("treats an isolate-mode worker as remote (appends must never run in-process there)", () => {
+    // A Fly worker: gets INSIDE_WORKER + NESTED_DISPATCH from buildFlyWorkerEnv,
+    // but deliberately NOT TASK_ORCH_RUNNER / TASK_ORCH_WORKER_IMAGE.
+    process.env.TASK_ORCH_INSIDE_WORKER = "1";
+    process.env.TASK_ORCH_NESTED_DISPATCH = "isolate";
+    delete process.env.TASK_ORCH_RUNNER;
+    delete process.env.TASK_ORCH_WORKER_IMAGE;
+    delete process.env.TASK_ORCH_DETACHED_RUNS;
+
+    expect(remoteRunnerEnabled()).toBe(true);
+  });
+
+  it("keeps an inline-mode worker on the in-process path", () => {
+    process.env.TASK_ORCH_INSIDE_WORKER = "1";
+    process.env.TASK_ORCH_NESTED_DISPATCH = "inline";
+    delete process.env.TASK_ORCH_RUNNER;
+    delete process.env.TASK_ORCH_WORKER_IMAGE;
+    delete process.env.TASK_ORCH_DETACHED_RUNS;
+
+    expect(remoteRunnerEnabled()).toBe(false);
   });
 });
