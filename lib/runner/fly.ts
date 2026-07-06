@@ -297,15 +297,41 @@ export function buildFlyWorkerEnv(runId: number): Record<string, string> {
   });
 }
 
+// Fly's shared-cpu machines enforce a hard memory-per-vCPU ratio — 256MB to
+// 2048MB per vCPU (see https://fly.io/docs/machines/guides-examples/machine-sizing/).
+// A TASK_ORCH_FLY_CPUS/TASK_ORCH_FLY_MEMORY_MB pair outside that range is
+// rejected by createMachine at the API layer, which upstream (run-dispatch.ts)
+// can only report as an opaque "spawn returned no pid" failure — no indication
+// the actual problem is the resource *ratio*. Incident: run 59 (2026-07-06),
+// TASK_ORCH_FLY_MEMORY_MB was bumped to 8192 to fix OOM-killed workers, but
+// TASK_ORCH_FLY_CPUS stayed at its old default of 2 (max for 2 vCPU is 4096MB).
+// Validating here fails fast with the real numbers instead of a guessing game.
+function assertValidSharedMachineResources(cpus: number, memoryMb: number): void {
+  const minMb = 256 * cpus;
+  const maxMb = 2048 * cpus;
+  if (memoryMb < minMb || memoryMb > maxMb) {
+    throw new Error(
+      `invalid Fly runner config: ${memoryMb}MB memory for ${cpus} vCPU (shared-cpu allows ` +
+        `${minMb}-${maxMb}MB for ${cpus} vCPU) — check TASK_ORCH_FLY_CPUS/TASK_ORCH_FLY_MEMORY_MB`
+    );
+  }
+}
+
 export function buildFlyMachineConfig(runId: number, volumeId: string): FlyMachineConfig {
+  // Default bumped from 2→4 vCPU alongside the existing 4096MB memory default:
+  // 4 vCPU supports up to 8192MB, matching the memory ceiling operators reach
+  // for first under OOM pressure (see incident note above).
+  const cpus = intEnv("TASK_ORCH_FLY_CPUS", 4);
+  const memoryMb = intEnv("TASK_ORCH_FLY_MEMORY_MB", 4096);
+  assertValidSharedMachineResources(cpus, memoryMb);
   return {
     image: process.env.FLY_RUNNER_IMAGE || "fly-runner:latest",
     env: buildFlyWorkerEnv(runId),
     mounts: [{ volume: volumeId, path: "/mnt/session" }],
     guest: {
       cpu_kind: "shared",
-      cpus: intEnv("TASK_ORCH_FLY_CPUS", 2),
-      memory_mb: intEnv("TASK_ORCH_FLY_MEMORY_MB", 4096),
+      cpus,
+      memory_mb: memoryMb,
     },
     restart: { policy: "on-failure", max_retries: 3 },
     metadata: { run_id: String(runId), managed_by: "task-orchestrator" },
