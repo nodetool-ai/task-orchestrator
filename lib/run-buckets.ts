@@ -30,7 +30,11 @@ export function classifyRun(
   if (REVIEW_STATUSES.has(status)) return "review";
   if (BLOCKED_STATUSES.has(status)) return "blocked";
   if (SHIPPED_STATUSES.has(status)) {
-    if (prUrl && taskState === "review") return "review";
+    // A completed run whose task still has an open, un-merged PR
+    // (testing/passing/failing) is still "in review" on the floor; only once
+    // the task reaches merged/cancelled is the run truly shipped.
+    if (prUrl && (taskState === "testing" || taskState === "passing" || taskState === "failing"))
+      return "review";
     return "shipped";
   }
   return null;

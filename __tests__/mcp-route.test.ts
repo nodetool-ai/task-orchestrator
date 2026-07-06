@@ -74,7 +74,7 @@ describe("POST /api/mcp", () => {
     expect(body.result.tools.length).toBe(37);
     const names = body.result.tools.map((t: { name: string }) => t.name);
     expect(names).toContain("list_plans");
-    expect(names).toContain("start_review");
+    expect(names).not.toContain("start_review");
     expect(names).toContain("await_session");
     expect(names).toContain("create_task");
     expect(names).toContain("transition_task");

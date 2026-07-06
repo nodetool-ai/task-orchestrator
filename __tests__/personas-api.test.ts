@@ -13,9 +13,9 @@ describe("GET /api/personas", () => {
   it("returns all seeded personas with the expected shape", async () => {
     const res = await GET();
     const body = await res.json();
-    expect(body.personas.length).toBe(7);
-    const r = body.personas.find((p: any) => p.id === "reviewer");
-    expect(r).toMatchObject({ id: "reviewer", name: "Reviewer" });
+    expect(body.personas.length).toBe(6);
+    const r = body.personas.find((p: any) => p.id === "implementor");
+    expect(r).toMatchObject({ id: "implementor", name: "Implementor" });
     expect(r.modelProvider).toBeUndefined();
     expect(r.modelId).toBeUndefined();
     expect(typeof r.systemPrompt).toBe("string");

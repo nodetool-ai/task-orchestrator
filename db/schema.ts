@@ -95,6 +95,11 @@ export const tasks = pgTable(
     // agent_runs.id ON DELETE SET NULL is applied in a migration; omitted here to
     // avoid a tasks↔agent_runs type-inference cycle.
     attachedRunId: integer("attached_run_id"),
+    // Explicit, tool-set PR link for this task (set_task_pr). Authoritative
+    // once populated — distinct from the session-derived "latest run's PR"
+    // heuristic in lib/repo.ts, which remains the fallback for tasks whose
+    // implementor hasn't called the tool yet.
+    prUrl: text("pr_url"),
     createdAt: ts("created_at").notNull().defaultNow(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
   },
@@ -103,6 +108,9 @@ export const tasks = pgTable(
     stateIdx: index("tasks_state_idx").on(t.state),
     assigneeIdx: index("tasks_assignee_idx").on(t.assignee),
     repoIdx: index("tasks_repo_idx").on(t.repoId),
+    // The webhook matcher and the ~20s PR-sync poller look tasks up by pr_url;
+    // index it so those stay indexed equality lookups, not table scans.
+    prUrlIdx: index("tasks_pr_url_idx").on(t.prUrl),
   })
 );
 

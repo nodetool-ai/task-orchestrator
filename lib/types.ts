@@ -3,9 +3,11 @@ import type { CwdStrategy } from "./runs";
 export const TASK_STATES = [
   "todo",
   "in_progress",
-  "review",
+  "testing",
+  "failing",
+  "passing",
+  "merged",
   "blocked",
-  "done",
   "cancelled",
 ] as const;
 export type TaskState = (typeof TASK_STATES)[number];
@@ -13,26 +15,47 @@ export type TaskState = (typeof TASK_STATES)[number];
 export const PLAN_STATES = ["draft", "proposed", "accepted", "done", "cancelled"] as const;
 export type PlanState = (typeof PLAN_STATES)[number];
 
-export const TASK_BOARD_STATES = ["todo", "in_progress", "review", "blocked", "done"] as const;
+export const TASK_BOARD_STATES = [
+  "todo",
+  "in_progress",
+  "testing",
+  "failing",
+  "passing",
+  "blocked",
+] as const;
 
 export const STATE_LABEL: Record<TaskState | PlanState, string> = {
   todo: "Todo",
   in_progress: "In progress",
-  review: "In review",
+  testing: "Testing",
+  failing: "Failing",
+  passing: "Passing",
+  merged: "Merged",
   blocked: "Blocked",
-  done: "Done",
   cancelled: "Cancelled",
+  // Plan states (draft/proposed/accepted/done/cancelled). `done` is a PLAN
+  // terminal — tasks no longer use it; do not remove.
   draft: "Draft",
   proposed: "Proposed",
   accepted: "Accepted",
+  done: "Done",
 };
 
+// A merged PR is authoritative and GitHub CI can flip between pass/fail at any
+// time, so every non-terminal PR-backed state must accept ALL states the GitHub
+// sync can derive ({testing, failing, passing, blocked, merged} — see
+// prToTaskState). Otherwise applyTaskStateFromPr / transitionTask hit an illegal
+// edge and silently no-op, stranding a task forever (e.g. a PR merged while a
+// non-required check is red would never move `failing` → `merged`). `todo` is
+// the only exception: it has no PR yet, so it just advances to in_progress.
 export const TASK_TRANSITIONS: Record<TaskState, TaskState[]> = {
   todo: ["in_progress", "cancelled"],
-  in_progress: ["review", "done", "blocked", "cancelled"],
-  review: ["in_progress", "done", "cancelled"],
-  blocked: ["in_progress", "cancelled"],
-  done: [],
+  in_progress: ["testing", "failing", "passing", "merged", "blocked", "cancelled"],
+  testing: ["passing", "failing", "merged", "blocked", "cancelled"],
+  failing: ["testing", "passing", "merged", "blocked", "cancelled"],
+  passing: ["merged", "testing", "failing", "blocked", "cancelled"],
+  blocked: ["in_progress", "testing", "failing", "passing", "merged", "cancelled"],
+  merged: [],
   cancelled: [],
 };
 
@@ -93,9 +116,9 @@ export interface TaskFull {
   estimate: string | null;
   tags: string[];
   repoId: string | null;
-  /** PR url of the task's most recent agent run that opened one, for display
-   *  (null if no run has opened a PR yet). A task can span several runs/PRs;
-   *  this is the latest. */
+  /** The task's PR link. Authoritative once set explicitly via the
+   *  set_task_pr tool (persisted on tasks.pr_url); until then, falls back to
+   *  the most recent agent run that opened one. Null if neither exists. */
   prUrl: string | null;
   createdAt: Date;
   updatedAt: Date;

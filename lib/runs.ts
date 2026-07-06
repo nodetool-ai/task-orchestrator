@@ -1748,11 +1748,11 @@ async function gitSyncAfterTurn(
   if (prUrl) {
     try {
       await transport.transitionTask(run.taskId, {
-        state: "review",
+        state: "testing",
         note: `Agent finished. PR: ${prUrl}`,
       });
     } catch (err) {
-      await transport.addTaskNote(run.taskId, "claude-agent", `Could not transition to review: ${describe(err)}`);
+      await transport.addTaskNote(run.taskId, "claude-agent", `Could not transition to testing: ${describe(err)}`);
     }
   }
   return prUrl ?? run.prUrl;
@@ -1897,20 +1897,21 @@ async function runReview(
       retries: FINALIZE_RETRIES,
     });
 
-    // An approving verdict marks the task done. The outcome is the JSON
-    // verdict block extracted above (or a fallback first line, which won't
-    // parse — so a non-approve outcome simply leaves the task untouched).
+    // An approving verdict marks the task merged (the sole success terminal).
+    // The outcome is the JSON verdict block extracted above (or a fallback
+    // first line, which won't parse — so a non-approve outcome simply leaves
+    // the task untouched).
     if (run.taskId && parseReviewVerdict(outcome) === "approve") {
       try {
         await transport.transitionTask(run.taskId, {
-          state: "done",
+          state: "merged",
           note: `Review run #${runId} approved the PR.`,
         });
       } catch (err) {
         await transport.addTaskNote(
           run.taskId,
           "claude-reviewer",
-          `Review approved but could not transition task to done: ${describe(err)}`
+          `Review approved but could not transition task to merged: ${describe(err)}`
         );
       }
     }
@@ -2054,7 +2055,7 @@ async function runExecute(
         const tasks = await transport.listTasks({ planId });
         const allClosed =
           tasks.length > 0 &&
-          tasks.every((t) => t.state === "done" || t.state === "cancelled");
+          tasks.every((t) => t.state === "merged" || t.state === "cancelled");
         const planNow = await transport.getPlan(planId);
         if (allClosed && planNow && planNow.state === "accepted") {
           await transport.updatePlanState(planId, "done");

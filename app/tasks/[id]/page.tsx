@@ -74,7 +74,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
           <h1 className="mt-2 text-2xl font-semibold tracking-tight leading-tight">{task.title}</h1>
         </div>
         <div className="flex flex-row sm:flex-col items-start sm:items-end gap-2 sm:gap-1.5 flex-wrap">
-          {task.state !== "done" && task.state !== "cancelled" && (
+          {task.state !== "merged" && task.state !== "cancelled" && (
             <TaskAgentButton taskId={task.id} hasAttachedRun={Boolean(attachedRun)} />
           )}
           <ResolveMergeButton taskId={task.id} />

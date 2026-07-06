@@ -1,7 +1,7 @@
 import { ne } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// start_session / start_review must stamp the spawner's userId onto the child
+// start_session must stamp the spawner's userId onto the child
 // via runs.create. Mock ONLY runs.create — the real one fires fire-and-forget
 // worker kickoffs (worktree/gh calls) we must not run in this suite; everything
 // else (runs.get, runs.list, hydration) stays real so the tools' lookup of the
@@ -93,46 +93,6 @@ function fakeRunRow(overrides: { id: number; taskId: string }) {
     completedAt: null,
   };
 }
-
-describe("start_review userId propagation", () => {
-  it("stamps the spawner's userId onto the child run", async () => {
-    const userId = await insertUser("spawner@example.com");
-    const plan = await repo.createPlan({ title: "Attribution", date: "2026-07-04" });
-    const task = await repo.createTask({ planId: plan.id, title: "Task", date: "2026-07-04" });
-    const spawnerId = await insertRun({ goal: "<execute>", planId: plan.id, userId });
-    createSpy.mockResolvedValue(fakeRunRow({ id: 4242, taskId: task.id }));
-
-    const res = await tool("start_review").execute(
-      { task_id: task.id, pr_url: "https://github.com/x/y/pull/9" },
-      { author: "test", runId: spawnerId }
-    );
-    expect(res.isError).toBeFalsy();
-    expect(createSpy).toHaveBeenCalledTimes(1);
-    expect(createSpy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        goal: "<review>",
-        taskId: task.id,
-        parentRunId: spawnerId,
-        userId,
-      })
-    );
-  });
-
-  it("passes userId=null when the tool runs outside a run (no ctx.runId)", async () => {
-    const plan = await repo.createPlan({ title: "No Spawner", date: "2026-07-04" });
-    const task = await repo.createTask({ planId: plan.id, title: "Task", date: "2026-07-04" });
-    createSpy.mockResolvedValue(fakeRunRow({ id: 4243, taskId: task.id }));
-
-    const res = await tool("start_review").execute(
-      { task_id: task.id, pr_url: "https://github.com/x/y/pull/10" },
-      { author: "test" }
-    );
-    expect(res.isError).toBeFalsy();
-    expect(createSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ userId: null, parentRunId: null })
-    );
-  });
-});
 
 describe("start_session userId propagation", () => {
   it("threads the spawner's userId through startSession into runs.create", async () => {

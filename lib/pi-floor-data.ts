@@ -194,9 +194,13 @@ const PLAN_STATE_TO_PI: Record<string, PiState> = {
 const TASK_STATE_TO_PI: Record<TaskState, PiState> = {
   todo: "todo",
   in_progress: "in_progress",
-  review: "review",
+  // testing/failing/passing are all "PR open, in flight" — bucket them into the
+  // existing Pi "review" glyph until the Pi floor gets its own states.
+  testing: "review",
+  failing: "review",
+  passing: "review",
+  merged: "done",
   blocked: "blocked",
-  done: "done",
   cancelled: "cancelled",
 };
 

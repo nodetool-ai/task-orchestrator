@@ -112,23 +112,9 @@ describe("await_session timeout_seconds bound", () => {
   });
 });
 
-describe("start_review pr_url validation", () => {
-  it("rejects an unparseable pr_url before touching the task", async () => {
-    const res = await tool("start_review").execute(
-      { task_id: "T-nope", pr_url: "not-a-pr-url" },
-      ctx
-    );
-    expect(res.isError).toBe(true);
-    expect((res.content[0] as { text: string }).text).toMatch(/Could not parse pr_url/);
-  });
-
-  it("still reports task-not-found for a well-formed pr_url", async () => {
-    const res = await tool("start_review").execute(
-      { task_id: "T-nope", pr_url: "https://github.com/x/y/pull/2" },
-      ctx
-    );
-    expect(res.isError).toBe(true);
-    expect((res.content[0] as { text: string }).text).toMatch(/not found/);
+describe("start_review removed (agent reviewer collapsed into single-agent flow)", () => {
+  it("is not present in the orchestrator tool registry", () => {
+    expect(ORCHESTRATOR_TOOLS.some((t) => t.name === "start_review")).toBe(false);
   });
 });
 

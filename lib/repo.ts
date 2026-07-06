@@ -18,6 +18,7 @@ import {
   type Repository as RepositoryDbRow,
   type Task as TaskRow,
 } from "@/db/schema";
+import { canonicalizePrUrl } from "./github-webhook";
 import {
   TASK_TRANSITIONS,
   PLAN_TRANSITIONS,
@@ -176,7 +177,9 @@ function hydrateTask(
   notes: TaskFull["notes"],
   criteria: TaskFull["criteria"],
   attachmentMetas: AttachmentMeta[],
-  prUrl: string | null = null
+  // Latest run's PR, inferred from agent_sessions — only used as a fallback
+  // when the task's own (explicit, tool-set) pr_url column is unset.
+  inferredPrUrl: string | null = null
 ): TaskFull {
   return {
     id: row.id,
@@ -188,7 +191,7 @@ function hydrateTask(
     estimate: row.estimate,
     tags: safeJsonArray(row.tags),
     repoId: row.repoId,
-    prUrl,
+    prUrl: row.prUrl ?? inferredPrUrl ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     dependencies: deps,
@@ -343,8 +346,9 @@ export async function planProgress(planId: string): Promise<PlanProgress> {
     .where(eq(tasks.planId, planId));
   const active = all.filter((t) => t.state !== "cancelled");
   const total = active.length;
-  const done = active.filter((t) => t.state === "done").length;
-  const open = active.filter((t) => t.state !== "done").length;
+  // `merged` is the sole success terminal — the completion count for a plan.
+  const done = active.filter((t) => t.state === "merged").length;
+  const open = active.filter((t) => t.state !== "merged").length;
   const pct = total === 0 ? 0 : Math.round((done / total) * 100);
   return { total, done, pct, open };
 }
@@ -366,7 +370,7 @@ export async function planProgressBatch(planIds: string[]): Promise<Map<string, 
     if (r.state === "cancelled") continue;
     const p = out.get(r.planId)!;
     p.total += Number(r.n);
-    if (r.state === "done") p.done += Number(r.n);
+    if (r.state === "merged") p.done += Number(r.n);
   }
   for (const p of out.values()) {
     p.open = p.total - p.done;
@@ -542,9 +546,11 @@ export async function taskCountsByState(): Promise<Record<TaskState, number>> {
   const out: Record<TaskState, number> = {
     todo: 0,
     in_progress: 0,
-    review: 0,
+    testing: 0,
+    failing: 0,
+    passing: 0,
+    merged: 0,
     blocked: 0,
-    done: 0,
     cancelled: 0,
   };
   for (const r of rows) out[r.state as TaskState] = Number(r.n);
@@ -930,7 +936,7 @@ export async function transitionTask(id: string, input: TransitionInput): Promis
     if (input.state === "in_progress" && !assignee) {
       throw new RepoError("Going to in_progress requires an assignee", 400);
     }
-    if (input.state === "done" && !input.bypassCriteria) {
+    if (input.state === "merged" && !input.bypassCriteria) {
       // Re-read criteria inside the tx too — otherwise a concurrent
       // updateCriterion could race the same way the transition itself did.
       const criteriaRows = await tx
@@ -940,7 +946,7 @@ export async function transitionTask(id: string, input: TransitionInput): Promis
       const openCriteria = criteriaRows.filter((c) => !c.done).length;
       if (openCriteria > 0) {
         throw new RepoError(
-          `Cannot mark done: ${openCriteria} acceptance criteria still open`,
+          `Cannot mark merged: ${openCriteria} acceptance criteria still open`,
           400
         );
       }
@@ -960,6 +966,56 @@ export async function transitionTask(id: string, input: TransitionInput): Promis
 
 export async function deleteTask(id: string) {
   await db.delete(tasks).where(eq(tasks.id, id));
+}
+
+/**
+ * Record a task's explicit PR link (set_task_pr tool). This is the
+ * authoritative source hydrateTask reads first — distinct from the
+ * session-derived "latest run's PR" fallback used until an implementor
+ * actually calls the tool. Does not touch task state; callers decide whether
+ * a transition is also warranted.
+ */
+export async function setTaskPr(taskId: string, prUrl: string): Promise<void> {
+  // Store the canonical form so getTaskByPrUrl (and the frequent PR-sync poller)
+  // can do an indexed equality lookup instead of scanning + canonicalizing every
+  // row. Fall back to the raw value only if it doesn't parse as a PR url.
+  const canonical = canonicalizePrUrl(prUrl) ?? prUrl;
+  await db
+    .update(tasks)
+    .set({ prUrl: canonical, updatedAt: new Date() })
+    .where(eq(tasks.id, taskId));
+}
+
+/**
+ * Resolve the task whose explicit `tasks.pr_url` link matches the given PR url.
+ * This is the authoritative task↔PR link the GitHub webhook/poller prefer over
+ * the older run-based (`agent_sessions.pr_url`/branch) heuristic. Comparison is
+ * canonical (case-insensitive, fragment/`.git`-stripped) so a webhook's
+ * lowercased url matches a mixed-case stored link. Returns null when no task
+ * carries a matching pr_url. Deterministic (lowest task id) if several do.
+ */
+export async function getTaskByPrUrl(prUrl: string): Promise<TaskFull | null> {
+  const key = canonicalizePrUrl(prUrl);
+  if (!key) return null;
+  // Fast path: indexed equality against the canonical value setTaskPr stores
+  // (tasks_pr_url_idx). Avoids scanning + canonicalizing every PR-backed task on
+  // each webhook delivery and every ~20s poll tick.
+  const [hit] = await db
+    .select({ id: tasks.id })
+    .from(tasks)
+    .where(eq(tasks.prUrl, key))
+    .orderBy(asc(tasks.id))
+    .limit(1);
+  if (hit) return getTask(hit.id);
+  // Legacy fallback: rows written before canonicalize-on-write may hold a
+  // non-canonical url; scan + canonicalize to match those.
+  const rows = await db
+    .select({ id: tasks.id, prUrl: tasks.prUrl })
+    .from(tasks)
+    .where(isNotNull(tasks.prUrl))
+    .orderBy(asc(tasks.id));
+  const match = rows.find((r) => canonicalizePrUrl(r.prUrl) === key);
+  return match ? getTask(match.id) : null;
 }
 
 // ──────────────────────────────────────────────────────────

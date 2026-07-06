@@ -377,7 +377,7 @@ function registerMergeTool(
     name: "gh_pr__pr_merge",
     label: "PR Merge",
     description:
-      "Merge a PR. method='merge' creates a merge commit, 'squash' squashes commits, 'rebase' rebases. Set delete_branch=true to also delete the PR's head branch after merging.",
+      "Merge a PR. method='merge' creates a merge commit, 'squash' squashes commits, 'rebase' rebases. Set delete_branch=true to also delete the PR's head branch after merging. Set auto=true to arm GitHub auto-merge instead of merging immediately.",
     parameters: Type.Object({
       url: Type.String({ minLength: 1 }),
       method: Type.Union([
@@ -386,13 +386,20 @@ function registerMergeTool(
         Type.Literal("rebase"),
       ]),
       delete_branch: Type.Optional(Type.Boolean()),
+      auto: Type.Optional(
+        Type.Boolean({
+          description:
+            "Enable GitHub auto-merge (merge automatically once required checks pass) instead of merging now. Requires auto-merge enabled + branch protection on the repo.",
+        })
+      ),
     }),
-    execute: async (_id, { url, method, delete_branch }) => {
+    execute: async (_id, { url, method, delete_branch, auto }) => {
       const g = await gate(url);
       if (!g.ok) return g.result;
       const lock = await checkAndAcquirePrLock(g.parsed.canonical, runId);
       if (!lock.ok) return lock.result;
       const args = ["pr", "merge", g.parsed.canonical];
+      if (auto) args.push("--auto");
       if (method === "merge") args.push("--merge");
       else if (method === "squash") args.push("--squash");
       else args.push("--rebase");
@@ -407,6 +414,7 @@ function registerMergeTool(
             ok: true,
             method,
             delete_branch: delete_branch === true,
+            auto: auto === true,
             pr: g.parsed.canonical,
             stdout: r.stdout.trim(),
           },

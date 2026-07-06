@@ -16,7 +16,7 @@ function fakeTask(overrides: Partial<TaskFull> = {}): TaskFull {
   return {
     id: "T-test",
     title: "Test task",
-    state: "review",
+    state: "testing",
     planId: "P-x",
     assignee: null,
     body: "Body text",
