@@ -22,6 +22,8 @@ export async function POST(
     const session = await agent.startSession({
       taskId: prior.taskId,
       model: input.model ?? prior.model ?? undefined,
+      // Omitted → startSession inherits the prior session's backend.
+      backend: input.backend ?? null,
       baseBranch: input.baseBranch,
       resumeOf: priorId,
     });

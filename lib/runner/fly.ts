@@ -5,6 +5,7 @@ import { and, eq } from "drizzle-orm";
 
 import { db } from "@/db";
 import { agentEvents, agentSessions, runnerInstances } from "@/db/schema";
+import { agentCredentialEnv } from "../agent-backend/provider-env";
 import { isTerminalStatus, type SessionStatus } from "../types";
 import { isWorkerClaimLive, nextLifecycleAction } from "./lifecycle";
 import { nestedDispatchMode } from "./provider";
@@ -268,8 +269,10 @@ export function buildFlyWorkerEnv(runId: number): Record<string, string> {
   return compactEnv({
     DATABASE_URL: envValue("DATABASE_URL"),
     GH_TOKEN: envValue("GH_TOKEN"),
-    CLAUDE_CODE_OAUTH_TOKEN: envValue("CLAUDE_CODE_OAUTH_TOKEN"),
-    ANTHROPIC_API_KEY: envValue("ANTHROPIC_API_KEY"),
+    // Agent credentials for BOTH backends: the Claude auth pair plus every
+    // pi provider key the server holds, so a Machine dispatched with
+    // TASK_ORCH_AGENT_BACKEND=pi can reach non-Anthropic providers too.
+    ...agentCredentialEnv(),
     TASK_ORCH_AGENT_BACKEND: envValue("TASK_ORCH_AGENT_BACKEND"),
     TASK_ORCH_CHAT_MODEL: envValue("TASK_ORCH_CHAT_MODEL"),
     TASK_ORCH_AGENT_MODEL: envValue("TASK_ORCH_AGENT_MODEL"),

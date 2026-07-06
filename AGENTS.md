@@ -68,6 +68,7 @@ parallel against different tasks.
 npm run task -- agent T-20260511-0001                 # start + tail
 npm run task -- agent T-20260511-0001 --no-follow     # detach
 npm run task -- agent T-20260511-0001 --model=claude-opus-4-7
+npm run task -- agent T-20260511-0001 --backend=pi    # or claude; default from env
 npm run task -- agent list                            # all runs
 npm run task -- agent cancel <session-id>             # abort
 ```

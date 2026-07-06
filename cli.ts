@@ -50,6 +50,13 @@ function asArray(v: unknown): string[] | undefined {
   return v.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
+function parseBackend(v: unknown): "pi" | "claude" | undefined {
+  const s = asString(v)?.trim().toLowerCase();
+  if (s === undefined) return undefined;
+  if (s === "pi" || s === "claude") return s;
+  throw new Error(`Unknown --backend '${s}'. Expected 'pi' or 'claude'.`);
+}
+
 // ──────────────────────────────────────────────────────────
 // Commands
 // ──────────────────────────────────────────────────────────
@@ -368,6 +375,8 @@ async function cmdAgent(args: Args) {
     const session = await agent.startSession({
       taskId: prior.taskId,
       model: asString(args.model) ?? prior.model ?? undefined,
+      // Omitted → startSession inherits the prior session's backend.
+      backend: parseBackend(args.backend),
       resumeOf: prior.id,
     });
     console.log(`Resumed as session #${session.id} (from #${prior.id})`);
@@ -376,12 +385,13 @@ async function cmdAgent(args: Args) {
     return 0;
   }
 
-  // Default: agent <task-id> [--model=...] [--no-follow]
+  // Default: agent <task-id> [--model=...] [--backend=pi|claude] [--no-follow]
   const taskId = args._.shift();
-  if (!taskId) throw new Error("Usage: agent <task-id> [--model=...] [--no-follow]");
+  if (!taskId) throw new Error("Usage: agent <task-id> [--model=...] [--backend=pi|claude] [--no-follow]");
   const session = await agent.startSession({
     taskId,
     model: asString(args.model),
+    backend: parseBackend(args.backend),
   });
   console.log(`Started session #${session.id} for ${taskId}`);
   if (args["no-follow"]) return 0;
@@ -651,11 +661,15 @@ Commands:
   attach rm <attachment-id>         Delete an attachment.
 
   agent <T-...> [--model=...]       Start an agent session for a task and tail
-                                    events. Use --no-follow to detach.
+                                    events. Use --no-follow to detach and
+                                    --backend=pi|claude to pick the agent
+                                    backend (default: deployment env).
   agent list [--json]               List all agent sessions.
   agent cancel <session-id>         Cancel an active session.
   agent resume <session-id>         Resume a prior (terminal) session; pass
-                                    --model=... to change models on resume.
+                                    --model=... / --backend=... to change
+                                    models or backends on resume (backend
+                                    defaults to the prior session's).
 
   user list [--json]                List sign-in users.
   user add <email> [--password=...] Create a user. Prompts for password if omitted.

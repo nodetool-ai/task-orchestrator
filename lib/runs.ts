@@ -54,7 +54,7 @@ import type { AgentSessionFull, RepositoryRow, SessionStatus } from "./types";
 import { isTerminalStatus, SESSION_STATUSES } from "./types";
 import { resolveProfiles, alwaysOnExtensions, type ProfileContext } from "./profiles";
 import { type RunEnvelope } from "./pi-event-mapper";
-import { getBackend, type Extension } from "./agent-backend";
+import { getBackend, resolveBackendId, type Extension } from "./agent-backend";
 import {
   claimInboxEvents,
   emitInboxEvent,
@@ -129,6 +129,9 @@ export interface CreateRunInput {
   prUrl?: string | null;
   parentRunId?: number | null;
   model?: string | null;
+  /** Agent backend for this run ('pi'|'claude'). Omitted/null inherits the
+   *  deployment default (TASK_ORCH_AGENT_BACKEND). */
+  backend?: string | null;
   /** Reasoning level for this run; overrides the persona's. Omitted/null
    *  inherits the persona's level (which may itself be unset = model default). */
   thinkingLevel?: "low" | "medium" | "high" | "xhigh" | null;
@@ -164,6 +167,9 @@ export interface RunRow {
   toolsProfile: string;
   cwdStrategy: CwdStrategy;
   model: string | null;
+  /** Agent backend this run executes on ('pi'|'claude'), or null for the
+   *  deployment default (TASK_ORCH_AGENT_BACKEND). */
+  backend: "pi" | "claude" | null;
   /** Per-run reasoning level (low|medium|high|xhigh), or null to inherit the persona. */
   thinkingLevel: "low" | "medium" | "high" | "xhigh" | null;
   branch: string | null;
@@ -521,6 +527,28 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   }
   const effectiveModel = input.model ?? DEFAULT_MODEL;
 
+  // Per-run backend choice. Normalize/validate eagerly so a typo'd backend is
+  // a 400 here rather than a failed first turn; null stays null (deployment
+  // default at turn time). An explicit 'claude' pick is additionally checked
+  // against the model's provider — the Claude backend is Anthropic-only, and
+  // this combination can never run.
+  let backend: "pi" | "claude" | null = null;
+  if (input.backend != null) {
+    try {
+      backend = resolveBackendId(input.backend);
+    } catch (err) {
+      throw new repo.RepoError(err instanceof Error ? err.message : String(err), 400);
+    }
+    const provider = effectiveModel.includes("/") ? effectiveModel.split("/", 2)[0] : "anthropic";
+    if (backend === "claude" && provider !== "anthropic") {
+      throw new repo.RepoError(
+        `The 'claude' backend only supports Anthropic models, but the run's model is '${effectiveModel}'. ` +
+          `Pick an anthropic/* model or the 'pi' backend.`,
+        400
+      );
+    }
+  }
+
   // Tree limits (Decision 2): reject BEFORE inserting, same reasoning as the
   // worktree-invariant checks above — validating after the insert would leave an
   // undriveable ghost row behind. Only applies to child runs; a root run (no
@@ -541,6 +569,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
       toolsProfile,
       cwdStrategy,
       model: effectiveModel,
+      backend,
       thinkingLevel: input.thinkingLevel ?? null,
       title: input.title ?? null,
       userId: input.userId ?? null,
@@ -2733,7 +2762,8 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     }
   };
 
-  const backend = await getBackend();
+  // Per-run backend; a null column falls back to the deployment default.
+  const backend = await getBackend(run.backend);
   const resumeToken = run.sdkSessionId ?? null;
   const turnArgs = {
     cwd,
@@ -3725,6 +3755,7 @@ function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     toolsProfile: row.toolsProfile,
     cwdStrategy: row.cwdStrategy as CwdStrategy,
     model: row.model,
+    backend: (row.backend as "pi" | "claude" | null) ?? null,
     thinkingLevel: (row.thinkingLevel as "low" | "medium" | "high" | "xhigh" | null) ?? null,
     branch: row.branch,
     worktreePath: row.worktreePath,
@@ -3779,6 +3810,7 @@ export function toAgentSessionFull(row: RunRow): AgentSessionFull {
     taskId: row.taskId,
     status: row.status,
     model: row.model,
+    backend: row.backend,
     branch: row.branch,
     worktreePath: row.worktreePath,
     prUrl: row.prUrl,

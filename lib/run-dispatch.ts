@@ -6,6 +6,7 @@ import { cpus, totalmem } from "node:os";
 import { join } from "node:path";
 import { db } from "../db";
 import { agentSessions, runnerInstances } from "../db/schema";
+import { AGENT_CREDENTIAL_ENV_KEYS } from "./agent-backend/provider-env";
 // lib/inbox has no static import of this module (its wake path uses a lazy
 // dynamic import), so this edge is cycle-free.
 import { fireDueTimers, parkedRunsWithPendingEvents } from "./inbox";
@@ -624,8 +625,11 @@ export function buildWorkerContainerConfig(runId: number, scope: string): Record
   const env = [
     pass("DATABASE_URL"),
     pass("GH_TOKEN"),
-    pass("CLAUDE_CODE_OAUTH_TOKEN"),
-    pass("ANTHROPIC_API_KEY"),
+    // Agent credentials for BOTH backends: the Claude auth pair plus every pi
+    // provider key set on the server, so a worker dispatched with
+    // TASK_ORCH_AGENT_BACKEND=pi can reach non-Anthropic providers too. Only
+    // set keys are forwarded (an absent key stays absent in the container).
+    ...AGENT_CREDENTIAL_ENV_KEYS.filter((k) => process.env[k] != null).map(pass),
     pass("TASK_ORCH_AGENT_BACKEND"),
     pass("TASK_ORCH_CHAT_MODEL"),
     pass("TASK_ORCH_AGENT_MODEL"),

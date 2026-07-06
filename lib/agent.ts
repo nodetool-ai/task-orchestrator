@@ -232,6 +232,10 @@ function ghPrState(prUrl: string): Promise<PrState | null> {
 export interface StartSessionInput {
   taskId: string;
   model?: string;
+  /** Agent backend ('pi'|'claude'). Omitted: a resume inherits the prior
+   *  session's backend (its resume token is backend-tagged); a fresh session
+   *  uses the deployment default. */
+  backend?: "pi" | "claude" | null;
   thinkingLevel?: "low" | "medium" | "high" | "xhigh" | null;
   baseBranch?: string;
   resumeOf?: number;
@@ -276,6 +280,7 @@ export async function startSession(input: StartSessionInput): Promise<AgentSessi
         409
       );
     }
+    let backend = input.backend ?? null;
     if (input.resumeOf) {
       const prior = await runs.get(input.resumeOf);
       if (!prior) throw new repo.RepoError(`Prior session #${input.resumeOf} not found`, 404);
@@ -288,6 +293,9 @@ export async function startSession(input: StartSessionInput): Promise<AgentSessi
           400
         );
       }
+      // A resume stays on the prior session's backend unless overridden: its
+      // resume token is backend-tagged, so a different backend starts fresh.
+      backend = backend ?? prior.backend;
     }
 
     const created = await runs.create({
@@ -299,6 +307,7 @@ export async function startSession(input: StartSessionInput): Promise<AgentSessi
       taskId: input.taskId,
       repoId: task.repoId ?? null,
       model: input.model ?? DEFAULT_MODEL,
+      backend,
       thinkingLevel: input.thinkingLevel ?? null,
       baseBranch: input.baseBranch ?? "main",
       parentRunId: input.resumeOf ?? input.parentRunId ?? null,

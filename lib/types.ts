@@ -167,6 +167,8 @@ export interface AgentSessionFull {
   taskId: string;
   status: SessionStatus;
   model: string | null;
+  /** Agent backend ('pi'|'claude'), or null = deployment default. */
+  backend: "pi" | "claude" | null;
   branch: string | null;
   worktreePath: string | null;
   prUrl: string | null;

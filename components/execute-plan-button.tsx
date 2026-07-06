@@ -13,6 +13,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip } from "@/components/ui/tooltip";
 import { ModelPicker } from "@/components/chat/model-picker";
+import { BackendPicker } from "@/components/pickers/backend-picker";
 import { DEFAULT_CHAT_MODEL, useModelOptions } from "@/components/chat/use-model-options";
 
 interface Props {
@@ -36,7 +37,7 @@ interface Props {
 export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  const { model, setModel, modelOptions } = useModelOptions(DEFAULT_CHAT_MODEL, open);
+  const { model, setModel, modelOptions, backend, setBackend, backendOptions } = useModelOptions(DEFAULT_CHAT_MODEL, open);
   const [instructions, setInstructions] = useState("");
   const [maxUsd, setMaxUsd] = useState(Math.max(openTaskCount, 1) * 25);
   const [pending, startTransition] = useTransition();
@@ -65,6 +66,7 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
             planId,
             personaId: "executor",
             model,
+            backend,
             initialPrompt: instructions.trim() || undefined,
             budget: { maxUsd, maxTurns: 200 },
           }),
@@ -123,12 +125,20 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
 
               <div className="grid grid-cols-2 gap-4 text-xs">
                 <Field label="Model">
-                  <ModelPicker
-                    value={model}
-                    options={modelOptions}
-                    onChange={setModel}
-                    disabled={pending}
-                  />
+                  <div className="flex items-center gap-2">
+                    <BackendPicker
+                      value={backend}
+                      options={backendOptions}
+                      onChange={setBackend}
+                      disabled={pending}
+                    />
+                    <ModelPicker
+                      value={model}
+                      options={modelOptions}
+                      onChange={setModel}
+                      disabled={pending}
+                    />
+                  </div>
                 </Field>
                 <Field label="Budget (max USD)">
                   <Input
