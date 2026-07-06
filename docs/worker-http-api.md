@@ -172,11 +172,15 @@ the CLI.
 - Server-side: grep the web logs for `[worker-api]` and a `runId=` to see one
   run's entire protocol conversation.
 - Worker logs still land in `agent_runs.worker_log`
-  (`GET /api/runs/:id/worker-log`) in both modes.
+  (`GET /api/runs/:id/worker-log`), shipped over `POST runs/:id/log`.
 
 ## Compatibility
 
 - No schema changes. No new NOTIFY channels.
-- Deployments that don't set `TASK_ORCH_WORKER_API_URL` behave exactly as
-  before (db transport everywhere, `DATABASE_URL` passed to workers).
+- **Breaking for worker dispatch**: `TASK_ORCH_WORKER_API_URL` (or
+  `NEXTAUTH_URL` on same-host dev) must be set — dispatch fails with an
+  actionable error otherwise, and workers never receive `DATABASE_URL`.
+  docker-compose defaults it to `http://server:3000`.
+- The web server, CLI, and Discord pipe are unaffected (they are the
+  orchestrator; the db transport is theirs).
 - The status-event/`_eos` SSE contract of the run view is untouched.

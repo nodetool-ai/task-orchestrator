@@ -96,10 +96,10 @@ export function workerDispatchEnv(runId: number): Record<string, string> {
         "— see docs/worker-http-api.md."
     );
   }
-  let token: string;
-  try {
-    token = mintWorkerToken(runId);
-  } catch {
+  // Check the secret explicitly (rather than wrapping every mint failure):
+  // a missing secret gets the actionable config message, while any other mint
+  // error (e.g. an invalid runId) bubbles up undisguised.
+  if (!process.env.TASK_ORCH_WORKER_API_SECRET && !process.env.AUTH_SECRET) {
     // Without this context the failure surfaces upstream as an opaque
     // "spawn returned no pid" — name the actual misconfiguration.
     throw new Error(
@@ -109,7 +109,7 @@ export function workerDispatchEnv(runId: number): Record<string, string> {
   }
   return {
     TASK_ORCH_WORKER_API_URL: apiUrl,
-    TASK_ORCH_WORKER_TOKEN: token,
+    TASK_ORCH_WORKER_TOKEN: mintWorkerToken(runId),
   };
 }
 
