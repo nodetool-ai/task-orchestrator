@@ -9,10 +9,11 @@
 import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, asc, desc, eq, gt, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNotNull, sql } from "drizzle-orm";
 
 import { db } from "@/db";
-import { agentEvents, agentSessions, tasks } from "@/db/schema";
+import { agentEvents, agentSessions } from "@/db/schema";
+import { syncPrBackedTasks } from "./pr-task-state";
 import * as repo from "./repo";
 import { insideWorker } from "./runner/provider";
 import * as runs from "./runs";
@@ -27,7 +28,7 @@ const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
 const DEFAULT_MODEL = process.env.TASK_ORCH_AGENT_MODEL ?? "claude-sonnet-4-6";
 
 // ──────────────────────────────────────────────────────────
-// Background tasks (orphan reaper, PR-merge poller).
+// Background tasks (orphan reaper, PR → task-state sync).
 //
 // These need to run regardless of whether anyone imports lib/runs.ts, so
 // they live here on the legacy module that every API route already touches.
@@ -35,9 +36,9 @@ const DEFAULT_MODEL = process.env.TASK_ORCH_AGENT_MODEL ?? "claude-sonnet-4-6";
 // ORCHESTRATOR-ONLY: both jobs read the DB directly. Under the HTTP-worker
 // architecture (#98) a run worker (TASK_ORCH_INSIDE_WORKER=1) holds no DB
 // access — the db guard throws on every call — so firing these inside a worker
-// only spams caught "reaper/pr watcher failed" errors and wastes a poll timer.
-// Reaping orphans and polling merged PRs are control-plane duties anyway; gate
-// them so they run on the server only.
+// only spams caught "reaper/pr sync failed" errors and wastes a poll timer.
+// Reaping orphans and syncing PR-backed task state are control-plane duties
+// anyway; gate them so they run on the server only.
 // ──────────────────────────────────────────────────────────
 
 declare global {
@@ -68,11 +69,16 @@ if (!insideWorker() && !globalThis.__agentReaperRan) {
   });
 }
 
-const PR_POLL_MS = Number(process.env.TASK_ORCH_PR_POLL_MS ?? 60_000);
-if (!insideWorker() && !globalThis.__agentPrWatcher && PR_POLL_MS > 0) {
+// PR → task-state sync cadence ("as often as possible" belt that catches
+// missed webhooks). TASK_ORCH_PR_SYNC_MS is the current knob; fall back to the
+// legacy TASK_ORCH_PR_POLL_MS if only that is set, else default 20s.
+const PR_SYNC_MS = Number(
+  process.env.TASK_ORCH_PR_SYNC_MS ?? process.env.TASK_ORCH_PR_POLL_MS ?? 20_000
+);
+if (!insideWorker() && !globalThis.__agentPrWatcher && PR_SYNC_MS > 0) {
   globalThis.__agentPrWatcher = setInterval(() => {
-    pollMergedPrs().catch((err) => console.error("agent: pr watcher failed:", err));
-  }, PR_POLL_MS);
+    syncPrBackedTasks().catch((err) => console.error("agent: pr sync failed:", err));
+  }, PR_SYNC_MS);
   globalThis.__agentPrWatcher.unref?.();
 }
 
@@ -137,110 +143,6 @@ async function reapOrphans() {
       cleanupWorktree(orphan.worktreePath, root).catch(() => {});
     }
   }
-}
-
-async function pollMergedPrs(): Promise<void> {
-  const rows = await db
-    .select({
-      sessionId: agentSessions.id,
-      taskId: agentSessions.taskId,
-      prUrl: agentSessions.prUrl,
-      startedAt: agentSessions.startedAt,
-    })
-    .from(agentSessions)
-    .innerJoin(tasks, eq(tasks.id, agentSessions.taskId))
-    // testing/passing/failing are the PR-open states (the happy path);
-    // `in_progress` catches tasks whose PR-transition failed or whose PR a
-    // human merged early. All of these can still reach `merged`.
-    .where(
-      and(
-        isNotNull(agentSessions.prUrl),
-        inArray(tasks.state, ["in_progress", "testing", "passing", "failing"])
-      )
-    );
-
-  // Group every PR-bearing run by task. A task can have more than one run with
-  // a PR (e.g. a stale run plus a follow-up that opened a different PR), and the
-  // *merged* one isn't necessarily the newest — collapsing to the latest run
-  // per task would miss it and strand the task open.
-  const byTask = new Map<string, (typeof rows)[number][]>();
-  for (const r of rows) {
-    if (!r.taskId || !r.prUrl) continue;
-    const list = byTask.get(r.taskId);
-    if (list) list.push(r);
-    else byTask.set(r.taskId, [r]);
-  }
-
-  for (const [taskId, taskRows] of byTask) {
-    // Newest-first so a freshly merged PR is found quickly, but still fall
-    // through to older PR-bearing runs.
-    taskRows.sort((a, b) => (a.startedAt > b.startedAt ? -1 : 1));
-    for (const r of taskRows) {
-      if (!r.prUrl) continue;
-      const info = await ghPrState(r.prUrl);
-      if (!info || info.state !== "MERGED") continue;
-      try {
-        await repo.transitionTask(taskId, {
-          state: "merged",
-          note: `PR merged: ${r.prUrl}`,
-          // A merged PR is authoritative — close the task even if acceptance
-          // criteria were never checked off, rather than stranding it open.
-          bypassCriteria: true,
-        });
-        await db.insert(agentEvents)
-          .values({
-            sessionId: r.sessionId,
-            type: "pr_merged",
-            payload: JSON.stringify({ url: r.prUrl, mergedAt: info.mergedAt }),
-            createdAt: new Date(),
-          });
-      } catch (err) {
-        try {
-          await repo.addNote(
-            taskId,
-            "claude-agent",
-            `PR merged but could not transition to merged: ${describe(err)}`
-          );
-        } catch {
-          // ignore
-        }
-      }
-      // The task is resolved (or we recorded why it couldn't be); stop checking
-      // its remaining PRs.
-      break;
-    }
-  }
-}
-
-interface PrState {
-  state: string;
-  mergedAt: string | null;
-}
-
-function ghPrState(prUrl: string): Promise<PrState | null> {
-  return new Promise((resolveP) => {
-    const child = spawn("gh", ["pr", "view", prUrl, "--json", "state,mergedAt"], {
-      env: process.env,
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d) => (stdout += d.toString()));
-    child.stderr.on("data", (d) => (stderr += d.toString()));
-    child.on("error", () => resolveP(null));
-    child.on("close", (code) => {
-      if (code !== 0) {
-        if (stderr) console.warn("gh pr view failed:", stderr.trim());
-        resolveP(null);
-        return;
-      }
-      try {
-        const parsed = JSON.parse(stdout) as PrState;
-        resolveP(parsed);
-      } catch {
-        resolveP(null);
-      }
-    });
-  });
 }
 
 // ──────────────────────────────────────────────────────────
@@ -472,11 +374,6 @@ function safeJson(s: string): unknown {
   } catch {
     return s;
   }
-}
-
-function describe(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return typeof err === "string" ? err : JSON.stringify(err);
 }
 
 // Test hook: reset the reaper guard and run reapOrphans for testing.
