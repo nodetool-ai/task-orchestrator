@@ -43,10 +43,6 @@ type RunsApi = {
   failPendingRun: (runId: number, error: string) => Promise<boolean>;
   /** Count runs holding a worker slot (worker_scope set + a lease status). */
   countInFlightWorkers: () => Promise<number>;
-  /** Drive a claimed run to completion IN THIS process (in-server cwd=none path). */
-  driveDispatchedRun: (runId: number) => Promise<void>;
-  /** Count in-server runs (cwd=none) currently DRIVING with a fresh claim. */
-  countInServerRuns: () => Promise<number>;
   /** Ids of runs parked in 'pending', oldest first (the dispatch queue). */
   listPendingRunIds: () => Promise<number[]>;
   /** Reap stale leases (OOM-killed / dead workers); re-dispatches resumable ones. */
@@ -89,25 +85,6 @@ export function detachedRunsEnabled(): boolean {
   if (runnerProviderKindFromEnv() === "fly") return true;
   const v = process.env.TASK_ORCH_DETACHED_RUNS;
   return !!v && v !== "0" && v.toLowerCase() !== "false";
-}
-
-/** True when a run executes in the orchestrator process itself rather than on a
- *  dispatched worker Machine: the repo-less (cwd_strategy="none") lightweight
- *  class — plan executors, chat, planners. They hold no checkout and no fs/shell
- *  tools (cwd=none tool policy), so the server env is not exposed to the agent,
- *  and an executor parks between turns rather than holding a resident container.
- *  Kill switch: TASK_ORCH_DISABLE_IN_SERVER_RUNS=1 routes them back to workers. */
-export function runsInServer(run: { cwdStrategy: string }): boolean {
-  const off = process.env.TASK_ORCH_DISABLE_IN_SERVER_RUNS;
-  if (off && off !== "0" && off.toLowerCase() !== "false") return false;
-  return run.cwdStrategy === "none";
-}
-
-/** Max concurrently-DRIVING in-server runs. The orchestrator is a single
- *  (--ha=false) machine, so cap resident in-process agent turns to protect it;
- *  over the cap, a run defers to 'pending' and the pump retries when a slot frees. */
-function inServerMax(): number {
-  return intEnv("TASK_ORCH_IN_SERVER_MAX", 4);
 }
 
 /** True when the server must route user turns through an out-of-process runner.
@@ -349,17 +326,12 @@ export async function dispatchRun(
   // reservation count seen by the next caller already includes this claim. The
   // spawn itself (a slow Docker round-trip) runs OUTSIDE the lock.
   const outcome = await withAdmissionLock<
-    { kind: Exclude<DispatchResult, "spawned"> } | { kind: "claimed"; scope: string; inServer: boolean }
+    { kind: Exclude<DispatchResult, "spawned"> } | { kind: "claimed"; scope: string }
   >(async () => {
     const run = await runs().get(runId);
     if (!run) return { kind: "not-found" };
     if (runs().isLeaseLive(run)) return { kind: "already-claimed" };
     if (run.workerScope) return { kind: "already-claimed" };
-
-    // Repo-less (cwd=none) runs execute in THIS orchestrator process rather than
-    // on a dispatched worker Machine (see runsInServer). They skip the worker
-    // admission gate and are bounded by their own in-server capacity gate below.
-    const inServer = runsInServer(run);
 
     // Tree-limit re-verify (Decision 2 in docs/nested-machine-dispatch.md):
     // create() already rejects an over-depth/over-size child before insert, but
@@ -377,7 +349,7 @@ export async function dispatchRun(
       }
     }
 
-    if (admissionEnabled() && !inServer) {
+    if (admissionEnabled()) {
       let decision = await admitFn(runId);
       // Deadlock breaker (M1): a plan-executor run occupies a worker slot for
       // its ENTIRE turn (countInFlightWorkers/flyAdmit count it the whole
@@ -432,26 +404,6 @@ export async function dispatchRun(
       }
     }
 
-    // In-server capacity gate: bound resident in-process agent turns on the single
-    // orchestrator machine. Over the cap, park for the pump exactly like the worker
-    // admission defer (same fields, same stampEpisode logic).
-    if (inServer) {
-      const active = await runs().countInServerRuns();
-      if (active >= inServerMax()) {
-        const stampEpisode = run.status !== "pending";
-        await db
-          .update(agentSessions)
-          .set({
-            status: "pending",
-            workerScope: null,
-            workerPid: null,
-            ...(stampEpisode ? { heartbeatAt: new Date() } : {}),
-          })
-          .where(eq(agentSessions.id, runId));
-        return { kind: "deferred" };
-      }
-    }
-
     const scope = `run-${runId}-${nonce()}`;
     // Atomic claim: only succeeds if worker_scope is still NULL AND the status is
     // still claimable. 'cancelled'/'closed' are terminal decisions that must NEVER
@@ -489,24 +441,10 @@ export async function dispatchRun(
         )
       );
     if (claimed.count === 0) return { kind: "already-claimed" };
-    return { kind: "claimed", scope, inServer };
+    return { kind: "claimed", scope };
   });
 
   if (outcome.kind !== "claimed") return outcome.kind;
-
-  if (outcome.inServer) {
-    // Drive the turn in THIS (orchestrator) process — no worker Machine. The
-    // claim is held (workerScope set by the atomic claim above); driveDispatchedRun
-    // keeps the heartbeat fresh and releases the claim in its finally.
-    await db
-      .update(agentSessions)
-      .set({ workerPid: process.pid })
-      .where(and(eq(agentSessions.id, runId), eq(agentSessions.workerScope, outcome.scope)));
-    void runs().driveDispatchedRun(runId).catch((err) => {
-      console.error(`[dispatch] in-server drive failed for run ${runId}:`, err);
-    });
-    return "spawned";
-  }
 
   // Start the worker through the selected provider. A throw/null must NOT leave
   // the run wedged in 'preparing' with no error — mark it failed and release the
@@ -585,13 +523,8 @@ async function pumpTick(): Promise<void> {
   } catch {
     // best-effort
   }
-  // Half 2: drain the deferred queue, oldest first. There are TWO independent
-  // capacity pools — worker slots (machines/memory) and in-server slots
-  // (TASK_ORCH_IN_SERVER_MAX) — and both defer into this one 'pending' queue.
-  // A defer means only THAT pool is full, so we stop dispatching that pool but
-  // keep scanning for runs of the other pool (a global break would let a
-  // head-of-line run blocked on one full pool starve runs behind it that the
-  // other, free pool could serve). The next tick retries whatever stays queued.
+  // Half 2: drain the deferred queue, oldest first. Stop at the first defer (the
+  // host is full); the next tick retries.
   let ids: number[];
   try {
     ids = await runs().listPendingRunIds();
@@ -600,16 +533,12 @@ async function pumpTick(): Promise<void> {
   }
   const maxDeferMs = intEnv("TASK_ORCH_MAX_DEFER_MS", DEFAULT_MAX_DEFER_MS);
   const now = Date.now();
-  let workerPoolFull = false;
-  let inServerPoolFull = false;
   for (const id of ids) {
     const run = await runs().get(id);
     if (!run || run.status !== "pending") continue;
-    const inServer = runsInServer(run);
     // Time in THIS pending episode: heartbeatAt is stamped when a run is deferred
     // into pending (dispatchRun's defer branch); a run born pending has no stamp
-    // and is measured from startedAt (≈ its enqueue time). The deadline is checked
-    // regardless of pool-full state so a run stuck past MAX_DEFER always fails.
+    // and is measured from startedAt (≈ its enqueue time).
     const pendingSince = run.heartbeatAt ?? run.startedAt;
     if (maxDeferMs > 0 && pendingSince && now - pendingSince.getTime() > maxDeferMs) {
       // Atomically take the terminal transition in ONE guarded write (status
@@ -619,23 +548,14 @@ async function pumpTick(): Promise<void> {
       // must not clobber its healthy claim into 'failed'. Previously this was two
       // writes (a raw CAS UPDATE then a separate failRun) for one transition; a
       // connection death between them could land the event without the column
-      // write and let the reaper mislabel the run. The message names the pool the
-      // run was actually waiting on.
-      const failMsg = inServer
-        ? "no in-server capacity: the run stayed queued past the maximum wait (TASK_ORCH_MAX_DEFER_MS) — in-server slots (TASK_ORCH_IN_SERVER_MAX) stayed full."
-        : "no worker capacity: the run stayed queued past the maximum wait (TASK_ORCH_MAX_DEFER_MS) — worker slots (machines/memory) stayed full.";
+      // write and let the reaper mislabel the run.
+      const failMsg =
+        "no worker capacity: the run stayed queued past the maximum wait (TASK_ORCH_MAX_DEFER_MS) — worker slots (machines/memory) stayed full.";
       await runs().failPendingRun(id, failMsg);
       continue;
     }
-    // This run's pool already deferred this tick — skip it, but keep scanning so
-    // the other pool still drains. Stop entirely once BOTH pools are full.
-    if (inServer ? inServerPoolFull : workerPoolFull) continue;
     const r = await dispatchRun(id);
-    if (r === "deferred") {
-      if (inServer) inServerPoolFull = true;
-      else workerPoolFull = true;
-      if (inServerPoolFull && workerPoolFull) break;
-    }
+    if (r === "deferred") break;
   }
   // Half 3: fire due timers (docs/agent-events.md §7). Each fired timer becomes
   // a `timer.fired` inbox event whose emit-time wake dispatches its (parked)

@@ -92,7 +92,7 @@ export class ClaudeBackend implements AgentBackend {
   readonly id = "claude" as const;
 
   async runTurn(args: RunTurnArgs): Promise<TurnOutcome> {
-    const { cwd, model, thinkingLevel, extensions, abort, prompt, onEvent, disallowedBuiltins } = args;
+    const { cwd, model, thinkingLevel, extensions, abort, prompt, onEvent } = args;
 
     // The Claude backend speaks only to Anthropic. Fail early with an actionable
     // message rather than letting a non-Anthropic provider reach the SDK and
@@ -220,7 +220,6 @@ export class ClaudeBackend implements AgentBackend {
           // ('low' | 'medium' | 'high'); omitted lets the model default apply.
           ...(thinkingLevel ? { effort: thinkingLevel } : {}),
           permissionMode: "bypassPermissions",
-          ...(disallowedBuiltins && disallowedBuiltins.length ? { disallowedTools: disallowedBuiltins as string[] } : {}),
           systemPrompt: {
             type: "preset",
             preset: "claude_code",
