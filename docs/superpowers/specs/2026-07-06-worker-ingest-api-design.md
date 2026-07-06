@@ -137,10 +137,14 @@ path (Decision 5) and the server logs the verification failures loudly — safe
 during Tier 2's rollout, unacceptable in `strict`, which is another reason
 `strict` is out of scope here.
 
-**Minting.** At Machine-provisioning time inside `buildFlyWorkerEnv(runId)`:
-`TASK_ORCH_INGEST_TOKEN: mintIngestToken(runId, currentGeneration)`. Minting
-is a pure function of `(runId, gen, secret)` — no DB insert at machine-create
-time. The generation bump (site 1 above) commits before mint reads it.
+**Minting.** At the Machine-provisioning sites — `create()` and the
+cold-recover branch of `resume()` — which are exactly where the generation
+bump (site 1 above) commits and the fresh value is in hand. The token is then
+passed *into* `buildFlyWorkerEnv` (its signature gains the parameter, e.g.
+`buildFlyWorkerEnv(runId, { ingestToken })`), keeping that helper synchronous
+and env-pure as it is today rather than giving it a DB read it has never had.
+Minting itself is a pure function of `(runId, gen, secret)` — no DB insert at
+machine-create time.
 **Consistency rule (v2, resolving a v1 ambiguity):** the token is minted
 whenever an ingest secret is configured, regardless of the mode flag —
 `off` + secret ⇒ token present but unused; no secret ⇒ no token and the

@@ -14,7 +14,8 @@ worker's DB authority while heartbeats/claims/dispatch/reads stay on the DB
 path per the PR #90 contract.
 
 **Architecture:** See the design doc (v2). Summary: stateless HMAC token
-(`tow1.<payload>.<sig>`, `{v, run, gen, iat}`) minted in `buildFlyWorkerEnv`
+(`tow1.<payload>.<sig>`, `{v, run, gen, iat}`) minted at the provisioning
+sites and passed into `buildFlyWorkerEnv` (which stays sync/env-pure),
 against `agent_runs.worker_generation`, which bumps on every replacement-
 Machine provisioning and on cancel/close/worker-death/orphan-fail; one batch
 fail-fast route whose handlers call the same tx-parametric write cores the DB
@@ -111,10 +112,11 @@ zod for the op union, Vitest. No new dependencies (HMAC via node:crypto).
       `completed`/`failed` landing does NOT bump; the reaper's
       completed-via-stranded-event branch does NOT bump.
 - [ ] Implement. Bump = single `UPDATE ... SET worker_generation =
-      worker_generation + 1` committed before `buildFlyWorkerEnv` reads the
-      row to mint (provisioning sites) or folded into the same transaction as
-      the status write (cancel/close/fail sites — Tier 1 helpers accept extra
-      `set` columns).
+      worker_generation + 1 RETURNING worker_generation` at the provisioning
+      sites (the returned value feeds the mint in Task 7 — `buildFlyWorkerEnv`
+      itself stays sync/env-pure and never reads the DB), or folded into the
+      same transaction as the status write (cancel/close/fail sites — Tier 1
+      helpers accept extra `set` columns).
 
 ### Task 4: Tx-parametric refactor of the write cores (blocker for Task 5)
 
@@ -207,9 +209,12 @@ zod for the op union, Vitest. No new dependencies (HMAC via node:crypto).
 ### Task 7: Env wiring + Tier-0 denylist + deploy docs
 
 **Files:**
-- Modify: `lib/runner/fly.ts` (`buildFlyWorkerEnv`: mint
-  `TASK_ORCH_INGEST_TOKEN` from the current `worker_generation`, pass
-  resolved `TASK_ORCH_INGEST` + `TASK_ORCH_INGEST_URL`),
+- Modify: `lib/runner/fly.ts` (mint `TASK_ORCH_INGEST_TOKEN` at the
+  provisioning sites — `create()` / cold-recover `resume()` — from the
+  generation returned by Task 3's bump, and pass it into
+  `buildFlyWorkerEnv(runId, { ingestToken })`, which stays synchronous and
+  env-pure; `buildFlyWorkerEnv` additionally passes resolved
+  `TASK_ORCH_INGEST` + `TASK_ORCH_INGEST_URL`),
   `lib/agent-backend/env-scrub.ts` (add `TASK_ORCH_INGEST_TOKEN`,
   `TASK_ORCH_INGEST_SECRET`, `TASK_ORCH_INGEST_SECRET_PREVIOUS` to
   `SECRET_ENV_DENYLIST`), `docs/fly-deployment.md`, `fly-deploy.sh`
