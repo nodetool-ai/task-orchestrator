@@ -37,6 +37,9 @@ type RunsApi = {
   isLeaseLive: (run: { status: string; heartbeatAt: Date | null }, now?: number) => boolean;
   /** Mark a run failed with an error (updates status + emits a status event). */
   failRun: (runId: number, error: string) => Promise<void>;
+  /** Atomically fail a run still 'pending' with no worker claim (status + event
+   *  in one tx, guarded). Returns true iff it actually failed the row. */
+  failPendingRun: (runId: number, error: string) => Promise<boolean>;
   /** Count runs holding a worker slot (worker_scope set + a lease status). */
   countInFlightWorkers: () => Promise<number>;
   /** Ids of runs parked in 'pending', oldest first (the dispatch queue). */
@@ -531,20 +534,17 @@ async function pumpTick(): Promise<void> {
     // and is measured from startedAt (≈ its enqueue time).
     const pendingSince = run.heartbeatAt ?? run.startedAt;
     if (maxDeferMs > 0 && pendingSince && now - pendingSince.getTime() > maxDeferMs) {
-      // Atomically take the terminal transition, guarded against a claim that
+      // Atomically take the terminal transition in ONE guarded write (status
+      // column + status event in the same tx). Guarded against a claim that
       // raced our get() above: only fail a run still parked in 'pending' with no
       // worker. A dispatch that claimed it in that window owns it now — this write
-      // must not clobber its healthy claim into 'failed'. The conditional UPDATE
-      // moves the row out of 'pending' itself (so the pump can't re-select it);
-      // failRun then emits the status event for the now-failed run.
+      // must not clobber its healthy claim into 'failed'. Previously this was two
+      // writes (a raw CAS UPDATE then a separate failRun) for one transition; a
+      // connection death between them could land the event without the column
+      // write and let the reaper mislabel the run.
       const failMsg =
         "no worker capacity: the run stayed queued past the maximum wait (TASK_ORCH_MAX_DEFER_MS) — worker slots (machines/memory) stayed full.";
-      const failed = await db
-        .update(agentSessions)
-        .set({ status: "failed", error: failMsg, completedAt: new Date() })
-        .where(and(eq(agentSessions.id, id), eq(agentSessions.status, "pending"), isNull(agentSessions.workerScope)));
-      if (failed.count === 0) continue;
-      await runs().failRun(id, failMsg);
+      await runs().failPendingRun(id, failMsg);
       continue;
     }
     const r = await dispatchRun(id);
