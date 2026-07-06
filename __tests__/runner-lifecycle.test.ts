@@ -69,29 +69,45 @@ describe("nextLifecycleAction", () => {
   });
 
   // A terminal run (completed/failed/cancelled/closed/budget_exhausted) never
-  // resumes, so its volume gets only the short TASK_ORCH_RUNNER_TERMINAL_MS
-  // window (default 1h) before archive+destroy — no 7d wait.
+  // resumes on its own, but dispatchRun DOES re-claim completed/failed/
+  // budget_exhausted for a follow-up turn or an operator restart — and that
+  // restart needs the volume's warm checkout + unpushed work + SDK transcript.
+  // So the volume gets the TASK_ORCH_RUNNER_TERMINAL_MS window (default 24h,
+  // matching the idle suspend window) before archive+destroy, while compute is
+  // still suspended immediately within the window. Incident: run 58's volume
+  // was destroyed 1h after a failed turn, so its restart lost all its work.
   describe("terminal runs", () => {
-    it("archives+destroys a completed run past the 1h window", () => {
+    it("archives+destroys a completed run past the 24h window", () => {
       expect(
-        nextLifecycleAction({ runStatus: "completed", runnerState: "running", idleMs: H + 60_000 }).kind,
+        nextLifecycleAction({ runStatus: "completed", runnerState: "running", idleMs: D + 60_000 }).kind,
       ).toBe("archive-and-destroy");
     });
 
     it("archives+destroys every terminal status past the window", () => {
       for (const status of ["completed", "failed", "cancelled", "closed", "budget_exhausted"]) {
         expect(
-          nextLifecycleAction({ runStatus: status, runnerState: "running", idleMs: H + 60_000 }).kind,
+          nextLifecycleAction({ runStatus: status, runnerState: "running", idleMs: D + 60_000 }).kind,
         ).toBe("archive-and-destroy");
       }
     });
 
     it("archives+destroys a stopped terminal run past the window without waiting 7d", () => {
       // Previously a stopped machine waited TASK_ORCH_RUNNER_STOP_MS (7d); a
-      // terminal run only waits the short window.
+      // terminal run only waits the (shorter) terminal window.
       expect(
-        nextLifecycleAction({ runStatus: "completed", runnerState: "stopped", idleMs: H + 60_000 }).kind,
+        nextLifecycleAction({ runStatus: "completed", runnerState: "stopped", idleMs: D + 60_000 }).kind,
       ).toBe("archive-and-destroy");
+    });
+
+    it("preserves a terminal run's volume for a same-day restart (1h after a failure)", () => {
+      // Regression for run 58: a failed <implement> run is revivable, so its
+      // volume must survive well past the 1h mark — long enough to restart.
+      expect(
+        nextLifecycleAction({ runStatus: "failed", runnerState: "suspended", idleMs: H + 60_000 }).kind,
+      ).toBe("none");
+      expect(
+        nextLifecycleAction({ runStatus: "failed", runnerState: "stopped", idleMs: H + 60_000 }).kind,
+      ).toBe("none");
     });
 
     it("suspends a running terminal run within the window", () => {
@@ -176,17 +192,21 @@ describe("nextLifecycleAction", () => {
     });
 
     it("still hard-reclaims a cancelled/closed executor after the terminal window", () => {
+      // cancelled/closed are NOT revivable, so even an executor gets the terminal
+      // window (not the long resumable window) and is destroyed once it elapses.
       for (const status of ["cancelled", "closed"]) {
         expect(
-          nextLifecycleAction({ runStatus: status, runnerState: "stopped", idleMs: H + 60_000, goal: "<execute>" }).kind,
+          nextLifecycleAction({ runStatus: status, runnerState: "stopped", idleMs: D + 60_000, goal: "<execute>" }).kind,
         ).toBe("archive-and-destroy");
       }
     });
 
     it("does not extend the window for completed non-executor runs", () => {
+      // Past the 24h terminal window a completed non-executor run is destroyed —
+      // it does NOT get the executor's long (7d) resumable window.
       for (const goal of [null, undefined, "<chat>", "implement task"]) {
         expect(
-          nextLifecycleAction({ runStatus: "completed", runnerState: "stopped", idleMs: 2 * H, goal }).kind,
+          nextLifecycleAction({ runStatus: "completed", runnerState: "stopped", idleMs: D + 60_000, goal }).kind,
         ).toBe("archive-and-destroy");
       }
     });

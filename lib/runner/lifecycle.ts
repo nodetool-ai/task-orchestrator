@@ -28,7 +28,6 @@ export interface LifecycleInput {
   goal?: string | null;
 }
 
-const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function intEnv(key: string, dflt: number): number {
@@ -93,12 +92,17 @@ function isActiveRunStatus(status: string): boolean {
  * starting, or holding a live worker claim) are never touched. Everything else
  * splits on whether the run is TERMINAL (done forever) or merely idle/resumable:
  *
- * Terminal runs (completed/failed/cancelled/closed/budget_exhausted) will never
- * resume, so their volume's only unique artifact (runner.log) is being made
- * durable elsewhere and needs no long retention. They get the SHORT window
- * TASK_ORCH_RUNNER_TERMINAL_MS (default 1h) — EXCEPT conversational terminal
- * runs (isConversationalTerminal: a plan executor between operator messages),
- * which are treated as idle/resumable below:
+ * Terminal runs (completed/failed/cancelled/closed/budget_exhausted) hold no
+ * live worker, so within their window a still-running machine is suspended to
+ * stop paying for compute immediately. But their VOLUME is kept for the full
+ * window TASK_ORCH_RUNNER_TERMINAL_MS (default 24h, matching the idle-suspend
+ * window) because dispatchRun re-claims completed/failed/budget_exhausted for a
+ * follow-up turn or operator restart — and that restart needs the volume's warm
+ * checkout, any unpushed work, and the SDK transcript. A shorter window silently
+ * strands a restart on a fresh, empty volume (incident: run 58 lost all its work
+ * when its volume was destroyed 1h after a failed turn). Conversational terminal
+ * runs (isConversationalTerminal: a plan executor between operator messages) are
+ * exempt and treated as idle/resumable below anyway:
  * - within the window a still-running machine is suspended (stop paying for
  *   compute immediately), otherwise left alone;
  * - past the window it is archived/destroyed regardless of runner state.
@@ -126,18 +130,19 @@ export function nextLifecycleAction(i: LifecycleInput): LifecycleAction {
   // finishes its turn) does the machine become eligible for suspend/stop.
   if (isWorkerClaimLive(i)) return { kind: "none" };
 
-  // Terminal runs are done forever: no resume is possible, so their volume gets
-  // only the short retention window before we archive+destroy. The creating/
-  // starting/gone states were already returned above, so any state reaching
-  // here (running/suspended/stopped) is eligible. Conversational terminal runs
-  // (a plan executor between operator messages) are exempt — they fall through
-  // to the long resumable windows below so a next-day follow-up still finds the
-  // machine, checkout, and session transcript intact.
+  // Terminal runs hold no live worker, but a completed/failed/budget_exhausted
+  // run is still revivable by dispatchRun (a follow-up turn or operator restart),
+  // so we keep its volume for the full terminal window before archive+destroy.
+  // The creating/starting/gone states were already returned above, so any state
+  // reaching here (running/suspended/stopped) is eligible. Conversational
+  // terminal runs (a plan executor between operator messages) are exempt — they
+  // fall through to the long resumable windows below so a next-day follow-up
+  // still finds the machine, checkout, and session transcript intact.
   if (isTerminalStatus(i.runStatus as SessionStatus) && !isConversationalTerminal(i)) {
-    const terminalWindowMs = intEnv("TASK_ORCH_RUNNER_TERMINAL_MS", HOUR_MS);
+    const terminalWindowMs = intEnv("TASK_ORCH_RUNNER_TERMINAL_MS", DAY_MS);
     if (i.idleMs >= terminalWindowMs) return { kind: "archive-and-destroy" };
-    // Still within the short window: stop paying for compute immediately, but
-    // keep the volume around until the window elapses.
+    // Still within the window: stop paying for compute immediately, but keep the
+    // volume around until the window elapses so a restart finds its work.
     return state === "running" ? { kind: "suspend" } : { kind: "none" };
   }
 
