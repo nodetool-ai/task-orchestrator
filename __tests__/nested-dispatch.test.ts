@@ -161,6 +161,26 @@ describe("buildFlyWorkerEnv REPO_CACHE_DIR", () => {
   });
 });
 
+describe("buildFlyWorkerEnv never forwards server-only Fly credentials", () => {
+  const KNOBS2 = ["FLY_API_TOKEN", "TASK_ORCH_FLY_APP"];
+  afterEach(() => {
+    for (const k of KNOBS2) delete process.env[k];
+  });
+
+  it("omits FLY_API_TOKEN and TASK_ORCH_FLY_APP even when set on the server process", () => {
+    // These are server-only: FLY_API_TOKEN is the Fly Machines API control-
+    // plane credential (lib/runner/fly-client.ts), and TASK_ORCH_FLY_APP names
+    // the runner pool app. Neither belongs on a worker Machine — a worker that
+    // held FLY_API_TOKEN could create/destroy Machines in the whole app.
+    process.env.FLY_API_TOKEN = "fo1_should_never_leak";
+    process.env.TASK_ORCH_FLY_APP = "task-orch-runner";
+
+    const env = buildFlyWorkerEnv(42);
+    expect(env.FLY_API_TOKEN).toBeUndefined();
+    expect(env.TASK_ORCH_FLY_APP).toBeUndefined();
+  });
+});
+
 describe("remoteRunnerEnabled inside workers", () => {
   it("treats an isolate-mode worker as remote (appends must never run in-process there)", () => {
     // A Fly worker: gets INSIDE_WORKER + NESTED_DISPATCH from buildFlyWorkerEnv,
