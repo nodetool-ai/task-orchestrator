@@ -469,12 +469,12 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     (goal === "<chat>" || goal === "<plan>"
       ? "none"
       : goal === "<execute>"
-        ? "repo"
+        ? "none"
         : "worktree");
   const toolsProfile =
     input.toolsProfile ??
     (goal === "<execute>"
-      ? "orchestrator,gh_pr,repo_read,spawn"
+      ? "orchestrator,gh_pr,spawn"
       : "orchestrator,repo_write");
   const initialStatus: SessionStatus =
     input.defer || goal === "<chat>" || goal === "<plan>" ? "idle" : "pending";

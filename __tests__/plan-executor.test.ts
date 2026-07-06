@@ -90,11 +90,11 @@ describe("create({ goal: '<execute>' })", () => {
     await expect(runs.create({ goal: "<execute>" })).rejects.toThrow(/planId/);
   });
 
-  it("defers cleanly with repo cwd and the spawn-enabled default profile", async () => {
+  it("defers cleanly with cwd=none (no checkout) and the spawn-enabled default profile", async () => {
     const plan = await repo.createPlan({ title: "Deferred", date: "2026-06-18" });
     const run = await runs.create({ goal: "<execute>", planId: plan.id, defer: true });
     expect(run.goal).toBe("<execute>");
-    expect(run.cwdStrategy).toBe("repo");
+    expect(run.cwdStrategy).toBe("none");
     expect(run.toolsProfile).toContain("spawn");
     expect(run.planId).toBe(plan.id);
     expect(run.status).toBe("idle");
