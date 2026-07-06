@@ -700,6 +700,7 @@ export async function deferRunForServerDispatch(
     .set({ status: "pending", heartbeatAt: new Date(), workerScope: null, workerPid: null })
     .where(and(
       eq(agentSessions.id, runId),
+      notInArray(agentSessions.status, ["cancelled", "closed"]),
       or(
         isNull(agentSessions.workerScope),
         isNull(agentSessions.heartbeatAt),
