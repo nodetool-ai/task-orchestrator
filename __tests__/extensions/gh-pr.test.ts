@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { EventEmitter } from "node:events";
+import { spawn } from "node:child_process";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   filterDiffByFile,
   ghPrExtension,
@@ -7,6 +9,9 @@ import {
   parsePrUrl,
   validatePrUrl,
 } from "../../lib/extensions/gh-pr";
+import * as worker from "../../lib/worker";
+
+vi.mock("node:child_process", () => ({ spawn: vi.fn() }));
 
 describe("parsePrUrl", () => {
   it("parses an https github PR url", () => {
@@ -212,6 +217,100 @@ describe("ghPrExtension", () => {
     // delete_branch is optional; url + method stay required.
     expect(schema.required).toEqual(expect.arrayContaining(["url", "method"]));
     expect(schema.required).not.toContain("delete_branch");
+  });
+});
+
+describe("gh_pr__pr_merge auto-merge (--auto)", () => {
+  function makeStub() {
+    const calls: Array<{ name: string; def: any }> = [];
+    const pi: any = {
+      registerTool: (def: any) => { calls.push({ name: def.name, def }); },
+      on: () => {},
+    };
+    return { calls, pi };
+  }
+
+  const prUrl = "https://github.com/nodetool-ai/nodetool/pull/42";
+
+  function setupTransport() {
+    const remotes = [
+      { id: "R-known", name: "Known", remote: "git@github.com:nodetool-ai/nodetool.git" },
+    ];
+    vi.spyOn(worker, "runTransport").mockResolvedValue({
+      listRepoRemotes: vi.fn().mockResolvedValue(remotes),
+      acquirePrLock: vi.fn().mockResolvedValue({ ok: true }),
+    } as never);
+  }
+
+  // Stubs the `gh` child process to succeed immediately and captures the
+  // argv it was spawned with, matching how lib/extensions/gh-pr.ts's
+  // internal `gh()` helper drives node:child_process.spawn.
+  function mockSpawnSuccess() {
+    let capturedArgs: string[] = [];
+    (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      (_cmd: string, args: string[]) => {
+        capturedArgs = args;
+        const child: any = new EventEmitter();
+        child.stdout = new EventEmitter();
+        child.stderr = new EventEmitter();
+        child.kill = vi.fn();
+        queueMicrotask(() => {
+          child.stdout.emit("data", Buffer.from("merged"));
+          child.emit("close", 0);
+        });
+        return child;
+      }
+    );
+    return { getArgs: () => capturedArgs };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
+  it("auto:true arms GitHub auto-merge: --auto precedes the method flag, and it's echoed in the result", async () => {
+    setupTransport();
+    const capture = mockSpawnSuccess();
+    const { calls, pi } = makeStub();
+    ghPrExtension({ cwd: "/tmp", runId: 1 })(pi);
+    const merge = calls.find((c) => c.name === "gh_pr__pr_merge")!;
+
+    const res = await merge.def.execute("id", {
+      url: prUrl,
+      method: "squash",
+      delete_branch: true,
+      auto: true,
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect(capture.getArgs()).toEqual([
+      "pr",
+      "merge",
+      prUrl,
+      "--auto",
+      "--squash",
+      "--delete-branch",
+    ]);
+    const body = JSON.parse(res.content[0].text);
+    expect(body.auto).toBe(true);
+  });
+
+  it("omitting auto preserves today's immediate-merge argv (no --auto)", async () => {
+    setupTransport();
+    const capture = mockSpawnSuccess();
+    const { calls, pi } = makeStub();
+    ghPrExtension({ cwd: "/tmp", runId: 1 })(pi);
+    const merge = calls.find((c) => c.name === "gh_pr__pr_merge")!;
+
+    const res = await merge.def.execute("id", { url: prUrl, method: "merge" });
+
+    expect(res.isError).toBeFalsy();
+    const args = capture.getArgs();
+    expect(args).not.toContain("--auto");
+    expect(args).toEqual(["pr", "merge", prUrl, "--merge"]);
+    const body = JSON.parse(res.content[0].text);
+    expect(body.auto).toBe(false);
   });
 });
 
