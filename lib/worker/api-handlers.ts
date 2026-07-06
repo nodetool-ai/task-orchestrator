@@ -117,6 +117,9 @@ async function route(
   }
   if (root === "tasks" && id) return routeTask(req, method, auth.runId, id, rest);
   if (root === "plans" && id) return routePlan(req, method, auth.runId, id, rest);
+  if (root === "repositories" && !id && method === "GET") {
+    return json(200, { repositories: await dbTransport.listRepoRemotes() });
+  }
   if (root === "personas" && id && method === "GET" && rest.length === 0) {
     // Read scope: a worker token only sees its own run's persona.
     const run = await requireRun(auth.runId);
@@ -249,6 +252,11 @@ async function routeRun(
       idleIfNonTerminal: body.idleIfNonTerminal === true,
     });
     return json(200, {});
+  }
+  if (sub === "pr-lock" && method === "POST") {
+    const { prUrl } = await readBody(req);
+    if (typeof prUrl !== "string" || !prUrl) bad("prUrl must be a non-empty string");
+    return json(200, await dbTransport.acquirePrLock(runId, prUrl));
   }
   if (sub === "tools/call" && method === "POST") {
     const body = await readBody(req);

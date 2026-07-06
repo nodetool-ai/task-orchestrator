@@ -1,8 +1,13 @@
 # Worker HTTP + SSE protocol
 
 How run workers talk to the orchestrator. Replaces "every worker holds
-`DATABASE_URL` and writes Postgres directly" with a typed protocol that can run
-over two transports; introduced 2026-07.
+`DATABASE_URL` and writes Postgres directly" with a typed protocol; introduced
+2026-07. **The HTTP protocol is a hard requirement for workers**: dispatch
+never hands out `DATABASE_URL`, a worker process without worker-API
+credentials refuses to start a transport, and any code path that would touch
+Postgres from inside a worker throws. The db transport still exists — as the
+orchestrator's own in-process implementation and the single implementation
+backing the HTTP routes.
 
 ## Why
 
@@ -59,8 +64,8 @@ polled by heartbeat code. That worked, but:
 | Process | Selection |
 | --- | --- |
 | Web server / CLI / tests | `db` (always — it *is* the orchestrator) |
-| Worker (`TASK_ORCH_INSIDE_WORKER=1`) without API env | `db` (legacy direct-Postgres worker, unchanged) |
-| Worker with `TASK_ORCH_WORKER_API_URL` + `TASK_ORCH_WORKER_TOKEN` | `http` |
+| Worker (`TASK_ORCH_INSIDE_WORKER=1`) with `TASK_ORCH_WORKER_API_URL` + `TASK_ORCH_WORKER_TOKEN` | `http` |
+| Worker without those | **hard error** — direct-Postgres workers are not supported. (`TASK_ORCH_WORKER_ALLOW_DB=1` is a test-only escape hatch for suites that simulate a worker env inside the orchestrator process.) |
 
 ### Authentication
 
@@ -92,7 +97,9 @@ All JSON unless noted; dates travel as ISO-8601 and are revived client-side.
 | `POST runs/:id/log` `{tail}` | `writeWorkerLog` | worker log forensics into `agent_runs.worker_log` |
 | `GET  runs/:id/repo` | `resolveRepo` | run repo → task repo → default chain |
 | `GET  runs/:id/control` | `subscribeInput` | **SSE**: `{type:"input"}` on new user messages, `{type:"cancel"}` pushed on cross-process cancel; comment pings every 15s |
-| `POST runs/:id/tools/call` `{tool, params, ctx}` | `callTool` | executes any of the 37 orchestrator tools server-side; `runId` comes from the token, never the body |
+| `POST runs/:id/tools/call` `{tool, params, ctx}` | `callTool` | executes any server-registry tool (the 37 orchestrator tools + the event, planning, spawn, and persona-memory tools — `lib/worker/server-tools.ts`) server-side; `runId` comes from the token, never the body. Long-poll friendly: awaited child appends can hold this open for hours |
+| `GET  repositories` | `listRepoRemotes` | repo remotes for gh_pr / gh_ci URL gating |
+| `POST runs/:id/pr-lock` `{prUrl}` | `acquirePrLock` | the §5.2 `pr:<url>` resource lease for PR-mutating tools |
 | `GET  tasks/:id` / `POST tasks/:id/transition` / `POST tasks/:id/notes` | `getTask` / `transitionTask` / `addTaskNote` | writes restricted to the run's own task |
 | `GET  plans/:id` / `GET plans/:id/tasks` / `POST plans/:id/state` | `getPlan` / `listTasks` / `updatePlanState` | state write restricted to the run's own plan |
 | `GET  personas/:id` | `getPersona` | |
@@ -113,46 +120,49 @@ Cancel latency is therefore bounded by the heartbeat cadence (20s), same as
 the previous flag-polling design, with the SSE push removing the extra DB
 read per beat.
 
-## Running external workers
+## Running workers
 
 1. Set `TASK_ORCH_WORKER_API_URL` on the **server** to its own base URL as
    reachable from workers (compose service name, flycast address, or public
-   https origin), and optionally `TASK_ORCH_WORKER_API_SECRET` (defaults to
-   `AUTH_SECRET`).
-2. That's it for managed spawns: every spawn path (docker container, Fly
-   Machine, dev detached process) injects the URL + a freshly minted run
-   token and **withholds `DATABASE_URL`**.
+   https origin; `NEXTAUTH_URL` is used as a same-host dev fallback), and
+   optionally `TASK_ORCH_WORKER_API_SECRET` (defaults to `AUTH_SECRET`).
+   Dispatch fails with an actionable error when neither URL is set.
+2. Every spawn path (docker container, Fly Machine, dev detached process)
+   injects the URL + a freshly minted run token and **never passes
+   `DATABASE_URL`**.
 3. A hand-rolled external worker is: env `TASK_ORCH_INSIDE_WORKER=1`,
    `TASK_ORCH_WORKER_API_URL`, `TASK_ORCH_WORKER_TOKEN`, plus agent/git
    credentials, then `npx tsx scripts/run-worker.ts <runId>`.
 
-`db/index.ts` constructs the Postgres client lazily: an HTTP-mode worker boots
-without `DATABASE_URL`, and any code path that still touches the DB directly
-in that mode throws a descriptive error naming this document.
+Enforcement is belt-and-suspenders: `runTransport()` throws in a worker
+process without API credentials, and `db/index.ts` (which constructs its
+client lazily) throws on ANY direct DB access from a worker — a not-yet-routed
+code path fails at its exact call site with an error naming this document.
 
-## Known phase-2 surface (still direct-DB)
+## Agent tools in workers
 
-These run inside the worker process and still require `DATABASE_URL` (i.e.
-keep passing it, or avoid these features on HTTP-only workers). Each fails
-loudly via the lazy-db guard if hit without it:
+Every tool that reads or writes orchestrator state executes **server-side**
+through one registry (`lib/worker/server-tools.ts`), reached via
+`transport.callTool` → `POST runs/:id/tools/call`:
 
-- **`lib/extensions/events.ts` — the always-on event tools** (`report_result`,
-  `raise`, `events__poll`/`emit`, `timer__*`, `ask_parent`,
-  `answer_question`). These mount in every turn and write
-  `agent_runs`/`run_timers` directly, so this is the highest-priority phase-2
-  item: an HTTP-only worker whose agent calls one of them fails that tool call
-  (the turn itself survives; the tool returns the lazy-db error). Until they
-  are routed server-side, pass `DATABASE_URL` to workers whose agents use the
-  event system (executors and parent/child trees especially).
-- `lib/extensions/planning.ts` (planning runs write plan/planning-stage rows),
-- `lib/extensions/persona-memory.ts` (persona memory reads/writes),
-- `lib/extensions/spawn.ts` + nested Machine dispatch (child runs dispatched
-  *from inside* a worker; the server-side dispatch paths — pump, release,
-  sendMessageToRun — are unaffected),
-- the Discord pipe and CLI (they are orchestrator-side tools, not workers).
+- the 37 orchestrator tools (`lib/orchestrator-tools`),
+- the always-on event tools (`report_result`, `raise`, `events__*`,
+  `timer__*`, `ask_parent`, `answer_question`),
+- the planning gate tools (`propose_spec`, `commit_spec_as_plan`,
+  `propose_implementation_plan` — the stage interceptor stays worker-local and
+  mirrors stage advances after successful calls),
+- the spawn tools (`spawn__*` — child runs are created and dispatched on the
+  orchestrator, which also retires the old in-worker nested-dispatch path),
+- the persona-memory tools (+ the ambient memory text, loaded at mount via the
+  internal `memory__load` registry entry).
 
-The intended next step for these is the same pattern used for the 37
-orchestrator tools: execute server-side behind one endpoint.
+The gh_pr / gh_ci tools are the deliberate hybrid: `gh` CLI shell-outs run
+worker-local (against the worker's checkout), while their orchestrator-state
+needs — repo-remote URL gating and the `pr:<url>` ownership lease — go through
+`listRepoRemotes` / `acquirePrLock`.
+
+Still orchestrator-side by nature (not workers at all): the Discord pipe and
+the CLI.
 
 ## Debugging cheatsheet
 

@@ -86,18 +86,29 @@ function createClient(): Client {
   });
 }
 
+function insideWorker(): boolean {
+  const v = process.env.TASK_ORCH_INSIDE_WORKER;
+  return !!v && v !== "0" && v.toLowerCase() !== "false";
+}
+
+function dbAllowedInWorker(): boolean {
+  const v = process.env.TASK_ORCH_WORKER_ALLOW_DB;
+  return !!v && v !== "0" && v.toLowerCase() !== "false";
+}
+
 function ensureClient(): Client {
   if (!globalThis.__tasksPg) {
-    if (!process.env.DATABASE_URL && process.env.TASK_ORCH_WORKER_API_URL) {
-      // The one misconfiguration this proxy exists to catch: an HTTP-mode
-      // worker (no DATABASE_URL) reached a code path that still talks to
-      // Postgres directly. Name the situation instead of "DATABASE_URL is
-      // not set".
+    if (insideWorker() && !dbAllowedInWorker()) {
+      // HARD REQUIREMENT: workers never talk to Postgres — all orchestrator
+      // state flows through the worker HTTP protocol (lib/worker). Any code
+      // path that lands here from a worker has not been routed through the
+      // transport and is a bug. (TASK_ORCH_WORKER_ALLOW_DB=1 is a test-only
+      // escape hatch for suites that simulate a worker env in the
+      // orchestrator process.)
       throw new Error(
-        "Direct database access attempted in an HTTP-mode worker (DATABASE_URL " +
-          "is unset; TASK_ORCH_WORKER_API_URL is set). This code path has not " +
-          "been routed through the worker transport (lib/worker) yet — see " +
-          "docs/worker-http-api.md."
+        "Direct database access attempted inside a run worker " +
+          "(TASK_ORCH_INSIDE_WORKER=1). Workers must go through the worker " +
+          "transport (lib/worker) — see docs/worker-http-api.md."
       );
     }
     globalThis.__tasksPg = createClient();

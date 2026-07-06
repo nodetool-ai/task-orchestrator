@@ -2721,7 +2721,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
 
   const extensions: Extension[] = [
     personaPromptFactory(personaForExt),
-    personaMemoryFactory(personaForExt, run, repo, cwd),
+    personaMemoryFactory(personaForExt, run, cwd),
     sandboxFactory(cwd, sandboxDbPath),
     // Registered unconditionally for every run (worker AND in-process
     // server), regardless of persona/goal/backend/tools_profile — see

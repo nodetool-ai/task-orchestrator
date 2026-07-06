@@ -196,6 +196,15 @@ export interface RunTransport {
   /** Resolve the repository this run operates on (run.repoId → task's repo →
    *  deployment default), or null when none is configured. */
   resolveRepo(runId: number): Promise<RepositoryRow | null>;
+  /** The deployment's repository remotes — what validatePrUrl gates the gh_pr
+   *  / gh_ci tools on. Read-only and tiny. */
+  listRepoRemotes(): Promise<Array<{ id: string; name: string; remote: string | null }>>;
+  /**
+   * Claim (or verify) the `pr:<url>` resource lease for this run — the §5.2
+   * cross-run PR-mutation guard used by the gh_pr write tools. Returns ok:false
+   * with the human-readable refusal when another live run owns the PR.
+   */
+  acquirePrLock(runId: number, prUrl: string): Promise<{ ok: boolean; reason?: string }>;
 
   /**
    * Execute an orchestrator tool (the task_orch__* registry) on behalf of this

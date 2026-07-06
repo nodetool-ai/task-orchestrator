@@ -6,11 +6,6 @@
 
 import { spawn } from "node:child_process";
 import { Type } from "typebox";
-import { eq } from "drizzle-orm";
-import { db } from "@/db";
-import { agentSessions, resourceLocks } from "@/db/schema";
-import { isTerminalStatus } from "../types";
-import type { SessionStatus } from "../types";
 import {
   ownerRepoFromRemote,
   parsePrUrl,
@@ -18,6 +13,7 @@ import {
   type ParsedPrUrl,
   type UrlValidation,
 } from "../gh-url";
+import { runTransport } from "@/lib/worker";
 import type { BackendRegistrar, ExtensionFactory } from "./types";
 
 // Re-export so consumers importing 'lib/extensions/gh-pr' get the URL helpers too.
@@ -84,13 +80,14 @@ export interface GhPrExtensionOptions {
 }
 
 /**
- * Resource-lock guard (§5.2): a `pr:<url>` lease in resource_locks answers
- * "who owns this PR" with a single primary-key lookup instead of a subtree
- * walk per mutating call. Locked by a live run that isn't the caller ->
- * refuse, naming the owner. Unlocked, or locked by a run that has since gone
- * terminal -> proceed and take/refresh the lease for the caller. One shared
- * helper so both pr_merge and the approving pr_review branch enforce the
- * exact same rule.
+ * Resource-lock guard (§5.2): a `pr:<url>` lease answers "who owns this PR"
+ * with a single primary-key lookup instead of a subtree walk per mutating
+ * call. Locked by a live run that isn't the caller -> refuse, naming the
+ * owner. Unlocked, or locked by a run that has since gone terminal -> proceed
+ * and take/refresh the lease for the caller. One shared helper so both
+ * pr_merge and the approving pr_review branch enforce the exact same rule.
+ * The lease itself lives on the orchestrator (transport.acquirePrLock —
+ * workers hold no database access); only the `gh` shell-outs run locally.
  */
 async function checkAndAcquirePrLock(
   prUrl: string,
@@ -109,37 +106,15 @@ async function checkAndAcquirePrLock(
       ),
     };
   }
-  const resource = `pr:${prUrl}`;
-  const existing = (
-    await db
-      .select({ ownerRunId: resourceLocks.ownerRunId })
-      .from(resourceLocks)
-      .where(eq(resourceLocks.resource, resource))
-  )[0];
-  if (existing && existing.ownerRunId !== runId) {
-    const ownerRow = (
-      await db
-        .select({ status: agentSessions.status })
-        .from(agentSessions)
-        .where(eq(agentSessions.id, existing.ownerRunId))
-    )[0];
-    const ownerAlive = ownerRow ? !isTerminalStatus(ownerRow.status as SessionStatus) : false;
-    if (ownerAlive) {
-      return {
-        ok: false,
-        result: errResult(
-          `run #${existing.ownerRunId} owns this PR (${prUrl}); append_message it instead of mutating the PR directly.`
-        ),
-      };
-    }
+  const verdict = await (await runTransport()).acquirePrLock(runId, prUrl);
+  if (!verdict.ok) {
+    return {
+      ok: false,
+      result: errResult(
+        verdict.reason ?? `another run owns this PR (${prUrl}); refusing to mutate it.`
+      ),
+    };
   }
-  await db
-    .insert(resourceLocks)
-    .values({ resource, ownerRunId: runId })
-    .onConflictDoUpdate({
-      target: resourceLocks.resource,
-      set: { ownerRunId: runId, acquiredAt: new Date() },
-    });
   return { ok: true };
 }
 
@@ -150,7 +125,9 @@ type Gate = (url: string) => Promise<
 
 function makeGate(): Gate {
   return async (url: string) => {
-    const v = await validatePrUrl(url);
+    // Repo-remote gating reads through the transport so HTTP workers never
+    // touch the repositories table directly.
+    const v = await validatePrUrl(url, async () => (await runTransport()).listRepoRemotes());
     if ("error" in v) return { ok: false, result: errResult(v.error) };
     return { ok: true, parsed: v.parsed, matched: v.matched };
   };

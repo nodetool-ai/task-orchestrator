@@ -15,7 +15,7 @@
 
 import { and, count, eq, gt, notInArray, sql } from "drizzle-orm";
 import { db } from "../../db";
-import { agentEvents, agentMessages, agentSessions } from "../../db/schema";
+import { agentEvents, agentMessages, agentSessions, resourceLocks } from "../../db/schema";
 import * as repo from "../repo";
 import { markControlInjected } from "../inbox";
 import { subscribeRunInput } from "../run-stream-listener";
@@ -291,11 +291,57 @@ export const dbTransport: RunTransport = {
     return repo.getPersona(personaId);
   },
 
+  async listRepoRemotes() {
+    return (await repo.listRepositories()).map((r) => ({
+      id: r.id,
+      name: r.name,
+      remote: r.remote,
+    }));
+  },
+
+  async acquirePrLock(runId, prUrl) {
+    // Resource-lock guard (§5.2): a `pr:<url>` lease answers "which run owns
+    // this PR right now". A different LIVE (non-terminal) owner refuses the
+    // mutation; a dead owner's lease is taken over.
+    const resource = `pr:${prUrl}`;
+    const existing = (
+      await db
+        .select({ ownerRunId: resourceLocks.ownerRunId })
+        .from(resourceLocks)
+        .where(eq(resourceLocks.resource, resource))
+    )[0];
+    if (existing && existing.ownerRunId !== runId) {
+      const ownerRow = (
+        await db
+          .select({ status: agentSessions.status })
+          .from(agentSessions)
+          .where(eq(agentSessions.id, existing.ownerRunId))
+      )[0];
+      const ownerAlive = ownerRow
+        ? !isTerminalStatus(ownerRow.status as SessionStatus)
+        : false;
+      if (ownerAlive) {
+        return {
+          ok: false,
+          reason: `run #${existing.ownerRunId} owns this PR (${prUrl}); append_message it instead of mutating the PR directly.`,
+        };
+      }
+    }
+    await db
+      .insert(resourceLocks)
+      .values({ resource, ownerRunId: runId })
+      .onConflictDoUpdate({
+        target: resourceLocks.resource,
+        set: { ownerRunId: runId, acquiredAt: new Date() },
+      });
+    return { ok: true };
+  },
+
   async callTool(runId, tool, params, ctx) {
-    // Lazy import: orchestrator-tools statically imports runs.ts (see the
+    // Lazy import: the registry modules statically import runs.ts (see the
     // module docstring's import discipline).
-    const { ORCHESTRATOR_TOOLS } = await import("../orchestrator-tools");
-    const def = ORCHESTRATOR_TOOLS.find((t) => t.name === tool);
+    const { resolveServerTool } = await import("./server-tools");
+    const def = await resolveServerTool(tool);
     if (!def) return { content: [{ type: "text", text: `Unknown tool: ${tool}` }], isError: true };
     return def.execute(params, { ...ctx, runId });
   },

@@ -66,7 +66,7 @@ const PROFILES: Record<string, ProfileDef> = {
   spawn: {
     factories: async (ctx) => {
       const { spawnExtension } = await import("./extensions/spawn");
-      return [spawnExtension({ runId: ctx.runId, runRow: ctx.run })];
+      return [spawnExtension({ runId: ctx.runId })];
     },
   },
   planning: {
@@ -93,7 +93,7 @@ export function listProfiles(): string[] {
  */
 export async function alwaysOnExtensions(ctx: ProfileContext): Promise<ExtensionFactory[]> {
   const { eventsExtension } = await import("./extensions/events");
-  return [eventsExtension({ runId: ctx.runId, runRow: ctx.run })];
+  return [eventsExtension({ runId: ctx.runId })];
 }
 
 export interface ResolvedProfile {

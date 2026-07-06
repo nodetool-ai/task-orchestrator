@@ -75,16 +75,27 @@ export function verifyWorkerToken(
 }
 
 /**
- * Env entries a dispatched worker needs to speak the HTTP protocol, or null
- * when this deployment doesn't run HTTP workers. The server opts in by setting
- * TASK_ORCH_WORKER_API_URL to its own base URL as reachable FROM the workers
- * (compose service name, flycast address, or a public https origin). Spawn
- * paths (docker/fly/detached) merge this in and drop DATABASE_URL, so the
- * worker's only credentials are the run-scoped token + its agent/git secrets.
+ * Env entries a dispatched worker needs to speak the HTTP protocol — REQUIRED
+ * for every dispatch: workers hold no database credentials, so a deployment
+ * that cannot mint these cannot run workers at all (this throws rather than
+ * letting the spawn fail as an opaque "no pid").
+ *
+ * The base URL is TASK_ORCH_WORKER_API_URL — the server's own origin as
+ * reachable FROM the workers (compose service name, flycast address, or a
+ * public https origin) — falling back to NEXTAUTH_URL, which is right for
+ * same-host dev workers but usually wrong for containers (localhost inside a
+ * container is the container).
  */
-export function workerDispatchEnv(runId: number): Record<string, string> | null {
-  const apiUrl = process.env.TASK_ORCH_WORKER_API_URL;
-  if (!apiUrl) return null;
+export function workerDispatchEnv(runId: number): Record<string, string> {
+  const apiUrl = process.env.TASK_ORCH_WORKER_API_URL || process.env.NEXTAUTH_URL;
+  if (!apiUrl) {
+    throw new Error(
+      "Cannot dispatch a worker: set TASK_ORCH_WORKER_API_URL to this server's " +
+        "base URL as reachable from workers (NEXTAUTH_URL is used as a dev " +
+        "fallback). Workers speak the HTTP protocol and receive no DATABASE_URL " +
+        "— see docs/worker-http-api.md."
+    );
+  }
   let token: string;
   try {
     token = mintWorkerToken(runId);
@@ -92,8 +103,8 @@ export function workerDispatchEnv(runId: number): Record<string, string> | null 
     // Without this context the failure surfaces upstream as an opaque
     // "spawn returned no pid" — name the actual misconfiguration.
     throw new Error(
-      "TASK_ORCH_WORKER_API_URL is set (HTTP worker mode) but no token signing " +
-        "secret is configured — set TASK_ORCH_WORKER_API_SECRET or AUTH_SECRET."
+      "Cannot dispatch a worker: no token signing secret is configured — set " +
+        "TASK_ORCH_WORKER_API_SECRET or AUTH_SECRET."
     );
   }
   return {

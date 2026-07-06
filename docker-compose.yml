@@ -99,6 +99,10 @@ services:
       TASK_ORCH_DOCKER_NETWORK: ${COMPOSE_PROJECT_NAME:-task-orchestrator}_default
       TASK_ORCH_REPO_CACHE_HOST_VOLUME: ${COMPOSE_PROJECT_NAME:-task-orchestrator}_repo-cache
       TASK_ORCH_CLAUDE_HOME_HOST: ${CLAUDE_HOME}
+      # Workers speak the HTTP + SSE protocol against this server (they get a
+      # run-scoped token, never DATABASE_URL) — this is the server's origin as
+      # reachable from worker containers on the compose network.
+      TASK_ORCH_WORKER_API_URL: ${TASK_ORCH_WORKER_API_URL:-http://server:3000}
       # ── Worker resource limits + memory-aware admission ──────────────────
       # Hard per-worker cgroup caps (bound one runaway worker) + an admission gate
       # that reads remaining host memory and defers over-capacity runs to 'pending'

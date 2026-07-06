@@ -79,13 +79,34 @@ describe("authorizeWorkerRequest", () => {
 });
 
 describe("workerDispatchEnv", () => {
-  it("is null when the server does not advertise a worker API url", () => {
-    expect(workerDispatchEnv(7)).toBeNull();
+  it("throws when no worker-reachable base URL is configured (dispatch must not fall back to DB workers)", () => {
+    const savedUrl = process.env.TASK_ORCH_WORKER_API_URL;
+    const savedNextauth = process.env.NEXTAUTH_URL;
+    delete process.env.TASK_ORCH_WORKER_API_URL;
+    delete process.env.NEXTAUTH_URL;
+    try {
+      expect(() => workerDispatchEnv(7)).toThrow(/TASK_ORCH_WORKER_API_URL/);
+    } finally {
+      if (savedUrl != null) process.env.TASK_ORCH_WORKER_API_URL = savedUrl;
+      if (savedNextauth != null) process.env.NEXTAUTH_URL = savedNextauth;
+    }
+  });
+
+  it("falls back to NEXTAUTH_URL for same-host dev workers", () => {
+    const savedUrl = process.env.TASK_ORCH_WORKER_API_URL;
+    delete process.env.TASK_ORCH_WORKER_API_URL;
+    process.env.NEXTAUTH_URL = "http://localhost:3000";
+    try {
+      expect(workerDispatchEnv(7).TASK_ORCH_WORKER_API_URL).toBe("http://localhost:3000");
+    } finally {
+      if (savedUrl != null) process.env.TASK_ORCH_WORKER_API_URL = savedUrl;
+      delete process.env.NEXTAUTH_URL;
+    }
   });
 
   it("hands out the url plus a token scoped to the run", () => {
     process.env.TASK_ORCH_WORKER_API_URL = "http://orchestrator:3000";
-    const env = workerDispatchEnv(7)!;
+    const env = workerDispatchEnv(7);
     expect(env.TASK_ORCH_WORKER_API_URL).toBe("http://orchestrator:3000");
     expect(verifyWorkerToken(env.TASK_ORCH_WORKER_TOKEN)).toEqual({ ok: true, runId: 7 });
   });

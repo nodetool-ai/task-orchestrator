@@ -267,12 +267,11 @@ async function emitRunnerEvent(runId: number, type: string, payload: Record<stri
 }
 
 export function buildFlyWorkerEnv(runId: number): Record<string, string> {
-  // HTTP worker protocol (docs/worker-http-api.md): when the server advertises
-  // TASK_ORCH_WORKER_API_URL, the Machine gets a run-scoped API token instead
-  // of database credentials and talks to /api/worker over HTTP + SSE.
-  const httpEnv = workerDispatchEnv(runId);
+  // Worker HTTP protocol (docs/worker-http-api.md): every Machine gets a
+  // run-scoped API token and talks to /api/worker over HTTP + SSE. Workers
+  // hold NO database credentials — DATABASE_URL is deliberately absent.
   return compactEnv({
-    ...(httpEnv ?? { DATABASE_URL: envValue("DATABASE_URL") }),
+    ...workerDispatchEnv(runId),
     GH_TOKEN: envValue("GH_TOKEN"),
     // Agent credentials for BOTH backends: the Claude auth pair plus every
     // pi provider key the server holds, so a Machine dispatched with
@@ -282,7 +281,6 @@ export function buildFlyWorkerEnv(runId: number): Record<string, string> {
     TASK_ORCH_CHAT_MODEL: envValue("TASK_ORCH_CHAT_MODEL"),
     TASK_ORCH_AGENT_MODEL: envValue("TASK_ORCH_AGENT_MODEL"),
     TASK_ORCH_CHAT_IDLE_MS: envValue("TASK_ORCH_CHAT_IDLE_MS"),
-    TASK_ORCH_PG_SCHEMA: envValue("TASK_ORCH_PG_SCHEMA"),
     TASK_ORCH_DETACHED_RUNS: "1",
     TASK_ORCH_INSIDE_WORKER: "1",
     // Pass the server's RESOLVED nested-dispatch policy (docs/nested-machine-

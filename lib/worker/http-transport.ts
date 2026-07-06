@@ -68,7 +68,7 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
     method: string,
     path: string,
     body?: unknown,
-    o: { retries?: number } = {}
+    o: { retries?: number; timeoutMs?: number } = {}
   ): Promise<T> {
     const retries = o.retries ?? (method === "GET" ? 2 : 0);
     const url = `${base}/api/worker/${path}`;
@@ -82,7 +82,7 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
             ...(body !== undefined ? { "content-type": "application/json" } : {}),
           },
           body: body !== undefined ? JSON.stringify(body) : undefined,
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          signal: AbortSignal.timeout(o.timeoutMs ?? REQUEST_TIMEOUT_MS),
         });
         const ms = Date.now() - started;
         if (!res.ok) {
@@ -345,6 +345,20 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
       return repo ?? null;
     },
 
+    async listRepoRemotes() {
+      const { repositories } = await request<{ repositories: never[] }>("GET", "repositories");
+      return repositories;
+    },
+
+    async acquirePrLock(runId, prUrl) {
+      return request<{ ok: boolean; reason?: string }>(
+        "POST",
+        `runs/${runId}/pr-lock`,
+        { prUrl },
+        { retries: 1 } // idempotent upsert keyed on the resource
+      );
+    },
+
     async callTool(runId, tool, params, ctx) {
       if (runId == null) {
         return {
@@ -352,11 +366,15 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
           isError: true,
         };
       }
-      const { result } = await request<{ result: never }>("POST", `runs/${runId}/tools/call`, {
-        tool,
-        params,
-        ctx,
-      });
+      const { result } = await request<{ result: never }>(
+        "POST",
+        `runs/${runId}/tools/call`,
+        { tool, params, ctx },
+        // Tool executions can legitimately block for a long time —
+        // spawn__append_message with await=true waits up to 2h for a child
+        // turn. Give the call ample headroom instead of the default 30s.
+        { timeoutMs: 2.5 * 60 * 60 * 1000 }
+      );
       return result;
     },
   };

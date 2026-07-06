@@ -6,6 +6,13 @@
 // custom events, report a structured result, raise a structured exception,
 // and hold a stateful child<->parent question exchange.
 //
+// EXECUTION MODEL: the tool definitions live in EVENT_TOOLS (server-executable
+// registry entries, resolved by lib/worker/server-tools). The extension
+// factory registers thin wrappers that route through the worker transport —
+// in-process on the orchestrator, POST /api/worker/runs/:id/tools/call from an
+// HTTP worker. Workers hold no database access (hard requirement), so nothing
+// in the execute bodies may run worker-side.
+//
 // CONTRACT WITH lib/runs.ts (the turn-end handler): tools registered here
 // NEVER set agent_runs.status directly. They write columns only:
 //   - park_reason        -> runs.ts maps to status='parked' at turn end
@@ -24,7 +31,6 @@ import { db } from "@/db";
 import { agentSessions, runTimers } from "@/db/schema";
 import * as runs from "../runs";
 import * as runDispatch from "../run-dispatch";
-import type { RunRow } from "../runs";
 import {
   CONTROL_TYPES,
   TIMER_MAX_MINUTES,
@@ -38,12 +44,15 @@ import {
   toEnvelope,
   type Audience,
 } from "../inbox";
+import type { OrchestratorTool, OrchestratorToolResult } from "../orchestrator-tools";
+import { runTransport } from "@/lib/worker";
 import type { ExtensionFactory } from "./types";
 
-const ok = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined });
-const errResult = (text: string) => ({
+const ok = (text: string): OrchestratorToolResult => ({
   content: [{ type: "text" as const, text }],
-  details: undefined,
+});
+const errResult = (text: string): OrchestratorToolResult => ({
+  content: [{ type: "text" as const, text }],
   isError: true,
 });
 
@@ -122,7 +131,7 @@ export function isWithinCallerTree(callerRootId: number, targetRootId: number): 
 }
 
 // ────────────────────────────────────────
-// DB-backed helpers
+// DB-backed helpers (server-side only)
 // ────────────────────────────────────────
 
 const MAX_WALK = 64;
@@ -178,7 +187,7 @@ async function getRawRunFields(id: number): Promise<RawRunFields | null> {
 }
 
 /**
- * Deliver a message to a run without ending OUR turn: the exact
+ * Deliver a message to a run without ending the CALLER's turn: the exact
  * fire-and-forget mechanism spawn__append_message uses in lib/extensions/spawn.ts
  * (sendMessageToRun over the remote runner; runs.append raced against a
  * setImmediate tick for the in-process dev path). Best-effort — errors are
@@ -220,401 +229,434 @@ async function deliverMessage(targetRunId: number, text: string): Promise<string
   return appendError;
 }
 
+/** The caller run id every event tool needs; a missing one is a miswired mount. */
+function requireRunId(ctx: { runId?: number }): number | null {
+  return typeof ctx.runId === "number" && ctx.runId > 0 ? ctx.runId : null;
+}
+
+const NO_RUN = errResult(
+  "Event tools need a caller run context (mounted without a run id — this is a bug in the mount, not your call)."
+);
+
 // ────────────────────────────────────────
-// Extension factory
+// Server-executable tool registry
+// ────────────────────────────────────────
+
+export const EVENT_TOOLS: OrchestratorTool[] = [
+  {
+    name: "timer__sleep",
+    label: "Sleep",
+    description:
+      "Park this run and go to sleep for up to `minutes` (clamped to " +
+      `[${TIMER_MIN_MINUTES}, ${TIMER_MAX_MINUTES}]). ` +
+      "Wakes on the timer firing OR on any earlier owner-audience inbox event " +
+      "(sleep is a maximum wait, not a hard suspension). Always available in " +
+      "every tools profile — this is the platform's guaranteed way to yield.",
+    parameters: Type.Object({
+      minutes: Type.Integer({ minimum: TIMER_MIN_MINUTES, maximum: TIMER_MAX_MINUTES }),
+      note: Type.Optional(Type.String()),
+    }),
+    execute: async ({ minutes, note }, ctx) => {
+      const runId = requireRunId(ctx);
+      if (!runId) return NO_RUN;
+      const res = await createTimer({ runId, minutes, note: note ?? null, correlationId: null });
+      if (!res.ok) return errResult(res.error);
+      await db
+        .update(agentSessions)
+        .set({ parkReason: "sleeping" })
+        .where(eq(agentSessions.id, runId));
+      return ok(
+        `Timer #${res.timerId} armed, firing at ${res.fireAt.toISOString()}. ` +
+          `End your turn now — you will be woken by this timer or by any earlier event.`
+      );
+    },
+  },
+
+  {
+    name: "timer__set",
+    label: "Set Timer",
+    description:
+      "Schedule a future timer.fired event WITHOUT parking. How an agent arms a " +
+      "watchdog for its own children ('wake me in 45 minutes even if nothing has " +
+      "happened'). Multiple may be armed, up to the per-run/per-tree caps.",
+    parameters: Type.Object({
+      minutes: Type.Integer({ minimum: TIMER_MIN_MINUTES, maximum: TIMER_MAX_MINUTES }),
+      note: Type.Optional(Type.String()),
+    }),
+    execute: async ({ minutes, note }, ctx) => {
+      const runId = requireRunId(ctx);
+      if (!runId) return NO_RUN;
+      const res = await createTimer({ runId, minutes, note: note ?? null, correlationId: null });
+      if (!res.ok) return errResult(res.error);
+      return ok(
+        JSON.stringify({ timer_id: res.timerId, fire_at: res.fireAt.toISOString() }, null, 2)
+      );
+    },
+  },
+
+  {
+    name: "timer__cancel",
+    label: "Cancel Timer",
+    description: "Cancel a pending timer you own by id.",
+    parameters: Type.Object({ timer_id: Type.Integer({ minimum: 1 }) }),
+    execute: async ({ timer_id }, ctx) => {
+      const runId = requireRunId(ctx);
+      if (!runId) return NO_RUN;
+      const cancelled = await cancelTimer(runId, timer_id);
+      if (!cancelled) {
+        return errResult(
+          `Timer #${timer_id} not found, not owned by this run, or already fired/cancelled.`
+        );
+      }
+      return ok(`Timer #${timer_id} cancelled.`);
+    },
+  },
+
+  {
+    name: "events__poll",
+    label: "Poll Events",
+    description:
+      "Non-blocking check for inbox events that arrived since your last turn or " +
+      "digest, without ending your turn. Owner events (yours to act on) are " +
+      "returned first, then a separate supervisor section (informational copies " +
+      "for your awareness only). Control-class events (cancel/budget) are never " +
+      "returned here — the platform enforces those directly.",
+    parameters: Type.Object({
+      types: Type.Optional(Type.Array(Type.String())),
+      max: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })),
+    }),
+    execute: async ({ types, max }, ctx) => {
+      const runId = requireRunId(ctx);
+      if (!runId) return NO_RUN;
+      const claimed = await claimInboxEvents(runId, {
+        audiences: ["owner", "supervisor"] as Audience[],
+        types,
+        max,
+      });
+      const owner: unknown[] = [];
+      const supervisor: unknown[] = [];
+      for (const row of claimed) {
+        try {
+          const env = toEnvelope(row);
+          (env.audience === "supervisor" ? supervisor : owner).push(env);
+        } catch (err) {
+          await quarantineEvent(row.id, err instanceof Error ? err.message : String(err)).catch(
+            () => {}
+          );
+        }
+      }
+      const remaining = await pendingOwnerCount(runId).catch(() => 0);
+      const pending_note =
+        remaining > 0
+          ? `${remaining} more owner-audience event(s) still pending (raise \`max\` or poll again).`
+          : null;
+      return ok(
+        JSON.stringify(
+          { events: [...owner, ...supervisor], owner, supervisor, pending_note },
+          null,
+          2
+        )
+      );
+    },
+  },
+
+  {
+    name: "events__emit",
+    label: "Emit Custom Event",
+    description:
+      "Emit a custom.* event to another run WITHIN YOUR OWN TREE (same root). " +
+      "The sibling-coordination escape hatch — e.g. tell a sibling implementor " +
+      "'the shared interface changed' — without a general cross-tree messaging " +
+      "surface. `type` must start with 'custom.'.",
+    parameters: Type.Object({
+      target_run_id: Type.Integer({ minimum: 1 }),
+      type: Type.String({ minLength: 1 }),
+      payload: Type.Optional(Type.Record(Type.String(), Type.Any())),
+      correlation_id: Type.Optional(Type.String()),
+    }),
+    execute: async ({ target_run_id, type, payload, correlation_id }, ctx) => {
+      const runId = requireRunId(ctx);
+      if (!runId) return NO_RUN;
+      const typeError = checkCustomEventType(type);
+      if (typeError) return errResult(typeError);
+
+      const target = await getRawRunFields(target_run_id);
+      if (!target) return errResult(`Run ${target_run_id} not found.`);
+
+      const [callerRoot, targetRoot] = await Promise.all([
+        findRootId(runId),
+        findRootId(target_run_id),
+      ]);
+      if (!isWithinCallerTree(callerRoot, targetRoot)) {
+        return errResult(
+          `Run ${target_run_id} is outside your tree (root #${targetRoot} vs your root #${callerRoot}). ` +
+            `events__emit only reaches runs within the caller's own tree.`
+        );
+      }
+
+      const result = await emitInboxEvent({
+        targetRunId: target_run_id,
+        type,
+        payload: payload ?? {},
+        sourceKind: "user",
+        sourceId: String(runId),
+        correlationId: correlation_id ?? null,
+      });
+      return ok(
+        JSON.stringify(
+          {
+            event_id: result.eventId,
+            target_run_id: result.targetRunId,
+            woke: result.woke,
+          },
+          null,
+          2
+        )
+      );
+    },
+  },
+
+  {
+    name: "report_result",
+    label: "Report Result",
+    description:
+      "Report this run's final result. Persists the result to agent_runs.result " +
+      "— it does NOT set run status or emit anything itself; the turn-end handler " +
+      "maps this column to a terminal status and emits child.result to the parent. " +
+      "This is the expected end of a child run's work.",
+    parameters: Type.Object({
+      status: Type.Union([
+        Type.Literal("success"),
+        Type.Literal("failed"),
+        Type.Literal("blocked"),
+      ]),
+      summary: Type.String({ minLength: 1, maxLength: 2000 }),
+      data: Type.Optional(Type.Record(Type.String(), Type.Any())),
+      pr_url: Type.Optional(Type.String()),
+      needs: Type.Optional(Type.String()),
+    }),
+    execute: async ({ status, summary, data, pr_url, needs }, ctx) => {
+      const runId = requireRunId(ctx);
+      if (!runId) return NO_RUN;
+      await db
+        .update(agentSessions)
+        .set({
+          result: {
+            kind: "result",
+            status,
+            summary,
+            data: data ?? null,
+            pr_url: pr_url ?? null,
+            needs: needs ?? null,
+            reported_at: new Date().toISOString(),
+          },
+        })
+        .where(eq(agentSessions.id, runId));
+      return ok("Result recorded. End your turn now — this is your final report.");
+    },
+  },
+
+  {
+    name: "raise",
+    label: "Raise Exception",
+    description:
+      "Report a named exception this run hit. Persists to agent_runs.result " +
+      "(kind='exception') — it does NOT set run status or emit anything itself; " +
+      "the turn-end handler maps this to a terminal status and emits " +
+      "child.exception to the parent. `recoverable: true` signals that " +
+      "spawn__append_message on this run is a sensible fix path.",
+    parameters: Type.Object({
+      code: Type.String({ minLength: 1 }),
+      message: Type.String({ minLength: 1 }),
+      recoverable: Type.Boolean(),
+      details: Type.Optional(Type.Record(Type.String(), Type.Any())),
+    }),
+    execute: async ({ code, message, recoverable, details }, ctx) => {
+      const runId = requireRunId(ctx);
+      if (!runId) return NO_RUN;
+      await db
+        .update(agentSessions)
+        .set({
+          result: {
+            kind: "exception",
+            code,
+            message,
+            recoverable,
+            details: details ?? null,
+            raised_at: new Date().toISOString(),
+          },
+        })
+        .where(eq(agentSessions.id, runId));
+      return ok("Exception recorded. End your turn now.");
+    },
+  },
+
+  {
+    name: "ask_parent",
+    label: "Ask Parent",
+    description:
+      "Ask your parent run a question and park until it's answered or the " +
+      "deadline passes. Roots with no parent get an error telling them to ask " +
+      "the human instead.",
+    parameters: Type.Object({
+      question: Type.String({ minLength: 1 }),
+      context: Type.Optional(Type.Record(Type.String(), Type.Any())),
+      timeout_minutes: Type.Optional(
+        Type.Integer({ minimum: TIMER_MIN_MINUTES, maximum: TIMER_MAX_MINUTES, default: 60 })
+      ),
+    }),
+    execute: async ({ question, context, timeout_minutes }, ctx) => {
+      const runId = requireRunId(ctx);
+      if (!runId) return NO_RUN;
+      const self = await getRawRunFields(runId);
+      if (!self) return errResult(`Run ${runId} not found.`);
+      if (self.parentRunId == null) {
+        return errResult(
+          "This is a root run with no parent; ask_parent has no one to ask. Surface the question to the human instead (e.g. via report_result status='blocked')."
+        );
+      }
+      const minutes = timeout_minutes ?? 60;
+      const attempt = self.attempt ?? 1;
+
+      const questionId = `q-${runId}-${Date.now()}`;
+      const askedAt = new Date();
+      const deadline = new Date(askedAt.getTime() + minutes * 60_000);
+      const pendingQuestion: PendingQuestion = {
+        question_id: questionId,
+        question,
+        context: context ?? null,
+        asked_at: askedAt.toISOString(),
+        deadline: deadline.toISOString(),
+        state: "open",
+      };
+
+      await db
+        .update(agentSessions)
+        .set({ pendingQuestion, parkReason: "question" })
+        .where(eq(agentSessions.id, runId));
+
+      const timerRes = await createTimer({
+        runId,
+        minutes,
+        note: "ask_parent deadline",
+        correlationId: questionId,
+      });
+      if (!timerRes.ok) {
+        // Timer cap hit: the question row is still recorded, but there is no
+        // automatic expiry. Surface this loudly rather than silently parking
+        // forever with no wake guarantee beyond the parent's answer.
+        return errResult(
+          `Question recorded but could not arm the ${minutes}m deadline timer: ${timerRes.error}`
+        );
+      }
+
+      await emitInboxEvent({
+        targetRunId: self.parentRunId,
+        type: "child.question",
+        sourceKind: "run",
+        sourceId: String(runId),
+        correlationId: questionId,
+        attempt,
+        payload: {
+          run_id: runId,
+          question_id: questionId,
+          question,
+          context: context ?? null,
+        },
+      });
+
+      return ok(
+        `Question sent (id ${questionId}). End your turn now; you'll wake with the answer or at the deadline (${deadline.toISOString()}).`
+      );
+    },
+  },
+
+  {
+    name: "answer_question",
+    label: "Answer Question",
+    description:
+      "Answer a child's pending ask_parent question. First answer wins; a second " +
+      "call for the same question_id errors ('already answered'), and an answer " +
+      "arriving after the child's deadline fired errors with the child's recorded " +
+      "assumption (if any) so you know it proceeded without your input.",
+    parameters: Type.Object({
+      child_run_id: Type.Integer({ minimum: 1 }),
+      question_id: Type.String({ minLength: 1 }),
+      answer: Type.String({ minLength: 1 }),
+    }),
+    execute: async ({ child_run_id, question_id, answer }, ctx) => {
+      const runId = requireRunId(ctx);
+      if (!runId) return NO_RUN;
+      const child = await getRawRunFields(child_run_id);
+      if (!child) return errResult(`Run ${child_run_id} not found.`);
+
+      const gateError = checkAnswerable(child.pendingQuestion, question_id);
+      if (gateError) return errResult(gateError);
+
+      const answeredAt = new Date().toISOString();
+      const updated: PendingQuestion = {
+        ...(child.pendingQuestion as PendingQuestion),
+        state: "answered",
+        answered_at: answeredAt,
+      };
+      await db
+        .update(agentSessions)
+        .set({ pendingQuestion: updated })
+        .where(eq(agentSessions.id, child_run_id));
+
+      // Cancel the child's deadline timer (correlated by question_id).
+      const timerRow = (
+        await db
+          .select({ id: runTimers.id })
+          .from(runTimers)
+          .where(
+            and(
+              eq(runTimers.runId, child_run_id),
+              eq(runTimers.correlationId, question_id),
+              eq(runTimers.status, "pending")
+            )
+          )
+      )[0];
+      if (timerRow) {
+        await cancelTimer(child_run_id, timerRow.id).catch(() => {});
+      }
+
+      const deliverError = await deliverMessage(
+        child_run_id,
+        `[answer to question ${question_id}] ${answer}`
+      );
+      if (deliverError) {
+        return errResult(
+          `Answer recorded, but delivery to run ${child_run_id} failed: ${deliverError}`
+        );
+      }
+      return ok(`Answer delivered to run ${child_run_id} for question ${question_id}.`);
+    },
+  },
+];
+
+// ────────────────────────────────────────
+// Extension factory (transport-backed wrappers)
 // ────────────────────────────────────────
 
 export interface EventsExtensionOptions {
   runId: number;
-  runRow: RunRow;
 }
 
 export const eventsExtension =
-  ({ runId, runRow }: EventsExtensionOptions): ExtensionFactory =>
+  ({ runId }: EventsExtensionOptions): ExtensionFactory =>
   (reg) => {
-    // ── timer__sleep ────────────────────────────────────────────────────
-    reg.registerTool({
-      name: "timer__sleep",
-      label: "Sleep",
-      description:
-        "Park this run and go to sleep for up to `minutes` (clamped to " +
-        `[${TIMER_MIN_MINUTES}, ${TIMER_MAX_MINUTES}]). ` +
-        "Wakes on the timer firing OR on any earlier owner-audience inbox event " +
-        "(sleep is a maximum wait, not a hard suspension). Always available in " +
-        "every tools profile — this is the platform's guaranteed way to yield.",
-      parameters: Type.Object({
-        minutes: Type.Integer({ minimum: TIMER_MIN_MINUTES, maximum: TIMER_MAX_MINUTES }),
-        note: Type.Optional(Type.String()),
-      }),
-      execute: async (_id, { minutes, note }) => {
-        const res = await createTimer({ runId, minutes, note: note ?? null, correlationId: null });
-        if (!res.ok) return errResult(res.error);
-        await db
-          .update(agentSessions)
-          .set({ parkReason: "sleeping" })
-          .where(eq(agentSessions.id, runId));
-        return ok(
-          `Timer #${res.timerId} armed, firing at ${res.fireAt.toISOString()}. ` +
-            `End your turn now — you will be woken by this timer or by any earlier event.`
-        );
-      },
-    });
-
-    // ── timer__set ──────────────────────────────────────────────────────
-    reg.registerTool({
-      name: "timer__set",
-      label: "Set Timer",
-      description:
-        "Schedule a future timer.fired event WITHOUT parking. How an agent arms a " +
-        "watchdog for its own children ('wake me in 45 minutes even if nothing has " +
-        "happened'). Multiple may be armed, up to the per-run/per-tree caps.",
-      parameters: Type.Object({
-        minutes: Type.Integer({ minimum: TIMER_MIN_MINUTES, maximum: TIMER_MAX_MINUTES }),
-        note: Type.Optional(Type.String()),
-      }),
-      execute: async (_id, { minutes, note }) => {
-        const res = await createTimer({ runId, minutes, note: note ?? null, correlationId: null });
-        if (!res.ok) return errResult(res.error);
-        return ok(
-          JSON.stringify(
-            { timer_id: res.timerId, fire_at: res.fireAt.toISOString() },
-            null,
-            2
-          )
-        );
-      },
-    });
-
-    // ── timer__cancel ───────────────────────────────────────────────────
-    reg.registerTool({
-      name: "timer__cancel",
-      label: "Cancel Timer",
-      description: "Cancel a pending timer you own by id.",
-      parameters: Type.Object({ timer_id: Type.Integer({ minimum: 1 }) }),
-      execute: async (_id, { timer_id }) => {
-        const cancelled = await cancelTimer(runId, timer_id);
-        if (!cancelled) {
-          return errResult(
-            `Timer #${timer_id} not found, not owned by this run, or already fired/cancelled.`
-          );
-        }
-        return ok(`Timer #${timer_id} cancelled.`);
-      },
-    });
-
-    // ── events__poll ────────────────────────────────────────────────────
-    reg.registerTool({
-      name: "events__poll",
-      label: "Poll Events",
-      description:
-        "Non-blocking check for inbox events that arrived since your last turn or " +
-        "digest, without ending your turn. Owner events (yours to act on) are " +
-        "returned first, then a separate supervisor section (informational copies " +
-        "for your awareness only). Control-class events (cancel/budget) are never " +
-        "returned here — the platform enforces those directly.",
-      parameters: Type.Object({
-        types: Type.Optional(Type.Array(Type.String())),
-        max: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })),
-      }),
-      execute: async (_id, { types, max }) => {
-        const claimed = await claimInboxEvents(runId, {
-          audiences: ["owner", "supervisor"] as Audience[],
-          types,
-          max,
-        });
-        const owner: unknown[] = [];
-        const supervisor: unknown[] = [];
-        for (const row of claimed) {
-          try {
-            const env = toEnvelope(row);
-            (env.audience === "supervisor" ? supervisor : owner).push(env);
-          } catch (err) {
-            await quarantineEvent(
-              row.id,
-              err instanceof Error ? err.message : String(err)
-            ).catch(() => {});
-          }
-        }
-        const remaining = await pendingOwnerCount(runId).catch(() => 0);
-        const pending_note =
-          remaining > 0
-            ? `${remaining} more owner-audience event(s) still pending (raise \`max\` or poll again).`
-            : null;
-        return ok(
-          JSON.stringify(
-            { events: [...owner, ...supervisor], owner, supervisor, pending_note },
-            null,
-            2
-          )
-        );
-      },
-    });
-
-    // ── events__emit ────────────────────────────────────────────────────
-    reg.registerTool({
-      name: "events__emit",
-      label: "Emit Custom Event",
-      description:
-        "Emit a custom.* event to another run WITHIN YOUR OWN TREE (same root). " +
-        "The sibling-coordination escape hatch — e.g. tell a sibling implementor " +
-        "'the shared interface changed' — without a general cross-tree messaging " +
-        "surface. `type` must start with 'custom.'.",
-      parameters: Type.Object({
-        target_run_id: Type.Integer({ minimum: 1 }),
-        type: Type.String({ minLength: 1 }),
-        payload: Type.Optional(Type.Record(Type.String(), Type.Any())),
-        correlation_id: Type.Optional(Type.String()),
-      }),
-      execute: async (_id, { target_run_id, type, payload, correlation_id }) => {
-        const typeError = checkCustomEventType(type);
-        if (typeError) return errResult(typeError);
-
-        const target = await getRawRunFields(target_run_id);
-        if (!target) return errResult(`Run ${target_run_id} not found.`);
-
-        const [callerRoot, targetRoot] = await Promise.all([
-          findRootId(runId),
-          findRootId(target_run_id),
-        ]);
-        if (!isWithinCallerTree(callerRoot, targetRoot)) {
-          return errResult(
-            `Run ${target_run_id} is outside your tree (root #${targetRoot} vs your root #${callerRoot}). ` +
-              `events__emit only reaches runs within the caller's own tree.`
-          );
-        }
-
-        const result = await emitInboxEvent({
-          targetRunId: target_run_id,
-          type,
-          payload: payload ?? {},
-          sourceKind: "user",
-          sourceId: String(runId),
-          correlationId: correlation_id ?? null,
-        });
-        return ok(
-          JSON.stringify(
-            {
-              event_id: result.eventId,
-              target_run_id: result.targetRunId,
-              woke: result.woke,
-            },
-            null,
-            2
-          )
-        );
-      },
-    });
-
-    // ── report_result ───────────────────────────────────────────────────
-    reg.registerTool({
-      name: "report_result",
-      label: "Report Result",
-      description:
-        "Report this run's final result. Persists the result to agent_runs.result " +
-        "— it does NOT set run status or emit anything itself; the turn-end handler " +
-        "maps this column to a terminal status and emits child.result to the parent. " +
-        "This is the expected end of a child run's work.",
-      parameters: Type.Object({
-        status: Type.Union([
-          Type.Literal("success"),
-          Type.Literal("failed"),
-          Type.Literal("blocked"),
-        ]),
-        summary: Type.String({ minLength: 1, maxLength: 2000 }),
-        data: Type.Optional(Type.Record(Type.String(), Type.Any())),
-        pr_url: Type.Optional(Type.String()),
-        needs: Type.Optional(Type.String()),
-      }),
-      execute: async (_id, { status, summary, data, pr_url, needs }) => {
-        await db
-          .update(agentSessions)
-          .set({
-            result: {
-              kind: "result",
-              status,
-              summary,
-              data: data ?? null,
-              pr_url: pr_url ?? null,
-              needs: needs ?? null,
-              reported_at: new Date().toISOString(),
-            },
-          })
-          .where(eq(agentSessions.id, runId));
-        return ok("Result recorded. End your turn now — this is your final report.");
-      },
-    });
-
-    // ── raise ───────────────────────────────────────────────────────────
-    reg.registerTool({
-      name: "raise",
-      label: "Raise Exception",
-      description:
-        "Report a named exception this run hit. Persists to agent_runs.result " +
-        "(kind='exception') — it does NOT set run status or emit anything itself; " +
-        "the turn-end handler maps this to a terminal status and emits " +
-        "child.exception to the parent. `recoverable: true` signals that " +
-        "spawn__append_message on this run is a sensible fix path.",
-      parameters: Type.Object({
-        code: Type.String({ minLength: 1 }),
-        message: Type.String({ minLength: 1 }),
-        recoverable: Type.Boolean(),
-        details: Type.Optional(Type.Record(Type.String(), Type.Any())),
-      }),
-      execute: async (_id, { code, message, recoverable, details }) => {
-        await db
-          .update(agentSessions)
-          .set({
-            result: {
-              kind: "exception",
-              code,
-              message,
-              recoverable,
-              details: details ?? null,
-              raised_at: new Date().toISOString(),
-            },
-          })
-          .where(eq(agentSessions.id, runId));
-        return ok("Exception recorded. End your turn now.");
-      },
-    });
-
-    // ── ask_parent ──────────────────────────────────────────────────────
-    reg.registerTool({
-      name: "ask_parent",
-      label: "Ask Parent",
-      description:
-        "Ask your parent run a question and park until it's answered or the " +
-        "deadline passes. Roots with no parent get an error telling them to ask " +
-        "the human instead.",
-      parameters: Type.Object({
-        question: Type.String({ minLength: 1 }),
-        context: Type.Optional(Type.Record(Type.String(), Type.Any())),
-        timeout_minutes: Type.Optional(
-          Type.Integer({ minimum: TIMER_MIN_MINUTES, maximum: TIMER_MAX_MINUTES, default: 60 })
-        ),
-      }),
-      execute: async (_id, { question, context, timeout_minutes }) => {
-        if (runRow.parentRunId == null) {
-          return errResult(
-            "This is a root run with no parent; ask_parent has no one to ask. Surface the question to the human instead (e.g. via report_result status='blocked')."
-          );
-        }
-        const minutes = timeout_minutes ?? 60;
-        const self = await getRawRunFields(runId);
-        const attempt = self?.attempt ?? 1;
-
-        const questionId = `q-${runId}-${Date.now()}`;
-        const askedAt = new Date();
-        const deadline = new Date(askedAt.getTime() + minutes * 60_000);
-        const pendingQuestion: PendingQuestion = {
-          question_id: questionId,
-          question,
-          context: context ?? null,
-          asked_at: askedAt.toISOString(),
-          deadline: deadline.toISOString(),
-          state: "open",
-        };
-
-        await db
-          .update(agentSessions)
-          .set({ pendingQuestion, parkReason: "question" })
-          .where(eq(agentSessions.id, runId));
-
-        const timerRes = await createTimer({
-          runId,
-          minutes,
-          note: "ask_parent deadline",
-          correlationId: questionId,
-        });
-        if (!timerRes.ok) {
-          // Timer cap hit: the question row is still recorded, but there is no
-          // automatic expiry. Surface this loudly rather than silently parking
-          // forever with no wake guarantee beyond the parent's answer.
-          return errResult(
-            `Question recorded but could not arm the ${minutes}m deadline timer: ${timerRes.error}`
-          );
-        }
-
-        await emitInboxEvent({
-          targetRunId: runRow.parentRunId,
-          type: "child.question",
-          sourceKind: "run",
-          sourceId: String(runId),
-          correlationId: questionId,
-          attempt,
-          payload: {
-            run_id: runId,
-            question_id: questionId,
-            question,
-            context: context ?? null,
-          },
-        });
-
-        return ok(
-          `Question sent (id ${questionId}). End your turn now; you'll wake with the answer or at the deadline (${deadline.toISOString()}).`
-        );
-      },
-    });
-
-    // ── answer_question ─────────────────────────────────────────────────
-    reg.registerTool({
-      name: "answer_question",
-      label: "Answer Question",
-      description:
-        "Answer a child's pending ask_parent question. First answer wins; a second " +
-        "call for the same question_id errors ('already answered'), and an answer " +
-        "arriving after the child's deadline fired errors with the child's recorded " +
-        "assumption (if any) so you know it proceeded without your input.",
-      parameters: Type.Object({
-        child_run_id: Type.Integer({ minimum: 1 }),
-        question_id: Type.String({ minLength: 1 }),
-        answer: Type.String({ minLength: 1 }),
-      }),
-      execute: async (_id, { child_run_id, question_id, answer }) => {
-        const child = await getRawRunFields(child_run_id);
-        if (!child) return errResult(`Run ${child_run_id} not found.`);
-
-        const gateError = checkAnswerable(child.pendingQuestion, question_id);
-        if (gateError) return errResult(gateError);
-
-        const answeredAt = new Date().toISOString();
-        const updated: PendingQuestion = {
-          ...(child.pendingQuestion as PendingQuestion),
-          state: "answered",
-          answered_at: answeredAt,
-        };
-        await db
-          .update(agentSessions)
-          .set({ pendingQuestion: updated })
-          .where(eq(agentSessions.id, child_run_id));
-
-        // Cancel the child's deadline timer (correlated by question_id).
-        const timerRow = (
-          await db
-            .select({ id: runTimers.id })
-            .from(runTimers)
-            .where(
-              and(
-                eq(runTimers.runId, child_run_id),
-                eq(runTimers.correlationId, question_id),
-                eq(runTimers.status, "pending")
-              )
-            )
-        )[0];
-        if (timerRow) {
-          await cancelTimer(child_run_id, timerRow.id).catch(() => {});
-        }
-
-        const deliverError = await deliverMessage(
-          child_run_id,
-          `[answer to question ${question_id}] ${answer}`
-        );
-        if (deliverError) {
-          return errResult(
-            `Answer recorded, but delivery to run ${child_run_id} failed: ${deliverError}`
-          );
-        }
-        return ok(`Answer delivered to run ${child_run_id} for question ${question_id}.`);
-      },
-    });
+    for (const tool of EVENT_TOOLS) {
+      reg.registerTool({
+        name: tool.name,
+        label: tool.label,
+        description: tool.description,
+        parameters: tool.parameters,
+        execute: async (_id, params) => {
+          const transport = await runTransport();
+          const r = await transport.callTool(runId, tool.name, params, { author: "agent" });
+          return { content: r.content, details: undefined, isError: r.isError ?? false };
+        },
+      });
+    }
   };

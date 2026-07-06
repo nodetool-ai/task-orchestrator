@@ -31,10 +31,10 @@ type ToolDef = {
   execute: (id: string, args: any) => Promise<any>;
 };
 
-function registerTools(runId: number, runRow: any): Map<string, ToolDef> {
+function registerTools(runId: number, _runRow?: any): Map<string, ToolDef> {
   const tools = new Map<string, ToolDef>();
   const reg: any = { registerTool: (def: ToolDef) => tools.set(def.name, def), on: () => {} };
-  spawnExtension({ runId, runRow })(reg);
+  spawnExtension({ runId })(reg);
   return tools;
 }
 
@@ -61,11 +61,11 @@ describe("append_message → remote-runner routing (BUG M3)", () => {
   it("await=false routes through sendMessageToRun, persists+dispatches, then detaches", async () => {
     vi.spyOn(runDispatch, "remoteRunnerEnabled").mockReturnValue(true);
     // Target run is idle/appendable.
-    vi.spyOn(runs, "get").mockResolvedValue({
-      status: "idle",
-      cwdStrategy: "none",
-      totalCostUsd: null,
-    } as any);
+    vi.spyOn(runs, "get").mockImplementation(async (id: number) =>
+      id === CALLER_ROW.id
+        ? CALLER_ROW
+        : ({ status: "idle", cwdStrategy: "none", totalCostUsd: null } as any)
+    );
     const appendSpy = vi.spyOn(runs, "append");
 
     // Fake worker relay: yields the just-persisted user_message frame (which, per
@@ -113,7 +113,9 @@ describe("append_message → remote-runner routing (BUG M3)", () => {
 
   it("await=false surfaces an up-front error frame from sendMessageToRun", async () => {
     vi.spyOn(runDispatch, "remoteRunnerEnabled").mockReturnValue(true);
-    vi.spyOn(runs, "get").mockResolvedValue({ status: "idle", cwdStrategy: "none" } as any);
+    vi.spyOn(runs, "get").mockImplementation(async (id: number) =>
+      id === CALLER_ROW.id ? CALLER_ROW : ({ status: "idle", cwdStrategy: "none" } as any)
+    );
     // eslint-disable-next-line require-yield
     async function* errGen(): AsyncGenerator<AppendStreamEvent> {
       yield { type: "error", error: "run vanished" };
@@ -132,11 +134,11 @@ describe("append_message → remote-runner routing (BUG M3)", () => {
 
   it("await=true drains the relay to done and returns awaited result", async () => {
     vi.spyOn(runDispatch, "remoteRunnerEnabled").mockReturnValue(true);
-    vi.spyOn(runs, "get").mockResolvedValue({
-      status: "idle",
-      cwdStrategy: "none",
-      totalCostUsd: 0.5,
-    } as any);
+    vi.spyOn(runs, "get").mockImplementation(async (id: number) =>
+      id === CALLER_ROW.id
+        ? CALLER_ROW
+        : ({ status: "idle", cwdStrategy: "none", totalCostUsd: 0.5 } as any)
+    );
     const appendSpy = vi.spyOn(runs, "append");
     async function* doneGen(): AsyncGenerator<AppendStreamEvent> {
       yield { type: "user_message", message: {} as any };
@@ -161,7 +163,9 @@ describe("append_message → remote-runner routing (BUG M3)", () => {
 describe("append_message → await=true timeout (BUG M2)", () => {
   it("returns 'timed_out' without cancelling the child, and tears down the relay", async () => {
     vi.spyOn(runDispatch, "remoteRunnerEnabled").mockReturnValue(true);
-    vi.spyOn(runs, "get").mockResolvedValue({ status: "running", cwdStrategy: "worktree" } as any);
+    vi.spyOn(runs, "get").mockImplementation(async (id: number) =>
+      id === CALLER_ROW.id ? CALLER_ROW : ({ status: "running", cwdStrategy: "worktree" } as any)
+    );
     const appendSpy = vi.spyOn(runs, "append");
 
     let finallyRan = false;
