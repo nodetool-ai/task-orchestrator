@@ -2,13 +2,23 @@
 # Fly Machines runner image. One Fly Machine runs one already-claimed agent run
 # against a persistent volume mounted at /mnt/session.
 
-FROM node:24-bookworm-slim
+# node 22 to match the primary target repo (nodetool pins node >=22 <23); its
+# baked node_modules ships native modules (better-sqlite3) whose ABI must match
+# the node the agent runs. task-orchestrator's own worker is pure JS, so it runs
+# fine on 22 too.
+FROM node:22-bookworm-slim
 
+# System packages fall in two groups:
+#   • runtime CLIs the agent skill/document/video nodes shell out to (ffmpeg,
+#     poppler, qpdf, pandoc, …) — mirrors nodetool's own runtime Dockerfile.
+#   • native BUILD toolchain nodetool's `npm ci` needs to compile native modules
+#     (build-essential, pkg-config, libsecret-1-dev, python3-pip).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
       git ca-certificates curl gnupg openssh-client ripgrep fd-find jq gosu \
       ffmpeg zip unzip poppler-utils qpdf pandoc postgresql-client \
-      python3 python3-venv \
+      python3 python3-venv python3-pip \
+      build-essential pkg-config libsecret-1-dev \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
@@ -58,6 +68,26 @@ ARG REPO_CACHE_REPOS=""
 # RUN below forces that layer (and only from there down) to re-run.
 ARG REPO_CACHE_BUST=""
 RUN --mount=type=secret,id=gh_token REPO_CACHE_BUST="$REPO_CACHE_BUST" bash scripts/build-repo-cache.sh /opt/repo-cache "$REPO_CACHE_REPOS"
+
+# Pre-warm the primary target repo: bake a full `npm ci` (root + every workspace
+# node_modules), built packages, and Playwright Chromium so an agent run never
+# pays a cold install on a fresh volume. lib/prewarm.ts symlinks this tree into
+# the per-run checkout at run time (only when the checkout's origin matches).
+# Never fatal — build-prewarm.sh exits 0 if the repo/token is absent or a step
+# fails, so the image still builds and runs just pay the cold install.
+#
+# Chromium lands in PLAYWRIGHT_BROWSERS_PATH (a global, checkout-independent
+# location) so `playwright test` finds it from any working directory. It adds
+# only a few hundred MB — negligible next to the multi-GB npm install.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+ARG PREWARM_REPO="nodetool-ai/nodetool"
+# Cache-bust twin of REPO_CACHE_BUST: the nightly/rebuild workflow passes a fresh
+# value so the baked install refreshes alongside the mirror instead of cache-hitting.
+ARG PREWARM_BUST=""
+RUN --mount=type=secret,id=gh_token \
+    PREWARM_BUST="$PREWARM_BUST" REPO_CACHE_DIR=/opt/repo-cache \
+    bash scripts/build-prewarm.sh /opt/nodetool-prewarm "$PREWARM_REPO"
+ENV PREWARM_DIR=/opt/nodetool-prewarm
 
 RUN git config --system user.email "agent@task-orchestrator.local" \
     && git config --system user.name "Task Orchestrator Agent" \

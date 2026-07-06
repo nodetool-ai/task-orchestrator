@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   DEV_PORT_BASE,
   DEV_PORT_SPAN,
+  discoverNodeModulesDirs,
+  linkNodeModulesTree,
   linkSharedWorktreeArtifacts,
   preferredDevPort,
   unlinkSharedWorktreeArtifacts,
@@ -228,5 +230,89 @@ describe("preferredDevPort", () => {
       [1, 2, 3, 4, 5].map((id) => preferredDevPort(`/repo/.worktrees/${id}`))
     );
     expect(ports.size).toBe(5);
+  });
+});
+
+// A monorepo has node_modules at the root AND per workspace (web/node_modules,
+// packages/*/node_modules). The prewarm-baked install and the worktree linker
+// must reproduce the WHOLE tree, not just the top-level dir. These cover
+// discoverNodeModulesDirs + linkNodeModulesTree and the worktree integration.
+describe("node_modules tree linking (monorepo)", () => {
+  let src: string;
+  let dst: string;
+
+  beforeEach(() => {
+    src = mkdtempSync(join(tmpdir(), "nm-src-"));
+    dst = mkdtempSync(join(tmpdir(), "nm-dst-"));
+    // A miniature monorepo layout with nested workspace installs.
+    for (const rel of [
+      "node_modules/left-pad",
+      "web/node_modules/react",
+      "packages/websocket/node_modules/ws",
+      "packages/agents/node_modules/zod",
+    ]) {
+      mkdirSync(join(src, rel), { recursive: true });
+      writeFileSync(join(src, rel, "index.js"), "module.exports = 1;");
+    }
+    // A build dir under a package must NOT be mistaken for / descended past a
+    // node_modules, and a nested node_modules INSIDE node_modules is not surfaced.
+    mkdirSync(join(src, "node_modules", "left-pad", "node_modules"), { recursive: true });
+  });
+
+  it("discovers every node_modules dir, pruning inside node_modules", async () => {
+    const dirs = await discoverNodeModulesDirs(src);
+    expect(dirs).toEqual([
+      "node_modules",
+      "packages/agents/node_modules",
+      "packages/websocket/node_modules",
+      "web/node_modules",
+    ]);
+    // The node_modules-inside-node_modules is pruned (not surfaced).
+    expect(dirs).not.toContain("node_modules/left-pad/node_modules");
+  });
+
+  it("symlinks the whole tree into a target checkout, resolvable at every level", async () => {
+    const linked = await linkNodeModulesTree(src, dst);
+    expect(linked).toContain("node_modules");
+    expect(linked).toContain("web/node_modules");
+    expect(linked).toContain("packages/websocket/node_modules");
+
+    for (const rel of ["node_modules", "web/node_modules", "packages/websocket/node_modules"]) {
+      const link = join(dst, rel);
+      expect((await lstat(link)).isSymbolicLink()).toBe(true);
+      expect(await realpath(link)).toBe(await realpath(join(src, rel)));
+    }
+    // Deps resolve through the links.
+    expect(readFileSync(join(dst, "web/node_modules/react/index.js"), "utf8")).toContain("module.exports");
+  });
+
+  it("never clobbers a real private node_modules the target already owns (isolate-env)", async () => {
+    // The target isolated its web install: a real dir, not a symlink.
+    mkdirSync(join(dst, "web", "node_modules", "private-dep"), { recursive: true });
+    await linkNodeModulesTree(src, dst);
+    expect((await lstat(join(dst, "web/node_modules"))).isSymbolicLink()).toBe(false);
+    expect(existsSync(join(dst, "web/node_modules/private-dep"))).toBe(true);
+    // But the untouched levels still got linked.
+    expect((await lstat(join(dst, "node_modules"))).isSymbolicLink()).toBe(true);
+  });
+
+  it("linkSharedWorktreeArtifacts propagates nested workspace node_modules into a worktree", async () => {
+    // Root has a full monorepo install; a worktree of it must see web/ + packages/*.
+    const wt = join(src, ".worktrees", "9");
+    mkdirSync(wt, { recursive: true });
+    await linkSharedWorktreeArtifacts(wt, src);
+    for (const rel of ["node_modules", "web/node_modules", "packages/agents/node_modules"]) {
+      expect((await lstat(join(wt, rel))).isSymbolicLink()).toBe(true);
+    }
+  });
+
+  it("isolate-env unlink removes every node_modules symlink in the tree", async () => {
+    const wt = join(src, ".worktrees", "9");
+    mkdirSync(wt, { recursive: true });
+    await linkSharedWorktreeArtifacts(wt, src);
+    const removed = await unlinkSharedWorktreeArtifacts(wt);
+    expect(removed).toContain("node_modules");
+    expect(removed).toContain("web/node_modules");
+    expect(existsSync(join(wt, "web/node_modules"))).toBe(false);
   });
 });

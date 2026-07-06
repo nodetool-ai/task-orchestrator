@@ -37,6 +37,12 @@ jobs:
             # Dockerfile.fly-runner.
             args+=(--build-arg "REPO_CACHE_BUST=$(date -u +%Y%m%dT%H%M%SZ)")
           fi
+          # Refresh the baked deps nightly alongside the mirror (same reason:
+          # otherwise the layer cache-hits and ships a stale npm install).
+          args+=(--build-arg "PREWARM_BUST=$(date -u +%Y%m%dT%H%M%SZ)")
+          if [ -n "${PREWARM_REPO:-}" ]; then
+            args+=(--build-arg "PREWARM_REPO=${PREWARM_REPO}")
+          fi
           if [ -n "${REPO_CACHE_GH_TOKEN:-}" ]; then
             args+=(--build-secret "gh_token=${REPO_CACHE_GH_TOKEN}")
           fi
@@ -48,3 +54,4 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_RUNNER_API_TOKEN }}
           REPO_CACHE_REPOS: ${{ vars.REPO_CACHE_REPOS }}
           REPO_CACHE_GH_TOKEN: ${{ secrets.REPO_CACHE_GH_TOKEN }}
+          PREWARM_REPO: ${{ vars.PREWARM_REPO }}
