@@ -3074,20 +3074,19 @@ async function emitChildDied(
   }
 }
 
-/** Fresh turn-end read of the columns tools mutate mid-turn (§6.1 contract). */
-async function readTurnEndState(
+/**
+ * Fresh turn-end read of the columns tools mutate mid-turn (§6.1 contract).
+ *
+ * MUST route through the transport, not `db` directly: the mutating tools
+ * (timer__sleep / ask_parent / report_result / raise) execute server-side, so
+ * an HTTP-mode worker can only observe their writes by reading back through the
+ * transport — and a direct `db` read from a worker (which holds no DB access)
+ * trips the guard in db/index.ts and fails the whole turn at the finish line.
+ */
+export async function readTurnEndState(
   runId: number
 ): Promise<{ status: SessionStatus; parkReason: string | null; result: unknown }> {
-  const row = (
-    await db
-      .select({
-        status: agentSessions.status,
-        parkReason: agentSessions.parkReason,
-        result: agentSessions.result,
-      })
-      .from(agentSessions)
-      .where(eq(agentSessions.id, runId))
-  )[0];
+  const row = await (await runTransport()).getRun(runId);
   return {
     status: (row?.status ?? "running") as SessionStatus,
     parkReason: row?.parkReason ?? null,
