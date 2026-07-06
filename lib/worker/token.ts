@@ -74,6 +74,23 @@ export function verifyWorkerToken(
   return { ok: true, runId };
 }
 
+/**
+ * Env entries a dispatched worker needs to speak the HTTP protocol, or null
+ * when this deployment doesn't run HTTP workers. The server opts in by setting
+ * TASK_ORCH_WORKER_API_URL to its own base URL as reachable FROM the workers
+ * (compose service name, flycast address, or a public https origin). Spawn
+ * paths (docker/fly/detached) merge this in and drop DATABASE_URL, so the
+ * worker's only credentials are the run-scoped token + its agent/git secrets.
+ */
+export function workerDispatchEnv(runId: number): Record<string, string> | null {
+  const apiUrl = process.env.TASK_ORCH_WORKER_API_URL;
+  if (!apiUrl) return null;
+  return {
+    TASK_ORCH_WORKER_API_URL: apiUrl,
+    TASK_ORCH_WORKER_TOKEN: mintWorkerToken(runId),
+  };
+}
+
 /** Extract + verify the bearer token from a Request, scoped to `runId` when
  *  given. Returns the authorized runId or a { status, error } rejection. */
 export function authorizeWorkerRequest(

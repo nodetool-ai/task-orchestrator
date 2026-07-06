@@ -9,6 +9,7 @@ import { agentCredentialEnv } from "../agent-backend/provider-env";
 import { isTerminalStatus, type SessionStatus } from "../types";
 import { isWorkerClaimLive, nextLifecycleAction } from "./lifecycle";
 import { nestedDispatchMode } from "./provider";
+import { workerDispatchEnv } from "../worker/token";
 import type { CreateRunnerInput, RunnerProvider, RunnerRef, RunnerState } from "./provider";
 import { FlyApiError, type FlyClient, type FlyMachine, type FlyMachineConfig, type FlyVolume, makeFlyClient } from "./fly-client";
 
@@ -266,8 +267,12 @@ async function emitRunnerEvent(runId: number, type: string, payload: Record<stri
 }
 
 export function buildFlyWorkerEnv(runId: number): Record<string, string> {
+  // HTTP worker protocol (docs/worker-http-api.md): when the server advertises
+  // TASK_ORCH_WORKER_API_URL, the Machine gets a run-scoped API token instead
+  // of database credentials and talks to /api/worker over HTTP + SSE.
+  const httpEnv = workerDispatchEnv(runId);
   return compactEnv({
-    DATABASE_URL: envValue("DATABASE_URL"),
+    ...(httpEnv ?? { DATABASE_URL: envValue("DATABASE_URL") }),
     GH_TOKEN: envValue("GH_TOKEN"),
     // Agent credentials for BOTH backends: the Claude auth pair plus every
     // pi provider key the server holds, so a Machine dispatched with
