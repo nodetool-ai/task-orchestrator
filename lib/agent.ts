@@ -105,20 +105,25 @@ async function reapOrphans() {
     if (runs.isLive(orphan.id)) continue;
     if (runs.isLeaseLive(orphan)) continue;
     const now = new Date();
-    await db.update(agentSessions)
-      .set({
-        status: "failed",
-        error: orphan.error ?? "Orphaned by server restart",
-        completedAt: now,
-      })
-      .where(eq(agentSessions.id, orphan.id));
-    await db.insert(agentEvents)
-      .values({
-        sessionId: orphan.id,
-        type: "status",
-        payload: JSON.stringify({ status: "failed", error: "Orphaned by server restart" }),
-        createdAt: now,
-      });
+    // One transaction for the status column write and its paired event: the same
+    // both-or-neither guarantee the runs.ts finalize path now gives — a lost
+    // column write must never leave the event orphaned (and vice versa).
+    await db.transaction(async (tx) => {
+      await tx.update(agentSessions)
+        .set({
+          status: "failed",
+          error: orphan.error ?? "Orphaned by server restart",
+          completedAt: now,
+        })
+        .where(eq(agentSessions.id, orphan.id));
+      await tx.insert(agentEvents)
+        .values({
+          sessionId: orphan.id,
+          type: "status",
+          payload: JSON.stringify({ status: "failed", error: "Orphaned by server restart" }),
+          createdAt: now,
+        });
+    });
     if (orphan.worktreePath && orphan.taskId) {
       const root = await repoRootForSession(orphan.taskId);
       cleanupWorktree(orphan.worktreePath, root).catch(() => {});

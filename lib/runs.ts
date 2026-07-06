@@ -35,7 +35,7 @@ import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, notInArray, or, sql, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 
 import { db } from "@/db";
@@ -52,6 +52,7 @@ import { parsePrUrl, ownerRepoFromRemote } from "./gh-url";
 import { assistantText, toolResults, type SdkContentBlock } from "./sdk-message";
 import type { AgentSessionFull, RepositoryRow, SessionStatus } from "./types";
 import { isTerminalStatus, SESSION_STATUSES } from "./types";
+import { isTransientNetworkError } from "./transient-errors";
 import { resolveProfiles, alwaysOnExtensions, type ProfileContext } from "./profiles";
 import { type RunEnvelope } from "./pi-event-mapper";
 import { getBackend, resolveBackendId, type Extension } from "./agent-backend";
@@ -88,6 +89,7 @@ runDispatch.__setRunsApi({
   get,
   isLeaseLive,
   failRun: setError,
+  failPendingRun,
   countInFlightWorkers,
   listPendingRunIds,
   reconcileOrphanedRuns,
@@ -1072,12 +1074,19 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       run.goal === "<review>"
         ? extractReviewOutcome(result.summary) ?? run.outcome
         : run.outcome;
-    // Conditional on the row NOT already being terminal-by-user: a cancel()/
-    // close() that raced in right as the turn ended must win. Without the WHERE
-    // guard this update would resurrect a 'cancelled'/'closed' run.
-    const finalUpdate = await db.update(agentSessions)
-      .set({
-        status: nextStatus,
+    // THE incident site: the turn-end landing (status column + paired event)
+    // must be one transaction so a connection death between them can't strand a
+    // finished run in a lease status for the reaper to mislabel as failed.
+    // applyStatusTx also fires the live-bus emit (BEFORE the finally drops the
+    // runner) and the child lifecycle event, only when the row actually wrote.
+    // Guard: keep THIS site's own CAS (notInArray cancelled/closed) rather than
+    // the generic terminal no-op guard — nextStatus here may itself be
+    // non-terminal (parked/idle on a resuming chat turn), and this CAS already
+    // stops a cancel()/close() that raced the turn end from being resurrected.
+    // Retries: the worker (driveDispatchedRun) is about to exit, so a transient
+    // DB blip re-acknowledges the atomic, guarded finalize a few times.
+    await applyStatusTx(run.id, nextStatus, {
+      set: {
         sdkSessionId: result.sdkSessionId ?? run.sdkSessionId,
         totalCostUsd: result.totalCostUsd ?? run.totalCostUsd,
         inputTokens: result.inputTokens ?? run.inputTokens,
@@ -1088,23 +1097,10 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
         // lost to a result/budget landing. Parked is non-terminal: no completedAt.
         parkReason: nextStatus === "parked" ? turnEnd.parkReason : null,
         completedAt: isTerminalStatus(nextStatus) ? new Date() : null,
-      })
-      .where(
-        and(
-          eq(agentSessions.id, run.id),
-          notInArray(agentSessions.status, ["cancelled", "closed"])
-        )
-      );
-    // Tell live SSE subscribers (the run-view in the browser) that the turn
-    // ended — emit BEFORE dropping the runner (in the finally) so the bus still
-    // exists. Only emit when we actually wrote the row; if a cancel()/close()
-    // won the race the update was a no-op and the aborter already emitted.
-    if (finalUpdate.count > 0) {
-      await emitStatus(run.id, nextStatus);
-      // Child lifecycle producer (§3.1): a terminal landing on a child run
-      // becomes a durable inbox event for its parent. Best-effort by design.
-      if (isTerminalStatus(nextStatus)) void emitTerminalChildEvent(run.id);
-    }
+      },
+      guard: notInArray(agentSessions.status, ["cancelled", "closed"]),
+      retries: FINALIZE_RETRIES,
+    });
 
     yield { type: "done" };
   } finally {
@@ -1162,14 +1158,16 @@ export async function cancel(id: number): Promise<RunRow> {
   // also signal through the DB. The worker polls isCancelRequested() at
   // heartbeat cadence and aborts its own turn. Harmless for in-process runs —
   // they already aborted synchronously, so the poll is a no-op there.
-  await db.update(agentSessions)
-    .set({ status: "cancelled", completedAt: new Date(), cancelRequested: 1 })
-    .where(eq(agentSessions.id, id));
-  await emitStatus(id, "cancelled");
+  // Atomic status+event with the terminal no-op guard: a concurrent double-cancel
+  // that raced past the early-return above matches 0 rows and emits no second
+  // event. applyStatusTx also fires the parent's terminal child event on a write.
+  await applyStatusTx(id, "cancelled", {
+    set: { completedAt: new Date(), cancelRequested: 1 },
+    guard: notInArray(agentSessions.status, TERMINAL_STATUSES),
+  });
   // Event system (§6.6): mirror the cancel as a CONTROL-class inbox row — the
   // model can never claim/swallow it; enforcement stays platform-side (the
   // heartbeat poll aborts and then markControlInjected acknowledges the row).
-  // Plus the per-run-singleton terminal event for the parent (§3.1).
   void emitInboxEvent({
     targetRunId: id,
     type: "run.cancel_requested",
@@ -1179,7 +1177,6 @@ export async function cancel(id: number): Promise<RunRow> {
     payload: { run_id: id },
     noWake: true,
   }).catch(() => {});
-  void emitTerminalChildEvent(id);
   closeBus(id);
   // Hard-stop the detached worker as a fallback (the cancel_requested poll aborts
   // it gracefully within a heartbeat; provider stop is the belt). No-op if gone.
@@ -1359,17 +1356,18 @@ export async function followUp(
       }
     }
 
-    await db.update(agentSessions)
-      .set({
-        status: "completed",
+    // Atomic completion (status + event) with the terminal no-op guard, so a
+    // lost column write can't strand this follow-up as an orphan. Server-side
+    // (webhook), so no worker retry.
+    await applyStatusTx(runId, "completed", {
+      set: {
         completedAt: new Date(),
         sdkSessionId: result.sdkSessionId ?? run.sdkSessionId,
         inputTokens: result.inputTokens ?? run.inputTokens,
         outputTokens: result.outputTokens ?? run.outputTokens,
-      })
-      .where(eq(agentSessions.id, runId));
-    await emitStatus(runId, "completed");
-    void emitTerminalChildEvent(runId);
+      },
+      guard: notInArray(agentSessions.status, TERMINAL_STATUSES),
+    });
   } catch (err) {
     if (!abort.signal.aborted) await setError(runId, describe(err));
   } finally {
@@ -1876,19 +1874,20 @@ async function runReview(
     // verdict block was emitted.
     const outcome = extractReviewOutcome(result.summary);
 
-    await db.update(agentSessions)
-      .set({
-        status: "completed",
+    // Atomic completion (status + event), worker path → retry the guarded
+    // finalize on a transient DB blip before this single-turn worker exits.
+    await applyStatusTx(runId, "completed", {
+      set: {
         completedAt: new Date(),
         outcome,
         sdkSessionId: result.sdkSessionId ?? run.sdkSessionId,
         totalCostUsd: result.totalCostUsd ?? run.totalCostUsd,
         inputTokens: result.inputTokens ?? run.inputTokens,
         outputTokens: result.outputTokens ?? run.outputTokens,
-      })
-      .where(eq(agentSessions.id, runId));
-    await emitStatus(runId, "completed");
-    void emitTerminalChildEvent(runId);
+      },
+      guard: notInArray(agentSessions.status, TERMINAL_STATUSES),
+      retries: FINALIZE_RETRIES,
+    });
 
     // An approving verdict marks the task done. The outcome is the JSON
     // verdict block extracted above (or a fallback first line, which won't
@@ -1912,7 +1911,7 @@ async function runReview(
       runners.delete(runId);
       return;
     }
-    await setError(runId, describe(err));
+    await setError(runId, describe(err), { retries: FINALIZE_RETRIES });
   } finally {
     clearInterval(heartbeat);
     closeBus(runId);
@@ -2023,19 +2022,22 @@ async function runExecute(
       budgetHit: false,
       defaultStatus: "completed",
     });
-    await db.update(agentSessions)
-      .set({
-        status: endStatus,
+    // Atomic landing (status + event) with the terminal no-op guard. endStatus
+    // may be non-terminal (parked) — the guard only bites once the row is already
+    // terminal, and applyStatusTx fires the child event only for terminal
+    // landings. Worker path → retry the guarded finalize on a transient blip.
+    await applyStatusTx(runId, endStatus, {
+      set: {
         parkReason: endStatus === "parked" ? turnEnd.parkReason : null,
         completedAt: isTerminalStatus(endStatus) ? new Date() : null,
         sdkSessionId: result.sdkSessionId ?? run.sdkSessionId,
         totalCostUsd: result.totalCostUsd ?? run.totalCostUsd,
         inputTokens: result.inputTokens ?? run.inputTokens,
         outputTokens: result.outputTokens ?? run.outputTokens,
-      })
-      .where(eq(agentSessions.id, runId));
-    await emitStatus(runId, endStatus);
-    if (isTerminalStatus(endStatus)) void emitTerminalChildEvent(runId);
+      },
+      guard: notInArray(agentSessions.status, TERMINAL_STATUSES),
+      retries: FINALIZE_RETRIES,
+    });
 
     // Fallback: if the agent drove every task to a terminal state but didn't
     // close the plan itself, mark the plan done. (Skipped when the executor
@@ -2059,7 +2061,7 @@ async function runExecute(
       runners.delete(runId);
       return;
     }
-    await setError(runId, describe(err));
+    await setError(runId, describe(err), { retries: FINALIZE_RETRIES });
   } finally {
     clearInterval(heartbeat);
     closeBus(runId);
@@ -3315,12 +3317,18 @@ async function persistMessage(
 }
 
 async function setStatus(runId: number, status: SessionStatus) {
+  // Terminal transitions are atomic + idempotent (applyStatusTx also fires the
+  // child lifecycle event on a landed write). Non-terminal transitions keep the
+  // cheap two-step write — there is no paired-event atomicity to protect and a
+  // lost non-terminal mirror is self-healing.
+  if (isTerminalStatus(status)) {
+    await applyStatusTx(runId, status, {
+      guard: notInArray(agentSessions.status, TERMINAL_STATUSES),
+    });
+    return;
+  }
   await db.update(agentSessions).set({ status }).where(eq(agentSessions.id, runId));
   await emitStatus(runId, status);
-  // Child lifecycle producer (§3.1): any terminal transition on a child run
-  // becomes an inbox event for its parent. Deduped per (run, attempt), so the
-  // defensive hook here and the explicit turn-end call sites can't double-emit.
-  if (isTerminalStatus(status)) void emitTerminalChildEvent(runId);
 }
 
 // ──────────────────────────────────────────────────────────
@@ -3510,10 +3518,14 @@ export async function reconcileOrphanedRuns(): Promise<number> {
     // means a genuine mid-turn orphan and falls through to the reap below.
     const lastEvent = await latestEventStatus(row.id);
     if (lastEvent?.status === "completed") {
-      await db.update(agentSessions)
-        .set({ status: "completed", error: null, completedAt: lastEvent.at })
-        .where(eq(agentSessions.id, row.id));
-      await emitStatus(row.id, "completed", { reconciled: true });
+      // Atomic status+event. Guard on the row still being in a lease status: a
+      // real finalize that landed between our SELECT and here already wrote
+      // 'completed' + its event, so this becomes a no-op instead of clobbering it.
+      await applyStatusTx(row.id, "completed", {
+        set: { error: null, completedAt: lastEvent.at },
+        guard: inArray(agentSessions.status, LEASE_STATUSES),
+        extra: { reconciled: true },
+      });
       reaped++;
       continue;
     }
@@ -3756,26 +3768,153 @@ export async function listPendingRunIds(): Promise<number[]> {
   return [...liveParentChildren, ...rest];
 }
 
-async function setError(runId: number, error: string) {
-  await db.update(agentSessions)
-    .set({ status: "failed", error, completedAt: new Date() })
-    .where(eq(agentSessions.id, runId));
-  await emitStatus(runId, "failed", { error });
-  // Child lifecycle producer (§3.1): failed → child.exception for the parent
-  // (code 'unhandled' unless a raise-tool payload sits in agent_runs.result).
-  void emitTerminalChildEvent(runId);
+// ──────────────────────────────────────────────────────────
+// Atomic run finalize (Tier 1)
+// ──────────────────────────────────────────────────────────
+//
+// Incident: a terminal transition was written as TWO statements — a status
+// column UPDATE on agent_runs, then a paired status-event INSERT (emitStatus).
+// Under DB pressure a worker's connection died BETWEEN them: the event landed
+// but the column write was lost, so the orphan reaper mislabeled a finished run
+// (PR already delivered) as `failed`. applyStatusTx makes the column write and
+// its paired event ONE transaction (both-or-neither) and idempotent: a guard
+// that matches 0 rows means the run is already finalized → no event, no throw.
+
+/** The terminal statuses (isTerminalStatus in lib/types.ts). A terminal write
+ *  is a no-op once the row already sits in one of these — the idempotency guard. */
+const TERMINAL_STATUSES: SessionStatus[] = SESSION_STATUSES.filter(isTerminalStatus);
+
+/** How many times a worker retries a transient-failed finalize before giving up,
+ *  and the per-attempt backoff. Kept snappy — a single-turn worker is about to
+ *  exit, so we spend at most a few seconds re-acknowledging the transition. */
+const FINALIZE_RETRIES = 3;
+const FINALIZE_BACKOFF_MS = [500, 1000, 2000];
+
+/** The single source of truth for a `status` event row's shape. Both
+ *  applyStatusTx (transactional) and emitStatus (non-terminal, best-effort)
+ *  build their INSERT through here so the payload the reaper's latestEventStatus
+ *  parser reads back can never drift between the two writers. */
+function buildStatusEventValues(
+  runId: number,
+  status: SessionStatus,
+  extra?: Record<string, unknown>
+): typeof agentEvents.$inferInsert {
+  return {
+    sessionId: runId,
+    type: "status",
+    payload: JSON.stringify({ status, ...(extra ?? {}) }),
+    createdAt: new Date(),
+  };
+}
+
+/**
+ * Retry `fn` while it fails with a transient network/DB error (connection reset
+ * mid-commit, socket hang up). Because applyStatusTx is atomic AND guarded, a
+ * retry after an AMBIGUOUS failure (the tx actually committed but the ack was
+ * lost) re-runs the guarded UPDATE, matches 0 rows, and returns `false` — the
+ * run IS finalized, so the caller treats false as success. Non-transient errors
+ * (a real bug, the rollback test's forced INSERT failure) propagate immediately.
+ */
+export async function finalizeWithRetry<T>(fn: () => Promise<T>, retries = FINALIZE_RETRIES): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!isTransientNetworkError(err) || attempt >= retries) throw err;
+      const backoff = FINALIZE_BACKOFF_MS[Math.min(attempt, FINALIZE_BACKOFF_MS.length - 1)];
+      await new Promise((r) => setTimeout(r, backoff));
+    }
+  }
+}
+
+type StatusTxOpts = {
+  /** Extra columns to write alongside status (error, completedAt, tokens, …). */
+  set?: Partial<typeof agentSessions.$inferInsert>;
+  /** Extra WHERE conditions ANDed with eq(id) — the CAS/idempotency guard. */
+  guard?: SQL | undefined;
+  /** Extra fields folded into the status event payload (e.g. { error }). */
+  extra?: Record<string, unknown>;
+  /** When set, retry the tx on a transient DB error this many times (worker paths). */
+  retries?: number;
+};
+
+/**
+ * Write a status transition and its paired status event as ONE transaction.
+ * Returns true if the row was written (event inserted), false if the guard
+ * matched 0 rows (already finalized — an idempotent no-op, NOT an error).
+ *
+ * The event INSERT is NOT swallowed: if it fails the whole tx aborts and the
+ * column write rolls back too — both-or-neither, which is the entire point. The
+ * live-bus emit and the child-lifecycle event fire only AFTER a successful
+ * commit and stay OUTSIDE the tx (they are side effects that must not be
+ * replayed if the tx retries/rolls back).
+ */
+export async function applyStatusTx(
+  runId: number,
+  status: SessionStatus,
+  opts: StatusTxOpts = {}
+): Promise<boolean> {
+  const where = opts.guard
+    ? and(eq(agentSessions.id, runId), opts.guard)
+    : eq(agentSessions.id, runId);
+  const run = (): Promise<boolean> =>
+    db.transaction(async (tx) => {
+      const written = await tx
+        .update(agentSessions)
+        .set({ status, ...(opts.set ?? {}) })
+        .where(where)
+        .returning({ id: agentSessions.id });
+      if (written.length === 0) return false; // already finalized → no event
+      await tx.insert(agentEvents).values(buildStatusEventValues(runId, status, opts.extra));
+      return true;
+    });
+  const committed = opts.retries ? await finalizeWithRetry(run, opts.retries) : await run();
+  if (committed) {
+    runners.get(runId)?.bus.emit("event", { type: "status", status, ...(opts.extra ?? {}) });
+    // Child lifecycle producer (§3.1): any terminal transition on a child run
+    // becomes a durable inbox event for its parent. Deduped per (run, attempt).
+    if (isTerminalStatus(status)) void emitTerminalChildEvent(runId);
+  }
+  return committed;
+}
+
+/**
+ * Atomically fail a run still parked in 'pending' with no worker claim — the
+ * dispatch pump's max-defer-exceeded transition (was a raw CAS UPDATE followed
+ * by a separate failRun, i.e. two writes for one transition). Guarded exactly as
+ * the original CAS was: a dispatch that claimed the row in the meantime owns it,
+ * so this write must not clobber a healthy claim into 'failed'. Returns true iff
+ * the row was actually failed (and its event emitted).
+ */
+export async function failPendingRun(runId: number, error: string): Promise<boolean> {
+  return applyStatusTx(runId, "failed", {
+    set: { error, completedAt: new Date() },
+    guard: and(eq(agentSessions.status, "pending"), isNull(agentSessions.workerScope)),
+    extra: { error },
+  });
+}
+
+export async function setError(runId: number, error: string, opts?: { retries?: number }) {
+  // Idempotent: the terminal guard makes a second setError on an already-failed
+  // (or completed/cancelled) run a no-op — no re-fired event, no error overwrite.
+  // reconcileOrphanedRuns only ever calls this on LEASE_STATUSES rows, so the
+  // guard never blocks a legitimate reap. emitTerminalChildEvent is fired inside
+  // applyStatusTx, gated on the write actually landing.
+  await applyStatusTx(runId, "failed", {
+    set: { error, completedAt: new Date() },
+    guard: notInArray(agentSessions.status, TERMINAL_STATUSES),
+    extra: { error },
+    retries: opts?.retries,
+  });
 }
 
 async function emitStatus(runId: number, status: SessionStatus, extra?: Record<string, unknown>) {
-  // Mirror to agent_events so legacy /sessions UI keeps showing transitions.
+  // Non-terminal / best-effort mirror to agent_events (legacy /sessions UI).
+  // Terminal transitions go through applyStatusTx instead, where the event is
+  // transactional; here the insert is swallowed because a lost non-terminal
+  // mirror is harmless (the next transition re-establishes state).
   try {
-    await db.insert(agentEvents)
-      .values({
-        sessionId: runId,
-        type: "status",
-        payload: JSON.stringify({ status, ...(extra ?? {}) }),
-        createdAt: new Date(),
-      });
+    await db.insert(agentEvents).values(buildStatusEventValues(runId, status, extra));
   } catch {
     // ignore event mirror failures
   }
