@@ -137,37 +137,12 @@ describe("await_session", () => {
   });
 });
 
-describe("start_review", () => {
-  it("errors when the task is unknown", async () => {
-    const res = await tool("start_review").execute(
-      { task_id: "T-nope", pr_url: "https://github.com/x/y/pull/2" },
-      ctx
-    );
-    expect(res.isError).toBe(true);
-  });
-
-  it("refuses to start a second review while one is already active on the task", async () => {
-    const plan = await repo.createPlan({ title: "Review Guard", date: "2026-06-18" });
-    const task = await repo.createTask({ planId: plan.id, title: "Task", date: "2026-06-18" });
-    await insertRun({
-      taskId: task.id,
-      prUrl: "https://github.com/x/y/pull/3",
-      status: "running",
-    });
-    const res = await tool("start_review").execute(
-      { task_id: task.id, pr_url: "https://github.com/x/y/pull/3" },
-      ctx
-    );
-    expect(res.isError).toBe(true);
-    expect((res.content[0] as { text: string }).text).toMatch(/already has an active review/);
-  });
-
-  it("the active-review guard only counts non-terminal runs (unit-level check)", async () => {
-    // Exercise runs.list's activeOnly filtering directly rather than through
-    // start_review's execute path — a terminal prior review must not count,
-    // but driving that via the real tool would fire start_review's
-    // fire-and-forget runs.create(...) side effects (real worktree/gh calls)
-    // against the shared test repo, which we want to avoid in this suite.
+// The active-review guard behavior formerly exercised through start_review
+// (now removed with the agent reviewer) is still worth covering at the
+// runs.list level, since <review> goal runs and their activeOnly filtering
+// remain live plumbing (see lib/runs.ts runReview).
+describe("runs.list activeOnly filter for <review> runs", () => {
+  it("only counts non-terminal runs", async () => {
     const plan = await repo.createPlan({ title: "Review Guard Done", date: "2026-06-18" });
     const task = await repo.createTask({ planId: plan.id, title: "Task", date: "2026-06-18" });
     await insertRun({

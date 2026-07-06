@@ -1,6 +1,6 @@
 // lib/orchestrator-tools.ts
 //
-// Shared registry of the 37 orchestrator tool definitions.
+// Shared registry of the 36 orchestrator tool definitions.
 // The pi extension consumes this and registers each with the task_orch__ prefix.
 // The MCP server consumes this directly (bare names).
 
@@ -8,8 +8,7 @@ import { Type, type TSchema } from "typebox";
 import * as repo from "./repo";
 import * as agentLib from "./agent";
 import * as runs from "./runs";
-import { REVIEW_DEFAULT_BUDGET_USD, parseReviewVerdict } from "./run-templates";
-import { parsePrUrl } from "./gh-url";
+import { parseReviewVerdict } from "./run-templates";
 import {
   PLAN_STATES,
   TASK_STATES,
@@ -28,7 +27,7 @@ export interface OrchestratorToolContext {
   defaultTaskId?: string;
   defaultPlanId?: string;
   /** The run this tool is executing inside, if any. Child runs spawned by
-   *  start_session/start_review are parented to it so they group in the UI
+   *  start_session are parented to it so they group in the UI
    *  and share the tree budget. Undefined when invoked via the MCP server. */
   runId?: number;
 }
@@ -85,7 +84,7 @@ const resolvePlanId = (provided: string | undefined, ctx: OrchestratorToolContex
   return ctx.defaultPlanId ?? null;
 };
 
-// Spawned children (start_session / start_review) inherit the spawner's user
+// Spawned children (start_session) inherit the spawner's user
 // attribution. The tool context only carries the run id, so resolve userId off
 // the spawning run's row; null when invoked outside a run (e.g. the MCP
 // server) or when the spawner itself has no user.
@@ -1024,76 +1023,10 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
   },
 
   {
-    name: "start_review",
-    label: "Start Review",
-    description:
-      "Kick off a background reviewer agent for a task's open PR. Creates a worktree at the PR head, judges the diff against the acceptance criteria, and records a verdict (approve | request_changes | comment) in the session outcome. On 'approve' the task auto-transitions to done. Returns the session id immediately (non-blocking) — call await_session to wait for the verdict.",
-    parameters: Type.Object({
-      task_id: Type.String({ minLength: 1 }),
-      pr_url: Type.String({ minLength: 1 }),
-      model: Type.Optional(Type.String()),
-      reasoning: Type.Optional(
-        Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh")], {
-          description: "Reasoning level for the reviewer. Omit to use the persona's default.",
-        })
-      ),
-    }),
-    execute: async ({ task_id, pr_url, model, reasoning }, ctx) => {
-      // pr_url gets interpolated straight into a worktree_at_pr checkout;
-      // catch a malformed value here instead of letting the run fail
-      // asynchronously deep in the worker.
-      if (!parsePrUrl(pr_url)) {
-        return errResult(
-          `Error: Could not parse pr_url '${pr_url}'. Expected https://github.com/<owner>/<repo>/pull/<n> or <owner>/<repo>#<n>.`
-        );
-      }
-      const task = await repo.getTask(task_id);
-      if (!task) return errResult(`Error: Task ${task_id} not found`);
-      // Refuse to stack a second reviewer on the same task while one is
-      // already active — otherwise repeated calls pile up unbounded
-      // concurrent review runs against the same PR.
-      const activeReviews = await runs.list({
-        goal: "<review>",
-        taskId: task_id,
-        activeOnly: true,
-      });
-      if (activeReviews.length > 0) {
-        return errResult(
-          `Error: Task ${task_id} already has an active review (session #${activeReviews[0].id}). Await or cancel it before starting another.`
-        );
-      }
-      const userId = await resolveSpawnerUserId(ctx);
-      const result = await safe(() =>
-        runs.create({
-          goal: "<review>",
-          cwdStrategy: "worktree_at_pr",
-          // Read-only gh_pr: this run checks out an untrusted third-party PR,
-          // so it must never be able to merge or approve the PR it's judging
-          // (gh_pr_ro has no pr_merge and pr_review can't emit 'approve').
-          toolsProfile: "orchestrator,repo_read,gh_pr_ro",
-          taskId: task_id,
-          prUrl: pr_url,
-          repoId: task.repoId ?? null,
-          personaId: "reviewer",
-          model: model ?? null,
-          thinkingLevel: reasoning ?? null,
-          parentRunId: ctx.runId ?? null,
-          userId,
-          budget: { maxUsd: REVIEW_DEFAULT_BUDGET_USD },
-        })
-      );
-      if ("_error" in result) return errResult(`Error: ${result._error}`);
-      return ok(
-        `Started review session #${result.id} for ${task_id} on PR ${pr_url}.`
-      );
-    },
-  },
-
-  {
     name: "await_session",
     label: "Await Session",
     description:
-      "Block until an agent session reaches a terminal status (completed | failed | cancelled | closed | budget_exhausted), then return its status, outcome, review verdict (if any), PR url, error, and cost. Use after start_session / start_review to wait for a child run to finish. Times out after timeout_seconds (default 1800, max 7200) and returns the current (non-terminal) status with timed_out=true.",
+      "Block until an agent session reaches a terminal status (completed | failed | cancelled | closed | budget_exhausted), then return its status, outcome, review verdict (if any), PR url, error, and cost. Use after start_session to wait for a child run to finish. Times out after timeout_seconds (default 1800, max 7200) and returns the current (non-terminal) status with timed_out=true.",
     parameters: Type.Object({
       session_id: Type.Integer(),
       timeout_seconds: Type.Optional(

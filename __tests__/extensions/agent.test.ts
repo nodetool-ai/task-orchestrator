@@ -15,10 +15,10 @@ import { orchestratorExtension } from "../../lib/extensions/agent";
 import { makeRegistrar } from "../helpers/fake-registrar";
 
 describe("orchestratorExtension", () => {
-  it("registers 37 task_orch tools", () => {
+  it("registers 36 task_orch tools", () => {
     const r = makeRegistrar();
     orchestratorExtension({ author: "test" })(r.reg);
-    expect(r.tools.size).toBe(37);
+    expect(r.tools.size).toBe(36);
     for (const [name, def] of r.tools) {
       expect(name).toMatch(/^task_orch__/);
       expect(def.label).toBeDefined();
