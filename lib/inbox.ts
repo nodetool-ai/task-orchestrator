@@ -184,7 +184,8 @@ async function insertEvent(
  *  2. supersession of stale pending terminal events from the same child (§4.3)
  *  3. the owner insert (deduped)
  *  4. exception re-routing past a terminal parent (§5.3)
- *  5. a supervisor copy to the live parent for parent-visible types (§5.2)
+ *  5. a supervisor copy to the live parent for parent-visible types, which
+ *     also wakes a parked parent (§5.2)
  *  6. waking a parked target for owner-audience notify events (§6.2)
  */
 export async function emitInboxEvent(input: EmitInput): Promise<EmitResult> {
@@ -256,11 +257,13 @@ export async function emitInboxEvent(input: EmitInput): Promise<EmitResult> {
     return rows[0]?.id ?? null;
   });
 
-  // Supervisor copy (§5.2) — informational, never wakes, best-effort.
+  // Supervisor copy (§5.2) — informational AND wakes a parked parent (§5.2a):
+  // a parked parent must not sleep through its child's lifecycle. Best-effort,
+  // mirroring the owner wake below; the pump sweep is the durable backstop.
   if (audience === "owner" && wantsSupervisorCopy(input.type) && target.parentRunId != null) {
     const parent = await resolveThroughSupersession(target.parentRunId);
     if (parent && !isTerminalStatus(parent.status as SessionStatus)) {
-      await insertEvent({
+      const copyId = await insertEvent({
         targetRunId: parent.id,
         type: input.type,
         payload: input.payload ?? {},
@@ -272,7 +275,15 @@ export async function emitInboxEvent(input: EmitInput): Promise<EmitResult> {
         attempt: input.attempt ?? null,
         bubbledFrom: target.id,
         dedupeKey: input.dedupeKey ? `sup:${input.dedupeKey}` : null,
-      }).catch(() => {});
+      }).catch(() => null);
+      if (copyId != null && !input.noWake && parent.status === "parked") {
+        try {
+          const runDispatch = await import("./run-dispatch");
+          void runDispatch.dispatchRun(parent.id).catch(() => {});
+        } catch {
+          // pump sweep will retry
+        }
+      }
     }
   }
 
@@ -481,8 +492,8 @@ export async function listRunTimers(runId: number, limit = 50): Promise<RunTimer
 }
 
 /**
- * Pump wake sweep (§6.2 belt): parked runs with pending owner-audience
- * notify events. Bounded; the pending partial index keeps this cheap.
+ * Pump wake sweep (§6.2 belt): parked runs with pending owner-OR-supervisor
+ * audience notify events. Bounded; the pending partial index keeps this cheap.
  */
 export async function parkedRunsWithPendingEvents(limit = 50): Promise<number[]> {
   const rows = await db
@@ -494,7 +505,7 @@ export async function parkedRunsWithPendingEvents(limit = 50): Promise<number[]>
         sql`EXISTS (SELECT 1 FROM ${inboxEvents}
               WHERE ${inboxEvents.targetRunId} = ${agentSessions.id}
                 AND ${inboxEvents.status} = 'pending'
-                AND ${inboxEvents.audience} = 'owner'
+                AND ${inboxEvents.audience} IN ('owner', 'supervisor')
                 AND ${inboxEvents.type} NOT IN (${sql.join(
                   [...CONTROL_TYPES].map((t) => sql`${t}`),
                   sql`, `
