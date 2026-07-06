@@ -3432,15 +3432,18 @@ export async function reconcileOrphanedRuns(): Promise<number> {
     // via isImplementWorktree, since the row is still in a *lease* status and
     // isResumableWorktreeRun only accepts post-reap terminal statuses). Clear
     // the stale claim first so dispatchRun can re-claim the row.
-    // Containerized workers re-clone from the repo-cache, so the branch (pushed
-    // to GitHub) + an SDK session is enough — the host worktree is gone with the
-    // dead container. Host/dev mode still requires the on-disk worktree.
-    const containerized = !!process.env.TASK_ORCH_WORKER_IMAGE;
+    // Remote runners (Fly Machines and Docker workers) re-clone from the branch
+    // pushed to GitHub, so branch + SDK session is enough — the worktree lives
+    // on the (dead/remote) worker, not here. On Fly especially, worktreePath is
+    // a runner-Machine volume path (/mnt/session/repo) that NEVER exists on the
+    // server, so an existsSync gate would wrongly fail every resumable orphan.
+    // Host/dev mode still requires the on-disk worktree.
+    const remote = runDispatch.remoteRunnerEnabled();
     const resumable =
       runDispatch.detachedRunsEnabled() &&
       isImplementWorktree(row) &&
       !!row.sdkSessionId &&
-      (containerized ? !!row.branch : !!row.worktreePath && existsSync(row.worktreePath));
+      (remote ? !!row.branch : !!row.worktreePath && existsSync(row.worktreePath));
     if (resumable) {
       await db.update(agentSessions)
         .set({ workerScope: null })
@@ -3462,7 +3465,19 @@ export async function reconcileOrphanedRuns(): Promise<number> {
         scopeKey: row.workerScope ?? "lease",
         resumable: false,
       });
-      await setError(row.id, "Interrupted by a process restart before the turn finished.");
+      // Say what we actually observed (a lost heartbeat), not a guessed cause —
+      // "process restart" sent incident debugging down the wrong path more than
+      // once. Include the forensics we have: heartbeat age, the worker scope
+      // (= machine/container name), and any PR the run delivered before dying.
+      const beatAge = row.heartbeatAt
+        ? `last heartbeat ${Math.max(0, Math.round((now - row.heartbeatAt.getTime()) / 60_000))} min ago`
+        : "no heartbeat recorded";
+      const delivered = row.prUrl ? ` Work delivered before the interruption: ${row.prUrl}` : "";
+      await setError(
+        row.id,
+        `Worker heartbeat lost — turn interrupted mid-flight (${beatAge}; scope ${row.workerScope ?? "none"}). ` +
+          `The worker process or its machine died or hung.${delivered}`
+      );
     }
     reaped++;
   }
