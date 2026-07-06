@@ -21,6 +21,21 @@ import {
   type CandidateRun,
   type NormalizedWebhookEvent,
 } from "./github-webhook";
+import {
+  applyTaskStateFromPr,
+  fetchPrGithubState,
+  type PrGithubStateFetcher,
+} from "./pr-task-state";
+import type { TaskFull } from "./types";
+
+// A task an event applies to, plus a matched run (if any) to hang durable
+// agent events (pr_merged) off of. Tasks are matched authoritatively by the
+// explicit `tasks.pr_url` link, falling back to the run-based heuristic for
+// legacy rows that predate `set_task_pr`.
+interface MatchedTask {
+  task: TaskFull;
+  run: runs.RunRow | null;
+}
 
 // Auto-fix: when CI fails (or a reviewer requests changes) on a task's PR,
 // resume the agent on the same branch to fix it. On by default — the
@@ -43,7 +58,11 @@ export interface DispatchResult {
 
 export async function handleWebhookEvent(
   event: NormalizedWebhookEvent,
-  deliveryId: string | null
+  deliveryId: string | null,
+  // Injectable so tests can drive task state without touching the `gh`
+  // subprocess. Production uses the real fetcher, which re-reads the PR's
+  // rolled-up GitHub state — authoritative, unlike a single check's conclusion.
+  fetchPrState: PrGithubStateFetcher = fetchPrGithubState
 ): Promise<DispatchResult> {
   const actions: string[] = [];
 
@@ -63,7 +82,6 @@ export async function handleWebhookEvent(
 
   const repoMap = await buildRepoOwnerMap(candidateRows);
   const matchedIds = selectMatchingRunIds(event, candidateRows, repoMap);
-  if (matchedIds.length === 0) return { matched: 0, actions };
 
   // Record the event on every matched run (durable log + best-effort live push).
   for (const id of matchedIds) await recordEvent(id, event, deliveryId);
@@ -91,9 +109,27 @@ export async function handleWebhookEvent(
     .filter((r): r is NonNullable<typeof r> => r != null)
     .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
 
+  // Task state is driven from GitHub via the same prToTaskState mapping the
+  // poller uses, matched by the authoritative tasks.pr_url link (run-based
+  // matching is only a fallback for legacy rows). This can find a task even
+  // when no run matched — hence the early-return also considers matchedTasks.
+  const matchedTasks = await resolveMatchedTasks(event, matchedRuns);
+
+  if (matchedIds.length === 0 && matchedTasks.length === 0) {
+    return { matched: 0, actions };
+  }
+
   if (event.merged) {
-    actions.push(...(await applyMerge(matchedRuns, event)));
+    actions.push(...(await applyMerge(matchedTasks, event)));
     return { matched: matchedIds.length, actions };
+  }
+
+  // A CI/check completion drives the matched tasks to passing/failing/testing
+  // from the PR's *rolled-up* GitHub state (re-read, not this one check's
+  // conclusion). Runs before handleNeedsFix so the task is already `failing`
+  // when the implementor is resumed to fix it.
+  if (event.kind === "ci") {
+    actions.push(...(await applyCiState(matchedTasks, event, fetchPrState)));
   }
 
   const isCiFailure = event.kind === "ci" && event.ciState === "failure";
@@ -109,56 +145,116 @@ export async function handleWebhookEvent(
   return { matched: matchedIds.length, actions };
 }
 
+/**
+ * Resolve the tasks an event drives. Prefers the authoritative `tasks.pr_url`
+ * link (one lookup per PR url on the event); falls back to the task owned by a
+ * matched run for legacy rows that predate `set_task_pr`. Deduped by task id,
+ * associating a matched run (newest first) for durable agent events.
+ */
+async function resolveMatchedTasks(
+  event: NormalizedWebhookEvent,
+  matchedRuns: runs.RunRow[]
+): Promise<MatchedTask[]> {
+  const byId = new Map<string, MatchedTask>();
+  for (const url of event.prUrls) {
+    const task = await repo.getTaskByPrUrl(url);
+    if (task && !byId.has(task.id)) {
+      const run = matchedRuns.find((r) => r.taskId === task.id) ?? null;
+      byId.set(task.id, { task, run });
+    }
+  }
+  for (const run of matchedRuns) {
+    if (!run.taskId || byId.has(run.taskId)) continue;
+    const task = await repo.getTask(run.taskId);
+    if (task) byId.set(task.id, { task, run });
+  }
+  return [...byId.values()];
+}
+
 // ──────────────────────────────────────────────────────────
 // Side effects
 // ──────────────────────────────────────────────────────────
 
 async function applyMerge(
-  matchedRuns: runs.RunRow[],
+  matchedTasks: MatchedTask[],
   event: NormalizedWebhookEvent
 ): Promise<string[]> {
   const actions: string[] = [];
-  const seenTasks = new Set<string>();
-  for (const run of matchedRuns) {
-    if (!run.taskId || seenTasks.has(run.taskId)) continue;
-    seenTasks.add(run.taskId);
-    const task = await repo.getTask(run.taskId);
-    if (!task) continue;
-    if (
-      task.state !== "in_progress" &&
-      task.state !== "testing" &&
-      task.state !== "passing" &&
-      task.state !== "failing"
-    )
-      continue;
+  for (const { task, run } of matchedTasks) {
+    const prev = task.state;
     try {
-      await repo.transitionTask(run.taskId, {
-        state: "merged",
-        note: `PR merged: ${event.prUrls[0] ?? run.prUrl ?? "(unknown)"}`,
-        // A merged PR is authoritative — close it even if criteria were never
-        // ticked, matching the merge poller's behavior.
-        bypassCriteria: true,
-      });
-      await db
-        .insert(agentEvents)
-        .values({
-          sessionId: run.id,
-          type: "pr_merged",
-          payload: JSON.stringify({ url: event.prUrls[0] ?? run.prUrl }),
-          createdAt: new Date(),
-        });
-      actions.push(`task ${run.taskId} → merged`);
+      // Route through the shared allowed-transition guard: prToTaskState maps a
+      // merged PR → "merged", and applyTaskStateFromPr no-ops (rather than
+      // throws) on an illegal edge, preserving the bypassCriteria behavior.
+      await applyTaskStateFromPr(
+        { id: task.id, state: task.state },
+        { merged: true, closed: false, ciConclusion: "none" }
+      );
     } catch (err) {
+      // A throw here is a real DB error, not an illegal edge (that's a no-op).
       try {
         await repo.addNote(
-          run.taskId,
+          task.id,
           "github-webhook",
           `PR merged but could not transition to merged: ${describe(err)}`
         );
       } catch {
         // ignore
       }
+      continue;
     }
+    const now = await repo.getTask(task.id);
+    if (now?.state === "merged" && prev !== "merged") {
+      // Preserve the durable pr_merged agent event (keyed to the run so the
+      // UI/SSE surface it). Only recorded when a matched run exists.
+      if (run) {
+        await db
+          .insert(agentEvents)
+          .values({
+            sessionId: run.id,
+            type: "pr_merged",
+            payload: JSON.stringify({ url: event.prUrls[0] ?? run.prUrl ?? task.prUrl }),
+            createdAt: new Date(),
+          });
+      }
+      actions.push(`task ${task.id} → merged`);
+    }
+  }
+  return actions;
+}
+
+/**
+ * Drive matched tasks from the PR's real GitHub state on a CI/check completion.
+ * Re-reads the rolled-up CI state (authoritative — a single check's conclusion
+ * is one of many) and funnels through applyTaskStateFromPr, the same shared
+ * path the poller uses, so this naturally yields failing/passing/testing.
+ */
+async function applyCiState(
+  matchedTasks: MatchedTask[],
+  event: NormalizedWebhookEvent,
+  fetchPrState: PrGithubStateFetcher
+): Promise<string[]> {
+  const actions: string[] = [];
+  for (const { task } of matchedTasks) {
+    const prUrl = task.prUrl ?? event.prUrls[0] ?? null;
+    if (!prUrl) continue;
+    let ghState;
+    try {
+      ghState = await fetchPrState(prUrl);
+    } catch (err) {
+      console.warn(`github-webhook: fetchPrGithubState failed for ${prUrl}:`, describe(err));
+      continue;
+    }
+    if (!ghState) continue;
+    const prev = task.state;
+    try {
+      await applyTaskStateFromPr({ id: task.id, state: task.state }, ghState);
+    } catch (err) {
+      console.error(`github-webhook: task ${task.id} CI sync failed:`, describe(err));
+      continue;
+    }
+    const now = await repo.getTask(task.id);
+    if (now && now.state !== prev) actions.push(`task ${task.id} → ${now.state}`);
   }
   return actions;
 }

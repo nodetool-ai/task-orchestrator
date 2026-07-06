@@ -18,6 +18,7 @@ import {
   type Repository as RepositoryDbRow,
   type Task as TaskRow,
 } from "@/db/schema";
+import { canonicalizePrUrl } from "./github-webhook";
 import {
   TASK_TRANSITIONS,
   PLAN_TRANSITIONS,
@@ -979,6 +980,26 @@ export async function setTaskPr(taskId: string, prUrl: string): Promise<void> {
     .update(tasks)
     .set({ prUrl, updatedAt: new Date() })
     .where(eq(tasks.id, taskId));
+}
+
+/**
+ * Resolve the task whose explicit `tasks.pr_url` link matches the given PR url.
+ * This is the authoritative task↔PR link the GitHub webhook/poller prefer over
+ * the older run-based (`agent_sessions.pr_url`/branch) heuristic. Comparison is
+ * canonical (case-insensitive, fragment/`.git`-stripped) so a webhook's
+ * lowercased url matches a mixed-case stored link. Returns null when no task
+ * carries a matching pr_url. Deterministic (lowest task id) if several do.
+ */
+export async function getTaskByPrUrl(prUrl: string): Promise<TaskFull | null> {
+  const key = canonicalizePrUrl(prUrl);
+  if (!key) return null;
+  const rows = await db
+    .select({ id: tasks.id, prUrl: tasks.prUrl })
+    .from(tasks)
+    .where(isNotNull(tasks.prUrl))
+    .orderBy(asc(tasks.id));
+  const match = rows.find((r) => canonicalizePrUrl(r.prUrl) === key);
+  return match ? getTask(match.id) : null;
 }
 
 // ──────────────────────────────────────────────────────────

@@ -32,6 +32,18 @@ import {
   tasks,
 } from "../db/schema";
 import { handleWebhookEvent } from "../lib/github-webhook-handler";
+import * as repo from "../lib/repo";
+import type { PrGithubState } from "../lib/pr-task-state";
+
+// A fetcher that always returns the given GitHub state, ignoring the url — so
+// task-state driving never spawns a real `gh` subprocess in tests.
+const fakeFetch = (s: PrGithubState) => async () => s;
+const gh = (over: Partial<PrGithubState> = {}): PrGithubState => ({
+  merged: false,
+  closed: false,
+  ciConclusion: "none",
+  ...over,
+});
 
 function sign(body: string, secret: string): string {
   return "sha256=" + createHmac("sha256", secret).update(body, "utf8").digest("hex");
@@ -344,7 +356,11 @@ describe("handleWebhookEvent CI-autofix targeting", () => {
     it(`does NOT autofix a ${status} run (user abandoned it)`, async () => {
       const id = await insertRun(status);
 
-      const result = await handleWebhookEvent(ciFailure(), "delivery-1");
+      const result = await handleWebhookEvent(
+        ciFailure(),
+        "delivery-1",
+        fakeFetch(gh({ ciConclusion: "failure" }))
+      );
 
       // The run still MATCHED the event (so the skip is due to status, not a
       // failed match): a durable 'github' event is recorded on it.
@@ -366,12 +382,192 @@ describe("handleWebhookEvent CI-autofix targeting", () => {
   it("DOES autofix a resumable (idle) worktree run — control for the guard", async () => {
     const id = await insertRun("idle");
 
-    const result = await handleWebhookEvent(ciFailure(), "delivery-2");
+    const result = await handleWebhookEvent(
+      ciFailure(),
+      "delivery-2",
+      fakeFetch(gh({ ciConclusion: "failure" }))
+    );
 
     expect(result.matched).toBe(1);
     expect(mockFollowUp).toHaveBeenCalledTimes(1);
     expect(mockFollowUp.mock.calls[0]?.[0]).toBe(id);
     expect(await eventsOfType(id, "github_autofix")).toBe(1);
     expect(result.actions.some((a) => /autofix triggered/.test(a))).toBe(true);
+  });
+});
+
+// GitHub-driven task lifecycle (§3): the webhook drives task state through the
+// SAME prToTaskState mapping the poller uses, matched via the authoritative
+// tasks.pr_url link. fetchPrGithubState is injected so no real `gh` runs.
+describe("handleWebhookEvent drives task state from GitHub", () => {
+  const PR_URL = "https://github.com/acme/widgets/pull/7";
+
+  beforeEach(async () => {
+    mockFollowUp.mockClear();
+    await db.delete(agentEvents);
+    await db.delete(taskNotes);
+    await db.delete(agentSessions);
+    await db.delete(tasks);
+    await db.delete(plans);
+    await db.delete(repositories).where(ne(repositories.id, "R-default"));
+
+    await db.insert(repositories).values({
+      id: "R-acme",
+      name: "widgets",
+      remote: "git@github.com:acme/widgets.git",
+      localPath: "/tmp/acme-widgets",
+      defaultBranch: "main",
+    });
+    await db.insert(plans).values({ id: "P-acme", title: "Acme plan" });
+  });
+
+  // A task in `testing` with its authoritative pr_url set — the shape after an
+  // implementor opened a PR and called set_task_pr.
+  async function makeTestingTask(prUrl = PR_URL): Promise<string> {
+    await db
+      .insert(tasks)
+      .values({ id: "T-acme", title: "Do the thing", planId: "P-acme", repoId: "R-acme" });
+    await repo.transitionTask("T-acme", { state: "in_progress", assignee: "alice" });
+    await repo.transitionTask("T-acme", { state: "testing" });
+    await repo.setTaskPr("T-acme", prUrl);
+    return "T-acme";
+  }
+
+  // A resumable worktree run for the task, matched by branch/PR — so a
+  // CI-failure can resume the implementor in place.
+  async function insertResumableRun(): Promise<number> {
+    const row = (
+      await db
+        .insert(agentSessions)
+        .values({
+          taskId: "T-acme",
+          status: "idle",
+          goal: "<implement>",
+          toolsProfile: "orchestrator,repo_write",
+          cwdStrategy: "worktree",
+          branch: "feature-x",
+          worktreePath: "/tmp/acme-widgets/.worktrees/1",
+          prUrl: PR_URL,
+          repoId: "R-acme",
+          startedAt: new Date(),
+        })
+        .returning({ id: agentSessions.id })
+    )[0];
+    return row!.id;
+  }
+
+  function mergeEvent(): NormalizedWebhookEvent {
+    return {
+      kind: "pr",
+      event: "pull_request",
+      action: "closed",
+      repoFullName: "acme/widgets",
+      prUrls: [PR_URL],
+      branch: "feature-x",
+      headSha: "abc123",
+      ciState: null,
+      conclusion: null,
+      merged: true,
+      prState: "closed",
+      workflowName: null,
+      actor: "alice",
+      body: null,
+      url: PR_URL,
+      summary: "PR merged",
+    };
+  }
+
+  function ciEvent(ciState: "success" | "failure"): NormalizedWebhookEvent {
+    return {
+      kind: "ci",
+      event: "workflow_run",
+      action: "completed",
+      repoFullName: "acme/widgets",
+      prUrls: [PR_URL],
+      branch: "feature-x",
+      headSha: "abc123",
+      ciState,
+      conclusion: ciState,
+      merged: false,
+      prState: null,
+      workflowName: "CI",
+      actor: "ci-bot",
+      body: null,
+      url: "https://github.com/acme/widgets/actions/runs/1",
+      summary: `Workflow "CI" ${ciState}`,
+    };
+  }
+
+  it("a merge webhook drives the matched task to merged (via tasks.pr_url)", async () => {
+    const taskId = await makeTestingTask();
+    const runId = await insertResumableRun();
+
+    const result = await handleWebhookEvent(mergeEvent(), "d-merge");
+
+    expect((await repo.getTask(taskId))!.state).toBe("merged");
+    expect(result.actions).toContain(`task ${taskId} → merged`);
+    // The durable pr_merged agent event is preserved (keyed to the run).
+    const merged = await db
+      .select({ id: agentEvents.id })
+      .from(agentEvents)
+      .where(and(eq(agentEvents.sessionId, runId), eq(agentEvents.type, "pr_merged")));
+    expect(merged).toHaveLength(1);
+  });
+
+  it("matches purely by tasks.pr_url even with no matching run", async () => {
+    const taskId = await makeTestingTask(); // no run inserted
+
+    const result = await handleWebhookEvent(mergeEvent(), "d-merge-norun");
+
+    expect((await repo.getTask(taskId))!.state).toBe("merged");
+    expect(result.actions).toContain(`task ${taskId} → merged`);
+  });
+
+  it("a CI-failure webhook drives testing → failing and resumes the implementor", async () => {
+    const taskId = await makeTestingTask();
+    const runId = await insertResumableRun();
+
+    const result = await handleWebhookEvent(
+      ciEvent("failure"),
+      "d-ci-fail",
+      fakeFetch(gh({ ciConclusion: "failure" }))
+    );
+
+    // State set first…
+    expect((await repo.getTask(taskId))!.state).toBe("failing");
+    expect(result.actions).toContain(`task ${taskId} → failing`);
+    // …then the implementor resumed to fix it.
+    expect(mockFollowUp).toHaveBeenCalledTimes(1);
+    expect(mockFollowUp.mock.calls[0]?.[0]).toBe(runId);
+    expect(result.actions.some((a) => /autofix triggered/.test(a))).toBe(true);
+  });
+
+  it("a CI-success webhook drives testing → passing (no resume)", async () => {
+    const taskId = await makeTestingTask();
+    await insertResumableRun();
+
+    const result = await handleWebhookEvent(
+      ciEvent("success"),
+      "d-ci-pass",
+      fakeFetch(gh({ ciConclusion: "success" }))
+    );
+
+    expect((await repo.getTask(taskId))!.state).toBe("passing");
+    expect(result.actions).toContain(`task ${taskId} → passing`);
+    expect(mockFollowUp).not.toHaveBeenCalled();
+  });
+
+  it("re-reads authoritative rolled-up CI state, not the event's single conclusion", async () => {
+    // The event says failure, but the PR's rolled-up state is green → passing.
+    const taskId = await makeTestingTask();
+    await insertResumableRun();
+
+    await handleWebhookEvent(
+      ciEvent("failure"),
+      "d-ci-authoritative",
+      fakeFetch(gh({ ciConclusion: "success" }))
+    );
+
+    expect((await repo.getTask(taskId))!.state).toBe("passing");
   });
 });
