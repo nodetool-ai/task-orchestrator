@@ -181,7 +181,8 @@ export function checkSpawnStartable(args: {
     if (!args.taskId) {
       return (
         `cwd_strategy=worktree spawns an implement-style child that branches off a ` +
-        `task; pass task_id. To review a PR instead, use the start_review tool.`
+        `task; pass task_id. There is no separate review tool — PR review is handled by ` +
+          `CI checks and the implementor's own checks before merge.`
       );
     }
     return null;
@@ -189,8 +190,8 @@ export function checkSpawnStartable(args: {
   return (
     `cwd_strategy='${args.cwdStrategy}' isn't startable via spawn_agent: no worker ` +
     `runs a free-form ${args.cwdStrategy} child, so it would hang at 'pending' forever. ` +
-    `Use cwd_strategy=worktree with a task_id to implement a task, or the start_review tool ` +
-    `to review a PR.`
+    `Use cwd_strategy=worktree with a task_id to implement a task; PR review is handled by ` +
+    `CI checks and the implementor's own checks, not a separate spawn.`
   );
 }
 
@@ -467,8 +468,9 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
             description:
               "Working-directory strategy. Use 'worktree' (with task_id) to implement a task " +
               "on a fresh branch — this is the only strategy spawn_agent auto-starts. 'repo'/'none' " +
-              "are not picked up by any worker here and would hang at 'pending'; review PRs via the " +
-              "start_review tool instead.",
+              "are not picked up by any worker here and would hang at 'pending'; PR review is " +
+              "handled by CI checks and the implementor's own checks, there is no separate " +
+              "review-spawn path.",
           }
         ),
         task_id: Type.Optional(Type.String()),
