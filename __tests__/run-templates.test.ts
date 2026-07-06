@@ -144,6 +144,60 @@ describe("buildImplementPrompt", () => {
   });
 });
 
+// When runs execute in a worker container (TASK_ORCH_DETACHED_RUNS / fly runner)
+// the checkout is a fresh private clone, not a shared-store worktree — so the
+// prompt must drop the "already installed / symlinked / isolate-env / worktree-dev"
+// host story and tell the agent to install deps itself if they're missing.
+describe("Working environment adapts to the container runner", () => {
+  const saved = {
+    detached: process.env.TASK_ORCH_DETACHED_RUNS,
+    runner: process.env.TASK_ORCH_RUNNER,
+  };
+  afterEach(() => {
+    if (saved.detached === undefined) delete process.env.TASK_ORCH_DETACHED_RUNS;
+    else process.env.TASK_ORCH_DETACHED_RUNS = saved.detached;
+    if (saved.runner === undefined) delete process.env.TASK_ORCH_RUNNER;
+    else process.env.TASK_ORCH_RUNNER = saved.runner;
+  });
+
+  it("implement prompt: fresh private clone, install-if-missing, no host-only advice", async () => {
+    process.env.TASK_ORCH_DETACHED_RUNS = "1";
+    delete process.env.TASK_ORCH_RUNNER;
+    const prompt = await buildImplementPrompt(fakeTask());
+    expect(prompt).toContain("fresh, private clone");
+    expect(prompt).toContain("npm ci");
+    // Host-only framing must be gone.
+    expect(prompt).not.toContain("SHARED across all worktrees");
+    expect(prompt).not.toContain("npm run isolate-env");
+    expect(prompt).not.toContain("npm run worktree-dev");
+    expect(prompt).not.toContain("isolated git worktree");
+  });
+
+  it("review prompt: fresh private clone, no shared-store claim", () => {
+    process.env.TASK_ORCH_DETACHED_RUNS = "1";
+    delete process.env.TASK_ORCH_RUNNER;
+    const prompt = buildReviewPrompt(fakeTask(), "https://github.com/o/r/pull/1");
+    expect(prompt).toContain("fresh, private clone");
+    expect(prompt).not.toContain("SHARED across all worktrees");
+  });
+
+  it("treats the fly runner as a container even without the detached flag", async () => {
+    delete process.env.TASK_ORCH_DETACHED_RUNS;
+    process.env.TASK_ORCH_RUNNER = "fly";
+    const prompt = await buildImplementPrompt(fakeTask());
+    expect(prompt).toContain("fresh, private clone");
+    expect(prompt).not.toContain("npm run isolate-env");
+  });
+
+  it("keeps the host-worktree story when the flag is off/falsey", async () => {
+    process.env.TASK_ORCH_DETACHED_RUNS = "0";
+    delete process.env.TASK_ORCH_RUNNER;
+    const prompt = await buildImplementPrompt(fakeTask());
+    expect(prompt).toContain("isolated git worktree");
+    expect(prompt).toContain("SHARED across all worktrees");
+  });
+});
+
 describe("buildChatPromptPrefix", () => {
   it("includes task id, title, body and criteria", () => {
     const prefix = buildChatPromptPrefix(fakeTask());

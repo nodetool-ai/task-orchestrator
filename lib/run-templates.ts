@@ -33,6 +33,24 @@ export const IMPLEMENT_DEFAULT_BUDGET_USD = 20;
 export const REVIEW_DEFAULT_BUDGET_USD = 5;
 
 /**
+ * True when runs execute in an out-of-process worker container/Machine rather
+ * than a host git worktree. In that world the checkout is a fresh, private clone
+ * (lib/runs.ts containerCheckout) — there is NO shared-store worktree, so the
+ * "node_modules is symlinked and already installed" / `isolate-env` /
+ * `worktree-dev` story from host mode does not hold, and dependencies are present
+ * only when the image happened to bake them (lib/prewarm.ts).
+ *
+ * Mirrors run-dispatch's detachedRunsEnabled() using only env reads, so the
+ * prompt builders (imported by client-facing route/page modules) don't pull the
+ * dispatch/docker graph in. Keep in sync with that helper.
+ */
+function runsInContainer(): boolean {
+  if (process.env.TASK_ORCH_RUNNER === "fly") return true;
+  const v = process.env.TASK_ORCH_DETACHED_RUNS;
+  return !!v && v !== "0" && v.toLowerCase() !== "false";
+}
+
+/**
  * Build the message the `Resolve merge` button posts into a task's attached run.
  * Merges the PR's base branch into the current branch and resolves conflicts.
  * `baseRef` is the PR's actual base; falls back to "main" when unknown.
@@ -188,19 +206,35 @@ export async function buildImplementPrompt(task: TaskFull): Promise<string> {
 
   lines.push("");
   lines.push("# Working environment");
-  lines.push("- You are in an isolated git worktree on a fresh branch.");
-  lines.push(
-    "- `node_modules` and the Turbopack/Next.js build cache (`.next`) are SHARED across all worktrees (symlinked to a common store). Dependencies are already installed — don't run `npm install` unless you're intentionally changing `package.json`, and never `rm -rf node_modules` or clear the build cache: that would clobber every other worktree running concurrently."
-  );
-  lines.push(
-    "- Playwright and its Chromium browser are already installed image-wide (`PLAYWRIGHT_BROWSERS_PATH` is set) — run `npx playwright test` directly; do NOT run `npx playwright install`."
-  );
-  lines.push(
-    "- Need a private environment? If you must add/upgrade/remove a dependency or want a clean isolated build, run `npm run isolate-env` first. It swaps the shared symlinks for this worktree's own `node_modules` and `.next`, so your dependency changes stay local. After that, `npm install` / building here is safe."
-  );
-  lines.push(
-    "- To preview your changes in a browser, run `npm run worktree-dev` (long-running — start it in the background). It serves this worktree on its own stable port bound to loopback only — never `0.0.0.0` — behind the app's normal login, so it won't collide with other worktrees or be exposed raw. Add `-- --tunnel` for a secure HTTPS Cloudflare URL you can share."
-  );
+  if (runsInContainer()) {
+    // Worker container/Machine: a fresh private clone, NOT a shared-store
+    // worktree. No sibling runs share it, and dependencies are present only when
+    // the image baked them — so install-if-missing is the right instinct here,
+    // and the host-only isolate-env / worktree-dev advice does not apply.
+    lines.push(
+      "- You are in a fresh, private clone of the repo on a new branch, checked out inside this run's container. Nothing else shares it."
+    );
+    lines.push(
+      "- Dependencies may already be installed (some images bake them in). If a build, test, typecheck, or lint fails because `node_modules` or a package is missing, just install them with the repo's package manager (e.g. `npm ci`) — there's no shared store to clobber, so that's safe and expected."
+    );
+    lines.push(
+      "- Playwright's Chromium may be installed image-wide (`PLAYWRIGHT_BROWSERS_PATH`). Try `npx playwright test` directly; only run `npx playwright install` if it reports the browser is missing."
+    );
+  } else {
+    lines.push("- You are in an isolated git worktree on a fresh branch.");
+    lines.push(
+      "- `node_modules` and the Turbopack/Next.js build cache (`.next`) are SHARED across all worktrees (symlinked to a common store). Dependencies are already installed — don't run `npm install` unless you're intentionally changing `package.json`, and never `rm -rf node_modules` or clear the build cache: that would clobber every other worktree running concurrently."
+    );
+    lines.push(
+      "- Playwright and its Chromium browser are already installed image-wide (`PLAYWRIGHT_BROWSERS_PATH` is set) — run `npx playwright test` directly; do NOT run `npx playwright install`."
+    );
+    lines.push(
+      "- Need a private environment? If you must add/upgrade/remove a dependency or want a clean isolated build, run `npm run isolate-env` first. It swaps the shared symlinks for this worktree's own `node_modules` and `.next`, so your dependency changes stay local. After that, `npm install` / building here is safe."
+    );
+    lines.push(
+      "- To preview your changes in a browser, run `npm run worktree-dev` (long-running — start it in the background). It serves this worktree on its own stable port bound to loopback only — never `0.0.0.0` — behind the app's normal login, so it won't collide with other worktrees or be exposed raw. Add `-- --tunnel` for a secure HTTPS Cloudflare URL you can share."
+    );
+  }
   lines.push("- Make all changes here. Commit with a clear message.");
   lines.push("- Do NOT push and do NOT open a PR — the orchestrator does both after you finish.");
   lines.push("- Run typecheck and lint where it applies; fix any errors you introduce.");
@@ -302,12 +336,21 @@ export function buildReviewPrompt(task: TaskFull, prUrl: string): string {
 
   lines.push("");
   lines.push("# Working environment");
-  lines.push(
-    "- You are in a git worktree checked out at the PR's head commit. Read the diff via `git diff <base>...HEAD` or via the gh_pr tools."
-  );
-  lines.push(
-    "- `node_modules` and the Turbopack/Next.js build cache (`.next`) are SHARED across all worktrees (symlinked to a common store). Dependencies are already installed — never `rm -rf node_modules` or clear the build cache: that would clobber every other worktree running concurrently."
-  );
+  if (runsInContainer()) {
+    lines.push(
+      "- You are in a fresh, private clone checked out at the PR's head commit, inside this run's container. Read the diff via `git diff <base>...HEAD` or via the gh_pr tools."
+    );
+    lines.push(
+      "- Dependencies may already be installed (some images bake them in). Reviewing is mostly reading; if you do need to build or run tests to verify something and `node_modules` is missing, install it with the repo's package manager (e.g. `npm ci`) — installing deps is fine, just don't change tracked files."
+    );
+  } else {
+    lines.push(
+      "- You are in a git worktree checked out at the PR's head commit. Read the diff via `git diff <base>...HEAD` or via the gh_pr tools."
+    );
+    lines.push(
+      "- `node_modules` and the Turbopack/Next.js build cache (`.next`) are SHARED across all worktrees (symlinked to a common store). Dependencies are already installed — never `rm -rf node_modules` or clear the build cache: that would clobber every other worktree running concurrently."
+    );
+  }
   lines.push(
     "- The `gh_pr` MCP server exposes `pr_view`, `pr_diff`, `pr_comments`, and similar tools — use them to load the PR's metadata, diff, CI status, and existing review comments."
   );
