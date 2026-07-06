@@ -116,3 +116,30 @@ export const TOOL_INPUT_KEYS: Record<CanonicalTool, string[]> = {
   TodoWrite: [],
   Task: ["description"],
 };
+
+/**
+ * The built-in filesystem/shell tools an agent run must NOT be given, derived
+ * from its cwd strategy and repo-write permission.
+ *
+ * - cwd_strategy "none" (no checkout): deny the whole fs/shell family — with no
+ *   repository they are useless, and `Bash` is arbitrary shell we don't want a
+ *   repo-less run to hold.
+ * - a checkout without repo-write permission (repo_read): deny the mutating
+ *   file tools so a read-only run stays read-only.
+ * - otherwise (repo_write worktree/repo runs): deny nothing (current behavior).
+ *
+ * `cwdStrategy` is typed as string (not the CwdStrategy union from lib/runs.ts)
+ * to keep this module free of a runs.ts import cycle.
+ */
+export function disallowedBuiltinsFor(
+  cwdStrategy: string,
+  allowsRepoWrite: boolean,
+): CanonicalTool[] {
+  if (cwdStrategy === "none") {
+    return ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "LS"];
+  }
+  if (!allowsRepoWrite) {
+    return ["Write", "Edit"];
+  }
+  return [];
+}
