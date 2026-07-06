@@ -177,7 +177,14 @@ describe("env-scrub extension is registered for every run (Tier 0)", () => {
     const cap: { prompt?: string; extensions?: any[] } = {};
     vi.spyOn(backend, "getBackend").mockResolvedValue(capturingBackend(cap));
     vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
-    const run = await create({ goal: "adhoc", cwdStrategy: "none", defer: true });
+    // A checkout run with repo-write (cwd=repo, default repo_write profile): Bash
+    // is legitimately available, so env-scrub's command mutation is the interceptor
+    // decision. cwd=repo takes the same prepareCwd branch as the old cwd=none here
+    // (resolves to repoRoot — no worktree materialization), but unlike cwd=none it
+    // does NOT trip the tool-policy denylist, so Bash isn't blocked. (A cwd=none run
+    // denies Bash outright — env-scrub's bash scrub is moot there; see
+    // __tests__/extensions/tool-policy.test.ts.)
+    const run = await create({ goal: "adhoc", cwdStrategy: "repo", defer: true });
     await insertUser(run.id, "go");
     await claim(run.id);
 

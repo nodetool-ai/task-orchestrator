@@ -35,7 +35,7 @@ import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, notInArray, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 
 import { db } from "@/db";
@@ -70,6 +70,8 @@ import { envScrubFactory } from "./extensions/env-scrub";
 import { personaPromptFactory } from "./extensions/persona-prompt";
 import { personaMemoryFactory } from "./extensions/persona-memory";
 import { abortBridgeFactory } from "./extensions/abort-bridge";
+import { toolPolicyFactory } from "./extensions/tool-policy";
+import { disallowedBuiltinsFor } from "./builtin-tools";
 import { linkSharedWorktreeArtifacts } from "./worktree-env";
 import { applyPrewarmToCheckout } from "./prewarm";
 // Namespace import (not `await import`) because reconcileOrphanedRuns() is
@@ -99,6 +101,8 @@ runDispatch.__setRunsApi({
   failRun: setError,
   failPendingRun,
   countInFlightWorkers,
+  driveDispatchedRun,
+  countInServerRuns,
   listPendingRunIds,
   reconcileOrphanedRuns,
   listLeasedRuns,
@@ -468,12 +472,12 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     (goal === "<chat>" || goal === "<plan>"
       ? "none"
       : goal === "<execute>"
-        ? "repo"
+        ? "none"
         : "worktree");
   const toolsProfile =
     input.toolsProfile ??
     (goal === "<execute>"
-      ? "orchestrator,gh_pr,repo_read,spawn"
+      ? "orchestrator,gh_pr,spawn"
       : "orchestrator,repo_write");
   const initialStatus: SessionStatus =
     input.defer || goal === "<chat>" || goal === "<plan>" ? "idle" : "pending";
@@ -2707,7 +2711,8 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   const profileCtx: ProfileContext = {
     runId: run.id, run, author, taskId: run.taskId, planId: run.planId, cwd,
   };
-  const { factories: profileFactories } = await resolveProfiles(profileSpec, profileCtx);
+  const { factories: profileFactories, allowsRepoWrite } = await resolveProfiles(profileSpec, profileCtx);
+  const disallowedBuiltins = disallowedBuiltinsFor(run.cwdStrategy, allowsRepoWrite);
   // Always-on extensions (docs/agent-events.md §7): the event/timer/result
   // tools mount regardless of tools_profile — no profile misconfiguration can
   // strand an agent without a way to park, report, or be woken.
@@ -2738,6 +2743,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     // so the order has no functional effect either way.
     envScrubFactory,
     abortBridgeFactory(abort),
+    toolPolicyFactory(disallowedBuiltins),
     ...alwaysOnFactories,
     ...profileFactories,
   ];
@@ -2805,6 +2811,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     abort,
     prompt,
     onEvent,
+    disallowedBuiltins,
   };
   // FIX 6 (M8): a resume token references state local to the container/worktree
   // that produced it (pi: a path under cwd; Claude: the HOME session store). When
@@ -3664,6 +3671,25 @@ export async function countInFlightWorkers(): Promise<number> {
     .from(agentSessions)
     .where(
       and(
+        isNotNull(agentSessions.workerScope),
+        // In-server (cwd=none) runs drive in the orchestrator process — they are
+        // not resident worker Machines and must not consume the worker budget.
+        ne(agentSessions.cwdStrategy, "none"),
+        gt(agentSessions.heartbeatAt, new Date(Date.now() - HEARTBEAT_STALE_MS))
+      )
+    );
+  return rows.length;
+}
+
+/** In-server runs currently DRIVING a turn (cwd=none, claimed, fresh heartbeat).
+ *  Bounds resident in-process agents on the single orchestrator machine. */
+export async function countInServerRuns(): Promise<number> {
+  const rows = await db
+    .select({ id: agentSessions.id })
+    .from(agentSessions)
+    .where(
+      and(
+        eq(agentSessions.cwdStrategy, "none"),
         isNotNull(agentSessions.workerScope),
         gt(agentSessions.heartbeatAt, new Date(Date.now() - HEARTBEAT_STALE_MS))
       )
