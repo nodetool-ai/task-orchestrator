@@ -70,6 +70,8 @@ import { envScrubFactory } from "./extensions/env-scrub";
 import { personaPromptFactory } from "./extensions/persona-prompt";
 import { personaMemoryFactory } from "./extensions/persona-memory";
 import { abortBridgeFactory } from "./extensions/abort-bridge";
+import { toolPolicyFactory } from "./extensions/tool-policy";
+import { disallowedBuiltinsFor } from "./builtin-tools";
 import { linkSharedWorktreeArtifacts } from "./worktree-env";
 // Namespace import (not `await import`) because reconcileOrphanedRuns() is
 // synchronous, and calling through the namespace (runDispatch.dispatchRun) keeps
@@ -2702,7 +2704,8 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   const profileCtx: ProfileContext = {
     runId: run.id, run, author, taskId: run.taskId, planId: run.planId, cwd,
   };
-  const { factories: profileFactories } = await resolveProfiles(profileSpec, profileCtx);
+  const { factories: profileFactories, allowsRepoWrite } = await resolveProfiles(profileSpec, profileCtx);
+  const disallowedBuiltins = disallowedBuiltinsFor(run.cwdStrategy, allowsRepoWrite);
   // Always-on extensions (docs/agent-events.md §7): the event/timer/result
   // tools mount regardless of tools_profile — no profile misconfiguration can
   // strand an agent without a way to park, report, or be woken.
@@ -2733,6 +2736,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     // so the order has no functional effect either way.
     envScrubFactory,
     abortBridgeFactory(abort),
+    toolPolicyFactory(disallowedBuiltins),
     ...alwaysOnFactories,
     ...profileFactories,
   ];
@@ -2800,6 +2804,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     abort,
     prompt,
     onEvent,
+    disallowedBuiltins,
   };
   // FIX 6 (M8): a resume token references state local to the container/worktree
   // that produced it (pi: a path under cwd; Claude: the HOME session store). When
