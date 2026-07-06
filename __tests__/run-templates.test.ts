@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   REVIEW_DEFAULT_BUDGET_USD,
   buildChatPromptPrefix,
@@ -8,6 +8,8 @@ import {
   extractReviewOutcome,
   parseReviewVerdict,
 } from "../lib/run-templates";
+import * as repo from "../lib/repo";
+import * as worker from "../lib/worker";
 import type { PlanFull, TaskFull } from "../lib/types";
 
 function fakeTask(overrides: Partial<TaskFull> = {}): TaskFull {
@@ -100,6 +102,45 @@ describe("buildImplementPrompt", () => {
     const prompt = await buildImplementPrompt(fakeTask());
     expect(prompt).toContain("npm run worktree-dev");
     expect(prompt).toContain("loopback");
+  });
+
+  // Regression (#98 fleet outage): buildImplementPrompt runs INSIDE a dispatched
+  // worker, which under the HTTP-worker architecture has no DB access — every
+  // direct repo/db call throws the "Direct database access inside a run worker"
+  // guard and crashes the run at boot. The plan + sibling-task lookups must go
+  // through the worker transport, never `repo` directly. This asserts BOTH the
+  // plan and the sibling snapshot route through the transport, and that repo is
+  // never touched. (The shipped bug: getPlan used the transport but the sibling
+  // `listTasks` still called `repo.listTasks` → 6/6 implement workers dead.)
+  describe("routes all orchestrator lookups through the worker transport (no direct DB)", () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it("fetches the plan AND sibling tasks via runTransport, not repo", async () => {
+      const plan = {
+        id: "P-x",
+        title: "Parent plan",
+        state: "active",
+        owner: null,
+        body: "plan body",
+      } as unknown as PlanFull;
+      const siblings = [
+        fakeTask({ id: "T-sibling", title: "A sibling task", state: "todo" }),
+        fakeTask({ id: "T-test" }), // the task itself — must be filtered out
+      ];
+      const getPlan = vi.fn().mockResolvedValue(plan);
+      const listTasks = vi.fn().mockResolvedValue(siblings);
+      vi.spyOn(worker, "runTransport").mockResolvedValue({ getPlan, listTasks } as never);
+      const repoListTasks = vi.spyOn(repo, "listTasks");
+
+      const prompt = await buildImplementPrompt(fakeTask({ id: "T-test", planId: "P-x" }));
+
+      expect(getPlan).toHaveBeenCalledWith("P-x");
+      expect(listTasks).toHaveBeenCalledWith({ planId: "P-x" });
+      expect(repoListTasks).not.toHaveBeenCalled(); // never the direct-DB path
+      expect(prompt).toContain("# Parent plan: P-x — Parent plan");
+      expect(prompt).toContain("- T-sibling [todo] A sibling task");
+      expect(prompt).not.toContain("- T-test ["); // the run's own task filtered out
+    });
   });
 });
 
