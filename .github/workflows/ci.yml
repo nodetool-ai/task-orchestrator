@@ -1,0 +1,57 @@
+name: CI
+
+# PR quality gate: typecheck + full vitest suite. This is the check the
+# GitHub-driven task lifecycle keys off (testing -> passing/failing) and the
+# gate `gh pr merge --auto` waits on. Runs on PRs and on push to main so the
+# default branch keeps a green check history.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+
+    # The vitest suite migrates + seeds a real Postgres per fork (see
+    # vitest.setup.ts, DATABASE_URL -> localhost:5433). Stand one up as a
+    # service on the same host:port the suite defaults to.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: devpw
+          POSTGRES_DB: taskorch
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://postgres:devpw@localhost:5433/taskorch
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
