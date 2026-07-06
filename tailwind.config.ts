@@ -31,6 +31,11 @@ const config: Config = {
           blocked: "hsl(var(--state-blocked))",
           done: "hsl(var(--state-done))",
           cancelled: "hsl(var(--state-cancelled))",
+          // Task lifecycle additions (testing/failing/passing/merged).
+          testing: "hsl(var(--state-testing))",
+          failing: "hsl(var(--state-failing))",
+          passing: "hsl(var(--state-passing))",
+          merged: "hsl(var(--state-merged))",
         },
       },
       borderRadius: { lg: "var(--radius)", md: "calc(var(--radius) - 2px)", sm: "calc(var(--radius) - 4px)" },

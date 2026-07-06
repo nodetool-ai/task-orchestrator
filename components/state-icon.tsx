@@ -36,12 +36,36 @@ export function StateIcon({
         </svg>
       );
     case "testing":
-    case "failing":
-    case "passing":
       return (
-        <svg {...common} className={cn("text-state-review shrink-0", className)}>
+        <svg {...common} className={cn("text-state-testing shrink-0", className)}>
           <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth={stroke} />
           <circle cx="8" cy="8" r="2.5" fill="currentColor" />
+        </svg>
+      );
+    case "failing":
+      return (
+        <svg {...common} className={cn("text-state-failing shrink-0", className)}>
+          <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth={stroke} />
+          <path
+            d="M5.8 5.8l4.4 4.4M10.2 5.8l-4.4 4.4"
+            stroke="currentColor"
+            strokeWidth={stroke}
+            strokeLinecap="round"
+          />
+        </svg>
+      );
+    case "passing":
+      return (
+        <svg {...common} className={cn("text-state-passing shrink-0", className)}>
+          <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth={stroke} />
+          <path
+            d="M5 8.2l2.2 2.2L11 6.6"
+            stroke="currentColor"
+            strokeWidth={stroke}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            fill="none"
+          />
         </svg>
       );
     case "blocked":
@@ -52,6 +76,19 @@ export function StateIcon({
         </svg>
       );
     case "merged":
+      return (
+        <svg {...common} className={cn("text-state-merged shrink-0", className)}>
+          <circle cx="8" cy="8" r="7" fill="currentColor" />
+          <path
+            d="M5 8.2l2.2 2.2L11 6.6"
+            stroke="hsl(var(--background))"
+            strokeWidth="1.75"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            fill="none"
+          />
+        </svg>
+      );
     case "done":
     case "accepted":
       return (

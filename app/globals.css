@@ -27,6 +27,15 @@
     --state-blocked: 0 72% 60%;
     --state-done: 152 60% 45%;
     --state-cancelled: 240 4% 50%;
+
+    /* Task lifecycle: testing/failing/passing/merged (review + done retired
+       as TASK states; `--state-review`/`--state-done` above remain as
+       general-purpose accent tokens used elsewhere — PR links, session
+       status, plan `done` — so they stay put). */
+    --state-testing: 217 85% 58%;
+    --state-failing: 6 78% 58%;
+    --state-passing: 152 65% 42%;
+    --state-merged: 262 75% 62%;
   }
 
   .dark {
@@ -52,6 +61,11 @@
     --state-blocked: 0 65% 65%;
     --state-done: 152 55% 55%;
     --state-cancelled: 240 5% 50%;
+
+    --state-testing: 217 85% 66%;
+    --state-failing: 6 75% 65%;
+    --state-passing: 152 60% 55%;
+    --state-merged: 262 70% 72%;
   }
 }
 

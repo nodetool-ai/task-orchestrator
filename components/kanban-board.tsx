@@ -5,15 +5,36 @@ import { EmptyState } from "@/components/ui/empty-state";
 
 export function KanbanBoard({ tasks }: { tasks: TaskFull[] }) {
   const byState = groupBy(tasks);
+  const merged = byState.merged ?? [];
   return (
-    /* On mobile: horizontal scroll with fixed-width columns so all 5 are visible.
-       On sm+: 2-col grid. On lg+: 5-col grid. */
-    <div className="-mx-4 sm:mx-0 overflow-x-auto pb-2 touch-pan-x">
-      <div className="flex gap-3 px-4 sm:px-0 sm:grid sm:grid-cols-2 lg:grid-cols-5">
-        {TASK_BOARD_STATES.map((state) => (
-          <Column key={state} state={state} tasks={byState[state] ?? []} />
-        ))}
+    <div>
+      {/* On mobile: horizontal scroll with fixed-width columns so all 6 are visible.
+         On sm+: 2-col grid. On lg+: 6-col grid. */}
+      <div className="-mx-4 sm:mx-0 overflow-x-auto pb-2 touch-pan-x">
+        <div className="flex gap-3 px-4 sm:px-0 sm:grid sm:grid-cols-2 lg:grid-cols-6">
+          {TASK_BOARD_STATES.map((state) => (
+            <Column key={state} state={state} tasks={byState[state] ?? []} />
+          ))}
+        </div>
       </div>
+
+      {/* `merged` is the board's closed/terminal group — kept out of the open
+          columns above (mirrors how `done` used to sit at the end of the
+          board) and shown as a collapsed summary instead of its own column. */}
+      {merged.length > 0 && (
+        <div className="mt-3 rounded-lg border border-border/60 bg-secondary/30">
+          <div className="flex items-center gap-2 px-3 py-2.5 border-b border-border/60">
+            <StateIcon state="merged" />
+            <span className="text-xs font-medium text-foreground">{STATE_LABEL.merged}</span>
+            <span className="ml-auto text-xs text-muted-foreground tabular-nums">{merged.length}</span>
+          </div>
+          <div className="p-2 grid gap-1.5 sm:grid-cols-2 lg:grid-cols-3">
+            {merged.map((t) => (
+              <TaskCard key={t.id} task={t} />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
