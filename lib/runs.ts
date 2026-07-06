@@ -35,7 +35,7 @@ import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, notInArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, notInArray, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 
 import { db } from "@/db";
@@ -676,6 +676,40 @@ async function emitRunnerDeferred(runId: number, parentRunId: number | null): Pr
   } catch {
     // ignore event mirror failures
   }
+}
+
+/**
+ * Park a run at 'pending' as a dispatch request for the SERVER's pump — the
+ * worker-side counterpart of dispatchRun for FOLLOW-UP messages, mirroring
+ * launchDetached's isolate deferral for child creation (the pending row IS the
+ * dispatch request; docs/nested-machine-dispatch.md Decision 1). A worker holds
+ * no Fly credentials, so it must never dispatch/resume Machines itself.
+ *
+ * Guarded single conditional UPDATE: a row with a live claim (workerScope set
+ * AND heartbeat fresher than HEARTBEAT_STALE_MS) is left alone — the in-flight
+ * turn drains the freshly persisted message, same as dispatchRun's
+ * "already-claimed". heartbeatAt is stamped because pumpTick measures the
+ * pending episode from it (TASK_ORCH_MAX_DEFER_MS).
+ */
+export async function deferRunForServerDispatch(
+  runId: number,
+  parentRunId: number | null
+): Promise<boolean> {
+  const staleBefore = new Date(Date.now() - HEARTBEAT_STALE_MS);
+  const parked = await db.update(agentSessions)
+    .set({ status: "pending", heartbeatAt: new Date(), workerScope: null, workerPid: null })
+    .where(and(
+      eq(agentSessions.id, runId),
+      or(
+        isNull(agentSessions.workerScope),
+        isNull(agentSessions.heartbeatAt),
+        lt(agentSessions.heartbeatAt, staleBefore)
+      )
+    ))
+    .returning({ id: agentSessions.id });
+  if (parked.length === 0) return false;
+  await emitRunnerDeferred(runId, parentRunId);
+  return true;
 }
 
 export async function list(filter: ListFilter = {}): Promise<RunRow[]> {
@@ -2428,19 +2462,28 @@ export async function* sendMessageToRun(opts: {
   // ignore any close marker that precedes our own user_message frame.
   const ownMsg = await persistMessage(runId, role, [{ type: "text", text }]);
 
+  const workerIsolate = runDispatch.insideWorker() && runDispatch.nestedDispatchMode() === "isolate";
+
   const fresh = await get(runId);
   if (fresh) {
     if (run.goal === "<chat>") {
       if (!isWorkerLive(fresh)) {
-        // Clear a dead worker's stale claim so dispatchRun can re-claim (idle chat
-        // rows aren't a lease status, so reconcile never cleared it).
-        if (fresh.workerScope) {
-          await db
-            .update(agentSessions)
-            .set({ workerScope: null, workerPid: null })
-            .where(eq(agentSessions.id, runId));
+        if (workerIsolate) {
+          // Worker context: no Fly credentials — park the row for the server's
+          // pump instead of dispatching (deferRunForServerDispatch re-checks the
+          // claim atomically, so the isWorkerLive read above going stale is safe).
+          await deferRunForServerDispatch(runId, run.parentRunId ?? null);
+        } else {
+          // Clear a dead worker's stale claim so dispatchRun can re-claim (idle chat
+          // rows aren't a lease status, so reconcile never cleared it).
+          if (fresh.workerScope) {
+            await db
+              .update(agentSessions)
+              .set({ workerScope: null, workerPid: null })
+              .where(eq(agentSessions.id, runId));
+          }
+          await runDispatch.dispatchRun(runId);
         }
-        await runDispatch.dispatchRun(runId);
       }
       // else: a live worker will pick up the run_input notify.
     } else {
@@ -2450,7 +2493,16 @@ export async function* sendMessageToRun(opts: {
       // Once the prior turn finished it released its claim (see
       // driveDispatchedRun's finally), so this dispatch now spawns a fresh worker
       // to pick up the follow-up instead of no-oping against a ghost claim forever.
-      await runDispatch.dispatchRun(runId);
+      if (workerIsolate) {
+        // Worker context (e.g. an executor's spawn__append_message): park the
+        // child at 'pending' for the server to dispatch onto the child's OWN
+        // Machine. Running this turn in-process would put the child's build
+        // tooling inside the parent's Machine — the 2026-07-05 incident where
+        // one typecheck OOM wedged the parent and every in-flight child.
+        await deferRunForServerDispatch(runId, run.parentRunId ?? null);
+      } else {
+        await runDispatch.dispatchRun(runId);
+      }
     }
   }
 
