@@ -1744,6 +1744,7 @@ async function gitSyncAfterTurn(
   const transport = await runTransport();
   const task = await transport.getTask(run.taskId);
   if (!task) return null;
+  if (task.prUrl) return task.prUrl;
   const prUrl = await openPr({ task, branch: run.branch, baseBranch: base, worktreePath: cwd, summary });
   if (prUrl) {
     try {
