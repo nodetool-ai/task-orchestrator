@@ -58,8 +58,15 @@ fi
 
 echo "[build-prewarm] cloning $REPO -> $DEST"
 rm -rf "$DEST"
+# --filter=blob:none is REQUIRED, not just an optimization: the repo-cache
+# mirror we borrow via --reference is itself blobless (build-repo-cache.sh
+# clones it with --filter=blob:none). A full clone + --dissociate would try to
+# localize every borrowed object, hit a blob the mirror never had, and abort
+# with "unable to read <oid> / cannot repack to clean up". A partial clone
+# leaves absent blobs promised (lazily fetched on checkout), so dissociate
+# succeeds. This mirrors the runtime per-run checkout in lib/runs.ts.
 if ! git -c http.extraHeader="$AUTH_HEADER" \
-      clone --depth 1 "${reference[@]}" \
+      clone --filter=blob:none "${reference[@]}" \
       "https://github.com/${owner}/${name}.git" "$DEST"; then
   finish_ok "clone failed for $REPO"
 fi
