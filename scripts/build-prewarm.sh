@@ -43,6 +43,10 @@ fi
 
 TOKEN=""
 if [ -f "$GH_TOKEN_FILE" ]; then TOKEN="$(cat "$GH_TOKEN_FILE")"; fi
+# Runtime fallback: when this runs inside a Machine (the seed-volume job) rather
+# than a BuildKit build, there is no secret-mount file — take the token from the
+# GH_TOKEN env the machine already carries.
+if [ -z "$TOKEN" ] && [ -n "${GH_TOKEN:-}" ]; then TOKEN="$GH_TOKEN"; fi
 if [ -z "$TOKEN" ]; then finish_ok "no gh_token secret"; fi
 
 owner="${REPO%%/*}"
@@ -77,10 +81,6 @@ if [ -n "$leaked" ]; then
   echo "[build-prewarm] FATAL: auth header persisted into $DEST config." >&2
   exit 1
 fi
-# Record which repo this prewarm belongs to; the runtime applier only links it
-# into a checkout whose origin matches, so it can never bleed into another repo.
-printf '%s\n' "$REPO" > "$DEST/.prewarm-repo"
-
 cd "$DEST" || finish_ok "cannot cd into $DEST"
 
 echo "[build-prewarm] npm ci (full workspace install)"
@@ -91,6 +91,12 @@ if ! npm ci --no-audit --no-fund; then
   find . -type d -name node_modules -prune -exec rm -rf {} + 2>/dev/null || true
   finish_ok "npm ci failed"
 fi
+
+# Record which repo this prewarm belongs to — written only AFTER a successful
+# install, so the marker's presence is a true "deps are ready" sentinel (the
+# seed-volume job keys success on it). The runtime applier links it only into a
+# checkout whose origin matches, so it can never bleed into another repo.
+printf '%s\n' "$REPO" > ".prewarm-repo"
 
 # Build workspace packages so packages/*/dist is ready (best-effort — dist is not
 # linked at runtime today, but building also runs postinstall/native steps).

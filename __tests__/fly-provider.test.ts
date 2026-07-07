@@ -26,10 +26,10 @@ function fakeFlyClient(calls: string[] = [], opts: FakeOptions = {}): FlyClient 
   const machines = new Map((opts.machines ?? []).map((m) => [m.id, m]));
   const volumes = new Map((opts.volumes ?? []).map((v) => [v.id, v]));
   return {
-    async createVolume(input: { name: string }) {
-      calls.push(`createVolume:${input.name}`);
+    async createVolume(input: { name: string; size_gb?: number; source_volume_id?: string }) {
+      calls.push(`createVolume:${input.name}${input.source_volume_id ? `:fork=${input.source_volume_id}` : ""}`);
       volumeSeq += 1;
-      return { id: `v${volumeSeq}`, region: "ams" };
+      return { id: `v${volumeSeq}`, region: "ams", sizeGb: input.size_gb };
     },
     async destroyVolume(id: string) {
       calls.push(`destroyVolume:${id}`);
@@ -53,6 +53,7 @@ function fakeFlyClient(calls: string[] = [], opts: FakeOptions = {}): FlyClient 
       const machine = { id, state: "created", region: input.region };
       machines.set(id, machine);
       calls.push(`createMachineVolume:${volumeId}`);
+      calls.push(`prewarmDir:${input.config.env?.PREWARM_DIR ?? "none"}`);
       return machine;
     },
     async getMachine(id: string) {
@@ -97,10 +98,53 @@ describe("FlyRunnerProvider", () => {
     const [row] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
     expect(row.volumeId).toBeTruthy();
     expect(row.machineId).toBe(ref!.handle);
-    expect(calls.slice(0, 3)).toEqual([`createVolume:vol_run_${run.id}`, "createMachine", "createMachineVolume:v1"]);
+    // No seed volume in listVolumes → blank volume (no fork), no PREWARM_DIR.
+    expect(calls.slice(0, 5)).toEqual([
+      "listVolumes",
+      `createVolume:vol_run_${run.id}`,
+      "createMachine",
+      "createMachineVolume:v1",
+      "prewarmDir:none",
+    ]);
     // Fly volume names allow only [a-z0-9_], max 30 chars — reject hyphens etc.
     const volName = `vol_run_${run.id}`;
     expect(volName).toMatch(/^[a-z0-9_]{1,30}$/);
+  });
+
+  it("forks the prewarm seed volume and sets PREWARM_DIR when a seed exists", async () => {
+    const calls: string[] = [];
+    const provider = new FlyRunnerProvider(
+      fakeFlyClient(calls, {
+        volumes: [
+          { id: "seed1", name: "prewarm_seed", region: "ams", state: "created", sizeGb: 20 },
+        ],
+      })
+    );
+    const run = await create({ goal: "<implement>", defer: true });
+
+    await provider.create({ runId: run.id, scope: `run-${run.id}-x` });
+
+    // The run volume is forked from the seed, and the machine gets PREWARM_DIR.
+    expect(calls).toContain(`createVolume:vol_run_${run.id}:fork=seed1`);
+    expect(calls).toContain("prewarmDir:/mnt/session/prewarm");
+  });
+
+  it("does not fork when the only seed is in a different region", async () => {
+    const calls: string[] = [];
+    const provider = new FlyRunnerProvider(
+      fakeFlyClient(calls, {
+        volumes: [
+          { id: "seed1", name: "prewarm_seed", region: "iad", state: "created", sizeGb: 20 },
+        ],
+      })
+    );
+    const run = await create({ goal: "<implement>", defer: true });
+
+    await provider.create({ runId: run.id, scope: `run-${run.id}-x` });
+
+    expect(calls).toContain(`createVolume:vol_run_${run.id}`);
+    expect(calls).not.toContain(`createVolume:vol_run_${run.id}:fork=seed1`);
+    expect(calls).toContain("prewarmDir:none");
   });
 
   it("fails a leased run whose machine has vanished", async () => {
