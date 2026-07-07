@@ -49,9 +49,18 @@ async function main() {
     }
   }
 
-  // 1. Ensure the seed volume.
+  // 1. Ensure the seed volume. Skip a seed that's mid-teardown: the Machines API
+  //    keeps listing a destroyed volume in "pending_destroy" for a while, and
+  //    reusing it makes createMachine 400 with "volume not found". Only a
+  //    "created"/"ready" seed is real — anything else → make a fresh one. (Same
+  //    state filter FlyRunnerProvider.resolvePrewarmSeed uses.)
   const volumes = await client.listVolumes();
-  let seed = volumes.find((v) => v.name === SEED_NAME && v.region === REGION);
+  let seed = volumes.find(
+    (v) =>
+      v.name === SEED_NAME &&
+      v.region === REGION &&
+      (v.state == null || v.state === "created" || v.state === "ready")
+  );
   // Track whether WE created it this run: if the install then fails we destroy it
   // so no empty seed lingers (FlyRunnerProvider would otherwise fork garbage into
   // every run). A pre-existing seed (last good prewarm) is left intact on failure.
