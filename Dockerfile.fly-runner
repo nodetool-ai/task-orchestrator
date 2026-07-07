@@ -75,25 +75,18 @@ ARG REPO_CACHE_REPOS=""
 ARG REPO_CACHE_BUST=""
 RUN --mount=type=secret,id=gh_token REPO_CACHE_BUST="$REPO_CACHE_BUST" bash scripts/build-repo-cache.sh /opt/repo-cache "$REPO_CACHE_REPOS"
 
-# Pre-warm the primary target repo: bake a full `npm ci` (root + every workspace
-# node_modules) + built packages so an agent run never pays a cold install on a
-# fresh volume. lib/prewarm.ts symlinks this tree into the per-run checkout at
-# run time (only when the checkout's origin matches). Never fatal —
-# build-prewarm.sh exits 0 if the repo/token is absent or a step fails, so the
-# image still builds and runs just pay the cold install.
+# The dependency prewarm is NO LONGER baked into the image. A full nodetool
+# `npm ci` is ~5 GB; baked into the rootfs it pushed the image past Fly's 8 GB
+# uncompressed-image limit, so worker machines failed to unpack it and the
+# container never started ("Not enough space to unpack image"). The prewarm now
+# lives on a seed Fly volume that each run forks (scripts/build-prewarm.sh is
+# run against that volume, not the image; PREWARM_DIR is set at runtime to the
+# fork's mount). With no PREWARM_DIR baked, lib/prewarm.ts returns null and a run
+# whose fork is unavailable simply pays a cold install — never fatal.
 #
-# Playwright browsers are intentionally NOT baked (build-prewarm.sh skips the
-# install) — a run that needs them installs on demand. PLAYWRIGHT_BROWSERS_PATH
-# is still set so any such runtime install lands in one global,
-# checkout-independent location.
+# PLAYWRIGHT_BROWSERS_PATH stays so any on-demand browser install lands in one
+# global, checkout-independent location.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
-ARG PREWARM_REPO="nodetool-ai/nodetool"
-# Cache-bust twin of REPO_CACHE_BUST (same nodetool HEAD SHA).
-ARG PREWARM_BUST=""
-RUN --mount=type=secret,id=gh_token \
-    PREWARM_BUST="$PREWARM_BUST" REPO_CACHE_DIR=/opt/repo-cache \
-    bash scripts/build-prewarm.sh /opt/nodetool-prewarm "$PREWARM_REPO"
-ENV PREWARM_DIR=/opt/nodetool-prewarm
 
 COPY . .
 
