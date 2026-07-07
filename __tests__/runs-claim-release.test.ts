@@ -119,6 +119,19 @@ function capturingBackend(capture: { prompt?: string; extensions?: any[] }, tota
   } as any;
 }
 
+// Backend that reports token usage but NO priced cost (the pi backend shape):
+// totalCostUsd is null while inputTokens/outputTokens carry real usage. Exercises
+// checkBudget's token-based cost estimate for budgetMaxUsd enforcement.
+function tokenBackend(inputTokens: number, outputTokens: number) {
+  return {
+    id: "fake",
+    async runTurn(args: any) {
+      args.onEvent({ type: "result", is_error: false, result: "ok", usage: {} });
+      return { summary: "ok", resumeToken: "s", turns: 1, inputTokens, outputTokens, totalCostUsd: null };
+    },
+  } as any;
+}
+
 async function insertUser(runId: number, text: string) {
   await db.insert(agentMessages).values({
     runId,
@@ -205,13 +218,43 @@ describe("checkBudget enforces maxUsd (FIX 5)", () => {
     expect(after?.totalCostUsd).toBe(5);
   });
 
-  it("does NOT trip when cost is unknown (pi-style null cost)", async () => {
+  it("does NOT trip when cost is unknown AND no token usage (null cost, zero tokens)", async () => {
     vi.spyOn(backend, "getBackend").mockResolvedValue(capturingBackend({}, null));
     const run = await create({ goal: "adhoc", cwdStrategy: "none", budget: { maxUsd: 1 }, defer: true });
 
     for await (const _ev of append({ runId: run.id, role: "user", text: "go" })) void _ev;
 
-    // Cost is null → cap can't trip; a non-worktree run lands idle.
+    // Cost null + zero tokens → nothing to estimate → cap can't trip; lands idle.
+    expect((await get(run.id))?.status).toBe("idle");
+  });
+
+  it("lands budget_exhausted when a token-only backend's ESTIMATED cost exceeds the cap", async () => {
+    // No reported cost, but 200k output tokens on the default model
+    // (anthropic/claude-sonnet-4-6 @ $15/MTok) estimates to ~$3 > $0.01 cap.
+    vi.spyOn(backend, "getBackend").mockResolvedValue(tokenBackend(0, 200_000));
+    const run = await create({ goal: "adhoc", cwdStrategy: "none", budget: { maxUsd: 0.01 }, defer: true });
+
+    for await (const _ev of append({ runId: run.id, role: "user", text: "go" })) void _ev;
+
+    expect((await get(run.id))?.status).toBe("budget_exhausted");
+  });
+
+  it("does NOT trip when the estimated cost is under the cap", async () => {
+    // 1k input + 1k output on claude-sonnet-4-6 ≈ $0.000018, well under the $100 cap.
+    vi.spyOn(backend, "getBackend").mockResolvedValue(tokenBackend(1_000, 1_000));
+    const run = await create({ goal: "adhoc", cwdStrategy: "none", budget: { maxUsd: 100 }, defer: true });
+
+    for await (const _ev of append({ runId: run.id, role: "user", text: "go" })) void _ev;
+
+    expect((await get(run.id))?.status).toBe("idle");
+  });
+
+  it("never trips on cost when budgetMaxUsd is unset, even with huge token usage", async () => {
+    vi.spyOn(backend, "getBackend").mockResolvedValue(tokenBackend(10_000_000, 10_000_000));
+    const run = await create({ goal: "adhoc", cwdStrategy: "none", defer: true });
+
+    for await (const _ev of append({ runId: run.id, role: "user", text: "go" })) void _ev;
+
     expect((await get(run.id))?.status).toBe("idle");
   });
 });
