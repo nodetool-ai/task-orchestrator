@@ -187,42 +187,45 @@ export async function buildImplementPrompt(task: TaskFull): Promise<string> {
   }
 
   lines.push("");
+  lines.push("# How to work");
+  lines.push("1. Inspect the relevant files and existing patterns before editing.");
+  lines.push("2. Implement the task end to end in this run's checkout.");
+  lines.push("3. Use the task MCP tools during the run: add notes for meaningful decisions and check acceptance criteria as you satisfy them.");
+  lines.push("4. Run the applicable verification commands, including typecheck and lint, and fix failures you introduce.");
+  lines.push("5. Finish exactly as described below.");
+  lines.push("");
   lines.push("# Working environment");
-  lines.push("- You are in an isolated git worktree on a fresh branch.");
+  lines.push("- You are in a separate checkout on a fresh branch. Make all changes here.");
   lines.push(
-    "- `node_modules` and the Turbopack/Next.js build cache (`.next`) are SHARED across all worktrees (symlinked to a common store). Dependencies are already installed — don't run `npm install` unless you're intentionally changing `package.json`, and never `rm -rf node_modules` or clear the build cache: that would clobber every other worktree running concurrently."
+    "- In container/prewarmed runs, dependencies and Playwright browsers may be linked from the runner image. In host runs, `node_modules` and the Turbopack/Next.js build cache (`.next`) may be shared across checkouts. Do not remove `node_modules`, clear `.next`, or run package installs unless dependency files must change."
   );
   lines.push(
-    "- Playwright and its Chromium browser are already installed image-wide (`PLAYWRIGHT_BROWSERS_PATH` is set) — run `npx playwright test` directly; do NOT run `npx playwright install`."
+    "- If dependency changes or a clean isolated build are required, run `npm run isolate-env` first. After that, package installs and builds are local to this checkout."
   );
   lines.push(
-    "- Need a private environment? If you must add/upgrade/remove a dependency or want a clean isolated build, run `npm run isolate-env` first. It swaps the shared symlinks for this worktree's own `node_modules` and `.next`, so your dependency changes stay local. After that, `npm install` / building here is safe."
+    "- Playwright and Chromium are already installed via `PLAYWRIGHT_BROWSERS_PATH`; run `npx playwright test` directly and do NOT run `npx playwright install`."
   );
   lines.push(
-    "- To preview your changes in a browser, run `npm run worktree-dev` (long-running — start it in the background). It serves this worktree on its own stable port bound to loopback only — never `0.0.0.0` — behind the app's normal login, so it won't collide with other worktrees or be exposed raw. Add `-- --tunnel` for a secure HTTPS Cloudflare URL you can share."
+    "- Prefer automated verification. If a browser preview is necessary and this runner supports it, use `npm run worktree-dev`; it chooses a stable loopback-only port. Never bind a dev server to `0.0.0.0`. Add `-- --tunnel` only when a shareable HTTPS URL is needed."
   );
-  lines.push("- Make all changes here. Commit with a clear message.");
-  lines.push("- Do NOT push and do NOT open a PR — the orchestrator does both after you finish.");
-  lines.push("- Run typecheck and lint where it applies; fix any errors you introduce.");
   lines.push("- This is a non-interactive run. Make reasonable decisions; do not ask questions.");
   lines.push("");
-  lines.push("# Task-system MCP tools");
-  lines.push("- mcp__task_orch__add_note(body): log a decision so the next person can see why.");
-  lines.push("- mcp__task_orch__check_criterion(criterion): mark an acceptance criterion done.");
-  lines.push("- mcp__task_orch__uncheck_criterion(criterion): undo if you check the wrong one.");
-  lines.push("- mcp__task_orch__add_criterion(text): add a criterion you discovered along the way.");
-  lines.push("- mcp__task_orch__list_criteria(): see the current state of criteria.");
-  lines.push("- mcp__task_orch__list_attachments(): list images/artifacts on this task.");
-  lines.push("- mcp__task_orch__get_attachment(id): view an attached image or read an artifact.");
-  lines.push("- mcp__task_orch__add_attachment(filename, text|content_base64): attach an artifact you produce.");
-  lines.push("Use these as you work — don't batch them until the end. Match criteria by substring.");
+  lines.push("# Task MCP tools");
+  lines.push("- `mcp__task_orch__add_note(body)`: log decisions, tradeoffs, blockers, or useful findings.");
+  lines.push("- `mcp__task_orch__check_criterion(criterion)`: mark a completed acceptance criterion; match by substring.");
+  lines.push("- `mcp__task_orch__uncheck_criterion(criterion)`: undo an accidental criterion check.");
+  lines.push("- `mcp__task_orch__add_criterion(text)`: add newly discovered required work.");
+  lines.push("- `mcp__task_orch__list_criteria()`: refresh criterion state.");
+  lines.push("- `mcp__task_orch__list_attachments()` / `get_attachment(id)`: inspect task attachments.");
+  lines.push("- `mcp__task_orch__add_attachment(filename, text|content_base64)`: attach useful artifacts you produce.");
   lines.push("");
-  lines.push("# Finishing");
-  lines.push("- Commit, then stop. Do NOT push, do NOT open the PR — the orchestrator does both.");
-  lines.push("- Your final assistant message becomes the PR description. Write a clean summary:");
-  lines.push("  - 1-3 sentences explaining what you did and why");
-  lines.push("  - bullet list of the main files / behaviours that changed if non-trivial");
-  lines.push("  - call out any caveats, follow-ups, or skipped acceptance criteria");
+  lines.push("# Finish");
+  lines.push("- Commit all intended changes with a clear message, then stop.");
+  lines.push("- Do NOT push and do NOT open a PR. After your turn, the orchestrator detects your commits, pushes the branch, opens or updates the PR, and moves the task forward.");
+  lines.push("- Your final assistant message becomes the PR description/summary. Include:");
+  lines.push("- 1-3 sentences explaining what changed and why.");
+  lines.push("- Bullets for main files or behavior changes when non-trivial.");
+  lines.push("- Verification run, plus any caveats, follow-ups, or skipped acceptance criteria.");
   return lines.join("\n");
 }
 

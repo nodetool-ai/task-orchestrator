@@ -81,14 +81,15 @@ describe("buildReviewPrompt", () => {
 });
 
 describe("buildImplementPrompt", () => {
-  it("describes the worktree working environment", async () => {
+  it("describes the separate checkout working environment", async () => {
     const prompt = await buildImplementPrompt(fakeTask());
-    expect(prompt).toContain("isolated git worktree");
+    expect(prompt).toContain("separate checkout");
   });
 
-  it("flags the shared node_modules / build cache across worktrees", async () => {
+  it("flags prewarmed/shared dependency and build-cache handling", async () => {
     const prompt = await buildImplementPrompt(fakeTask());
-    expect(prompt).toContain("SHARED across all worktrees");
+    expect(prompt).toContain("container/prewarmed runs");
+    expect(prompt).toContain("shared across checkouts");
     expect(prompt).toContain("node_modules");
     expect(prompt).toContain("Turbopack");
   });
