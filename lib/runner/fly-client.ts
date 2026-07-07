@@ -47,7 +47,7 @@ export interface FlyClient {
   createVolume(input: {
     name: string;
     region: string;
-    size_gb: number;
+    size_gb?: number;
     source_volume_id?: string;
   }): Promise<FlyVolume>;
   destroyVolume(id: string): Promise<void>;
@@ -162,7 +162,7 @@ export function makeFlyClient(input?: typeof fetch | FlyClientOptions): FlyClien
     async createVolume(input: {
       name: string;
       region: string;
-      size_gb: number;
+      size_gb?: number;
       source_volume_id?: string;
     }) {
       const result = await request<any>("POST", "/volumes", input);

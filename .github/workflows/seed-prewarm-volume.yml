@@ -35,3 +35,7 @@ jobs:
           TASK_ORCH_FLY_APP: task-orchestrator-runners
           # contents:read token to clone nodetool inside the seed machine.
           GH_TOKEN: ${{ secrets.REPO_CACHE_GH_TOKEN }}
+          # Optional repo variables. Forked run volumes inherit this seed size,
+          # because Fly rejects size_gb on source_volume_id fork requests.
+          TASK_ORCH_PREWARM_SEED_GB: ${{ vars.TASK_ORCH_PREWARM_SEED_GB }}
+          TASK_ORCH_RUNNER_VOLUME_GB: ${{ vars.TASK_ORCH_RUNNER_VOLUME_GB }}

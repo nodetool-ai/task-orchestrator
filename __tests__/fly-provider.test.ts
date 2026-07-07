@@ -27,7 +27,11 @@ function fakeFlyClient(calls: string[] = [], opts: FakeOptions = {}): FlyClient 
   const volumes = new Map((opts.volumes ?? []).map((v) => [v.id, v]));
   return {
     async createVolume(input: { name: string; size_gb?: number; source_volume_id?: string }) {
-      calls.push(`createVolume:${input.name}${input.source_volume_id ? `:fork=${input.source_volume_id}` : ""}`);
+      calls.push(
+        `createVolume:${input.name}${input.size_gb == null ? "" : `:size=${input.size_gb}`}${
+          input.source_volume_id ? `:fork=${input.source_volume_id}` : ""
+        }`
+      );
       volumeSeq += 1;
       return { id: `v${volumeSeq}`, region: "ams", sizeGb: input.size_gb };
     },
@@ -101,7 +105,7 @@ describe("FlyRunnerProvider", () => {
     // No seed volume in listVolumes → blank volume (no fork), no PREWARM_DIR.
     expect(calls.slice(0, 5)).toEqual([
       "listVolumes",
-      `createVolume:vol_run_${run.id}`,
+      `createVolume:vol_run_${run.id}:size=10`,
       "createMachine",
       "createMachineVolume:v1",
       "prewarmDir:none",
@@ -126,6 +130,7 @@ describe("FlyRunnerProvider", () => {
 
     // The run volume is forked from the seed, and the machine gets PREWARM_DIR.
     expect(calls).toContain(`createVolume:vol_run_${run.id}:fork=seed1`);
+    expect(calls).not.toContain(`createVolume:vol_run_${run.id}:size=20:fork=seed1`);
     expect(calls).toContain("prewarmDir:/mnt/session/prewarm");
   });
 
@@ -142,7 +147,26 @@ describe("FlyRunnerProvider", () => {
 
     await provider.create({ runId: run.id, scope: `run-${run.id}-x` });
 
-    expect(calls).toContain(`createVolume:vol_run_${run.id}`);
+    expect(calls).toContain(`createVolume:vol_run_${run.id}:size=10`);
+    expect(calls).not.toContain(`createVolume:vol_run_${run.id}:fork=seed1`);
+    expect(calls).toContain("prewarmDir:none");
+  });
+
+  it("does not fork an undersized seed volume", async () => {
+    vi.stubEnv("TASK_ORCH_RUNNER_VOLUME_GB", "40");
+    const calls: string[] = [];
+    const provider = new FlyRunnerProvider(
+      fakeFlyClient(calls, {
+        volumes: [
+          { id: "seed1", name: "prewarm_seed", region: "ams", state: "created", sizeGb: 20 },
+        ],
+      })
+    );
+    const run = await create({ goal: "<implement>", defer: true });
+
+    await provider.create({ runId: run.id, scope: `run-${run.id}-x` });
+
+    expect(calls).toContain(`createVolume:vol_run_${run.id}:size=40`);
     expect(calls).not.toContain(`createVolume:vol_run_${run.id}:fork=seed1`);
     expect(calls).toContain("prewarmDir:none");
   });

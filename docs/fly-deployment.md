@@ -242,7 +242,7 @@ Full descriptions are in `.env.docker.example`.
 | `TASK_ORCH_FLY_REGION` | web region | Region for run Machines + Volumes. |
 | `TASK_ORCH_FLY_CPUS` | `2` | vCPUs per run Machine (shared). |
 | `TASK_ORCH_FLY_MEMORY_MB` | `4096` | Memory per run Machine. |
-| `TASK_ORCH_RUNNER_VOLUME_GB` | `10` | Volume size per run. `10` GB comfortably fits a repo checkout + npm cache + Claude session store for typical repos; bump it (e.g. `20`) for monorepos or heavy `node_modules`. Only the volume's `logs/runner.log` is unique, and it is shipped to Postgres (see below), so a right-sized volume loses nothing when destroyed. |
+| `TASK_ORCH_RUNNER_VOLUME_GB` | `10` | Volume size per run when no prewarm fork is used. With `prewarm_seed`, Fly forks inherit the seed volume size because `size_gb` is not allowed on fork requests, so keep `TASK_ORCH_PREWARM_SEED_GB` at least this large. `10` GB fits typical repos; bump for monorepos or heavy caches. |
 | `TASK_ORCH_MAX_MACHINES` | `0` (fly gate off) | Max active Machines; `>0` also enables the admission gate that defers over-cap runs to `pending`. |
 | `TASK_ORCH_FLY_POLL_MS` | `10000` | How often the server reconciles Fly state (and runs the orphan-volume reaper). |
 | `TASK_ORCH_RUNNER_TERMINAL_MS` | `86400000` (24h) | Idle window before a **terminal** run's Machine + Volume is destroyed. Compute is still suspended immediately, but a `completed`/`failed`/`budget_exhausted` run is revivable (a follow-up turn or operator restart re-claims it), so its volume — warm checkout, unpushed work, SDK transcript — is kept for 24h rather than reclaimed after 1h. A shorter window strands a restart on a fresh, empty volume. |
@@ -471,6 +471,8 @@ Configure these in the GitHub repo that hosts this project:
 | `REPO_CACHE_REPOS` | Actions **variable** | Space/comma-separated `owner/repo` list of the repos to pre-cache into the image. |
 | `REPO_CACHE_GH_TOKEN` | Actions **secret** | Read-only *contents* token, used **only at build time** to clone the mirrors. |
 | `FLY_RUNNER_API_TOKEN` | Actions **secret** | Existing token the workflow uses to push the image to the runner registry. |
+| `TASK_ORCH_PREWARM_SEED_GB` | Actions **variable** | Optional seed volume size. Forked run volumes inherit this size, so set it to at least `TASK_ORCH_RUNNER_VOLUME_GB`. |
+| `TASK_ORCH_RUNNER_VOLUME_GB` | Actions **variable** | Optional copy of the web app's run-volume size so the seed workflow can create a large-enough source volume. |
 
 **Failure semantics.** If the nightly build fails — or you set none of the above
 — nothing breaks: runs still work, cold starts just move more data (a larger

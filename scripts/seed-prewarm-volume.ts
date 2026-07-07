@@ -7,7 +7,8 @@
 // FlyRunnerProvider.create() forks into each run (source_volume_id). This job
 // keeps that seed fresh:
 //
-//   1. ensure the seed volume exists (create sized TASK_ORCH_PREWARM_SEED_GB)
+//   1. ensure the seed volume exists (create sized to the larger of
+//      TASK_ORCH_PREWARM_SEED_GB and TASK_ORCH_RUNNER_VOLUME_GB)
 //   2. boot a one-shot Machine that mounts it and runs build-prewarm.sh into
 //      <mount>/prewarm (init.exec overrides the worker entrypoint)
 //   3. wait for the Machine to stop, then destroy it (KEEP the volume)
@@ -19,14 +20,24 @@
 // Env: FLY_API_TOKEN (runner-app deploy token), GH_TOKEN (contents:read for the
 // clone). Optional: TASK_ORCH_FLY_APP (runner app, default below),
 // FLY_RUNNER_IMAGE, TASK_ORCH_FLY_REGION, TASK_ORCH_PREWARM_SEED_VOLUME,
-// TASK_ORCH_PREWARM_SEED_GB, PREWARM_REPO.
+// TASK_ORCH_PREWARM_SEED_GB, TASK_ORCH_RUNNER_VOLUME_GB, PREWARM_REPO.
 
 import { makeFlyClient } from "../lib/runner/fly-client";
+
+function intEnv(key: string, dflt: number): number {
+  const raw = process.env[key];
+  if (raw == null || raw === "") return dflt;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) throw new Error(`${key} must be a positive number, got ${raw}`);
+  return Math.floor(n);
+}
 
 const APP = process.env.TASK_ORCH_FLY_APP || "task-orchestrator-runners";
 const REGION = process.env.TASK_ORCH_FLY_REGION || "ams";
 const SEED_NAME = process.env.TASK_ORCH_PREWARM_SEED_VOLUME || "prewarm_seed";
-const SEED_GB = Number(process.env.TASK_ORCH_PREWARM_SEED_GB || "20");
+const REQUESTED_SEED_GB = intEnv("TASK_ORCH_PREWARM_SEED_GB", 20);
+const RUNNER_VOLUME_GB = intEnv("TASK_ORCH_RUNNER_VOLUME_GB", 10);
+const SEED_GB = Math.max(REQUESTED_SEED_GB, RUNNER_VOLUME_GB);
 const PREWARM_REPO = process.env.PREWARM_REPO || "nodetool-ai/nodetool";
 const IMAGE = process.env.FLY_RUNNER_IMAGE || `registry.fly.io/${APP}:latest`;
 const GH_TOKEN = process.env.GH_TOKEN;
@@ -67,6 +78,15 @@ async function main() {
   const createdFresh = !seed;
   if (seed) {
     console.log(`reusing seed volume ${seed.id} (${SEED_NAME}, ${REGION})`);
+    if (seed.sizeGb != null && seed.sizeGb < SEED_GB) {
+      throw new Error(
+        `existing seed volume ${seed.id} is ${seed.sizeGb} GB, but forked run volumes need ` +
+          `${SEED_GB} GB (max of TASK_ORCH_PREWARM_SEED_GB=${REQUESTED_SEED_GB} and ` +
+          `TASK_ORCH_RUNNER_VOLUME_GB=${RUNNER_VOLUME_GB}). Fly volume forks inherit the ` +
+          `source size and cannot set size_gb; delete/recreate ${SEED_NAME} or use a new ` +
+          `TASK_ORCH_PREWARM_SEED_VOLUME name.`
+      );
+    }
   } else {
     console.log(`creating seed volume ${SEED_NAME} (${SEED_GB} GB, ${REGION})`);
     seed = await client.createVolume({ name: SEED_NAME, region: REGION, size_gb: SEED_GB });

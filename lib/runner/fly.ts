@@ -376,16 +376,25 @@ export class FlyRunnerProvider implements RunnerProvider {
   private async resolvePrewarmSeed(region: string): Promise<FlyVolume | null> {
     if (!PREWARM_SEED_VOLUME_NAME) return null;
     try {
+      const requiredGb = intEnv("TASK_ORCH_RUNNER_VOLUME_GB", DEFAULT_VOLUME_GB);
       const volumes = await this.flyClient.listVolumes();
-      return (
+      const seed =
         volumes.find(
           (v) =>
             v.name === PREWARM_SEED_VOLUME_NAME &&
             v.region === region &&
             // Skip a seed mid-provision/teardown; "created"/"ready" are forkable.
             (v.state == null || v.state === "created" || v.state === "ready")
-        ) ?? null
-      );
+        ) ?? null;
+      if (seed?.sizeGb != null && seed.sizeGb < requiredGb) {
+        console.error(
+          `[FlyRunnerProvider] prewarm seed ${seed.id} is ${seed.sizeGb} GB, smaller than ` +
+            `TASK_ORCH_RUNNER_VOLUME_GB=${requiredGb}; skipping fork because Fly volume forks ` +
+            `inherit source size`
+        );
+        return null;
+      }
+      return seed;
     } catch (err) {
       console.error("[FlyRunnerProvider] resolvePrewarmSeed failed:", err);
       return null;
@@ -399,10 +408,10 @@ export class FlyRunnerProvider implements RunnerProvider {
     const region = process.env.TASK_ORCH_FLY_REGION || DEFAULT_REGION;
     const configuredGb = intEnv("TASK_ORCH_RUNNER_VOLUME_GB", DEFAULT_VOLUME_GB);
     // Fork the prewarm seed when one exists: the run boots with warm deps at
-    // PREWARM_MOUNT_DIR and skips the cold install. A fork must be at least the
-    // source's size. No seed → blank volume + cold install (unchanged path).
+    // PREWARM_MOUNT_DIR and skips the cold install. Fly rejects size_gb on fork
+    // requests, so forked volumes inherit the seed size. No seed → blank volume
+    // with the configured size + cold install (unchanged path).
     const seed = await this.resolvePrewarmSeed(region);
-    const sizeGb = seed?.sizeGb ? Math.max(configuredGb, seed.sizeGb) : configuredGb;
     const prewarmDir = seed ? PREWARM_MOUNT_DIR : undefined;
     let volume: FlyVolume | null = null;
     let machine: FlyMachine | null = null;
@@ -412,8 +421,7 @@ export class FlyRunnerProvider implements RunnerProvider {
         // unlike Machine names. runId is numeric, so vol_run_<id> is always valid.
         name: `vol_run_${input.runId}`,
         region,
-        size_gb: sizeGb,
-        ...(seed ? { source_volume_id: seed.id } : {}),
+        ...(seed ? { source_volume_id: seed.id } : { size_gb: configuredGb }),
       });
       machine = await this.flyClient.createMachine({
         name: input.scope,
