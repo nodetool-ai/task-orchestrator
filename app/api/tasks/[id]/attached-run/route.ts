@@ -43,7 +43,7 @@ export async function POST(
 
     const run = await runs.create({
       goal: "<implement>",
-      toolsProfile: "orchestrator,repo_write",
+      toolsProfile: "orchestrator,repo_write,gh_pr,gh_ci",
       cwdStrategy: "worktree",
       taskId: id,
       personaId: personaId ?? "implementor",

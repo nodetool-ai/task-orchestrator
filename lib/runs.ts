@@ -1750,14 +1750,36 @@ async function gitSyncAfterTurn(
   if (task.prUrl) return task.prUrl;
   const prUrl = await openPr({ task, branch: run.branch, baseBranch: base, worktreePath: cwd, summary });
   if (prUrl) {
-    try {
-      await transport.transitionTask(run.taskId, {
-        state: "testing",
-        note: `Agent finished. PR: ${prUrl}`,
-      });
-    } catch (err) {
-      await transport.addTaskNote(run.taskId, "claude-agent", `Could not transition to testing: ${describe(err)}`);
+    const setPr = await transport.callTool(
+      run.id,
+      "set_task_pr",
+      { task_id: run.taskId, pr_url: prUrl },
+      { author: "claude-agent" }
+    );
+    if (setPr.isError) {
+      const text = setPr.content.map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
+      await transport.addTaskNote(
+        run.taskId,
+        "claude-agent",
+        `Could not record task PR: ${text || "set_task_pr failed"}`
+      );
+      try {
+        await transport.transitionTask(run.taskId, {
+          state: "testing",
+          note: `Agent finished. PR: ${prUrl}`,
+        });
+      } catch (err) {
+        await transport.addTaskNote(run.taskId, "claude-agent", `Could not transition to testing: ${describe(err)}`);
+      }
     }
+    const armed = await armAutoMerge(prUrl, cwd);
+    await transport.addTaskNote(
+      run.taskId,
+      "claude-agent",
+      armed
+        ? `Fallback PR sync armed auto-merge for ${prUrl}.`
+        : `Opened PR ${prUrl}, but could not arm GitHub auto-merge automatically.`
+    );
   }
   return prUrl ?? run.prUrl;
 }
@@ -2640,6 +2662,19 @@ async function openPr({ task, branch, baseBranch, worktreePath, summary }: OpenP
     return m ? m[0] : out.trim() || null;
   } catch (err) {
     console.warn(`gh pr create failed: ${describe(err)}`);
+    return null;
+  }
+}
+
+async function armAutoMerge(prUrl: string, worktreePath: string): Promise<string | null> {
+  try {
+    const out = await sh(
+      ["gh", "pr", "merge", prUrl, "--auto", "--squash", "--delete-branch"],
+      worktreePath
+    );
+    return out.trim() || "auto-merge armed";
+  } catch (err) {
+    console.warn(`gh pr merge --auto failed: ${describe(err)}`);
     return null;
   }
 }
