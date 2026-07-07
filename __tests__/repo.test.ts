@@ -178,18 +178,11 @@ describe("transitionTask", () => {
     expect(t.assignee).toBe("alice");
   });
 
-  it("rejects merged while criteria are open", async () => {
+  it("permits merged while criteria are open", async () => {
     await repo.addCriterion(id, "ship it");
     await repo.transitionTask(id, { state: "in_progress", assignee: "alice" });
     await repo.transitionTask(id, { state: "testing" });
-    await expect(repo.transitionTask(id, { state: "merged" })).rejects.toThrow(/criteria/);
-  });
-
-  it("bypassCriteria forces merged past open criteria", async () => {
-    await repo.addCriterion(id, "ship it");
-    await repo.transitionTask(id, { state: "in_progress", assignee: "alice" });
-    await repo.transitionTask(id, { state: "testing" });
-    const after = await repo.transitionTask(id, { state: "merged", bypassCriteria: true });
+    const after = await repo.transitionTask(id, { state: "merged" });
     expect(after.state).toBe("merged");
   });
 
@@ -222,7 +215,7 @@ describe("transitionTask", () => {
   it("locks merged as a terminal state", async () => {
     await repo.transitionTask(id, { state: "in_progress", assignee: "alice" });
     await repo.transitionTask(id, { state: "testing" });
-    await repo.transitionTask(id, { state: "merged", bypassCriteria: true });
+    await repo.transitionTask(id, { state: "merged" });
     await expect(repo.transitionTask(id, { state: "in_progress", assignee: "alice" })).rejects.toThrow(
       /terminal/
     );
@@ -298,7 +291,7 @@ describe("plan progress", () => {
     const c = await repo.createTask({ planId: "P-test", title: "C", date: "2026-01-15" });
     await repo.transitionTask(a.id, { state: "in_progress", assignee: "x" });
     await repo.transitionTask(a.id, { state: "testing" });
-    await repo.transitionTask(a.id, { state: "merged", bypassCriteria: true });
+    await repo.transitionTask(a.id, { state: "merged" });
     await repo.transitionTask(c.id, { state: "cancelled" });
     void b;
     const prog = await repo.planProgress("P-test");

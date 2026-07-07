@@ -185,7 +185,7 @@ async function applyMerge(
     try {
       // Route through the shared allowed-transition guard: prToTaskState maps a
       // merged PR → "merged", and applyTaskStateFromPr no-ops (rather than
-      // throws) on an illegal edge, preserving the bypassCriteria behavior.
+      // throws) on an illegal edge.
       await applyTaskStateFromPr(
         { id: task.id, state: task.state },
         { merged: true, closed: false, ciConclusion: "none" }

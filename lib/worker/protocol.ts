@@ -100,7 +100,6 @@ export interface TaskTransitionInput {
   state: TaskState;
   assignee?: string;
   note?: string;
-  bypassCriteria?: boolean;
 }
 
 export interface HeartbeatResult {
