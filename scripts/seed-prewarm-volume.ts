@@ -52,6 +52,10 @@ async function main() {
   // 1. Ensure the seed volume.
   const volumes = await client.listVolumes();
   let seed = volumes.find((v) => v.name === SEED_NAME && v.region === REGION);
+  // Track whether WE created it this run: if the install then fails we destroy it
+  // so no empty seed lingers (FlyRunnerProvider would otherwise fork garbage into
+  // every run). A pre-existing seed (last good prewarm) is left intact on failure.
+  const createdFresh = !seed;
   if (seed) {
     console.log(`reusing seed volume ${seed.id} (${SEED_NAME}, ${REGION})`);
   } else {
@@ -106,10 +110,23 @@ async function main() {
   console.log(`seed machine final: state=${final?.state ?? "timeout"} exit=${exit ?? "?"}`);
   await client.destroyMachine(machine.id, { force: true }).catch(() => {});
 
-  if (!final) throw new Error(`seed machine did not finish within ${Math.round(TIMEOUT_MS / 60_000)}m`);
-  if (final.state === "failed") throw new Error("seed machine entered failed state");
-  if (typeof exit === "number" && exit !== 0) {
-    throw new Error(`prewarm install exited non-zero (${exit}) — seed NOT refreshed`);
+  const failure =
+    !final
+      ? `seed machine did not finish within ${Math.round(TIMEOUT_MS / 60_000)}m`
+      : final.state === "failed"
+        ? "seed machine entered failed state"
+        : typeof exit === "number" && exit !== 0
+          ? `prewarm install exited non-zero (${exit}) — seed NOT refreshed`
+          : null;
+
+  if (failure) {
+    // Don't leave an empty/partial seed for create() to fork. Only destroy a
+    // volume WE created this run; a pre-existing seed keeps its last good state.
+    if (createdFresh) {
+      console.log(`destroying freshly-created empty seed volume ${seed.id}`);
+      await client.destroyVolume(seed.id).catch(() => {});
+    }
+    throw new Error(failure);
   }
   console.log(`prewarm seed volume ${seed.id} is ready (repo ${PREWARM_REPO}).`);
 }
