@@ -456,4 +456,12 @@ describe("spawnExtension", () => {
       "spawn__spawn_agent",
     ]);
   });
+
+  it("lets agents choose a child run backend and model", () => {
+    const { calls, pi } = makeStub();
+    spawnExtension({ runId: 0 })(pi);
+    const spawn = calls.find((c) => c.name === "spawn__spawn_agent")!.def;
+    expect(spawn.parameters.properties.backend).toBeTruthy();
+    expect(spawn.parameters.properties.model).toBeTruthy();
+  });
 });

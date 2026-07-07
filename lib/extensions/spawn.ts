@@ -454,6 +454,19 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
             description: "Reasoning level for the child agent. Omit to use the persona's default.",
           })
         ),
+        backend: Type.Optional(
+          Type.Union([Type.Literal("pi"), Type.Literal("claude")], {
+            description:
+              "Agent engine/backend for the child run. Omit to use the deployment default.",
+          })
+        ),
+        model: Type.Optional(
+          Type.String({
+            minLength: 1,
+            description:
+              "Provider-qualified model id for the child run, e.g. anthropic/claude-sonnet-4-6 or openai/gpt-5. Omit to use the run default.",
+          })
+        ),
         tools_profile: Type.String({
           minLength: 1,
           description:
@@ -557,6 +570,8 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
           newRun = await runs.create({
             goal: args.goal,
             personaId: args.persona,
+            model: args.model ?? undefined,
+            backend: args.backend ?? undefined,
             thinkingLevel: args.reasoning ?? null,
             toolsProfile: args.tools_profile,
             cwdStrategy: args.cwd_strategy as CwdStrategy,
