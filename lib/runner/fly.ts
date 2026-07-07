@@ -455,7 +455,7 @@ export class FlyRunnerProvider implements RunnerProvider {
       console.error("[FlyRunnerProvider] create failed:", err);
       if (machine?.id) await this.flyClient.destroyMachine(machine.id, { force: true }).catch(() => {});
       if (volume?.id) await this.flyClient.destroyVolume(volume.id).catch(() => {});
-      return null;
+      throw err;
     }
   }
 

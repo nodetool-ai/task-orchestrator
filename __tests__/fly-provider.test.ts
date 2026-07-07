@@ -147,6 +147,25 @@ describe("FlyRunnerProvider", () => {
     expect(calls).toContain("prewarmDir:none");
   });
 
+  it("cleans up and rethrows when createMachine fails during create()", async () => {
+    const calls: string[] = [];
+    const provider = new FlyRunnerProvider(
+      fakeFlyClient(calls, {
+        createMachineFailsForVolume: new Set(["v1"]),
+      })
+    );
+    const run = await create({ goal: "<implement>", defer: true });
+
+    await expect(provider.create({ runId: run.id, scope: `run-${run.id}-x` })).rejects.toThrow(
+      "fake: volume v1 not found"
+    );
+
+    expect(calls).toContain("createMachine");
+    expect(calls).toContain("destroyVolume:v1");
+    const rows = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(rows).toHaveLength(0);
+  });
+
   it("fails a leased run whose machine has vanished", async () => {
     const run = await create({ goal: "<implement>", defer: true });
     await db.update(agentSessions)

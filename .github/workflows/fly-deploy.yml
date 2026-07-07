@@ -36,9 +36,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Built on the GitHub runner (BuildKit + GHA layer cache) and pushed to
-      # registry.fly.io/task-orchestrator-runners:latest — no machine released.
-      # See .github/actions/build-runner-image for the caching rationale.
+      # Builds and pushes registry.fly.io/task-orchestrator-runners:latest via
+      # Fly's deploy path — no machine released.
       - uses: ./.github/actions/build-runner-image
         with:
           fly-registry-token: ${{ secrets.FLY_RUNNER_API_TOKEN }}

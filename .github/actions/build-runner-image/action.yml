@@ -1,9 +1,8 @@
 name: "Build runner image"
 description: >-
-  Build the Fly per-run worker image on the GitHub Actions runner (BuildKit,
-  with GitHub Actions layer cache) and push it to registry.fly.io. Replaces the
-  Depot/remote-builder path so the multi-GB nodetool prewarm has 16 GB of RAM
-  and a reusable layer cache.
+  Build the Fly per-run worker image with flyctl deploy --build-only --push so
+  the runner app's registry.fly.io latest tag is updated in the same way Fly
+  Machines resolve runnable images.
 
 inputs:
   fly-registry-token:
@@ -21,9 +20,8 @@ inputs:
 runs:
   using: "composite"
   steps:
-    # The image is multi-GB; the stock runner's ~14 GB free disk is tight once
-    # BuildKit holds context + intermediate layers + the final image. Reclaim
-    # ~20 GB of preinstalled toolchains we don't use.
+    # Keep some free space for flyctl's context packaging and any local Docker
+    # cleanup the hosted runner needs before invoking the remote Fly builder.
     - name: Free up disk space
       shell: bash
       run: |
@@ -34,10 +32,8 @@ runs:
         sudo docker image prune -af 2>/dev/null || true
         echo "after:  $(df -h --output=avail / | tail -1 | tr -d ' ') free"
 
-    # The prewarm/repo-cache layers are keyed on nodetool's HEAD SHA (see
-    # *_BUST in Dockerfile.fly-runner). Resolving it here means those layers
-    # cache-hit — skipping the expensive nodetool `npm ci` — whenever nodetool
-    # itself hasn't advanced since the last build. Public repo, no auth needed.
+    # Repo-cache layers are keyed on nodetool's HEAD SHA (see *_BUST in
+    # Dockerfile.fly-runner). Public repo, no auth needed.
     - name: Resolve nodetool HEAD (prewarm cache key)
       id: nodetool
       shell: bash
@@ -46,40 +42,29 @@ runs:
         echo "nodetool HEAD: ${sha:-<unresolved>}"
         echo "sha=${sha}" >> "$GITHUB_OUTPUT"
 
-    - uses: docker/setup-buildx-action@v3
-
-    # `flyctl auth docker` writes registry.fly.io credentials into the Docker
-    # config from FLY_API_TOKEN — the supported way to push to Fly's registry.
     - uses: superfly/flyctl-actions/setup-flyctl@master
-    - name: Authenticate Docker to Fly registry
-      shell: bash
-      run: flyctl auth docker
-      env:
-        FLY_API_TOKEN: ${{ inputs.fly-registry-token }}
 
     - name: Build + push runner image
-      uses: docker/build-push-action@v6
-      with:
-        context: .
-        file: Dockerfile.fly-runner
-        push: true
-        tags: registry.fly.io/task-orchestrator-runners:latest
-        # Fly Machines have intermittently attempted to unpack the BuildKit
-        # attestation manifest (unknown/unknown platform) as if it were a
-        # runnable image. Push a plain image manifest instead.
-        provenance: false
-        # GitHub Actions layer cache (per-repo, ~10 GB budget). mode=max caches
-        # intermediate layers too, so the cached nodetool prewarm layer is
-        # reusable across builds — that's the whole point of keying the bust on
-        # the nodetool SHA above.
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-        # PREWARM_REPO is intentionally omitted so the Dockerfile default
-        # (nodetool-ai/nodetool) applies — passing an empty value would override
-        # it and disable the prewarm.
-        build-args: |
-          REPO_CACHE_REPOS=${{ inputs.repo-cache-repos }}
-          REPO_CACHE_BUST=${{ steps.nodetool.outputs.sha }}
-          PREWARM_BUST=${{ steps.nodetool.outputs.sha }}
-        secrets: |
-          gh_token=${{ inputs.gh-token }}
+      shell: bash
+      run: |
+        args=(
+          --config fly.runner.toml
+          --app task-orchestrator-runners
+          --dockerfile Dockerfile.fly-runner
+          --build-only
+          --push
+          --remote-only
+          --image-label latest
+          --build-arg "REPO_CACHE_REPOS=${REPO_CACHE_REPOS}"
+          --build-arg "REPO_CACHE_BUST=${NODETOOL_SHA}"
+          --build-arg "PREWARM_BUST=${NODETOOL_SHA}"
+        )
+        if [ -n "${GH_TOKEN}" ]; then
+          args+=(--build-secret "gh_token=${GH_TOKEN}")
+        fi
+        flyctl deploy "${args[@]}"
+      env:
+        FLY_API_TOKEN: ${{ inputs.fly-registry-token }}
+        GH_TOKEN: ${{ inputs.gh-token }}
+        NODETOOL_SHA: ${{ steps.nodetool.outputs.sha }}
+        REPO_CACHE_REPOS: ${{ inputs.repo-cache-repos }}

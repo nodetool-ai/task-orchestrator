@@ -22,10 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Same GitHub-built + GHA-cached image as fly-deploy.yml. The prewarm layer
-      # is keyed on nodetool's HEAD SHA, so on nights when nodetool hasn't moved
-      # this cache-hits and finishes cheaply; when it has, the mirror + install
-      # refresh. (Formerly forced a full rebuild every night via a timestamp.)
+      # Same Fly-built image path as fly-deploy.yml. Repo-cache layers are keyed
+      # on nodetool's HEAD SHA, so unchanged nodetool builds can reuse cache.
       - uses: ./.github/actions/build-runner-image
         with:
           fly-registry-token: ${{ secrets.FLY_RUNNER_API_TOKEN }}
