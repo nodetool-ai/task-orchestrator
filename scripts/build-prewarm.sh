@@ -85,11 +85,20 @@ cd "$DEST" || finish_ok "cannot cd into $DEST"
 
 echo "[build-prewarm] npm ci (full workspace install)"
 if ! npm ci --no-audit --no-fund; then
-  # A partial node_modules is worse than none (broken resolution). Wipe it so the
-  # runtime applier finds nothing to link and the run does its own clean install.
-  echo "[build-prewarm] npm ci failed — wiping partial node_modules." >&2
-  find . -type d -name node_modules -prune -exec rm -rf {} + 2>/dev/null || true
-  finish_ok "npm ci failed"
+  # npm ci is strict: it aborts outright when package-lock.json has drifted from
+  # package.json — a common transient state on a fast-moving target repo (e.g. a
+  # dep bumped without regenerating the lock). A prewarm only wants a warm
+  # node_modules, not lockfile reproducibility, so fall back to `npm install`,
+  # which reconciles the lock and installs. The per-run checkout does its own
+  # install anyway; this is just a cache.
+  echo "[build-prewarm] npm ci failed (likely lock drift) — retrying with npm install." >&2
+  if ! npm install --no-audit --no-fund; then
+    # A partial node_modules is worse than none (broken resolution). Wipe it so
+    # the runtime applier finds nothing to link and the run cold-installs.
+    echo "[build-prewarm] npm install also failed — wiping partial node_modules." >&2
+    find . -type d -name node_modules -prune -exec rm -rf {} + 2>/dev/null || true
+    finish_ok "npm install failed"
+  fi
 fi
 
 # Record which repo this prewarm belongs to — written only AFTER a successful
