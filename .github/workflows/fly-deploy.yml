@@ -36,32 +36,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-      - name: fly deploy (runner image, build-only)
-        # Carry the repo-mirror seed inputs too, so push-to-main rebuilds ship a
-        # fresh seed. Build the flag list in shell so an unset var/secret simply
-        # omits the flag — an empty --build-secret would fail the deploy.
-        run: |
-          set -euo pipefail
-          args=()
-          if [ -n "${REPO_CACHE_REPOS:-}" ]; then
-            args+=(--build-arg "REPO_CACHE_REPOS=${REPO_CACHE_REPOS}")
-          fi
-          # Pre-warm the target repo's deps (npm ci + Playwright) into the image.
-          # Bust the prewarm layer per push so it reflects the latest nodetool.
-          args+=(--build-arg "PREWARM_BUST=${{ github.sha }}")
-          if [ -n "${PREWARM_REPO:-}" ]; then
-            args+=(--build-arg "PREWARM_REPO=${PREWARM_REPO}")
-          fi
-          if [ -n "${REPO_CACHE_GH_TOKEN:-}" ]; then
-            args+=(--build-secret "gh_token=${REPO_CACHE_GH_TOKEN}")
-          fi
-          flyctl deploy --config fly.runner.toml -a task-orchestrator-runners \
-            --dockerfile Dockerfile.fly-runner \
-            --build-only --push --image-label latest --remote-only \
-            "${args[@]}"
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_RUNNER_API_TOKEN }}
-          REPO_CACHE_REPOS: ${{ vars.REPO_CACHE_REPOS }}
-          REPO_CACHE_GH_TOKEN: ${{ secrets.REPO_CACHE_GH_TOKEN }}
-          PREWARM_REPO: ${{ vars.PREWARM_REPO }}
+      # Built on the GitHub runner (BuildKit + GHA layer cache) and pushed to
+      # registry.fly.io/task-orchestrator-runners:latest — no machine released.
+      # See .github/actions/build-runner-image for the caching rationale.
+      - uses: ./.github/actions/build-runner-image
+        with:
+          fly-registry-token: ${{ secrets.FLY_RUNNER_API_TOKEN }}
+          gh-token: ${{ secrets.REPO_CACHE_GH_TOKEN }}
+          repo-cache-repos: ${{ vars.REPO_CACHE_REPOS }}

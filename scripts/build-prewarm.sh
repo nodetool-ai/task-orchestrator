@@ -99,15 +99,9 @@ if npm run --silent 2>/dev/null | grep -qE '^\s*build:packages'; then
   npm run build:packages || echo "[build-prewarm] WARNING: build:packages failed — continuing." >&2
 fi
 
-# Playwright browser + OS deps into the image-global PLAYWRIGHT_BROWSERS_PATH.
-# Chromium only: it is the sole project in the target's playwright config. If the
-# repo doesn't use Playwright, the binary is absent and this is a no-op.
-if [ -x node_modules/.bin/playwright ]; then
-  echo "[build-prewarm] installing Playwright Chromium + OS deps"
-  node_modules/.bin/playwright install --with-deps chromium \
-    || echo "[build-prewarm] WARNING: playwright install failed — continuing." >&2
-else
-  echo "[build-prewarm] no local playwright binary — skipping browser install."
-fi
+# Playwright browsers are intentionally NOT baked: they add size/build time and
+# most runs don't need a browser. A run that does need one installs it on demand
+# into PLAYWRIGHT_BROWSERS_PATH (set in Dockerfile.fly-runner).
+echo "[build-prewarm] skipping Playwright browser install (not baked by design)."
 
 echo "[build-prewarm] done: $(du -sh "$DEST" 2>/dev/null | cut -f1) baked at $DEST"
