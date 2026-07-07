@@ -47,12 +47,18 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN npm install -g pdf-lib docx && npm cache clean --force
 ENV NODE_PATH=/usr/local/lib/node_modules
 
-COPY . .
-
-# Pre-bundle the TypeScript worker with esbuild (a devDependency installed by the
-# `npm ci` above) so a run boots via `node dist/run-worker.js` instead of paying
-# tsx's whole-import-graph transpile cost on every cold start.
-RUN npm run build:worker
+# ---------------------------------------------------------------------------
+# nodetool repo-cache + prewarm — deliberately placed BEFORE `COPY . .`.
+#
+# These layers depend only on the two scripts copied just below and on the
+# nodetool HEAD SHA passed as *_BUST — NOT on task-orchestrator source. So a
+# task-orch push where nodetool is unchanged reuses the cached multi-GB
+# `npm ci` layer instead of reinstalling nodetool from scratch. (When they sat
+# after `COPY . .`, every task-orch push invalidated them and re-ran the whole
+# install.) The scripts are copied on their own so editing unrelated source
+# doesn't bust this either.
+# ---------------------------------------------------------------------------
+COPY scripts/build-repo-cache.sh scripts/build-prewarm.sh ./scripts/
 
 # Bake blobless bare mirrors of the hot target repos into the image so per-run
 # checkouts fetch only the delta (git clone --reference <mirror> --dissociate).
@@ -61,33 +67,40 @@ RUN npm run build:worker
 # Both are optional — build-repo-cache.sh exits 0 (seeding nothing) when either
 # is absent, so the image always builds and runs fall back to full clones.
 ARG REPO_CACHE_REPOS=""
-# REPO_CACHE_BUST defeats the remote builder's layer cache for the seeding step:
-# with no new commits, COPY . . (and thus everything after it) cache-hits, and a
-# nightly rebuild would silently ship the same stale mirrors it set out to
-# refresh. The nightly workflow passes a fresh timestamp; consuming it in the
-# RUN below forces that layer (and only from there down) to re-run.
+# REPO_CACHE_BUST is nodetool's current HEAD SHA (passed by the workflows). Same
+# SHA → this layer cache-hits and the baked mirror is reused; a new nodetool
+# commit → new SHA → the layer (and the prewarm below) re-run and refresh.
+# Keying on the SHA rather than a timestamp is what lets GitHub's build cache
+# skip the expensive seed+install when nodetool hasn't moved.
 ARG REPO_CACHE_BUST=""
 RUN --mount=type=secret,id=gh_token REPO_CACHE_BUST="$REPO_CACHE_BUST" bash scripts/build-repo-cache.sh /opt/repo-cache "$REPO_CACHE_REPOS"
 
 # Pre-warm the primary target repo: bake a full `npm ci` (root + every workspace
-# node_modules), built packages, and Playwright Chromium so an agent run never
-# pays a cold install on a fresh volume. lib/prewarm.ts symlinks this tree into
-# the per-run checkout at run time (only when the checkout's origin matches).
-# Never fatal — build-prewarm.sh exits 0 if the repo/token is absent or a step
-# fails, so the image still builds and runs just pay the cold install.
+# node_modules) + built packages so an agent run never pays a cold install on a
+# fresh volume. lib/prewarm.ts symlinks this tree into the per-run checkout at
+# run time (only when the checkout's origin matches). Never fatal —
+# build-prewarm.sh exits 0 if the repo/token is absent or a step fails, so the
+# image still builds and runs just pay the cold install.
 #
-# Chromium lands in PLAYWRIGHT_BROWSERS_PATH (a global, checkout-independent
-# location) so `playwright test` finds it from any working directory. It adds
-# only a few hundred MB — negligible next to the multi-GB npm install.
+# Playwright browsers are intentionally NOT baked (build-prewarm.sh skips the
+# install) — a run that needs them installs on demand. PLAYWRIGHT_BROWSERS_PATH
+# is still set so any such runtime install lands in one global,
+# checkout-independent location.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 ARG PREWARM_REPO="nodetool-ai/nodetool"
-# Cache-bust twin of REPO_CACHE_BUST: the nightly/rebuild workflow passes a fresh
-# value so the baked install refreshes alongside the mirror instead of cache-hitting.
+# Cache-bust twin of REPO_CACHE_BUST (same nodetool HEAD SHA).
 ARG PREWARM_BUST=""
 RUN --mount=type=secret,id=gh_token \
     PREWARM_BUST="$PREWARM_BUST" REPO_CACHE_DIR=/opt/repo-cache \
     bash scripts/build-prewarm.sh /opt/nodetool-prewarm "$PREWARM_REPO"
 ENV PREWARM_DIR=/opt/nodetool-prewarm
+
+COPY . .
+
+# Pre-bundle the TypeScript worker with esbuild (a devDependency installed by the
+# `npm ci` above) so a run boots via `node dist/run-worker.js` instead of paying
+# tsx's whole-import-graph transpile cost on every cold start.
+RUN npm run build:worker
 
 RUN git config --system user.email "agent@task-orchestrator.local" \
     && git config --system user.name "Task Orchestrator Agent" \
