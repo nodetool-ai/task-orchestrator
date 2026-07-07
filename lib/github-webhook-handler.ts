@@ -6,7 +6,7 @@
 // Pure parsing/verification/matching lives in lib/github-webhook.ts; this
 // module owns the DB + agent SDK side effects.
 
-import { and, desc, eq, isNotNull, or } from "drizzle-orm";
+import { isNotNull, or } from "drizzle-orm";
 
 import { db } from "@/db";
 import { agentEvents, agentSessions } from "@/db/schema";
@@ -15,12 +15,12 @@ import * as runs from "./runs";
 import { ownerRepoFromRemote } from "./gh-url";
 import { emitInboxEvent } from "./inbox";
 import {
-  autofixEnabledFor,
   mapWebhookToInboxType,
   selectMatchingRunIds,
   type CandidateRun,
   type NormalizedWebhookEvent,
 } from "./github-webhook";
+import { maybeTriggerAutofix } from "./ci-autofix";
 import {
   applyTaskStateFromPr,
   fetchPrGithubState,
@@ -36,20 +36,6 @@ interface MatchedTask {
   task: TaskFull;
   run: runs.RunRow | null;
 }
-
-// Auto-fix: when CI fails (or a reviewer requests changes) on a task's PR,
-// resume the agent on the same branch to fix it. On by default — the
-// orchestrator watches every PR's CI and fixes failures in place. Set
-// TASK_ORCH_CI_AUTOFIX=0 (or false/no/off) to disable.
-const AUTOFIX_ENABLED = autofixEnabledFor(process.env.TASK_ORCH_CI_AUTOFIX);
-// Cap auto-fix attempts per run so a persistently-red PR can't loop forever.
-const AUTOFIX_MAX = Math.max(0, Number(process.env.TASK_ORCH_CI_AUTOFIX_MAX ?? 3));
-// Debounce: ignore repeat triggers within this window (a single push fans out
-// into many check_run/workflow_run/check_suite deliveries).
-const AUTOFIX_DEBOUNCE_MS = Math.max(
-  0,
-  Number(process.env.TASK_ORCH_CI_AUTOFIX_DEBOUNCE_MS ?? 120_000)
-);
 
 export interface DispatchResult {
   matched: number;
@@ -264,79 +250,20 @@ async function handleNeedsFix(
   event: NormalizedWebhookEvent,
   reason: "ci" | "review"
 ): Promise<string[]> {
-  const actions: string[] = [];
-
-  // Pick the newest run that owns a task and a worktree branch — that's the
-  // one whose PR this feedback is about and that we can resume in place.
-  //
-  // Require a *resumable* status too: cancel()/close() leave the branch and
-  // worktree_path columns intact (only the on-disk worktree is deleted), so
-  // without this guard CI/review autofix would resurrect a run the user
-  // explicitly cancelled/closed — re-materializing the worktree, spending a
-  // paid turn, and pushing to the abandoned PR branch. isResumableWorktreeRun
-  // excludes cancelled/closed and in-flight states.
-  const target = matchedRuns.find(
-    (r) =>
-      r.taskId &&
-      r.branch &&
-      r.worktreePath &&
-      r.cwdStrategy === "worktree" &&
-      runs.isResumableWorktreeRun(r.status, r.cwdStrategy)
-  );
-
-  // Always leave a breadcrumb on the task so it's visible even without autofix.
-  if (target?.taskId) {
-    try {
-      await repo.addNote(target.taskId, "github-webhook", noteFor(event, reason));
-    } catch {
-      // ignore
-    }
-  }
-
-  if (!AUTOFIX_ENABLED) {
-    if (target) actions.push(`noted ${reason} feedback on task ${target.taskId}`);
-    return actions;
-  }
-  if (!target) return actions;
-  if (runs.isLive(target.id)) {
-    actions.push(`autofix skipped: run #${target.id} already in flight`);
-    return actions;
-  }
-  if ((await countAutofixAttempts(target.id)) >= AUTOFIX_MAX) {
-    actions.push(`autofix skipped: run #${target.id} hit attempt cap (${AUTOFIX_MAX})`);
-    return actions;
-  }
-  if (await recentlyAutofixed(target.id)) {
-    actions.push(`autofix debounced: run #${target.id}`);
-    return actions;
-  }
-
-  // Record the attempt up front (also powers the cap + debounce checks) then
-  // kick the follow-up turn in the background — we don't block the webhook
-  // response on a full agent turn.
-  await db
-    .insert(agentEvents)
-    .values({
-      sessionId: target.id,
-      type: "github_autofix",
-      payload: JSON.stringify({
-        reason,
-        pr_url: event.prUrls[0] ?? target.prUrl ?? null,
-        conclusion: event.conclusion,
-        workflow: event.workflowName,
-      }),
-      createdAt: new Date(),
-    });
-
-  const prompt = autofixPrompt(event, reason, target.prUrl ?? event.prUrls[0] ?? null);
-  void runs
-    .followUp(target.id, prompt, {
-      author: "github-webhook",
-      addProfiles: ["gh_pr", "gh_ci"],
-    })
-    .catch((err) => console.error("github-webhook: autofix follow-up failed:", err));
-
-  actions.push(`autofix triggered: run #${target.id} (${reason})`);
+  // matchedRuns are already sorted newest-first by the caller. Delegate the
+  // target selection + gating + follow-up kick to the shared trigger, which the
+  // poller also calls — the `github_autofix` events it records dedupe the two
+  // paths against each other.
+  const { actions } = await maybeTriggerAutofix(matchedRuns, {
+    reason,
+    prUrl: event.prUrls[0] ?? null,
+    workflowName: event.workflowName,
+    conclusion: event.conclusion,
+    headSha: event.headSha,
+    actor: event.actor,
+    body: event.body,
+    breadcrumb: noteFor(event, reason),
+  });
   return actions;
 }
 
@@ -397,27 +324,6 @@ async function buildRepoOwnerMap(
   return map;
 }
 
-async function countAutofixAttempts(runId: number): Promise<number> {
-  return (await db
-    .select({ id: agentEvents.id })
-    .from(agentEvents)
-    .where(
-      and(eq(agentEvents.sessionId, runId), eq(agentEvents.type, "github_autofix"))
-    )).length;
-}
-
-async function recentlyAutofixed(runId: number): Promise<boolean> {
-  if (AUTOFIX_DEBOUNCE_MS <= 0) return false;
-  const cutoff = Date.now() - AUTOFIX_DEBOUNCE_MS;
-  const last = (await db
-    .select({ type: agentEvents.type, createdAt: agentEvents.createdAt })
-    .from(agentEvents)
-    .where(eq(agentEvents.sessionId, runId))
-    .orderBy(desc(agentEvents.id)))
-    .find((r) => r.type === "github_autofix");
-  return !!last && last.createdAt.getTime() >= cutoff;
-}
-
 function noteFor(event: NormalizedWebhookEvent, reason: "ci" | "review"): string {
   if (reason === "ci") {
     return (
@@ -428,42 +334,6 @@ function noteFor(event: NormalizedWebhookEvent, reason: "ci" | "review"): string
   }
   const body = event.body ? `\n\n> ${event.body.replace(/\n/g, "\n> ")}` : "";
   return `Reviewer requested changes${event.actor ? ` (${event.actor})` : ""}.${body}`;
-}
-
-function autofixPrompt(
-  event: NormalizedWebhookEvent,
-  reason: "ci" | "review",
-  prUrl: string | null
-): string {
-  const pr = prUrl ?? event.prUrls[0] ?? "(this task's PR)";
-  if (reason === "ci") {
-    return [
-      `GitHub CI reported a FAILURE on the pull request for this task: ${pr}.`,
-      event.workflowName ? `Workflow/check: ${event.workflowName}.` : "",
-      event.conclusion ? `Conclusion: ${event.conclusion}.` : "",
-      event.headSha ? `Head commit: ${event.headSha}.` : "",
-      ``,
-      `You are back in the task's worktree on the PR branch. Use the gh_ci tools`,
-      `(ci_runs then ci_logs) to fetch the failing logs for this PR, diagnose the`,
-      `failure, and fix it. Commit your changes — they will be pushed to the same`,
-      `branch to update the PR and re-trigger CI.`,
-      ``,
-      `If the failure is flaky/unrelated to this change or not actionable from the`,
-      `code, do NOT make speculative edits: explain why and stop.`,
-    ]
-      .filter(Boolean)
-      .join("\n");
-  }
-  return [
-    `A reviewer requested changes on the pull request for this task: ${pr}.`,
-    event.actor ? `Reviewer: ${event.actor}.` : "",
-    event.body ? `\nReview comment:\n${event.body}\n` : "",
-    `You are back in the task's worktree on the PR branch. Address the feedback,`,
-    `then commit — your changes will be pushed to update the PR. Use gh_pr__pr_view`,
-    `/ gh_pr__pr_diff if you need more context on the current PR state.`,
-  ]
-    .filter(Boolean)
-    .join("\n");
 }
 
 function describe(err: unknown): string {

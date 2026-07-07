@@ -372,6 +372,11 @@ Each delivery is matched to runs by PR url or by head branch + repository, then:
   (`TASK_ORCH_CI_AUTOFIX_DEBOUNCE_MS`, default 120s) per run; it is off by
   default since it spends model budget unattended.
 
+The webhook is the fast path, but the 20s PR-state poller (`TASK_ORCH_PR_SYNC_MS`)
+also drives the same capped autofix when it sees a PR with red CI — so a dropped
+webhook delivery can't strand the fix loop. Both paths share the cap/debounce
+guards (keyed to the same `github_autofix` events), so they never double-fire.
+
 ## Tests
 
 `npm test` runs the Vitest suite against a throwaway Postgres (each test
