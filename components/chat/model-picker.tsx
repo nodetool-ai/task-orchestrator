@@ -18,8 +18,28 @@ interface Props {
   id?: string;
 }
 
-function capitalize(s: string): string {
-  return s.charAt(0).toUpperCase() + s.slice(1);
+const PROVIDER_LABELS: Record<string, string> = {
+  anthropic: "Anthropic",
+  deepseek: "DeepSeek",
+  google: "Google",
+  groq: "Groq",
+  "kimi-coding": "Kimi",
+  minimax: "MiniMax",
+  mistral: "Mistral",
+  openai: "OpenAI",
+  openrouter: "OpenRouter",
+  xai: "xAI",
+  zai: "Z.ai",
+};
+
+function providerLabel(provider: string): string {
+  return (
+    PROVIDER_LABELS[provider] ??
+    provider
+      .split("-")
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ")
+  );
 }
 
 export function ModelPicker({ value, options, onChange, disabled, id }: Props) {
@@ -42,9 +62,15 @@ export function ModelPicker({ value, options, onChange, disabled, id }: Props) {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return allOptions;
-    return allOptions.filter(
-      (m) => m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)
-    );
+    return allOptions.filter((m) => {
+      const provider = providerLabel(m.provider).toLowerCase();
+      return (
+        m.id.toLowerCase().includes(q) ||
+        m.name.toLowerCase().includes(q) ||
+        m.provider.toLowerCase().includes(q) ||
+        provider.includes(q)
+      );
+    });
   }, [allOptions, query]);
 
   // Group by provider.
@@ -119,7 +145,7 @@ export function ModelPicker({ value, options, onChange, disabled, id }: Props) {
               grouped.map(([provider, models]) => (
                 <div key={provider}>
                   <div className="px-2.5 pt-2 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/70">
-                    {capitalize(provider)}
+                    {providerLabel(provider)}
                   </div>
                   {models.map((m) => {
                     const qualified = `${m.provider}/${m.id}`;
