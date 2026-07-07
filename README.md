@@ -372,6 +372,54 @@ Each delivery is matched to runs by PR url or by head branch + repository, then:
   (`TASK_ORCH_CI_AUTOFIX_DEBOUNCE_MS`, default 120s) per run; it is off by
   default since it spends model budget unattended.
 
+The webhook is the fast path, but the 20s PR-state poller (`TASK_ORCH_PR_SYNC_MS`)
+also drives the same capped autofix when it sees a PR with red CI — so a dropped
+webhook delivery can't strand the fix loop. Both paths share the cap/debounce
+guards (keyed to the same `github_autofix` events), so they never double-fire.
+
+When the loop can't converge — CI is still red after `TASK_ORCH_CI_AUTOFIX_MAX`
+attempts, or there's no resumable run left to fix in place — the task is escalated
+to `blocked` (once, guarded by a `github_autofix_exhausted` event) so a human is
+pulled in instead of the loop going silent.
+
+### Proactive scheduler (`TASK_ORCH_AUTO_LAUNCH`)
+
+The autofix loop above drives a task once a run exists. The **proactive
+scheduler** closes the loop at the front: when enabled, it periodically scans
+for `todo` tasks that are ready to be worked and auto-starts an agent session on
+each — reusing the exact same start path as `POST /api/tasks/:id/sessions` and
+`npm run task -- agent T-…` (worktree, branch, transition to `in_progress`,
+dispatch) — so the orchestrator can run autonomously: agent acts → CI gates →
+merge or block.
+
+**Off by default.** Like autofix and detached runs, the whole feature is inert
+unless explicitly enabled, and the poll interval is only armed when the flag is
+on (zero overhead — no timer, no DB scan — when off).
+
+A task is auto-launched only when **all** hold: its state is `todo`; its
+assignee matches `TASK_ORCH_AUTO_LAUNCH_ASSIGNEE` (so it never grabs human-owned
+work); all of its dependency tasks are `merged`; it has no active (non-terminal)
+agent run already; and launching it keeps the count of currently-active
+auto-launched runs at or below `TASK_ORCH_AUTO_LAUNCH_MAX_CONCURRENT`. Each tick
+recomputes that budget from the DB and launches up to it, oldest task first.
+Every auto-launched run is tagged with an `auto_launch` event so it's observable
+and counts against the ceiling. Runaway is prevented three ways: a task with a
+live run is never launched twice (checked here and again under the advisory lock
+inside the start path), the concurrency ceiling is always respected, and only
+`todo` tasks with the matching assignee are ever touched.
+
+Env knobs (all safe defaults; feature off unless the master switch is on):
+
+- `TASK_ORCH_AUTO_LAUNCH` — master switch. Off by default; `1`/`true`/`yes`/`on`
+  enables it, unset/`0`/`false`/`no`/`off` disables it.
+- `TASK_ORCH_AUTO_LAUNCH_INTERVAL_MS` — poll cadence (default `60000`).
+- `TASK_ORCH_AUTO_LAUNCH_MAX_CONCURRENT` — ceiling on concurrently-active
+  auto-launched runs (default `3`).
+- `TASK_ORCH_AUTO_LAUNCH_ASSIGNEE` — only tasks with this assignee are eligible
+  (default `claude`).
+- `TASK_ORCH_AUTO_LAUNCH_PLAN` — optional plan id; when set, only tasks in that
+  plan are eligible (default: all plans).
+
 ## Tests
 
 `npm test` runs the Vitest suite against a throwaway Postgres (each test

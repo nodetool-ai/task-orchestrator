@@ -11,11 +11,12 @@
 // stay consistent.
 
 import { spawn } from "node:child_process";
-import { and, isNotNull, notInArray } from "drizzle-orm";
+import { and, desc, eq, isNotNull, notInArray } from "drizzle-orm";
 
 import { db } from "@/db";
-import { tasks } from "@/db/schema";
+import { agentSessions, tasks } from "@/db/schema";
 import * as repo from "./repo";
+import { maybeTriggerAutofix, type AutofixCandidate } from "./ci-autofix";
 import { TASK_TRANSITIONS, type TaskState } from "./types";
 
 // ──────────────────────────────────────────────────────────
@@ -233,7 +234,28 @@ export async function syncPrBackedTasks(
     try {
       const ghState = await fetchState(row.prUrl);
       if (!ghState) continue;
-      await applyTaskStateFromPr({ id: row.id, state: row.state as TaskState }, ghState);
+      const redAndOpen =
+        ghState.ciConclusion === "failure" && !ghState.merged && !ghState.closed;
+      // A task already in `blocked` with still-red CI has been escalated (or its
+      // PR was closed) and is awaiting a human — don't let the CI-failure sync
+      // drag it back to `failing` every tick, which would visually undo the
+      // escalation. Recovery (green → passing, merged) still applies because
+      // those states aren't skipped here.
+      if (!(redAndOpen && row.state === "blocked")) {
+        await applyTaskStateFromPr({ id: row.id, state: row.state as TaskState }, ghState);
+      }
+      // Belt for a dropped CI-failure webhook: when the PR's rolled-up CI is
+      // red (and the PR is neither merged nor closed), drive the SAME capped
+      // autofix the webhook would. The shared cap/debounce/in-flight guards
+      // read the `github_autofix` events keyed to the target run, so this
+      // dedupes against a recent webhook rather than double-firing. When the
+      // loop can't progress (cap hit, or no resumable run) it escalates the task
+      // to `blocked` — guarded by a one-shot `github_autofix_exhausted` event so
+      // the ~20s poll can't re-escalate. Never fires on a green/merged/closed
+      // PR. Best-effort — a failure here must not abort the loop for other tasks.
+      if (redAndOpen) {
+        await maybeTriggerAutofixForTask(row.id, row.prUrl);
+      }
     } catch (err) {
       console.warn(
         `syncPrBackedTasks: task ${row.id} (${row.prUrl}) sync failed:`,
@@ -241,4 +263,26 @@ export async function syncPrBackedTasks(
       );
     }
   }
+}
+
+/**
+ * Load a task's runs newest-first and hand them to the shared autofix trigger.
+ * Kept separate so a throw is contained to the one task in the poller loop.
+ */
+async function maybeTriggerAutofixForTask(taskId: string, prUrl: string): Promise<void> {
+  const candidates = (await db
+    .select({
+      id: agentSessions.id,
+      taskId: agentSessions.taskId,
+      branch: agentSessions.branch,
+      worktreePath: agentSessions.worktreePath,
+      cwdStrategy: agentSessions.cwdStrategy,
+      status: agentSessions.status,
+      prUrl: agentSessions.prUrl,
+    })
+    .from(agentSessions)
+    .where(eq(agentSessions.taskId, taskId))
+    .orderBy(desc(agentSessions.startedAt))) as AutofixCandidate[];
+
+  await maybeTriggerAutofix(candidates, { reason: "ci", prUrl });
 }

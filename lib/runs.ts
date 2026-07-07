@@ -55,6 +55,7 @@ import { isTerminalStatus, LEASE_STATUSES, SESSION_STATUSES } from "./types";
 import { isTransientNetworkError } from "./transient-errors";
 import { resolveProfiles, alwaysOnExtensions, type ProfileContext } from "./profiles";
 import { type RunEnvelope } from "./pi-event-mapper";
+import { estimateCostUsd } from "./pricing";
 import { getBackend, resolveBackendId, type Extension } from "./agent-backend";
 import {
   claimInboxEvents,
@@ -2882,17 +2883,28 @@ function checkBudget(run: RunRow, result: TurnResult): boolean {
   ) {
     return true;
   }
-  // FIX 5 (M19): enforce the dollar cap when the backend reports a cost. The
-  // Claude backend reports cumulative total_cost_usd per session, so once it meets
-  // or exceeds budgetMaxUsd the run is exhausted. pi runs remain effectively
-  // uncapped here: pi exposes no cost surface (totalCostUsd is null), so this
-  // condition never trips for them. Column kept for historical data (see SCHEMA.md).
-  if (
-    run.budgetMaxUsd != null &&
-    result.totalCostUsd != null &&
-    result.totalCostUsd >= run.budgetMaxUsd
-  ) {
-    return true;
+  // Dollar cap. The budgetMaxUsd backstop must hold regardless of backend:
+  //   - Claude backend: reports a cumulative total_cost_usd per session, which is
+  //     authoritative — compare it directly (unchanged behavior).
+  //   - pi backend: reports token *usage* but no priced cost (totalCostUsd is null
+  //     or 0). Previously this left pi runs effectively uncapped on dollars — a
+  //     resume/autofix loop could spend unbounded $. We now ESTIMATE the cost from
+  //     this turn's token usage via a per-model pricing table (lib/pricing.ts) and
+  //     enforce the same cap against the estimate.
+  // The estimate is approximate (input/output list price only, no separate cache
+  // pricing) so a tripped cap is "hit on an estimated basis". The estimate here is
+  // per-turn; cross-turn resume loops stay bounded by budgetMaxTurns/budgetMaxSeconds
+  // above. run.totalCostUsd is folded in as prior spend so that if a backend ever
+  // records a running cost it accumulates rather than resetting each turn.
+  if (run.budgetMaxUsd != null) {
+    if (result.totalCostUsd != null && result.totalCostUsd > 0) {
+      if (result.totalCostUsd >= run.budgetMaxUsd) return true;
+    } else {
+      const estimate = estimateCostUsd(run.model, result.inputTokens, result.outputTokens);
+      if (estimate != null && (run.totalCostUsd ?? 0) + estimate >= run.budgetMaxUsd) {
+        return true;
+      }
+    }
   }
   return false;
 }
