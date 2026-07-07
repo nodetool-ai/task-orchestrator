@@ -399,3 +399,140 @@ describe("syncPrBackedTasks autofix (webhook-delivery fallback)", () => {
     expect(await autofixEvents(runId)).toBe(0);
   });
 });
+
+// ──────────────────────────────────────────────────────────
+// Non-convergence escalation: when the loop can't progress, the task is moved
+// to `blocked` (once) so a human takes over. Idempotency is guarded by a
+// one-shot `github_autofix_exhausted` event keyed to the anchor run.
+// ──────────────────────────────────────────────────────────
+
+describe("syncPrBackedTasks autofix escalation", () => {
+  beforeEach(() => mockFollowUp.mockClear());
+
+  async function insertRun(
+    taskId: string,
+    prUrl: string,
+    over: { status?: string } = {}
+  ): Promise<number> {
+    const row = (
+      await db
+        .insert(agentSessions)
+        .values({
+          taskId,
+          status: over.status ?? "idle",
+          goal: "<implement>",
+          cwdStrategy: "worktree",
+          branch: "feature-x",
+          worktreePath: "/tmp/r/.worktrees/1",
+          prUrl,
+          startedAt: new Date(),
+        })
+        .returning({ id: agentSessions.id })
+    )[0];
+    return row!.id;
+  }
+
+  async function exhaustedEvents(runId: number): Promise<number> {
+    return (
+      await db
+        .select({ id: agentEvents.id })
+        .from(agentEvents)
+        .where(
+          and(
+            eq(agentEvents.sessionId, runId),
+            eq(agentEvents.type, "github_autofix_exhausted")
+          )
+        )
+    ).length;
+  }
+
+  async function escalationNotes(taskId: string): Promise<number> {
+    return (
+      await db.select().from(taskNotes).where(eq(taskNotes.taskId, taskId))
+    ).filter((n) => /needs manual attention/.test(n.body)).length;
+  }
+
+  it("cap-hit red CI escalates the task to blocked exactly once (guarded)", async () => {
+    const task = await makeTaskInState("failing", "https://github.com/o/r/pull/50");
+    const runId = await insertRun(task.id, "https://github.com/o/r/pull/50");
+    // Pre-load AUTOFIX_MAX prior attempts so the cap is already reached.
+    for (let i = 0; i < AUTOFIX_MAX; i++) {
+      await db.insert(agentEvents).values({
+        sessionId: runId,
+        type: "github_autofix",
+        payload: "{}",
+        createdAt: new Date(Date.now() - 10 * 60_000),
+      });
+    }
+
+    // Tick 1: cap hit → escalate to blocked, note added, one guard event.
+    await syncPrBackedTasks(fixedFetcher(gh({ ciConclusion: "failure" })));
+    expect((await repo.getTask(task.id))!.state).toBe("blocked");
+    expect(mockFollowUp).not.toHaveBeenCalled();
+    expect(await exhaustedEvents(runId)).toBe(1);
+    expect(await escalationNotes(task.id)).toBe(1);
+
+    // Tick 2: the guard prevents re-escalation — still blocked, still one guard
+    // event, still one note, no follow-up.
+    await syncPrBackedTasks(fixedFetcher(gh({ ciConclusion: "failure" })));
+    expect((await repo.getTask(task.id))!.state).toBe("blocked");
+    expect(await exhaustedEvents(runId)).toBe(1);
+    expect(await escalationNotes(task.id)).toBe(1);
+    expect(mockFollowUp).not.toHaveBeenCalled();
+  });
+
+  it("red CI with no resumable run escalates the task to blocked once", async () => {
+    const task = await makeTaskInState("failing", "https://github.com/o/r/pull/51");
+    // Only a closed run exists — not resumable, so there is no target to fix.
+    const runId = await insertRun(task.id, "https://github.com/o/r/pull/51", {
+      status: "closed",
+    });
+
+    await syncPrBackedTasks(fixedFetcher(gh({ ciConclusion: "failure" })));
+    expect((await repo.getTask(task.id))!.state).toBe("blocked");
+    expect(mockFollowUp).not.toHaveBeenCalled();
+    expect(await exhaustedEvents(runId)).toBe(1);
+    expect(await escalationNotes(task.id)).toBe(1);
+
+    // A second tick does not re-escalate.
+    await syncPrBackedTasks(fixedFetcher(gh({ ciConclusion: "failure" })));
+    expect(await exhaustedEvents(runId)).toBe(1);
+    expect(await escalationNotes(task.id)).toBe(1);
+  });
+
+  it("does NOT escalate when the happy path can still autofix (attempts < cap)", async () => {
+    const task = await makeTaskInState("testing", "https://github.com/o/r/pull/52");
+    const runId = await insertRun(task.id, "https://github.com/o/r/pull/52");
+
+    await syncPrBackedTasks(fixedFetcher(gh({ ciConclusion: "failure" })));
+    // Normal autofix fired; task driven to failing, never blocked.
+    expect((await repo.getTask(task.id))!.state).toBe("failing");
+    expect(mockFollowUp).toHaveBeenCalledTimes(1);
+    expect(await exhaustedEvents(runId)).toBe(0);
+  });
+
+  it("does NOT escalate a green PR", async () => {
+    const task = await makeTaskInState("testing", "https://github.com/o/r/pull/53");
+    const runId = await insertRun(task.id, "https://github.com/o/r/pull/53");
+    await syncPrBackedTasks(fixedFetcher(gh({ ciConclusion: "success" })));
+    expect((await repo.getTask(task.id))!.state).toBe("passing");
+    expect(await exhaustedEvents(runId)).toBe(0);
+  });
+
+  it("does NOT escalate when autofix is disabled (TASK_ORCH_CI_AUTOFIX off)", async () => {
+    vi.stubEnv("TASK_ORCH_CI_AUTOFIX", "0");
+    try {
+      const task = await makeTaskInState("failing", "https://github.com/o/r/pull/54");
+      const runId = await insertRun(task.id, "https://github.com/o/r/pull/54", {
+        status: "closed",
+      });
+      await syncPrBackedTasks(fixedFetcher(gh({ ciConclusion: "failure" })));
+      // Loop disabled: task stays failing, no escalation, no follow-up.
+      expect((await repo.getTask(task.id))!.state).toBe("failing");
+      expect(await exhaustedEvents(runId)).toBe(0);
+      expect(mockFollowUp).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});

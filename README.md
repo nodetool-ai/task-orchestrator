@@ -377,6 +377,11 @@ also drives the same capped autofix when it sees a PR with red CI — so a dropp
 webhook delivery can't strand the fix loop. Both paths share the cap/debounce
 guards (keyed to the same `github_autofix` events), so they never double-fire.
 
+When the loop can't converge — CI is still red after `TASK_ORCH_CI_AUTOFIX_MAX`
+attempts, or there's no resumable run left to fix in place — the task is escalated
+to `blocked` (once, guarded by a `github_autofix_exhausted` event) so a human is
+pulled in instead of the loop going silent.
+
 ## Tests
 
 `npm test` runs the Vitest suite against a throwaway Postgres (each test

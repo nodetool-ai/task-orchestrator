@@ -571,3 +571,150 @@ describe("handleWebhookEvent drives task state from GitHub", () => {
     expect((await repo.getTask(taskId))!.state).toBe("passing");
   });
 });
+
+// Non-convergence escalation via the webhook path: when the loop can't progress
+// (attempt cap hit, or no resumable run) the task is moved to `blocked` with a
+// note, guarded by a one-shot `github_autofix_exhausted` event.
+describe("handleWebhookEvent CI-autofix escalation", () => {
+  const PR_URL = "https://github.com/acme/widgets/pull/7";
+
+  beforeEach(async () => {
+    mockFollowUp.mockClear();
+    await db.delete(agentEvents);
+    await db.delete(taskNotes);
+    await db.delete(agentSessions);
+    await db.delete(tasks);
+    await db.delete(plans);
+    await db.delete(repositories).where(ne(repositories.id, "R-default"));
+
+    await db.insert(repositories).values({
+      id: "R-acme",
+      name: "widgets",
+      remote: "git@github.com:acme/widgets.git",
+      localPath: "/tmp/acme-widgets",
+      defaultBranch: "main",
+    });
+    await db.insert(plans).values({ id: "P-acme", title: "Acme plan" });
+  });
+
+  // A task already in `failing` (implementor opened a PR, CI went red) with its
+  // authoritative pr_url set.
+  async function makeFailingTask(): Promise<string> {
+    await db
+      .insert(tasks)
+      .values({ id: "T-acme", title: "Do the thing", planId: "P-acme", repoId: "R-acme" });
+    await repo.transitionTask("T-acme", { state: "in_progress", assignee: "alice" });
+    await repo.transitionTask("T-acme", { state: "testing" });
+    await repo.transitionTask("T-acme", { state: "failing" });
+    await repo.setTaskPr("T-acme", PR_URL);
+    return "T-acme";
+  }
+
+  async function insertRun(status: string): Promise<number> {
+    const row = (
+      await db
+        .insert(agentSessions)
+        .values({
+          taskId: "T-acme",
+          status,
+          goal: "<implement>",
+          cwdStrategy: "worktree",
+          branch: "feature-x",
+          worktreePath: "/tmp/acme-widgets/.worktrees/1",
+          prUrl: PR_URL,
+          repoId: "R-acme",
+          startedAt: new Date(),
+        })
+        .returning({ id: agentSessions.id })
+    )[0];
+    return row!.id;
+  }
+
+  function ciFailure(): NormalizedWebhookEvent {
+    return {
+      kind: "ci",
+      event: "workflow_run",
+      action: "completed",
+      repoFullName: "acme/widgets",
+      prUrls: [PR_URL],
+      branch: "feature-x",
+      headSha: "abc123",
+      ciState: "failure",
+      conclusion: "failure",
+      merged: false,
+      prState: null,
+      workflowName: "CI",
+      actor: "ci-bot",
+      body: null,
+      url: "https://github.com/acme/widgets/actions/runs/1",
+      summary: 'Workflow "CI" failure',
+    };
+  }
+
+  async function eventsOfType(runId: number, type: string): Promise<number> {
+    return (
+      await db
+        .select({ id: agentEvents.id })
+        .from(agentEvents)
+        .where(and(eq(agentEvents.sessionId, runId), eq(agentEvents.type, type)))
+    ).length;
+  }
+
+  it("escalates to blocked once when the attempt cap is hit", async () => {
+    const { AUTOFIX_MAX } = await import("../lib/ci-autofix");
+    const taskId = await makeFailingTask();
+    const runId = await insertRun("idle");
+    for (let i = 0; i < AUTOFIX_MAX; i++) {
+      await db.insert(agentEvents).values({
+        sessionId: runId,
+        type: "github_autofix",
+        payload: "{}",
+        createdAt: new Date(Date.now() - 10 * 60_000),
+      });
+    }
+
+    await handleWebhookEvent(ciFailure(), "d-cap-1", fakeFetch(gh({ ciConclusion: "failure" })));
+    expect((await repo.getTask(taskId))!.state).toBe("blocked");
+    expect(mockFollowUp).not.toHaveBeenCalled();
+    expect(await eventsOfType(runId, "github_autofix_exhausted")).toBe(1);
+
+    // A second delivery does not re-escalate (guard) and does not undo the block.
+    await handleWebhookEvent(ciFailure(), "d-cap-2", fakeFetch(gh({ ciConclusion: "failure" })));
+    expect((await repo.getTask(taskId))!.state).toBe("blocked");
+    expect(await eventsOfType(runId, "github_autofix_exhausted")).toBe(1);
+  });
+
+  it("escalates to blocked when there is no resumable run", async () => {
+    const taskId = await makeFailingTask();
+    const runId = await insertRun("closed"); // not resumable
+
+    await handleWebhookEvent(ciFailure(), "d-strand", fakeFetch(gh({ ciConclusion: "failure" })));
+    expect((await repo.getTask(taskId))!.state).toBe("blocked");
+    expect(mockFollowUp).not.toHaveBeenCalled();
+    expect(await eventsOfType(runId, "github_autofix_exhausted")).toBe(1);
+  });
+
+  it("does NOT escalate when autofix is disabled", async () => {
+    vi.stubEnv("TASK_ORCH_CI_AUTOFIX", "0");
+    try {
+      const taskId = await makeFailingTask();
+      const runId = await insertRun("closed");
+      await handleWebhookEvent(ciFailure(), "d-off", fakeFetch(gh({ ciConclusion: "failure" })));
+      expect((await repo.getTask(taskId))!.state).toBe("failing");
+      expect(await eventsOfType(runId, "github_autofix_exhausted")).toBe(0);
+      expect(mockFollowUp).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("does NOT escalate on the happy path (attempts < cap, resumable run)", async () => {
+    const taskId = await makeFailingTask();
+    const runId = await insertRun("idle");
+
+    await handleWebhookEvent(ciFailure(), "d-happy", fakeFetch(gh({ ciConclusion: "failure" })));
+    expect((await repo.getTask(taskId))!.state).toBe("failing");
+    expect(mockFollowUp).toHaveBeenCalledTimes(1);
+    expect(await eventsOfType(runId, "github_autofix_exhausted")).toBe(0);
+  });
+});

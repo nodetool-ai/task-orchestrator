@@ -16,6 +16,12 @@
 // target run — so whichever path fires first records the event, and the other
 // path picks the SAME target run and is deduped by that row (no double-fire).
 //
+// When the loop can't make progress it escalates instead of going silent: on a
+// red-CI event whose attempts have hit AUTOFIX_MAX, or where there is no
+// resumable run to fix in place, the task is moved to `blocked` for a human. A
+// one-shot `github_autofix_exhausted` event (keyed to the anchor run) guards
+// that escalation so the ~20s poller can't re-block/re-note a stuck task.
+//
 // Kept free of imports from either entry point so there is no import cycle
 // (the poller must not pull in the webhook route handler).
 
@@ -26,10 +32,25 @@ import { agentEvents } from "@/db/schema";
 import * as repo from "./repo";
 import * as runs from "./runs";
 import { autofixEnabledFor } from "./github-webhook";
+import { TASK_TRANSITIONS, type TaskState } from "./types";
 
 // Auto-fix is on by default — the orchestrator watches every PR's CI and fixes
 // failures in place. Set TASK_ORCH_CI_AUTOFIX=0 (or false/no/off) to disable.
-export const AUTOFIX_ENABLED = autofixEnabledFor(process.env.TASK_ORCH_CI_AUTOFIX);
+// Read at call time (not import) so a toggle takes effect without a restart and
+// so the whole loop — including its escalation stop condition — is gated by it.
+export function autofixEnabled(): boolean {
+  return autofixEnabledFor(process.env.TASK_ORCH_CI_AUTOFIX);
+}
+// Kept as a convenience snapshot for callers/tests that only need the boot-time
+// value; the gates below use autofixEnabled() so a runtime toggle is honored.
+export const AUTOFIX_ENABLED = autofixEnabled();
+
+// Task states we escalate FROM when the autofix loop can't make progress. These
+// are the "actively working a PR through CI" states where pulling in a human
+// (→ blocked) is the right terminal stop. Excludes `todo` (no PR yet) and the
+// terminal/blocked states themselves. `blocked` is a legal target from each of
+// these (see TASK_TRANSITIONS in lib/types.ts).
+const ESCALATABLE_STATES: TaskState[] = ["in_progress", "testing", "failing", "passing"];
 // Cap auto-fix attempts per run so a persistently-red PR can't loop forever.
 export const AUTOFIX_MAX = Math.max(0, Number(process.env.TASK_ORCH_CI_AUTOFIX_MAX ?? 3));
 // Debounce: ignore repeat triggers within this window (a single push fans out
@@ -112,17 +133,52 @@ export async function maybeTriggerAutofix(
     }
   }
 
-  if (!AUTOFIX_ENABLED) {
+  if (!autofixEnabled()) {
+    // Loop disabled: keep today's note-only behavior — never escalate.
     if (target) actions.push(`noted ${reason} feedback on task ${target.taskId}`);
     return { target, triggered: false, actions };
   }
-  if (!target) return { target: null, triggered: false, actions };
+  if (!target) {
+    // #4 Stranded-run policy: red CI for this task but NO resumable worktree run
+    // to fix it in place (the run landed closed/cancelled). Escalate the task to
+    // `blocked` so a human takes over, rather than going silent. (Alternative,
+    // not chosen: spawn a fresh fixer agent — more invasive/costly; revisit if
+    // desired.) Anchor the idempotency guard to the newest run we do have.
+    const anchor = candidates.find((c) => c.taskId) ?? null;
+    if (anchor?.taskId) {
+      const escalated = await escalateExhausted(
+        anchor.taskId,
+        anchor.id,
+        "CI is red but there is no live/resumable run to auto-fix — needs manual attention.",
+        { reason, kind: "no_resumable_run", pr_url: ctx.prUrl ?? anchor.prUrl ?? null }
+      );
+      if (escalated)
+        actions.push(`autofix escalated: task ${anchor.taskId} → blocked (no resumable run)`);
+    }
+    return { target: null, triggered: false, actions };
+  }
   if (runs.isLive(target.id)) {
     actions.push(`autofix skipped: run #${target.id} already in flight`);
     return { target, triggered: false, actions };
   }
   if ((await countAutofixAttempts(target.id)) >= AUTOFIX_MAX) {
     actions.push(`autofix skipped: run #${target.id} hit attempt cap (${AUTOFIX_MAX})`);
+    // #2 Non-convergence: the loop has retried AUTOFIX_MAX times and CI is still
+    // red. Escalate to `blocked` (once) so a human is pulled in instead of
+    // silently giving up.
+    const escalated = await escalateExhausted(
+      target.taskId!,
+      target.id,
+      `CI still red after ${AUTOFIX_MAX} autofix attempts — needs manual attention.`,
+      {
+        reason,
+        kind: "attempt_cap",
+        attempts: AUTOFIX_MAX,
+        pr_url: ctx.prUrl ?? target.prUrl ?? null,
+      }
+    );
+    if (escalated)
+      actions.push(`autofix escalated: task ${target.taskId} → blocked (attempt cap)`);
     return { target, triggered: false, actions };
   }
   if (await recentlyAutofixed(target.id)) {
@@ -177,6 +233,60 @@ export async function recentlyAutofixed(runId: number): Promise<boolean> {
       .orderBy(desc(agentEvents.id))
   ).find((r) => r.type === "github_autofix");
   return !!last && last.createdAt.getTime() >= cutoff;
+}
+
+/**
+ * Terminal escalation for the autofix loop: transition the task to `blocked`
+ * with a human-readable note and record ONE durable `github_autofix_exhausted`
+ * event keyed to the anchor run.
+ *
+ * The event is the idempotency guard: the poller re-scans blocked tasks every
+ * ~20s (blocked is not terminal), so without it the escalation would re-block
+ * and re-note on every tick. We check for the guard first and only record it
+ * AFTER a successful transition, so a task we couldn't actually escalate (wrong
+ * state, illegal edge) never gets a phantom guard row that would suppress a
+ * later, legitimate escalation.
+ *
+ * Best-effort: never throws — a failure to escalate one task must not abort the
+ * poller loop over the others. Returns true iff it escalated on THIS call.
+ */
+async function escalateExhausted(
+  taskId: string,
+  anchorRunId: number,
+  note: string,
+  payload: Record<string, unknown>
+): Promise<boolean> {
+  try {
+    const already = await db
+      .select({ id: agentEvents.id })
+      .from(agentEvents)
+      .where(
+        and(
+          eq(agentEvents.sessionId, anchorRunId),
+          eq(agentEvents.type, "github_autofix_exhausted")
+        )
+      );
+    if (already.length > 0) return false;
+
+    const task = await repo.getTask(taskId);
+    if (!task) return false;
+    // Only escalate from a state where `blocked` is meaningful AND a legal edge.
+    if (!ESCALATABLE_STATES.includes(task.state)) return false;
+    if (!(TASK_TRANSITIONS[task.state] ?? []).includes("blocked")) return false;
+
+    await repo.transitionTask(taskId, { state: "blocked", note });
+
+    await db.insert(agentEvents).values({
+      sessionId: anchorRunId,
+      type: "github_autofix_exhausted",
+      payload: JSON.stringify(payload),
+      createdAt: new Date(),
+    });
+    return true;
+  } catch (err) {
+    console.error("ci-autofix: escalation failed:", err);
+    return false;
+  }
 }
 
 function autofixPrompt(ctx: AutofixContext, prUrl: string | null): string {

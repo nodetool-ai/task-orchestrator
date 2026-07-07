@@ -233,6 +233,12 @@ async function applyCiState(
     }
     if (!ghState) continue;
     const prev = task.state;
+    // An already-blocked task with still-red CI has been escalated (or its PR
+    // was closed) and is awaiting a human — a stray CI-failure webhook must not
+    // drag it back to `failing`. Recovery (green/merged) is not skipped.
+    const redAndOpen =
+      ghState.ciConclusion === "failure" && !ghState.merged && !ghState.closed;
+    if (redAndOpen && prev === "blocked") continue;
     try {
       await applyTaskStateFromPr({ id: task.id, state: task.state }, ghState);
     } catch (err) {
