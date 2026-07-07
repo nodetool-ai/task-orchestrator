@@ -174,7 +174,7 @@ describe("applyTaskStateFromPr", () => {
     expect((await repo.getTask(task.id))!.state).toBe("failing");
   });
 
-  it("testing → merged on merge (bypasses open acceptance criteria)", async () => {
+  it("testing → merged on merge (open acceptance criteria don't block)", async () => {
     const task = await makeTaskInState("testing", "https://github.com/o/r/pull/3");
     await repo.addCriterion(task.id, "not done yet");
     await applyTaskStateFromPr(task, gh({ merged: true }));

@@ -322,7 +322,6 @@ async function routeTask(
         state: body.state as never,
         assignee: typeof body.assignee === "string" ? body.assignee : undefined,
         note: typeof body.note === "string" ? body.note : undefined,
-        bypassCriteria: body.bypassCriteria === true,
       });
       return json(200, {});
     }

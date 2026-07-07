@@ -199,9 +199,6 @@ export async function applyTaskStateFromPr(
   await repo.transitionTask(task.id, {
     state: target,
     note: noteFor(target),
-    // A merged PR is authoritative that the work shipped — close the task even
-    // if acceptance criteria were never checked off, rather than stranding it.
-    bypassCriteria: target === "merged",
   });
 }
 

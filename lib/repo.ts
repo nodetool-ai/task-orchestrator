@@ -899,10 +899,6 @@ export interface TransitionInput {
   state: TaskState;
   assignee?: string;
   note?: string;
-  // Skip the acceptance-criteria gate when moving to `done`. Used by the
-  // PR-merge poller: a merged PR is authoritative that the work shipped, so
-  // unchecked criteria should not strand the task in `review`.
-  bypassCriteria?: boolean;
 }
 
 export async function transitionTask(id: string, input: TransitionInput): Promise<TaskFull> {
@@ -935,21 +931,6 @@ export async function transitionTask(id: string, input: TransitionInput): Promis
     const assignee = input.assignee ?? row.assignee ?? undefined;
     if (input.state === "in_progress" && !assignee) {
       throw new RepoError("Going to in_progress requires an assignee", 400);
-    }
-    if (input.state === "merged" && !input.bypassCriteria) {
-      // Re-read criteria inside the tx too — otherwise a concurrent
-      // updateCriterion could race the same way the transition itself did.
-      const criteriaRows = await tx
-        .select({ done: acceptanceCriteria.done })
-        .from(acceptanceCriteria)
-        .where(eq(acceptanceCriteria.taskId, id));
-      const openCriteria = criteriaRows.filter((c) => !c.done).length;
-      if (openCriteria > 0) {
-        throw new RepoError(
-          `Cannot mark merged: ${openCriteria} acceptance criteria still open`,
-          400
-        );
-      }
     }
     const now = new Date();
     await tx.update(tasks)
