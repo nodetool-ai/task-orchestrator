@@ -18,6 +18,17 @@ const DEFAULT_REGION = "ams";
 // 10 GB for the vast majority of runs. Overridable per-deployment via
 // TASK_ORCH_RUNNER_VOLUME_GB (see create()) for heavy repos that need more.
 const DEFAULT_VOLUME_GB = 10;
+
+// Prewarm seed volume: a persistent volume (populated by
+// scripts/seed-prewarm-volume.ts) holding a baked nodetool `npm ci` under
+// PREWARM_MOUNT_DIR. create() forks it into each run's volume so the run boots
+// with warm deps — without a 5 GB image (which blew past Fly's 8 GB image cap).
+// Named WITHOUT the `vol_run_` prefix so the orphan reaper (isReapableVolume)
+// never touches it. Empty name disables forking (runs cold-install).
+const PREWARM_SEED_VOLUME_NAME = process.env.TASK_ORCH_PREWARM_SEED_VOLUME ?? "prewarm_seed";
+// Where the seed's prewarm tree lands once the forked volume is mounted at
+// /mnt/session. Must match scripts/seed-prewarm-volume.ts.
+const PREWARM_MOUNT_DIR = "/mnt/session/prewarm";
 const DEFAULT_POLL_MS = 10_000;
 const SWEEP_MIN_SILENCE_MS = 30_000;
 // Grace window so a just-created, not-yet-attached volume isn't reaped mid-
@@ -266,12 +277,19 @@ async function emitRunnerEvent(runId: number, type: string, payload: Record<stri
   }
 }
 
-export function buildFlyWorkerEnv(runId: number): Record<string, string> {
+export function buildFlyWorkerEnv(
+  runId: number,
+  opts: { prewarmDir?: string } = {}
+): Record<string, string> {
   // Worker HTTP protocol (docs/worker-http-api.md): every Machine gets a
   // run-scoped API token and talks to /api/worker over HTTP + SSE. Workers
   // hold NO database credentials — DATABASE_URL is deliberately absent.
   return compactEnv({
     ...workerDispatchEnv(runId),
+    // Set only when this run's volume was forked from the prewarm seed, so the
+    // baked deps live at PREWARM_MOUNT_DIR. lib/prewarm.ts existsSync-guards it,
+    // and compactEnv drops it when undefined (no seed → cold install).
+    PREWARM_DIR: opts.prewarmDir,
     GH_TOKEN: envValue("GH_TOKEN"),
     // Agent credentials for BOTH backends: the Claude auth pair plus every
     // pi provider key the server holds, so a Machine dispatched with
@@ -320,7 +338,11 @@ function assertValidSharedMachineResources(cpus: number, memoryMb: number): void
   }
 }
 
-export function buildFlyMachineConfig(runId: number, volumeId: string): FlyMachineConfig {
+export function buildFlyMachineConfig(
+  runId: number,
+  volumeId: string,
+  opts: { prewarmDir?: string } = {}
+): FlyMachineConfig {
   // Default bumped from 2→4 vCPU alongside the existing 4096MB memory default:
   // 4 vCPU supports up to 8192MB, matching the memory ceiling operators reach
   // for first under OOM pressure (see incident note above).
@@ -329,7 +351,7 @@ export function buildFlyMachineConfig(runId: number, volumeId: string): FlyMachi
   assertValidSharedMachineResources(cpus, memoryMb);
   return {
     image: process.env.FLY_RUNNER_IMAGE || "fly-runner:latest",
-    env: buildFlyWorkerEnv(runId),
+    env: buildFlyWorkerEnv(runId, opts),
     mounts: [{ volume: volumeId, path: "/mnt/session" }],
     guest: {
       cpu_kind: "shared",
@@ -346,12 +368,42 @@ export class FlyRunnerProvider implements RunnerProvider {
 
   constructor(private readonly flyClient: FlyClient = makeFlyClient()) {}
 
+  /**
+   * The prewarm seed volume to fork for a new run, or null when none is usable
+   * (feature disabled, no seed in this region, or a listing error). Best-effort:
+   * never throws — a missing seed just means the run cold-installs.
+   */
+  private async resolvePrewarmSeed(region: string): Promise<FlyVolume | null> {
+    if (!PREWARM_SEED_VOLUME_NAME) return null;
+    try {
+      const volumes = await this.flyClient.listVolumes();
+      return (
+        volumes.find(
+          (v) =>
+            v.name === PREWARM_SEED_VOLUME_NAME &&
+            v.region === region &&
+            // Skip a seed mid-provision/teardown; "created"/"ready" are forkable.
+            (v.state == null || v.state === "created" || v.state === "ready")
+        ) ?? null
+      );
+    } catch (err) {
+      console.error("[FlyRunnerProvider] resolvePrewarmSeed failed:", err);
+      return null;
+    }
+  }
+
   async create(input: CreateRunnerInput): Promise<RunnerRef | null> {
     const existing = await this.getInstance(input.runId);
     if (existing?.volumeId) return this.resume(input.runId, input.scope);
 
     const region = process.env.TASK_ORCH_FLY_REGION || DEFAULT_REGION;
-    const sizeGb = intEnv("TASK_ORCH_RUNNER_VOLUME_GB", DEFAULT_VOLUME_GB);
+    const configuredGb = intEnv("TASK_ORCH_RUNNER_VOLUME_GB", DEFAULT_VOLUME_GB);
+    // Fork the prewarm seed when one exists: the run boots with warm deps at
+    // PREWARM_MOUNT_DIR and skips the cold install. A fork must be at least the
+    // source's size. No seed → blank volume + cold install (unchanged path).
+    const seed = await this.resolvePrewarmSeed(region);
+    const sizeGb = seed?.sizeGb ? Math.max(configuredGb, seed.sizeGb) : configuredGb;
+    const prewarmDir = seed ? PREWARM_MOUNT_DIR : undefined;
     let volume: FlyVolume | null = null;
     let machine: FlyMachine | null = null;
     try {
@@ -361,11 +413,12 @@ export class FlyRunnerProvider implements RunnerProvider {
         name: `vol_run_${input.runId}`,
         region,
         size_gb: sizeGb,
+        ...(seed ? { source_volume_id: seed.id } : {}),
       });
       machine = await this.flyClient.createMachine({
         name: input.scope,
         region,
-        config: buildFlyMachineConfig(input.runId, volume.id),
+        config: buildFlyMachineConfig(input.runId, volume.id, { prewarmDir }),
       });
 
       await db

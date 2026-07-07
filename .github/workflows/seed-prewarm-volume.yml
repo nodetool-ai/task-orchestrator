@@ -1,0 +1,37 @@
+name: Seed prewarm volume
+
+# (Re)populates the prewarm SEED volume on the runner app with a fresh nodetool
+# `npm ci`. FlyRunnerProvider forks this volume into each run so workers boot
+# with warm deps — WITHOUT baking ~5 GB into the image (which broke image unpack
+# past Fly's 8 GB cap). Runs nightly and on demand; a stale/failed seed just
+# means runs cold-install, never break.
+on:
+  schedule:
+    - cron: "37 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: seed-prewarm-volume
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    name: Seed prewarm volume
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install deps
+        run: npm ci
+      - name: Seed
+        run: npx tsx scripts/seed-prewarm-volume.ts
+        env:
+          # Runner-app deploy token (already used to push the runner image) — the
+          # seed volume + machine live in the runner app.
+          FLY_API_TOKEN: ${{ secrets.FLY_RUNNER_API_TOKEN }}
+          TASK_ORCH_FLY_APP: task-orchestrator-runners
+          # contents:read token to clone nodetool inside the seed machine.
+          GH_TOKEN: ${{ secrets.REPO_CACHE_GH_TOKEN }}

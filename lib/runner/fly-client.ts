@@ -8,12 +8,21 @@ export interface FlyMachineConfig {
   guest: { cpu_kind: "shared" | "performance"; cpus: number; memory_mb: number };
   restart?: { policy: "on-failure" | "no" | "always"; max_retries?: number };
   metadata?: Record<string, string>;
+  // init.exec overrides the image entrypoint — the seed-volume job uses it to run
+  // the prewarm install instead of the worker entrypoint.
+  init?: { exec?: string[] };
+  // auto_destroy=true makes flyd remove the machine once its process exits (the
+  // seed job's one-shot machine cleans itself up).
+  auto_destroy?: boolean;
 }
 
 export interface FlyMachine {
   id: string;
   state: string;
   region: string;
+  name?: string;
+  /** Exit code of a stopped one-shot machine, when Fly reports it. */
+  exitCode?: number;
 }
 
 export interface FlyVolume {
@@ -32,7 +41,15 @@ export interface FlyVolume {
 }
 
 export interface FlyClient {
-  createVolume(input: { name: string; region: string; size_gb: number }): Promise<FlyVolume>;
+  // source_volume_id forks an existing volume (the prewarm seed) into the new
+  // one — Fly copies its contents, so the run boots with warm deps already
+  // present. Omitted → a blank volume.
+  createVolume(input: {
+    name: string;
+    region: string;
+    size_gb: number;
+    source_volume_id?: string;
+  }): Promise<FlyVolume>;
   destroyVolume(id: string): Promise<void>;
   listVolumes(): Promise<FlyVolume[]>;
   createMachine(input: { name: string; region: string; config: FlyMachineConfig }): Promise<FlyMachine>;
@@ -79,11 +96,19 @@ function normalizeOptions(input?: typeof fetch | FlyClientOptions): Required<Fly
 }
 
 function machineFromJson(result: any): FlyMachine {
-  return {
+  const machine: FlyMachine = {
     id: String(result.id),
     state: String(result.state ?? "unknown"),
     region: String(result.region ?? ""),
   };
+  if (result.name != null) machine.name = String(result.name);
+  // Best-effort exit code for a stopped one-shot machine (seed job). Fly reports
+  // it on the most recent "exit" event; absent on running machines.
+  const exit = Array.isArray(result.events)
+    ? result.events.find((e: any) => e?.type === "exit")?.request?.exit_event?.exit_code
+    : undefined;
+  if (typeof exit === "number") machine.exitCode = exit;
+  return machine;
 }
 
 function volumeFromJson(result: any): FlyVolume {
@@ -134,7 +159,12 @@ export function makeFlyClient(input?: typeof fetch | FlyClientOptions): FlyClien
   }
 
   return {
-    async createVolume(input: { name: string; region: string; size_gb: number }) {
+    async createVolume(input: {
+      name: string;
+      region: string;
+      size_gb: number;
+      source_volume_id?: string;
+    }) {
       const result = await request<any>("POST", "/volumes", input);
       return volumeFromJson(result ?? {});
     },
