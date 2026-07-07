@@ -64,6 +64,10 @@ runs:
         file: Dockerfile.fly-runner
         push: true
         tags: registry.fly.io/task-orchestrator-runners:latest
+        # Fly Machines have intermittently attempted to unpack the BuildKit
+        # attestation manifest (unknown/unknown platform) as if it were a
+        # runnable image. Push a plain image manifest instead.
+        provenance: false
         # GitHub Actions layer cache (per-repo, ~10 GB budget). mode=max caches
         # intermediate layers too, so the cached nodetool prewarm layer is
         # reusable across builds — that's the whole point of keying the bust on
