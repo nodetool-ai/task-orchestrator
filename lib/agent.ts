@@ -13,6 +13,7 @@ import { and, asc, desc, eq, gt, isNotNull, sql } from "drizzle-orm";
 
 import { db } from "@/db";
 import { agentEvents, agentSessions } from "@/db/schema";
+import { autoLaunchEligibleTasks, autoLaunchEnabled, autoLaunchIntervalMs } from "./auto-launch";
 import { syncPrBackedTasks } from "./pr-task-state";
 import * as repo from "./repo";
 import { insideWorker } from "./runner/provider";
@@ -46,6 +47,8 @@ declare global {
   var __agentReaperRan: boolean | undefined;
   // eslint-disable-next-line no-var
   var __agentPrWatcher: NodeJS.Timeout | undefined;
+  // eslint-disable-next-line no-var
+  var __agentAutoLauncher: NodeJS.Timeout | undefined;
 }
 
 // Declared before the module-init reaper invocation below. reapOrphans() is a
@@ -80,6 +83,26 @@ if (!insideWorker() && !globalThis.__agentPrWatcher && PR_SYNC_MS > 0) {
     syncPrBackedTasks().catch((err) => console.error("agent: pr sync failed:", err));
   }, PR_SYNC_MS);
   globalThis.__agentPrWatcher.unref?.();
+}
+
+// Proactive scheduler (lib/auto-launch.ts): auto-launch agent sessions on
+// eligible `todo` tasks so the orchestrator runs autonomously. OFF by default —
+// the interval is armed ONLY when TASK_ORCH_AUTO_LAUNCH is explicitly enabled,
+// so there is zero overhead (no timer, no DB scan) when the feature is off.
+// ORCHESTRATOR-ONLY, same as the PR-sync poller above: a run worker holds no DB
+// access, so this control-plane duty runs on the server only.
+if (
+  !insideWorker() &&
+  !globalThis.__agentAutoLauncher &&
+  autoLaunchEnabled() &&
+  autoLaunchIntervalMs() > 0
+) {
+  globalThis.__agentAutoLauncher = setInterval(() => {
+    autoLaunchEligibleTasks().catch((err) =>
+      console.error("agent: auto-launch failed:", err)
+    );
+  }, autoLaunchIntervalMs());
+  globalThis.__agentAutoLauncher.unref?.();
 }
 
 async function reapOrphans() {
