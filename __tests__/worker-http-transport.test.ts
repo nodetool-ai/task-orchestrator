@@ -75,6 +75,42 @@ function transportFor(runId: number) {
 }
 
 describe("http transport over the wire", () => {
+  it("retries message appends with the same idempotency key after a timeout", async () => {
+    const bodies: any[] = [];
+    const fetchMock = vi.fn();
+    fetchMock.mockImplementationOnce(async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    });
+    fetchMock.mockImplementationOnce(async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return new Response(
+        JSON.stringify({
+          message: {
+            id: 123,
+            runId: 1,
+            role: "agent",
+            content: [{ type: "text", text: "ok" }],
+            createdAt: new Date().toISOString(),
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    });
+
+    const t = createHttpTransport({
+      baseUrl: "http://worker.test",
+      token: "token",
+      fetchImpl: fetchMock as any,
+    });
+    const msg = await t.appendMessage(1, "agent", [{ type: "text", text: "ok" }]);
+
+    expect(msg.id).toBe(123);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(bodies[0].idempotencyKey).toMatch(/^msg:1:/);
+    expect(bodies[1].idempotencyKey).toBe(bodies[0].idempotencyKey);
+  });
+
   it("reads runs with dates revived and appends messages", async () => {
     const run = await create({ goal: "<chat>", defer: true });
     const t = transportFor(run.id);

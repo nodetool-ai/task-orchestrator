@@ -29,6 +29,7 @@ import type {
 const log = createLogger("worker-transport-http");
 
 const REQUEST_TIMEOUT_MS = 30_000;
+const MESSAGE_APPEND_TIMEOUT_MS = 120_000;
 const RETRY_BACKOFF_MS = [500, 1000, 2000];
 /** SSE reconnect backoff (resets after a healthy connection). */
 const SSE_RECONNECT_MS = [1000, 2000, 5000, 10_000];
@@ -126,6 +127,14 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
     return new Promise((r) => setTimeout(r, ms));
   }
 
+  function messageIdempotencyKey(runId: number): string {
+    const random =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : Math.random().toString(36).slice(2);
+    return `msg:${runId}:${Date.now()}:${random}`;
+  }
+
   // ── /control SSE channel ──────────────────────────────────────────────────
   // One connection per subscribed run: `input` events wake the chat loop,
   // `cancel` events arm the latch. Auto-reconnects until unsubscribed.
@@ -216,10 +225,16 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
     },
 
     async appendMessage(runId, role, content) {
-      const { message } = await request<{ message: never }>("POST", `runs/${runId}/messages`, {
-        role,
-        content,
-      });
+      const { message } = await request<{ message: never }>(
+        "POST",
+        `runs/${runId}/messages`,
+        {
+          role,
+          content,
+          idempotencyKey: messageIdempotencyKey(runId),
+        },
+        { retries: 2, timeoutMs: MESSAGE_APPEND_TIMEOUT_MS }
+      );
       return message;
     },
 

@@ -114,6 +114,11 @@ export interface ReleaseClaimOpts {
   idleIfNonTerminal?: boolean;
 }
 
+export interface AppendMessageOpts {
+  /** Makes worker HTTP retries safe after ambiguous timeout/network failures. */
+  idempotencyKey?: string;
+}
+
 /** Result content an orchestrator tool returns (mirrors lib/orchestrator-tools). */
 export interface ToolCallResult {
   content: Array<
@@ -139,7 +144,12 @@ export interface RunTransport {
   // run plane
   getRun(runId: number): Promise<RunRow | null>;
   listMessages(runId: number): Promise<MessageRow[]>;
-  appendMessage(runId: number, role: MessageRole, content: SdkContentBlock[]): Promise<MessageRow>;
+  appendMessage(
+    runId: number,
+    role: MessageRole,
+    content: SdkContentBlock[],
+    opts?: AppendMessageOpts
+  ): Promise<MessageRow>;
   /** Append a raw agent_events row (turn_done markers, non-terminal status mirrors). */
   appendEvent(runId: number, type: string, payload: Record<string, unknown>): Promise<void>;
   /** Count a run's events of one type (chat resume bookkeeping). */

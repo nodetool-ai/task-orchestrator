@@ -7,7 +7,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
-import { agentSessions } from "../db/schema";
+import { agentMessages, agentSessions } from "../db/schema";
 import * as repo from "../lib/repo";
 import { create, get, listMessages } from "../lib/runs";
 import { handleWorkerApi } from "../lib/worker/api-handlers";
@@ -82,6 +82,22 @@ describe("worker API run plane", () => {
     expect(messages.some((m: any) => m.id === posted.message.id)).toBe(true);
     // And the row is visible through the normal server-side read path.
     expect((await listMessages(run.id)).some((m) => m.id === posted.message.id)).toBe(true);
+  });
+
+  it("deduplicates retried message appends by idempotency key", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    const body = {
+      role: "agent",
+      content: [{ type: "text", text: "only once" }],
+      idempotencyKey: `test-message-${run.id}`,
+    };
+
+    const first = await json(await call(run.id, "POST", `runs/${run.id}/messages`, body));
+    const second = await json(await call(run.id, "POST", `runs/${run.id}/messages`, body));
+
+    expect(second.message.id).toBe(first.message.id);
+    const rows = await db.select().from(agentMessages).where(eq(agentMessages.runId, run.id));
+    expect(rows).toHaveLength(1);
   });
 
   it("rejects a bad message role", async () => {

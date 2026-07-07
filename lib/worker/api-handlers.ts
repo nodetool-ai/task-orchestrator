@@ -187,10 +187,15 @@ async function routeRun(
     return json(200, { messages: await dbTransport.listMessages(runId) });
   }
   if (sub === "messages" && method === "POST") {
-    const { role, content } = await readBody(req);
+    const { role, content, idempotencyKey } = await readBody(req);
     if (!MESSAGE_ROLES.includes(role as never)) bad(`role must be one of ${MESSAGE_ROLES.join(", ")}`);
     if (!Array.isArray(content)) bad("content must be an array of content blocks");
-    const message = await dbTransport.appendMessage(runId, role as never, content as never);
+    if (idempotencyKey !== undefined && typeof idempotencyKey !== "string") {
+      bad("idempotencyKey must be a string");
+    }
+    const message = await dbTransport.appendMessage(runId, role as never, content as never, {
+      idempotencyKey,
+    });
     return json(200, { message });
   }
   if (sub === "events" && method === "POST") {

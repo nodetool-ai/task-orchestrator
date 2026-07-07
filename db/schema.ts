@@ -311,11 +311,15 @@ export const agentMessages = pgTable(
     // JSON array of SDK content blocks for user/agent/tool messages; single-
     // element array carrying {type,...payload} for system messages.
     content: text("content").notNull().default("[]"),
+    // Worker HTTP retries use this to make message appends idempotent across a
+    // timed-out request whose DB insert may still have committed.
+    idempotencyKey: text("idempotency_key"),
     createdAt: ts("created_at").notNull().defaultNow(),
   },
   (t) => ({
     runIdx: index("agent_messages_run_idx").on(t.runId),
     runOrdIdx: index("agent_messages_run_id_ord_idx").on(t.runId, t.id),
+    idempotencyKeyIdx: uniqueIndex("agent_messages_idempotency_key_idx").on(t.idempotencyKey),
   })
 );
 

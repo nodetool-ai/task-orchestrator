@@ -108,12 +108,33 @@ export const dbTransport: RunTransport = {
     return rows.map(hydrateMessage);
   },
 
-  async appendMessage(runId, role: MessageRole, content) {
+  async appendMessage(runId, role: MessageRole, content, opts) {
+    const idempotencyKey = opts?.idempotencyKey?.trim() || undefined;
     const inserted = await db
       .insert(agentMessages)
-      .values({ runId, role, content: JSON.stringify(content), createdAt: new Date() })
+      .values({
+        runId,
+        role,
+        content: JSON.stringify(content),
+        idempotencyKey,
+        createdAt: new Date(),
+      })
+      .onConflictDoNothing()
       .returning();
-    return (await runs()).hydrateMessage(inserted[0]);
+    const row =
+      inserted[0] ??
+      (idempotencyKey
+        ? (
+            await db
+              .select()
+              .from(agentMessages)
+              .where(and(eq(agentMessages.runId, runId), eq(agentMessages.idempotencyKey, idempotencyKey)))
+          )[0]
+        : null);
+    if (!row) {
+      throw new Error("Message append conflicted but no idempotent row was found");
+    }
+    return (await runs()).hydrateMessage(row);
   },
 
   async appendEvent(runId, type, payload) {
