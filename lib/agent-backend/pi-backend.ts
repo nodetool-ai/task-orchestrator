@@ -16,7 +16,6 @@ import {
   getAgentDir,
   type ExtensionFactory as PiExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
-import { getModel, getProviders, getModels } from "@earendil-works/pi-ai";
 
 import { mapPiEvent, type RunEnvelope } from "../pi-event-mapper";
 import { interceptorToolName } from "../builtin-tools";
@@ -122,14 +121,10 @@ export class PiBackend implements AgentBackend {
       extensionFactories: [factory],
     });
 
-    // pi-ai's getModel() returns undefined for a provider/model pair absent from
-    // its registry, and createAgentSession would silently fall back to the default
-    // model (running the turn on the wrong model while the run row still reports the
-    // intended one). Fail loudly instead, mirroring how the Claude backend validates
-    // its provider.
-    const piModel = getModel(model.provider as any, model.id as any) as
-      | ReturnType<typeof getModel>
-      | undefined;
+    // ModelRegistry.find() returns undefined for a provider/model pair absent
+    // from pi's registry. createAgentSession would otherwise silently fall back
+    // to the default model while the run row still reports the intended one.
+    const piModel = modelRegistry.find(model.provider, model.id);
     if (!piModel) {
       throw new Error(
         `Model '${model.provider}/${model.id}' was not found in the pi model registry. ` +
@@ -232,8 +227,21 @@ export class PiBackend implements AgentBackend {
   }
 
   listProviders() {
-    return getProviders()
-      .map((id) => ({ id, models: getModels(id).map((m) => ({ id: m.id, name: m.name })) }))
-      .filter((p) => p.models.length > 0);
+    const authStorage = AuthStorage.create();
+    const modelRegistry = ModelRegistry.create(authStorage);
+    const providers = new Map<string, { id: string; models: { id: string; name: string }[] }>();
+
+    for (const model of modelRegistry.getAll()) {
+      const provider = providers.get(model.provider) ?? { id: model.provider, models: [] };
+      provider.models.push({ id: model.id, name: model.name });
+      providers.set(model.provider, provider);
+    }
+
+    return Array.from(providers.values())
+      .map((provider) => ({
+        ...provider,
+        models: provider.models.sort((a, b) => a.id.localeCompare(b.id)),
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id));
   }
 }

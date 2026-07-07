@@ -4,7 +4,7 @@
 // with TASK_ORCH_AGENT_BACKEND=pi boots fine and then fails its first provider
 // call if only the Anthropic pair was forwarded.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getProviders, findEnvKeys } from "@earendil-works/pi-ai";
+import { getProviders, findEnvKeys } from "@earendil-works/pi-ai/compat";
 import {
   AGENT_CREDENTIAL_ENV_KEYS,
   agentCredentialEnv,
