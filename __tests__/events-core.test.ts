@@ -138,7 +138,56 @@ describe("decideTurnEndStatus", () => {
   it("infers failed for raise-shaped results, completed otherwise", () => {
     expect(decideTurnEndStatus({ ...base, result: { code: "no_creds" } })).toBe("failed");
     expect(decideTurnEndStatus({ ...base, result: { status: "failed" } })).toBe("failed");
+    expect(decideTurnEndStatus({ ...base, result: { status: "blocked" } })).toBe("failed");
     expect(decideTurnEndStatus({ ...base, result: { status: "success" } })).toBe("completed");
+  });
+
+  it("keeps implement worktree turns running until a PR is observed", () => {
+    expect(
+      decideTurnEndStatus({
+        ...base,
+        requiresPrUrl: true,
+        prUrl: null,
+      })
+    ).toBe("running");
+    expect(
+      decideTurnEndStatus({
+        ...base,
+        requiresPrUrl: true,
+        prUrl: "https://github.com/acme/repo/pull/1",
+      })
+    ).toBe("completed");
+  });
+
+  it("does not accept a success result without a required PR", () => {
+    expect(
+      decideTurnEndStatus({
+        ...base,
+        requiresPrUrl: true,
+        result: { status: "success", summary: "done" },
+      })
+    ).toBe("running");
+    expect(
+      decideTurnEndStatus({
+        ...base,
+        requiresPrUrl: true,
+        result: {
+          status: "success",
+          summary: "done",
+          pr_url: "https://github.com/acme/repo/pull/1",
+        },
+      })
+    ).toBe("completed");
+  });
+
+  it("lets explicit failure end an implement run even without a PR", () => {
+    expect(
+      decideTurnEndStatus({
+        ...base,
+        requiresPrUrl: true,
+        result: { code: "cannot_apply", message: "missing spec" },
+      })
+    ).toBe("failed");
   });
 
   it("a result beats a park_reason written the same turn", () => {
@@ -152,6 +201,16 @@ describe("decideTurnEndStatus", () => {
     expect(
       decideTurnEndStatus({ ...base, parkReason: "question", defaultStatus: "idle" })
     ).toBe("parked");
+  });
+
+  it("does not park an implement-style run that still lacks a PR", () => {
+    expect(
+      decideTurnEndStatus({
+        ...base,
+        requiresPrUrl: true,
+        parkReason: "question",
+      })
+    ).toBe("running");
   });
 
   it("chat runs keep their idle behavior even with a park_reason", () => {

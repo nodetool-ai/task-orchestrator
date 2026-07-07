@@ -241,6 +241,7 @@ export async function startSession(input: StartSessionInput): Promise<AgentSessi
       backend = backend ?? prior.backend;
     }
 
+    const persona = await repo.getPersona("implementor");
     const created = await runs.create({
       goal: "<implement>",
       cwdStrategy: "worktree",
@@ -255,6 +256,11 @@ export async function startSession(input: StartSessionInput): Promise<AgentSessi
       baseBranch: input.baseBranch ?? "main",
       parentRunId: input.resumeOf ?? input.parentRunId ?? null,
       userId: input.userId ?? null,
+      personaId: "implementor",
+      budget: {
+        maxTurns: persona?.budgetMaxTurns ?? undefined,
+        maxSeconds: persona?.budgetMaxSeconds ?? undefined,
+      },
     });
 
     return runs.toAgentSessionFull(created);

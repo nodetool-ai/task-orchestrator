@@ -992,90 +992,135 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       // pump sweep / next turn retries pending events
     }
 
-    let result: TurnResult;
-    try {
-      result = await runOneTurn({
-        run,
-        cwd,
-        prompt: effectivePrompt,
-        abort,
-        author,
-        onSdk: (m) => {
-          // forward to in-process bus consumers (SSE for /sessions UI)
-          bus.emit("event", { type: "sdk", sdk: m });
-        },
-      });
-    } catch (err) {
+    let promptForTurn = effectivePrompt;
+    let result: TurnResult | null = null;
+    let prUrlUpdate = run.prUrl;
+    let observedPrUrl = run.prUrl;
+    let nextStatus: SessionStatus = "idle";
+    let turnEnd: Awaited<ReturnType<typeof readTurnEndState>> | null = null;
+    let outcomeUpdate = run.outcome;
+
+    while (true) {
+      // Fresh turn = fresh tool intent. Without this, a prior report_result()
+      // without a PR would keep steering every continuation to the same stale
+      // result instead of letting the agent correct course.
+      await (await runTransport()).patchRun(run.id, { result: null, parkReason: null });
+
+      try {
+        result = await runOneTurn({
+          run,
+          cwd,
+          prompt: promptForTurn,
+          abort,
+          author,
+          onSdk: (m) => {
+            // forward to in-process bus consumers (SSE for /sessions UI)
+            bus.emit("event", { type: "sdk", sdk: m });
+          },
+        });
+      } catch (err) {
+        if (abort.signal.aborted) {
+          // Aborted mid-turn. cancel()/interrupt()/close() rewrote the row; a bare
+          // client-disconnect (req.signal → input.abort) did not — repair the
+          // stranded 'running' row so it doesn't look in-flight forever.
+          await repairAbortedRun(input.runId);
+          yield { type: "done" };
+          return;
+        }
+        const msg = describe(err);
+        await setError(run.id, msg);
+        yield { type: "error", error: msg };
+        return;
+      }
+
+      // The turn resolved normally but the signal may have aborted right at the
+      // end (backend swallowed it). Respect any terminal row the aborter wrote /
+      // repair a stranded lease instead of overwriting it below.
       if (abort.signal.aborted) {
-        // Aborted mid-turn. cancel()/interrupt()/close() rewrote the row; a bare
-        // client-disconnect (req.signal → input.abort) did not — repair the
-        // stranded 'running' row so it doesn't look in-flight forever.
         await repairAbortedRun(input.runId);
         yield { type: "done" };
         return;
       }
-      const msg = describe(err);
-      await setError(run.id, msg);
-      yield { type: "error", error: msg };
-      return;
-    }
 
-    // The turn resolved normally but the signal may have aborted right at the
-    // end (backend swallowed it). Respect any terminal row the aborter wrote /
-    // repair a stranded lease instead of overwriting it below.
-    if (abort.signal.aborted) {
-      await repairAbortedRun(input.runId);
-      yield { type: "done" };
-      return;
-    }
-
-    // Forward streamed SDK envelopes to the caller. We accumulated them in
-    // the turn helper rather than yielding live so the per-message persistence
-    // and the SSE stream see the same sequence.
-    for (const env of result.envelopes) {
-      // Persisted envelopes carry their DB row so the client can dedup this
-      // frame against the same row arriving over the read-only /events tail.
-      yield { type: "sdk", sdk: env, message: result.persisted.get(env) };
-    }
-
-    // Worktree runs sync git after each turn: if the branch gained commits,
-    // push them (updating the PR) and open a PR the first time round. A no-op
-    // for chat-only turns (no commits) and for non-worktree runs.
-    let prUrlUpdate = run.prUrl;
-    if (isImplementWorktree(run)) {
-      try {
-        prUrlUpdate = await gitSyncAfterTurn(run, cwd, result.summary, input.baseBranch);
-      } catch (err) {
-        await persistMessage(run.id, "system", [
-          { type: "text", text: `Push/PR sync failed: ${describe(err)}` },
-        ]);
+      // Forward streamed SDK envelopes to the caller. We accumulated them in
+      // the turn helper rather than yielding live so the per-message persistence
+      // and the SSE stream see the same sequence.
+      for (const env of result.envelopes) {
+        // Persisted envelopes carry their DB row so the client can dedup this
+        // frame against the same row arriving over the read-only /events tail.
+        yield { type: "sdk", sdk: env, message: result.persisted.get(env) };
       }
+
+      // Worktree runs sync git after each turn: if the branch gained commits,
+      // push them (updating the PR) and open a PR the first time round. A no-op
+      // for chat-only turns (no commits) and for non-worktree runs.
+      if (isImplementWorktree(run)) {
+        try {
+          prUrlUpdate = await gitSyncAfterTurn(run, cwd, result.summary, input.baseBranch);
+        } catch (err) {
+          await persistMessage(run.id, "system", [
+            { type: "text", text: `Push/PR sync failed: ${describe(err)}` },
+          ]);
+        }
+      }
+
+      // Worktree runs now require a PR before a success landing. If the agent
+      // cannot fulfill the task, it can call raise() or report_result(status:
+      // "failed"|"blocked") to land failed instead of continuing.
+      const budgetHit = checkBudget(run, result);
+      const landsCompleted = isImplementWorktree(run);
+      turnEnd = await readTurnEndState(run.id);
+      observedPrUrl = resultPrUrl(turnEnd.result) ?? prUrlUpdate;
+      if (landsCompleted && !observedPrUrl && run.taskId) {
+        const task = await (await runTransport()).getTask(run.taskId);
+        observedPrUrl = task?.prUrl ?? null;
+      }
+      nextStatus = decideTurnEndStatus({
+        goal: run.goal,
+        freshStatus: turnEnd.status,
+        parkReason: turnEnd.parkReason,
+        result: turnEnd.result,
+        budgetHit,
+        defaultStatus: landsCompleted ? "completed" : "idle",
+        requiresPrUrl: landsCompleted,
+        prUrl: observedPrUrl,
+      });
+      // Review-style runs surface a structured verdict in `outcome`. Gated on
+      // goal so chat/implement append flows are unaffected.
+      outcomeUpdate =
+        run.goal === "<review>"
+          ? extractReviewOutcome(result.summary) ?? run.outcome
+          : run.outcome;
+
+      if (isImplementWorktree(run) && nextStatus === "running") {
+        await persistMessage(run.id, "system", [
+          {
+            type: "text",
+            text:
+              "The previous turn ended without producing a PR. Continue working in this same branch until a PR exists. " +
+              "If the task cannot be fulfilled, call raise({ code, message, recoverable, details }) or " +
+              "report_result({ status: \"failed\", summary }).",
+          },
+        ]);
+        promptForTurn =
+          "Continue the same task. Do not stop after investigation or partial edits. " +
+          "Commit the work, push the branch, open a PR, call set_task_pr with the PR URL, arm auto-merge, " +
+          "then report_result({ status: \"success\", summary, pr_url }). " +
+          "If you cannot fulfill the task, call raise({ code, message, recoverable, details }) or " +
+          "report_result({ status: \"failed\", summary }) and end.";
+        run = (await get(run.id)) ?? run;
+        continue;
+      }
+
+      break;
     }
 
-    // Worktree runs (the task's attached session) land at `completed` after each
-    // turn — terminal so the executor's await_session resolves, but resumable
-    // via the guard above. Chat/none runs land `idle`. Budget caps win.
-    // Turn-end parking contract (§6.1): tools may have written park_reason
-    // (timer__sleep / ask_parent) or result (report_result / raise) mid-turn —
-    // re-read both FRESHLY from the DB and let them steer the landing status
-    // via decideTurnEndStatus (result > budget > park > default).
-    const budgetHit = checkBudget(run, result);
-    const landsCompleted = isImplementWorktree(run);
-    const turnEnd = await readTurnEndState(run.id);
-    const nextStatus: SessionStatus = decideTurnEndStatus({
-      goal: run.goal,
-      freshStatus: turnEnd.status,
-      parkReason: turnEnd.parkReason,
-      result: turnEnd.result,
-      budgetHit,
-      defaultStatus: landsCompleted ? "completed" : "idle",
-    });
-    // Review-style runs surface a structured verdict in `outcome`. Gated on
-    // goal so chat/implement append flows are unaffected.
-    const outcomeUpdate =
-      run.goal === "<review>"
-        ? extractReviewOutcome(result.summary) ?? run.outcome
-        : run.outcome;
+    if (!result || !turnEnd) {
+      await setError(run.id, "Turn ended without producing a result.");
+      yield { type: "error", error: "Turn ended without producing a result." };
+      return;
+    }
+
     // THE incident site: the turn-end landing (status column + paired event)
     // must be one transaction so a connection death between them can't strand a
     // finished run in a lease status for the reaper to mislabel as failed.
@@ -1094,7 +1139,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
         inputTokens: result.inputTokens ?? run.inputTokens,
         outputTokens: result.outputTokens ?? run.outputTokens,
         outcome: outcomeUpdate,
-        prUrl: prUrlUpdate,
+        prUrl: observedPrUrl ?? prUrlUpdate,
         // Keep park_reason only when actually parking; clear a stale one that
         // lost to a result/budget landing. Parked is non-terminal: no completedAt.
         parkReason: nextStatus === "parked" ? turnEnd.parkReason : null,
@@ -3160,6 +3205,10 @@ export interface TurnEndDecisionInput {
   budgetHit: boolean;
   /** What the legacy logic would land: 'completed' (implement) or 'idle' (chat). */
   defaultStatus: SessionStatus;
+  /** Implement-style runs must not report success until a PR exists. */
+  requiresPrUrl?: boolean;
+  /** PR observed either from git sync, the run row, task row, or report_result. */
+  prUrl?: string | null;
 }
 
 /**
@@ -3167,26 +3216,28 @@ export interface TurnEndDecisionInput {
  * layer, pure so it's unit-testable. Priority:
  *   1. result written this turn → the tool's terminal status if it already
  *      wrote one; else failed for raise-shaped payloads ({code}/status:
- *      'failed'), completed otherwise.
+ *      'failed'|'blocked'), or completed only when any required PR exists.
  *   2. a cancel/close that raced in wins (the caller's WHERE guard is the
  *      real protection; this keeps the decision honest too).
  *   3. budget exhaustion beats parking — an exhausted run must not sleep.
- *   4. park_reason set on a goal-driven (non-chat) run that would otherwise
+ *   4. implement-style PR requirements beat parking; the agent must either
+ *      produce a PR or explicitly fail.
+ *   5. park_reason set on a goal-driven (non-chat) run that would otherwise
  *      land completed/idle → 'parked'. Chat runs keep their idle behavior.
- *   5. otherwise the legacy default.
+ *   6. otherwise the legacy default.
  */
 export function decideTurnEndStatus(i: TurnEndDecisionInput): SessionStatus {
   if (i.result != null) {
     if (isTerminalStatus(i.freshStatus)) return i.freshStatus;
-    const r = i.result as { status?: unknown; code?: unknown };
-    const failedish =
-      typeof i.result === "object" &&
-      i.result !== null &&
-      (r.status === "failed" || typeof r.code === "string");
-    return failedish ? "failed" : "completed";
+    const failedish = isFailedResult(i.result);
+    if (failedish) return "failed";
+    if (i.budgetHit) return "budget_exhausted";
+    if (i.requiresPrUrl && !(i.prUrl ?? resultPrUrl(i.result))) return "running";
+    return "completed";
   }
   if (i.freshStatus === "cancelled" || i.freshStatus === "closed") return i.freshStatus;
   if (i.budgetHit) return "budget_exhausted";
+  if (i.requiresPrUrl && !i.prUrl) return "running";
   if (
     i.parkReason != null &&
     i.goal !== "<chat>" &&
@@ -3195,6 +3246,25 @@ export function decideTurnEndStatus(i: TurnEndDecisionInput): SessionStatus {
     return "parked";
   }
   return i.defaultStatus;
+}
+
+function isFailedResult(result: unknown): boolean {
+  if (result == null || typeof result !== "object" || Array.isArray(result)) return false;
+  const r = result as { status?: unknown; code?: unknown };
+  return (
+    typeof r.code === "string" ||
+    r.status === "failed" ||
+    r.status === "blocked" ||
+    r.status === "error"
+  );
+}
+
+function resultPrUrl(result: unknown): string | null {
+  if (result == null || typeof result !== "object" || Array.isArray(result)) return null;
+  const prUrl =
+    (result as { pr_url?: unknown; prUrl?: unknown }).pr_url ??
+    (result as { prUrl?: unknown }).prUrl;
+  return typeof prUrl === "string" && prUrl.trim() ? prUrl.trim() : null;
 }
 
 /** The single typed content block a digest frame carries (§6.4). */

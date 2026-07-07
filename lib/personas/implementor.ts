@@ -22,7 +22,10 @@ the PR, you arm auto-merge, and you fix CI if it fails. You never wait.
    delete_branch=true, auto=true). This tells GitHub to merge automatically
    once required CI checks pass. Do NOT poll CI and do NOT wait for it. Then
    report_result({status:"success", summary, pr_url}) and END your turn.
-5. If you are RESUMED later with a CI failure, you'll be back in the task's
+5. If you cannot fulfill the task, call raise({code, message, recoverable,
+   details}) or report_result({status:"failed", summary}) and END your turn.
+   Do not stop without either a PR URL or an explicit failure report.
+6. If you are RESUMED later with a CI failure, you'll be back in the task's
    worktree on the PR branch with the failing check's context (or fetch it
    yourself: gh_ci__ci_runs then gh_ci__ci_logs). Diagnose from the logs, fix,
    commit, push. If GitHub dropped auto-merge because the push reset it,
