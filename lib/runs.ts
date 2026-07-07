@@ -41,6 +41,7 @@ import { alias } from "drizzle-orm/pg-core";
 import { db } from "@/db";
 import { agentEvents, agentMessages, agentSessions } from "@/db/schema";
 import { describe } from "@/lib/utils";
+import { parseProviderQualifiedModel } from "@/lib/model-id";
 import * as repo from "./repo";
 import {
   buildExecutePrompt,
@@ -528,9 +529,10 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   }
 
   // Resolve the effective model. The model is a per-run choice (the run-agent
-  // dialog / chat composers emit a provider-qualified "provider/id"); it is no
-  // longer tied to the persona. Fall back to the env default when the caller
-  // omits one. We persist the resolved value so the UI shows what was used.
+  // dialog / chat composers emit "provider/model-id"; model-id itself may
+  // contain slashes, e.g. OpenRouter ids). It is no longer tied to the persona.
+  // Fall back to the env default when the caller omits one. We persist the
+  // resolved value so the UI shows what was used.
   const personaId = input.personaId ?? "implementor";
   if (!(await repo.getPersona(personaId))) {
     // persona_id is a foreign key; surface a clear 404 instead of letting the
@@ -551,7 +553,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     } catch (err) {
       throw new repo.RepoError(err instanceof Error ? err.message : String(err), 400);
     }
-    const provider = effectiveModel.includes("/") ? effectiveModel.split("/", 2)[0] : "anthropic";
+    const { provider } = parseProviderQualifiedModel(effectiveModel);
     if (backend === "claude" && provider !== "anthropic") {
       throw new repo.RepoError(
         `The 'claude' backend only supports Anthropic models, but the run's model is '${effectiveModel}'. ` +
@@ -2698,13 +2700,12 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     );
   }
 
-  // The model is chosen per-run, not by the persona. The model picker emits a
-  // provider-qualified "provider/id"; a bare value (e.g. a legacy
-  // TASK_ORCH_AGENT_MODEL) defaults to the anthropic provider.
+  // The model is chosen per-run, not by the persona. The model picker emits
+  // "provider/model-id"; a bare value (e.g. a legacy TASK_ORCH_AGENT_MODEL)
+  // defaults to the anthropic provider.
   const rawModel = run.model ?? DEFAULT_MODEL;
-  const [resolvedProvider, resolvedModelId] = rawModel.includes("/")
-    ? (rawModel.split("/", 2) as [string, string])
-    : ["anthropic", rawModel];
+  const { provider: resolvedProvider, id: resolvedModelId } =
+    parseProviderQualifiedModel(rawModel);
   const profileSpec = run.toolsProfile ?? persona.toolsProfile;
 
   const profileCtx: ProfileContext = {
