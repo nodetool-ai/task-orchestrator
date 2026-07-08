@@ -8,13 +8,16 @@
 //
 // Two run goals route through here today (see isLightweightPiChatRun /
 // isLightweightPiExecutorRun in lib/runs.ts):
-//   • <chat>   — ad-hoc assistant turns. Tools: orchestrator surface only.
+//   • <chat>   — ad-hoc assistant turns. Tools: orchestrator + read-only
+//                 repo/GitHub context helpers.
 //   • <execute> — the plan executor. Tools: orchestrator + spawn + the
 //                 always-on event tools (timer__sleep, report_result, …) it
 //                 needs to drive its wake/park loop.
 // The loop body is identical for both; toolsForRun(run) picks the surface.
 
 import { asc, desc, eq } from "drizzle-orm";
+import { existsSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import {
   validateToolCall,
@@ -38,6 +41,8 @@ import {
 import { parseProviderQualifiedModel } from "@/lib/model-id";
 import { assistantText, type SdkContentBlock } from "@/lib/sdk-message";
 import { runTransport } from "@/lib/worker";
+import { collectExtensions } from "@/lib/agent-backend/collect";
+import type { Extension, NeutralTool, ToolResult } from "@/lib/agent-backend/types";
 
 import type { AppendStreamEvent, MessageRow, RunRow } from "@/lib/runs";
 import type { RunEnvelope } from "@/lib/pi-event-mapper";
@@ -71,41 +76,125 @@ function maxToolRounds(run: RunRow): number {
 }
 
 /** One tool the lightweight loop exposes to the model: the name the model sees
- *  (`modelName`) and the bare registry name we dispatch to via the transport
- *  (`registryName`). Orchestrator tools carry a `task_orch__` prefix on the wire
- *  but a bare name in the registry; events/spawn/planning tools are stored under
- *  the same prefixed name in both places. */
+ *  (`modelName`) and the local executor used by the direct pi-ai loop. */
 interface LightweightToolEntry {
   tool: Tool;
-  registryName: string;
+  execute: (callId: string, params: any) => Promise<ToolResult>;
 }
 
-async function toolsForRun(run: RunRow): Promise<LightweightToolEntry[]> {
-  const categories: OrchestratorTool[] = [...ORCHESTRATOR_TOOLS];
-  // The plan executor also needs the always-on event tools (timer__sleep,
-  // report_result, raise, ask_parent, answer_question, events__poll) to drive
-  // its wake/park loop, plus the spawn tools (spawn__get_run,
-  // spawn__append_message) for nudging children. Planning is unused at execute
-  // time. Chat stays orchestrator-only — its turns are short and synchronous.
-  if (run.goal === "<execute>") {
-    const [events, spawn] = await Promise.all([
-      import("./extensions/events"),
-      import("./extensions/spawn"),
-    ]);
-    categories.push(...events.EVENT_TOOLS, ...spawn.SPAWN_TOOLS);
+function profileNames(profile: string | null | undefined): Set<string> {
+  return new Set(
+    (profile ?? "")
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean)
+  );
+}
+
+async function repoContextForRun(run: RunRow): Promise<{
+  cwd?: string;
+  hasLocalCheckout: boolean;
+  remote: string | null;
+}> {
+  const repo = await (await runTransport()).resolveRepo(run.id);
+  const cwd = repo?.localPath ? resolve(repo.localPath) : undefined;
+  let hasLocalCheckout = false;
+  try {
+    hasLocalCheckout = Boolean(cwd && existsSync(cwd) && statSync(cwd).isDirectory());
+  } catch {
+    hasLocalCheckout = false;
   }
-  return categories.map((tool) => {
-    const isOrchestrator = !tool.name.includes("__");
-    const modelName = isOrchestrator ? `${TOOL_PREFIX}${tool.name}` : tool.name;
+  return { cwd, hasLocalCheckout, remote: repo?.remote ?? null };
+}
+
+async function toolsForRun(run: RunRow, author: string): Promise<LightweightToolEntry[]> {
+  const entries: LightweightToolEntry[] = ORCHESTRATOR_TOOLS.map((tool) => {
+    const modelName = `${TOOL_PREFIX}${tool.name}`;
     return {
       tool: {
         name: modelName,
         description: tool.description,
         parameters: tool.parameters,
       },
-      registryName: tool.name,
+      execute: async (_callId, params) => {
+        const result = await (await runTransport()).callTool(run.id, tool.name, params, {
+          author,
+          defaultTaskId: run.taskId ?? undefined,
+          defaultPlanId: run.planId ?? undefined,
+        });
+        return {
+          content: result.content,
+          isError: result.isError ?? false,
+        };
+      },
     };
   });
+  // The plan executor also needs the always-on event tools (timer__sleep,
+  // report_result, raise, ask_parent, answer_question, events__poll) to drive
+  // its wake/park loop, plus the spawn tools (spawn__get_run,
+  // spawn__append_message) for nudging children. Planning is unused at execute
+  // time.
+  if (run.goal === "<execute>") {
+    const [events, spawn] = await Promise.all([
+      import("./extensions/events"),
+      import("./extensions/spawn"),
+    ]);
+    const categories: OrchestratorTool[] = [...events.EVENT_TOOLS, ...spawn.SPAWN_TOOLS];
+    entries.push(...categories.map((tool): LightweightToolEntry => ({
+      tool: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      },
+      execute: async (_callId, params) => {
+        const result = await (await runTransport()).callTool(run.id, tool.name, params, {
+          author,
+          defaultTaskId: run.taskId ?? undefined,
+          defaultPlanId: run.planId ?? undefined,
+        });
+        return {
+          content: result.content,
+          isError: result.isError ?? false,
+        };
+      },
+    })));
+  }
+
+  if (run.goal === "<chat>") {
+    const repoCtx = await repoContextForRun(run);
+    const names = profileNames(run.toolsProfile);
+    const extensions: Extension[] = [];
+    if (repoCtx.hasLocalCheckout && repoCtx.cwd && (names.has("repo_read") || names.has("repo_write"))) {
+      const { repoReadExtension } = await import("./extensions/repo-read");
+      extensions.push(repoReadExtension({ cwd: repoCtx.cwd }));
+    }
+    if (!names.has("gh_pr")) {
+      const { ghPrStrictReadOnlyExtension } = await import("./extensions/gh-pr");
+      extensions.push(ghPrStrictReadOnlyExtension({
+        cwd: repoCtx.hasLocalCheckout ? repoCtx.cwd : undefined,
+        remote: repoCtx.remote,
+        runId: run.id,
+      }));
+    } else {
+      const { ghPrExtension } = await import("./extensions/gh-pr");
+      extensions.push(ghPrExtension({
+        cwd: repoCtx.hasLocalCheckout ? repoCtx.cwd : undefined,
+        remote: repoCtx.remote,
+        runId: run.id,
+      }));
+    }
+    const collected = await collectExtensions(extensions);
+    entries.push(...collected.tools.map((tool: NeutralTool) => ({
+      tool: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      },
+      execute: tool.execute,
+    })));
+  }
+
+  return entries;
 }
 
 type PiSdkContentBlock = SdkContentBlock & { piMessage?: Message };
@@ -161,9 +250,20 @@ function textFromAssistant(message: AssistantMessage): string | null {
   return assistantText(toSdkBlocks(message)).trim() || null;
 }
 
-function toPiContent(blocks: OrchestratorContentBlock[]) {
+function toPiContent(
+  blocks: Array<OrchestratorContentBlock | { type: string; [k: string]: unknown }>
+): Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> {
   return blocks.map((block) => {
-    if (block.type === "text" || block.type === "image") return block;
+    if (block.type === "text" && typeof block.text === "string") {
+      return { type: "text", text: block.text };
+    }
+    if (
+      block.type === "image" &&
+      typeof block.data === "string" &&
+      typeof block.mimeType === "string"
+    ) {
+      return { type: "image", data: block.data, mimeType: block.mimeType };
+    }
     return { type: "text" as const, text: JSON.stringify(block) };
   });
 }
@@ -385,23 +485,19 @@ async function executeToolCall(args: {
   run: RunRow;
   author: string;
   tools: Tool[];
-  dispatch: Map<string, string>;
+  dispatch: Map<string, LightweightToolEntry>;
   call: ToolCall;
 }): Promise<ToolResultMessage> {
-  const { run, author, tools, dispatch, call } = args;
+  const { tools, dispatch, call } = args;
   const now = Date.now();
 
   try {
     const params = validateToolCall(tools, call);
-    const registryName = dispatch.get(call.name);
-    if (!registryName) {
+    const entry = dispatch.get(call.name);
+    if (!entry) {
       throw new Error(`Unknown lightweight tool: ${call.name}`);
     }
-    const result = await (await runTransport()).callTool(run.id, registryName, params, {
-      author,
-      defaultTaskId: run.taskId ?? undefined,
-      defaultPlanId: run.planId ?? undefined,
-    });
+    const result = await entry.execute(call.id, params);
     return {
       role: "toolResult",
       toolCallId: call.id,
@@ -448,9 +544,9 @@ export async function runChatAiTurn(args: {
   await annotateCurrentUserMessage(run.id, inputText);
 
   const contextMessages = await listContextMessages(run, inputText);
-  const entries = await toolsForRun(run);
+  const entries = await toolsForRun(run, author);
   const tools = entries.map((entry) => entry.tool);
-  const dispatch = new Map(entries.map((entry) => [entry.tool.name, entry.registryName]));
+  const dispatch = new Map(entries.map((entry) => [entry.tool.name, entry]));
   const model = await resolveModel(run.model ?? DEFAULT_CHAT_MODEL);
   const reasoning = (run.thinkingLevel ?? persona.thinkingLevel ?? undefined) as ThinkingLevel | undefined;
   const context: Context = {

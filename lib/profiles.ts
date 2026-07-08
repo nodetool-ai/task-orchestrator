@@ -6,8 +6,8 @@
 //
 // 'orchestrator' mounts the task-orchestrator surface (plans, tasks, notes,
 // criteria, sessions) via the agent extension.
-// 'repo_write' / 'repo_read' are markers for the SDK's built-in fs tools;
-// they contribute no factories today (kept for future tightening).
+// 'repo_write' / 'repo_read' mount narrow read-only repo helper tools; full
+// backend runs also have their SDK built-in fs tools.
 // 'gh_pr', 'gh_ci' mount the GitHub PR / CI helper extensions.
 // 'gh_pr_ro' mounts the read-only subset of gh_pr (view/diff/comment/review
 // without approve — no pr_merge). Used for review runs, which check out an
@@ -43,18 +43,34 @@ const PROFILES: Record<string, ProfileDef> = {
       })];
     },
   },
-  repo_write: { factories: () => [], allowsRepoWrite: true },
-  repo_read:  { factories: () => [], allowsRepoWrite: false },
+  repo_write: {
+    factories: async (ctx) => {
+      const { repoReadExtension } = await import("./extensions/repo-read");
+      return [repoReadExtension({ cwd: ctx.cwd })];
+    },
+    allowsRepoWrite: true,
+  },
+  repo_read:  {
+    factories: async (ctx) => {
+      const { repoReadExtension } = await import("./extensions/repo-read");
+      return [repoReadExtension({ cwd: ctx.cwd })];
+    },
+    allowsRepoWrite: false,
+  },
   gh_pr: {
     factories: async (ctx) => {
       const { ghPrExtension } = await import("./extensions/gh-pr");
-      return [ghPrExtension({ cwd: ctx.cwd, runId: ctx.runId })];
+      const { runTransport } = await import("@/lib/worker");
+      const repo = await (await runTransport()).resolveRepo(ctx.runId);
+      return [ghPrExtension({ cwd: ctx.cwd, remote: repo?.remote ?? null, runId: ctx.runId })];
     },
   },
   gh_pr_ro: {
     factories: async (ctx) => {
       const { ghPrReadOnlyExtension } = await import("./extensions/gh-pr");
-      return [ghPrReadOnlyExtension({ cwd: ctx.cwd, runId: ctx.runId })];
+      const { runTransport } = await import("@/lib/worker");
+      const repo = await (await runTransport()).resolveRepo(ctx.runId);
+      return [ghPrReadOnlyExtension({ cwd: ctx.cwd, remote: repo?.remote ?? null, runId: ctx.runId })];
     },
   },
   gh_ci: {

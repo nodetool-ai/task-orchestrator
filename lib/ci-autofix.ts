@@ -29,6 +29,7 @@ import { and, desc, eq } from "drizzle-orm";
 
 import { db } from "@/db";
 import { agentEvents } from "@/db/schema";
+import { CODE_REVIEW_RECEPTION_GUIDANCE } from "./code-review-guidance";
 import * as repo from "./repo";
 import * as runs from "./runs";
 import { autofixEnabledFor } from "./github-webhook";
@@ -316,6 +317,8 @@ function autofixPrompt(ctx: AutofixContext, prUrl: string | null): string {
     `You are back in the task's worktree on the PR branch. Address the feedback,`,
     `then commit — your changes will be pushed to update the PR. Use gh_pr__pr_view`,
     `/ gh_pr__pr_diff if you need more context on the current PR state.`,
+    ``,
+    CODE_REVIEW_RECEPTION_GUIDANCE,
   ]
     .filter(Boolean)
     .join("\n");

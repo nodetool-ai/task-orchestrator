@@ -188,16 +188,20 @@ describe("ghPrExtension", () => {
     return { calls, pi };
   }
 
-  it("registers the five gh_pr tools", () => {
+  it("registers the full gh_pr tool set", () => {
     const { calls, pi } = makeStub();
     ghPrExtension({ cwd: "/tmp" })(pi);
     const names = calls.map((c) => c.name).sort();
     expect(names).toEqual([
+      "gh_pr__pr_checks",
       "gh_pr__pr_comment",
+      "gh_pr__pr_comments",
       "gh_pr__pr_diff",
+      "gh_pr__pr_list",
       "gh_pr__pr_merge",
       "gh_pr__pr_review",
       "gh_pr__pr_view",
+      "gh_repo__branches",
     ]);
   });
 
@@ -324,7 +328,7 @@ describe("ghPrReadOnlyExtension", () => {
     return { calls, pi };
   }
 
-  it("registers view/diff/review/comment but NOT pr_merge", () => {
+  it("registers read/review/comment tools but NOT pr_merge", () => {
     // This is the privilege-boundary fix: a review run checks out an
     // untrusted third-party PR, so the read-only tool set it's given must
     // have no way to merge that PR.
@@ -332,10 +336,14 @@ describe("ghPrReadOnlyExtension", () => {
     ghPrReadOnlyExtension({ cwd: "/tmp" })(pi);
     const names = calls.map((c) => c.name).sort();
     expect(names).toEqual([
+      "gh_pr__pr_checks",
       "gh_pr__pr_comment",
+      "gh_pr__pr_comments",
       "gh_pr__pr_diff",
+      "gh_pr__pr_list",
       "gh_pr__pr_review",
       "gh_pr__pr_view",
+      "gh_repo__branches",
     ]);
     expect(names).not.toContain("gh_pr__pr_merge");
   });

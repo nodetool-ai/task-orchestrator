@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Save } from "lucide-react";
+import { Check, RotateCcw, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Field } from "@/components/ui/field";
 import { Spinner } from "@/components/ui/spinner";
@@ -34,11 +34,13 @@ type SaveState = "idle" | "saving" | "saved" | "error";
 export function PersonaEditor({ persona }: Props) {
   const [draft, setDraft] = useState<PersonaDto>(persona);
   const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [resetState, setResetState] = useState<SaveState>("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   function update<K extends keyof PersonaDto>(key: K, value: PersonaDto[K]) {
     setDraft((d) => ({ ...d, [key]: value }));
     setSaveState("idle");
+    setResetState("idle");
   }
 
   async function save() {
@@ -69,6 +71,34 @@ export function PersonaEditor({ persona }: Props) {
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
       setSaveState("error");
+    }
+  }
+
+  async function resetToDefault() {
+    setResetState("saving");
+    setErrorMsg(null);
+    try {
+      const res = await fetch(`/api/personas/${draft.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "reset" }),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        persona?: PersonaDto;
+        error?: string;
+      };
+      if (!res.ok || !body.persona) {
+        setErrorMsg(body.error ?? `HTTP ${res.status}`);
+        setResetState("error");
+        return;
+      }
+      setDraft(body.persona);
+      setSaveState("idle");
+      setResetState("saved");
+      setTimeout(() => setResetState("idle"), 1500);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+      setResetState("error");
     }
   }
 
@@ -162,7 +192,7 @@ export function PersonaEditor({ persona }: Props) {
       <div className="flex items-center gap-3 pt-2">
         <Button
           onClick={save}
-          disabled={saveState === "saving"}
+          disabled={saveState === "saving" || resetState === "saving"}
           className="gap-2"
         >
           {saveState === "saving" ? (
@@ -174,6 +204,21 @@ export function PersonaEditor({ persona }: Props) {
           )}
           {saveState === "saved" ? "Saved" : "Save"}
         </Button>
+        <Button
+          variant="outline"
+          onClick={resetToDefault}
+          disabled={saveState === "saving" || resetState === "saving"}
+          className="gap-2"
+        >
+          {resetState === "saving" ? (
+            <Spinner />
+          ) : resetState === "saved" ? (
+            <Check className="size-3.5" />
+          ) : (
+            <RotateCcw className="size-3.5" />
+          )}
+          {resetState === "saved" ? "Reset" : "Reset to default"}
+        </Button>
         <ErrorText>{errorMsg}</ErrorText>
       </div>
     </li>
@@ -181,4 +226,3 @@ export function PersonaEditor({ persona }: Props) {
 }
 
 const fieldClass = "rounded-md px-2.5 text-sm";
-

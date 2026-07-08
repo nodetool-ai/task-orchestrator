@@ -73,10 +73,23 @@ const errResult = (text: string) =>
 
 export interface GhPrExtensionOptions {
   cwd?: string;
+  /** Registered repository remote. Lets lightweight chat use GitHub tools even
+   *  when there is no local checkout to run gh from. */
+  remote?: string | null;
   /** Caller's run id, used by the resource-lock guard (docs/agent-events.md
    *  §5.2) on mutating tools (merge, approve). Required for ghPrExtension;
    *  unused by ghPrReadOnlyExtension (no merge tool, approve excluded). */
   runId?: number;
+}
+
+function repoFullName(remote: string | null | undefined): string | null {
+  if (!remote) return null;
+  const parsed = ownerRepoFromRemote(remote);
+  return parsed ? `${parsed.owner}/${parsed.repo}` : null;
+}
+
+function repoFlag(fullName: string | null): string[] {
+  return fullName ? ["--repo", fullName] : [];
 }
 
 /**
@@ -135,7 +148,83 @@ function makeGate(): Gate {
 
 // Read-only tools: fetch PR metadata/diff. Safe for a reviewer driven by
 // untrusted PR content — no mutation of GitHub state.
-function registerReadTools(reg: BackendRegistrar, cwd: string | undefined, gate: Gate) {
+function registerReadTools(
+  reg: BackendRegistrar,
+  cwd: string | undefined,
+  gate: Gate,
+  opts: { repoFullName?: string | null } = {}
+) {
+  const fullName = opts.repoFullName ?? null;
+
+  reg.registerTool({
+    name: "gh_pr__pr_list",
+    label: "PR List",
+    description:
+      "List pull requests for the current GitHub repository. Optionally filter by state.",
+    parameters: Type.Object({
+      state: Type.Optional(Type.Union([
+        Type.Literal("open"),
+        Type.Literal("closed"),
+        Type.Literal("merged"),
+        Type.Literal("all"),
+      ])),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+    }),
+    execute: async (_id, { state, limit }) => {
+      if (!cwd && !fullName) {
+        return errResult("PR listing needs either a local checkout or a registered GitHub remote.");
+      }
+      const fields =
+        "number,title,state,url,author,headRefName,baseRefName,createdAt,updatedAt,isDraft";
+      const args = [
+        "pr",
+        "list",
+        ...repoFlag(fullName),
+        "--state",
+        state ?? "open",
+        "--limit",
+        String(Math.min(limit ?? 30, 100)),
+        "--json",
+        fields,
+      ];
+      const r = await gh(args, cwd);
+      if (r.code !== 0) {
+        return errResult(r.stderr.trim() || `gh pr list failed (exit ${r.code})`);
+      }
+      return ok(r.stdout);
+    },
+  });
+
+  reg.registerTool({
+    name: "gh_repo__branches",
+    label: "GitHub Branches",
+    description:
+      "List branches from the registered GitHub repository, independent of local remote freshness.",
+    parameters: Type.Object({
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+      protected_only: Type.Optional(Type.Boolean()),
+    }),
+    execute: async (_id, { limit, protected_only }) => {
+      if (!fullName) {
+        return errResult("GitHub branch listing needs a registered GitHub remote.");
+      }
+      const args = [
+        "api",
+        "--method",
+        "GET",
+        `repos/${fullName}/branches`,
+        "-F",
+        `per_page=${Math.min(limit ?? 50, 100)}`,
+      ];
+      if (protected_only === true) args.push("-F", "protected=true");
+      const r = await gh(args, cwd);
+      if (r.code !== 0) {
+        return errResult(r.stderr.trim() || `gh api branches failed (exit ${r.code})`);
+      }
+      return ok(r.stdout);
+    },
+  });
+
   reg.registerTool({
     name: "gh_pr__pr_view",
     label: "PR View",
@@ -207,6 +296,80 @@ function registerReadTools(reg: BackendRegistrar, cwd: string | undefined, gate:
         return errResult(`No diff hunks for file '${file}' in PR ${g.parsed.canonical}.`);
       }
       return ok(filtered);
+    },
+  });
+
+  reg.registerTool({
+    name: "gh_pr__pr_comments",
+    label: "PR Comments",
+    description:
+      "Read a PR's issue comments, review comments, and review summaries.",
+    parameters: Type.Object({
+      url: Type.String({ minLength: 1 }),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+    }),
+    execute: async (_id, { url, limit }) => {
+      const g = await gate(url);
+      if (!g.ok) return g.result;
+      const perPage = String(Math.min(limit ?? 50, 100));
+      const issueComments = await gh([
+        "api",
+        "--method",
+        "GET",
+        `repos/${g.parsed.owner}/${g.parsed.repo}/issues/${g.parsed.number}/comments`,
+        "-F",
+        `per_page=${perPage}`,
+      ], cwd);
+      if (issueComments.code !== 0) {
+        return errResult(issueComments.stderr.trim() || `gh api issue comments failed (exit ${issueComments.code})`);
+      }
+      const reviewComments = await gh([
+        "api",
+        "--method",
+        "GET",
+        `repos/${g.parsed.owner}/${g.parsed.repo}/pulls/${g.parsed.number}/comments`,
+        "-F",
+        `per_page=${perPage}`,
+      ], cwd);
+      if (reviewComments.code !== 0) {
+        return errResult(reviewComments.stderr.trim() || `gh api review comments failed (exit ${reviewComments.code})`);
+      }
+      const reviews = await gh([
+        "api",
+        "--method",
+        "GET",
+        `repos/${g.parsed.owner}/${g.parsed.repo}/pulls/${g.parsed.number}/reviews`,
+        "-F",
+        `per_page=${perPage}`,
+      ], cwd);
+      if (reviews.code !== 0) {
+        return errResult(reviews.stderr.trim() || `gh api reviews failed (exit ${reviews.code})`);
+      }
+      return ok(JSON.stringify({
+        issue_comments: tryParseJson(issueComments.stdout),
+        review_comments: tryParseJson(reviewComments.stdout),
+        reviews: tryParseJson(reviews.stdout),
+      }, null, 2));
+    },
+  });
+
+  reg.registerTool({
+    name: "gh_pr__pr_checks",
+    label: "PR Checks",
+    description:
+      "Read current GitHub check/status details for a PR.",
+    parameters: Type.Object({
+      url: Type.String({ minLength: 1 }),
+    }),
+    execute: async (_id, { url }) => {
+      const g = await gate(url);
+      if (!g.ok) return g.result;
+      const fields = "name,state,startedAt,completedAt,link,description,bucket,workflow,event";
+      const r = await gh(["pr", "checks", g.parsed.canonical, "--json", fields], cwd);
+      if (r.code !== 0 && r.code !== 8) {
+        return errResult(r.stderr.trim() || `gh pr checks failed (exit ${r.code})`);
+      }
+      return ok(r.stdout);
     },
   });
 }
@@ -432,8 +595,9 @@ export const ghPrExtension =
   (opts: GhPrExtensionOptions = {}): ExtensionFactory =>
   (reg) => {
     const cwd = opts.cwd;
+    const fullName = repoFullName(opts.remote);
     const gate = makeGate();
-    registerReadTools(reg, cwd, gate);
+    registerReadTools(reg, cwd, gate, { repoFullName: fullName });
     registerReviewTool(reg, cwd, gate, { allowApprove: true, runId: opts.runId });
     registerCommentTool(reg, cwd, gate);
     registerMergeTool(reg, cwd, gate, opts.runId);
@@ -447,10 +611,22 @@ export const ghPrReadOnlyExtension =
   (opts: GhPrExtensionOptions = {}): ExtensionFactory =>
   (reg) => {
     const cwd = opts.cwd;
+    const fullName = repoFullName(opts.remote);
     const gate = makeGate();
-    registerReadTools(reg, cwd, gate);
+    registerReadTools(reg, cwd, gate, { repoFullName: fullName });
     registerReviewTool(reg, cwd, gate, { allowApprove: false, runId: opts.runId });
     registerCommentTool(reg, cwd, gate);
+  };
+
+// Strict read-only set for lightweight chat: list/view/diff only. Unlike
+// ghPrReadOnlyExtension this cannot write PR comments or review verdicts.
+export const ghPrStrictReadOnlyExtension =
+  (opts: GhPrExtensionOptions = {}): ExtensionFactory =>
+  (reg) => {
+    const cwd = opts.cwd;
+    const fullName = repoFullName(opts.remote);
+    const gate = makeGate();
+    registerReadTools(reg, cwd, gate, { repoFullName: fullName });
   };
 
 // ──────────────────────────────────────────────────────────
