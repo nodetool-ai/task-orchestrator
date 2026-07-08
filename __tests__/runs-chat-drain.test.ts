@@ -45,11 +45,13 @@ beforeEach(async () => {
   await db.delete(agentSessions);
   // Short idle timeout so the worker loop exits quickly in-test.
   process.env.TASK_ORCH_CHAT_IDLE_MS = "300";
+  process.env.TASK_ORCH_LIGHTWEIGHT_CHATS = "0";
 });
 
 afterEach(async () => {
   vi.restoreAllMocks();
   delete process.env.TASK_ORCH_CHAT_IDLE_MS;
+  delete process.env.TASK_ORCH_LIGHTWEIGHT_CHATS;
   // Restore the run_input trigger a test may have disabled to simulate a lost NOTIFY.
   await db
     .execute(sql`ALTER TABLE agent_messages ENABLE TRIGGER agent_messages_notify_input`)

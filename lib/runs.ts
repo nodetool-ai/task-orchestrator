@@ -129,6 +129,10 @@ function lightweightChatsEnabled(): boolean {
   return v == null || (v !== "0" && v.toLowerCase() !== "false");
 }
 
+function isLightweightPiChatRun(run: { goal: string; backend: "pi" | "claude" | null }): boolean {
+  return run.goal === "<chat>" && (run.backend == null || run.backend === "pi") && lightweightChatsEnabled();
+}
+
 const SANDBOX_OPTS = {
   enabled: true as const,
   autoAllowBashIfSandboxed: true as const,
@@ -557,19 +561,23 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   }
   const effectiveModel = input.model ?? DEFAULT_MODEL;
 
-  // Per-run backend choice. Ad-hoc chat is pi-only because it uses the direct
-  // @earendil-works/pi-ai loop with DB-backed message context. Other run kinds
-  // normalize/validate the requested backend eagerly; null stays null
-  // (deployment default at turn time). An explicit 'claude' pick is additionally
-  // checked against the model's provider — the Claude backend is Anthropic-only,
-  // and this combination can never run.
+  // Per-run backend choice. Ad-hoc lightweight chat runs through pi-ai directly:
+  // a null backend is allowed for legacy/deployment-default rows, but an
+  // explicit chat backend must be pi. Other run kinds normalize/validate the
+  // requested backend eagerly; null stays null (deployment default at turn time).
+  // An explicit 'claude' pick is additionally checked against the model's
+  // provider — the Claude backend is Anthropic-only, and this combination can
+  // never run.
   let backend: "pi" | "claude" | null = null;
-  const requestedBackend = goal === "<chat>" ? "pi" : input.backend;
+  const requestedBackend = input.backend;
   if (requestedBackend != null) {
     try {
       backend = resolveBackendId(requestedBackend);
     } catch (err) {
       throw new repo.RepoError(err instanceof Error ? err.message : String(err), 400);
+    }
+    if (goal === "<chat>" && backend !== "pi") {
+      throw new repo.RepoError("Chat runs only support the 'pi' backend.", 400);
     }
     const { provider } = parseProviderQualifiedModel(effectiveModel);
     if (backend === "claude" && provider !== "anthropic") {
@@ -912,6 +920,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     if (
       isTerminalStatus(run.status) &&
       run.status !== "idle" &&
+      !(run.goal === "<chat>" && run.status === "completed") &&
       !isResumableWorktreeRun(run.status, run.cwdStrategy)
     ) {
       const why =
@@ -1020,7 +1029,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       // pump sweep / next turn retries pending events
     }
 
-    if (run.goal === "<chat>" && resolveBackendId(run.backend) === "pi" && lightweightChatsEnabled()) {
+    if (isLightweightPiChatRun(run)) {
       try {
         const { runChatAiTurn } = await import("./chat-ai-loop");
         const chatResult = await runChatAiTurn({
@@ -2640,7 +2649,7 @@ export async function* sendMessageToRun(opts: {
   // they can use the same backend + orchestrator tools without paying worker
   // startup cost. Set TASK_ORCH_LIGHTWEIGHT_CHATS=0 to restore worker-backed
   // chat sessions in deployments that require that isolation boundary.
-  if (run.goal === "<chat>" && resolveBackendId(run.backend) === "pi" && lightweightChatsEnabled()) {
+  if (isLightweightPiChatRun(run)) {
     yield* append({ runId, role, text, author, abort });
     return;
   }
@@ -2992,7 +3001,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
         provider: runnerProviderLabel(),
         runId: run.id,
         fields: {
-          backend: resolveBackendId(run.backend),
+          backend: backend.id,
           durationMs: firstEventMs,
           eventType: env.type,
         },
@@ -3030,12 +3039,13 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   };
 
   // Per-run backend; a null column falls back to the deployment default.
-  const backendId = resolveBackendId(run.backend);
+  const requestedBackendLabel = run.backend ?? process.env.TASK_ORCH_AGENT_BACKEND ?? "pi";
   const backend = await timeRunnerPhase(
     "backend_load",
     () => getBackend(run.backend),
-    { provider: runnerProviderLabel(), fields: { runId: run.id, backend: backendId } }
+    { provider: runnerProviderLabel(), fields: { runId: run.id, backend: requestedBackendLabel } }
   );
+  const backendId = backend.id;
   const resumeToken = run.sdkSessionId ?? null;
   const turnArgs = {
     cwd,

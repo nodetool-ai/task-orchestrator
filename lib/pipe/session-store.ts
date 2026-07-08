@@ -30,6 +30,7 @@ export interface GetOrCreateOptions {
  * landed `completed`/`failed`/`budget_exhausted` are kept too.
  */
 function isDanglingRun(run: runs.RunRow): boolean {
+  if (run.goal === "<chat>" && run.status === "completed") return false;
   return (
     isTerminalStatus(run.status) &&
     run.status !== "idle" &&
