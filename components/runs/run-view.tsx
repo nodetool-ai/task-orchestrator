@@ -30,7 +30,6 @@ import type { SdkContentBlock, SdkMessageEnvelope } from "@/lib/sdk-message";
 import { SessionStatusPill } from "@/components/session-status-pill";
 import { RunMessage } from "@/components/runs/run-message";
 import { ToolGroup, type ToolInteraction } from "@/components/tool-group";
-import { segmentToolMessages } from "@/lib/tool-grouping";
 import { SystemEventRow } from "@/components/runs/system-event-row";
 import { EventDigestCard, type DigestEnvelope } from "@/components/runs/event-digest-card";
 import { InboxPanel } from "@/components/runs/inbox-panel";
@@ -756,17 +755,17 @@ export function RunView({
           </div>
         ) : (
           <div className="mx-auto max-w-3xl py-4">
-            {segmentToolMessages(visibleMessages).map((seg) =>
+            {segmentTranscript(visibleMessages).map((seg) =>
               seg.kind === "tools" ? (
                 <ToolGroup
-                  key={`tg-${seg.messages[0].id}`}
-                  createdAt={seg.messages[0].createdAt}
+                  key={seg.key}
+                  createdAt={seg.createdAt}
                   interactions={buildToolInteractions(seg.messages)}
                 />
               ) : seg.message.role === "system" ? (
                 seg.message.systemKind === "event_digest" ? (
                   <EventDigestCard
-                    key={seg.message.id}
+                    key={seg.key}
                     when={seg.message.createdAt ?? new Date()}
                     events={
                       (seg.message.systemPayload?.events as DigestEnvelope[]) ?? []
@@ -774,7 +773,7 @@ export function RunView({
                   />
                 ) : (
                   <SystemEventRow
-                    key={seg.message.id}
+                    key={seg.key}
                     when={seg.message.createdAt ?? new Date()}
                     kind={seg.message.systemKind ?? "info"}
                     payload={seg.message.systemPayload ?? {}}
@@ -783,7 +782,7 @@ export function RunView({
                 )
               ) : (
                 <RunMessage
-                  key={seg.message.id}
+                  key={seg.key}
                   role={seg.message.role}
                   content={seg.message.content}
                   createdAt={seg.message.createdAt}
@@ -950,6 +949,80 @@ function toUiMessage(m: MessageRow): UiMessage {
     // the JSON fallback for everything.
     ...(m.role === "system" ? extractSystemMeta(m.content) : {}),
   };
+}
+
+type TranscriptSegment =
+  | { kind: "message"; key: string; message: UiMessage }
+  | {
+      kind: "tools";
+      key: string;
+      createdAt?: Date;
+      messages: Array<{ id: number | string; content: SdkContentBlock[] }>;
+    };
+
+function segmentTranscript(messages: UiMessage[]): TranscriptSegment[] {
+  const out: TranscriptSegment[] = [];
+  let tools: Array<{
+    id: number | string;
+    content: SdkContentBlock[];
+    createdAt?: Date;
+  }> = [];
+
+  const flushTools = () => {
+    if (tools.length === 0) return;
+    out.push({
+      kind: "tools",
+      key: `tg-${tools[0].id}-${out.length}`,
+      createdAt: tools[0].createdAt,
+      messages: tools,
+    });
+    tools = [];
+  };
+
+  for (const message of messages) {
+    if (message.role === "system") {
+      flushTools();
+      out.push({ kind: "message", key: `m-${message.id}`, message });
+      continue;
+    }
+
+    let textBlocks: SdkContentBlock[] = [];
+    let part = 0;
+    const flushText = () => {
+      if (textBlocks.length === 0) return;
+      out.push({
+        kind: "message",
+        key: `m-${message.id}-${part}`,
+        message: { ...message, content: textBlocks },
+      });
+      part += 1;
+      textBlocks = [];
+    };
+
+    for (const block of message.content) {
+      if (isToolBlock(block)) {
+        flushText();
+        tools.push({
+          id: `${message.id}-${part}`,
+          content: [block],
+          createdAt: message.createdAt,
+        });
+        part += 1;
+      } else {
+        flushTools();
+        textBlocks.push(block);
+      }
+    }
+
+    flushText();
+  }
+
+  flushTools();
+  return out;
+}
+
+function isToolBlock(block: SdkContentBlock): boolean {
+  return block.type === "tool_use" || block.type === "tool_result";
 }
 
 function buildToolInteractions(
