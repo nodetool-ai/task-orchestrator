@@ -1,3 +1,19 @@
+// lib/chat-ai-loop.ts
+//
+// The lightweight pi-ai turn loop: an in-process replacement for runOneTurn
+// that drives @earendil-works/pi-ai's models().completeSimple() directly,
+// loading conversation context from Postgres and persisting each envelope as
+// it streams. No SDK session files, no Claude/pi backend harness, no worker
+// container — just the model + the orchestrator's server-side tool registry.
+//
+// Two run goals route through here today (see isLightweightPiChatRun /
+// isLightweightPiExecutorRun in lib/runs.ts):
+//   • <chat>   — ad-hoc assistant turns. Tools: orchestrator surface only.
+//   • <execute> — the plan executor. Tools: orchestrator + spawn + the
+//                 always-on event tools (timer__sleep, report_result, …) it
+//                 needs to drive its wake/park loop.
+// The loop body is identical for both; toolsForRun(run) picks the surface.
+
 import { asc, desc, eq } from "drizzle-orm";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import {
@@ -14,7 +30,11 @@ import {
 
 import { db } from "@/db";
 import { agentMessages } from "@/db/schema";
-import { ORCHESTRATOR_TOOLS, type OrchestratorContentBlock } from "@/lib/orchestrator-tools";
+import {
+  ORCHESTRATOR_TOOLS,
+  type OrchestratorContentBlock,
+  type OrchestratorTool,
+} from "@/lib/orchestrator-tools";
 import { parseProviderQualifiedModel } from "@/lib/model-id";
 import { assistantText, type SdkContentBlock } from "@/lib/sdk-message";
 import { runTransport } from "@/lib/worker";
@@ -24,7 +44,12 @@ import type { RunEnvelope } from "@/lib/pi-event-mapper";
 
 const DEFAULT_CHAT_MODEL = process.env.TASK_ORCH_AGENT_MODEL ?? "anthropic/claude-sonnet-4-6";
 const TOOL_PREFIX = "task_orch__";
-const DEFAULT_MAX_TOOL_ROUNDS = 8;
+const DEFAULT_CHAT_MAX_TOOL_ROUNDS = 8;
+// The executor drives a multi-step orchestration loop per wake (re-scan tasks,
+// start N children, arm watchdog, park) and routinely needs more rounds than a
+// chat turn. The watchdog parking tools keep a single wake bounded, but give it
+// real headroom so it never has to mid-turn truncate a scan/start/park sequence.
+const DEFAULT_EXECUTOR_MAX_TOOL_ROUNDS = 30;
 
 let modelsInstance: ReturnType<typeof builtinModels> | null = null;
 
@@ -33,17 +58,54 @@ function models() {
   return modelsInstance;
 }
 
-function maxToolRounds(): number {
-  const raw = Number(process.env.TASK_ORCH_CHAT_MAX_TOOL_ROUNDS);
-  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_MAX_TOOL_ROUNDS;
+function maxToolRounds(run: RunRow): number {
+  const isExecutor = run.goal === "<execute>";
+  const envVar = isExecutor
+    ? "TASK_ORCH_EXECUTOR_MAX_TOOL_ROUNDS"
+    : "TASK_ORCH_CHAT_MAX_TOOL_ROUNDS";
+  const fallback = isExecutor
+    ? DEFAULT_EXECUTOR_MAX_TOOL_ROUNDS
+    : DEFAULT_CHAT_MAX_TOOL_ROUNDS;
+  const raw = Number(process.env[envVar]);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
 }
 
-function chatTools(): Tool[] {
-  return ORCHESTRATOR_TOOLS.map((tool) => ({
-    name: `${TOOL_PREFIX}${tool.name}`,
-    description: tool.description,
-    parameters: tool.parameters,
-  }));
+/** One tool the lightweight loop exposes to the model: the name the model sees
+ *  (`modelName`) and the bare registry name we dispatch to via the transport
+ *  (`registryName`). Orchestrator tools carry a `task_orch__` prefix on the wire
+ *  but a bare name in the registry; events/spawn/planning tools are stored under
+ *  the same prefixed name in both places. */
+interface LightweightToolEntry {
+  tool: Tool;
+  registryName: string;
+}
+
+async function toolsForRun(run: RunRow): Promise<LightweightToolEntry[]> {
+  const categories: OrchestratorTool[] = [...ORCHESTRATOR_TOOLS];
+  // The plan executor also needs the always-on event tools (timer__sleep,
+  // report_result, raise, ask_parent, answer_question, events__poll) to drive
+  // its wake/park loop, plus the spawn tools (spawn__get_run,
+  // spawn__append_message) for nudging children. Planning is unused at execute
+  // time. Chat stays orchestrator-only — its turns are short and synchronous.
+  if (run.goal === "<execute>") {
+    const [events, spawn] = await Promise.all([
+      import("./extensions/events"),
+      import("./extensions/spawn"),
+    ]);
+    categories.push(...events.EVENT_TOOLS, ...spawn.SPAWN_TOOLS);
+  }
+  return categories.map((tool) => {
+    const isOrchestrator = !tool.name.includes("__");
+    const modelName = isOrchestrator ? `${TOOL_PREFIX}${tool.name}` : tool.name;
+    return {
+      tool: {
+        name: modelName,
+        description: tool.description,
+        parameters: tool.parameters,
+      },
+      registryName: tool.name,
+    };
+  });
 }
 
 type PiSdkContentBlock = SdkContentBlock & { piMessage?: Message };
@@ -323,18 +385,19 @@ async function executeToolCall(args: {
   run: RunRow;
   author: string;
   tools: Tool[];
+  dispatch: Map<string, string>;
   call: ToolCall;
 }): Promise<ToolResultMessage> {
-  const { run, author, tools, call } = args;
+  const { run, author, tools, dispatch, call } = args;
   const now = Date.now();
 
   try {
     const params = validateToolCall(tools, call);
-    if (!call.name.startsWith(TOOL_PREFIX)) {
-      throw new Error(`Unknown chat tool prefix for ${call.name}`);
+    const registryName = dispatch.get(call.name);
+    if (!registryName) {
+      throw new Error(`Unknown lightweight tool: ${call.name}`);
     }
-    const bareName = call.name.slice(TOOL_PREFIX.length);
-    const result = await (await runTransport()).callTool(run.id, bareName, params, {
+    const result = await (await runTransport()).callTool(run.id, registryName, params, {
       author,
       defaultTaskId: run.taskId ?? undefined,
       defaultPlanId: run.planId ?? undefined,
@@ -385,7 +448,9 @@ export async function runChatAiTurn(args: {
   await annotateCurrentUserMessage(run.id, inputText);
 
   const contextMessages = await listContextMessages(run, inputText);
-  const tools = chatTools();
+  const entries = await toolsForRun(run);
+  const tools = entries.map((entry) => entry.tool);
+  const dispatch = new Map(entries.map((entry) => [entry.tool.name, entry.registryName]));
   const model = await resolveModel(run.model ?? DEFAULT_CHAT_MODEL);
   const reasoning = (run.thinkingLevel ?? persona.thinkingLevel ?? undefined) as ThinkingLevel | undefined;
   const context: Context = {
@@ -402,7 +467,7 @@ export async function runChatAiTurn(args: {
   let sawCost = false;
   let turns = 0;
 
-  for (let round = 0; round < maxToolRounds(); round += 1) {
+  for (let round = 0; round < maxToolRounds(run); round += 1) {
     if (abort.signal.aborted) throw new Error("Turn aborted");
     const assistant = await models().completeSimple(model, context, {
       reasoning,
@@ -446,7 +511,7 @@ export async function runChatAiTurn(args: {
 
     for (const call of calls) {
       if (abort.signal.aborted) throw new Error("Turn aborted");
-      const toolResult = await executeToolCall({ run, author, tools, call });
+      const toolResult = await executeToolCall({ run, author, tools, dispatch, call });
       context.messages.push(toolResult);
       const blocks = toSdkBlocks(toolResult);
       const persisted = await persistUiMessage(run.id, "tool", blocks, toolResult);
@@ -454,5 +519,5 @@ export async function runChatAiTurn(args: {
     }
   }
 
-  throw new Error(`Chat exceeded ${maxToolRounds()} tool rounds`);
+  throw new Error(`Lightweight turn exceeded ${maxToolRounds(run)} tool rounds`);
 }

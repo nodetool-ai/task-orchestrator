@@ -102,6 +102,12 @@ calls, tool results, and text/image content without a second chat-message table.
 The frontend ignores `piMessage`; the chat server loads it from Postgres each
 turn rather than relying on process-local SDK session files.
 
+The plan executor (goal=`<execute>`) uses the same lightweight loop
+(`lib/chat-ai-loop.ts`) by default: its kickoff prompt is persisted as a
+`user` row and each wake drives `@earendil-works/pi-ai` directly with the
+orchestrator + spawn + event tool surface. Set
+`TASK_ORCH_LIGHTWEIGHT_EXECUTOR=0` to fall back to the full backend harness.
+
 personas                 persona registry (seeded from lib/personas/*.ts)
   id                  TEXT  PK              e.g. 'reviewer', 'implementor'
   name                TEXT  NOT NULL        display name

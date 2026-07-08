@@ -53,12 +53,15 @@ async function insertRun(
 }
 
 describe("executor persona", () => {
-  it("is registered with the spawn profile", () => {
+  it("is registered with the orchestrator + spawn profile", () => {
     const p = PERSONAS.find((x) => x.id === "executor");
     expect(p).toBeDefined();
     expect(p!.toolsProfile).toContain("orchestrator");
-    expect(p!.toolsProfile).toContain("gh_pr");
     expect(p!.toolsProfile).toContain("spawn");
+    // The executor only manages tasks and orchestrates the plan — it has no
+    // gh_pr or repo tools. Children own the PR/repo work end-to-end.
+    expect(p!.toolsProfile).not.toContain("gh_pr");
+    expect(p!.toolsProfile).not.toContain("repo_read");
   });
 });
 

@@ -23,6 +23,11 @@ const h = vi.hoisted(() => ({
   snapshot: null as null | (() => Promise<Array<{ role: string }>>),
 }));
 
+// Mock BOTH executor turn paths so a single file can cover them. The
+// runOneTurn path (getBackend.runTurn) is used when
+// TASK_ORCH_LIGHTWEIGHT_EXECUTOR=0; the lightweight loop (runChatAiTurn) is
+// the default. Each implementation mirrors the other's streaming shape so the
+// mid-turn snapshot captures the same "kickoff + first assistant" state.
 vi.mock("../lib/agent-backend", () => ({
   getBackend: async () => ({
     id: "pi",
@@ -66,6 +71,39 @@ vi.mock("../lib/agent-backend", () => ({
   }),
 }));
 
+vi.mock("../lib/chat-ai-loop", () => ({
+  // Mirror getBackend.runTurn's streaming shape: persist a 'system'/tool pair
+  // via the transport so the snapshot sees the same "kickoff + first assistant"
+  // state, then return the same final result. The lightweight path emits one
+  // AppendStreamEvent per assistant / tool-result envelope.
+  runChatAiTurn: async ({ run }: { run: { id: number } }) => {
+    const { runTransport } = await import("../lib/worker");
+    const transport = await runTransport();
+    const firstBlocks = [{ type: "text", text: "starting task A" }];
+    const firstMessage = await transport.appendMessage(run.id, "agent", firstBlocks as any);
+    // Page load snapshot after the first assistant envelope is persisted.
+    if (h.snapshot) h.midTurn = await h.snapshot();
+    const toolBlocks = [
+      { type: "tool_result", tool_use_id: "t1", content: "ok" },
+    ];
+    await transport.appendMessage(run.id, "tool", toolBlocks as any);
+    const finalBlocks = [{ type: "text", text: "task A merged" }];
+    const finalMessage = await transport.appendMessage(run.id, "agent", finalBlocks as any);
+    return {
+      events: [
+        { type: "sdk", sdk: { type: "assistant", message: { content: firstBlocks } }, message: firstMessage },
+        { type: "sdk", sdk: { type: "user", message: { content: toolBlocks } } },
+        { type: "sdk", sdk: { type: "assistant", message: { content: finalBlocks } }, message: finalMessage },
+      ],
+      summary: "plan done",
+      totalCostUsd: 0.01,
+      inputTokens: 10,
+      outputTokens: 20,
+      turns: 1,
+    };
+  },
+}));
+
 vi.mock("../auth", () => ({
   auth: async () => ({ user: { email: "test@example.com" } }),
 }));
@@ -75,6 +113,11 @@ import * as runs from "../lib/runs";
 import { GET as getLiveSessions } from "../app/api/live-sessions/route";
 
 beforeEach(async () => {
+  // This file mocks lib/agent-backend's runTurn — the runOneTurn / full
+  // SDK harness path. Disable the lightweight executor loop so executors
+  // route through that harness here; the lightweight path has its own
+  // persistence test below.
+  process.env.TASK_ORCH_LIGHTWEIGHT_EXECUTOR = "0";
   await seedPersonas();
   await db.delete(agentMessages);
   await db.delete(agentEvents);
@@ -121,6 +164,38 @@ describe("plan-executor run history", () => {
     const msgs = await runs.listMessages(run.id);
     expect(msgs.map((m) => m.role)).toEqual(["system", "agent", "tool", "agent"]);
     // The kickoff prompt anchors the transcript.
+    expect(JSON.stringify(msgs[0].content)).toContain(plan.id);
+    expect((await runs.get(run.id))!.status).toBe("completed");
+  });
+});
+
+// Lightweight executor loop (the default): same mid-turn persistence guarantee
+// as the runOneTurn path above, but driving @earendil-works/pi-ai directly via
+// runChatAiTurn. The kickoff prompt lands as a 'user' row (the loop's context
+// loader keys on the latest user row) instead of 'system'.
+describe("plan-executor run history (lightweight loop)", () => {
+  beforeEach(() => {
+    process.env.TASK_ORCH_LIGHTWEIGHT_EXECUTOR = "1";
+  });
+
+  it("persists the kickoff prompt and each streamed envelope mid-turn", async () => {
+    const plan = await repo.createPlan({ title: "Ship Light", date: "2026-07-02" });
+    h.snapshot = async () => {
+      const r = (await runs.list({ goal: "<execute>" }))[0];
+      return r ? (await runs.listMessages(r.id)).map((m) => ({ role: m.role })) : [];
+    };
+
+    const run = await runs.create({ goal: "<execute>", planId: plan.id });
+    await waitForTerminal(run.id);
+
+    // Mid-turn the DB already holds the kickoff prompt (user) and the first
+    // assistant envelope — same guarantee as the runOneTurn path.
+    expect(h.midTurn).not.toBeNull();
+    expect(h.midTurn!.map((m) => m.role)).toEqual(["user", "agent"]);
+
+    const msgs = await runs.listMessages(run.id);
+    // user kickoff, assistant, tool result, assistant final.
+    expect(msgs.map((m) => m.role)).toEqual(["user", "agent", "tool", "agent"]);
     expect(JSON.stringify(msgs[0].content)).toContain(plan.id);
     expect((await runs.get(run.id))!.status).toBe("completed");
   });

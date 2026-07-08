@@ -67,9 +67,10 @@ export function buildExecutePrompt(plan: PlanFull, tasks: TaskFull[]): string {
   const lines: string[] = [
     `# Execute plan ${plan.id}: ${plan.title}`,
     "",
-    "Drive this plan to completion: implement each task, review its PR, auto-fix on",
-    "request_changes (max 3 attempts), and squash-merge approved PRs into the default",
-    "branch. Run independent tasks in parallel — start every ready task before awaiting.",
+    "Drive this plan to completion: spawn one implementor per task (each child",
+    "implements, opens its own PR, and arms GitHub auto-merge so a green CI run",
+    "merges it). Run independent tasks in parallel — start every ready task",
+    "before parking.",
     "",
     `## Tasks (${open.length} open of ${tasks.length})`,
   ];

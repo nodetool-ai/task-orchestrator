@@ -133,6 +133,29 @@ function isLightweightPiChatRun(run: { goal: string; backend: "pi" | "claude" | 
   return run.goal === "<chat>" && (run.backend == null || run.backend === "pi") && lightweightChatsEnabled();
 }
 
+// Same flag gates the lightweight loop for the plan executor. The executor's
+// job is purely task orchestration (re-scan list_tasks, start children, park
+// on timer__sleep) — it never writes code or reads PR diffs itself, so it
+// gains nothing from the heavy SDK harness and loses the latency of spawning
+// a backend session per wake. Set TASK_ORCH_LIGHTWEIGHT_EXECUTOR=0 to fall
+// back to runOneTurn + the full backend (Claude session files, etc.).
+function lightweightExecutorEnabled(): boolean {
+  const v = process.env.TASK_ORCH_LIGHTWEIGHT_EXECUTOR;
+  return v == null || (v !== "0" && v.toLowerCase() !== "false");
+}
+
+function isLightweightPiExecutorRun(run: {
+  goal: string;
+  backend: "pi" | "claude" | null;
+}): boolean {
+  return (
+    run.goal === "<execute>" &&
+    (run.backend == null || run.backend === "pi") &&
+    lightweightChatsEnabled() &&
+    lightweightExecutorEnabled()
+  );
+}
+
 const SANDBOX_OPTS = {
   enabled: true as const,
   autoAllowBashIfSandboxed: true as const,
@@ -495,7 +518,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   const toolsProfile =
     input.toolsProfile ??
     (goal === "<execute>"
-      ? "orchestrator,gh_pr,repo_read,spawn"
+      ? "orchestrator,spawn"
       : "orchestrator,repo_write");
   const initialStatus: SessionStatus =
     input.defer || goal === "<chat>" || goal === "<plan>" ? "idle" : "pending";
@@ -2203,17 +2226,54 @@ async function runExecute(
       // pump sweep / next turn retries pending events
     }
     // Persist the kickoff prompt so a page load shows what this executor was
-    // asked to do — the executor is driven server-side, so unlike append()
-    // there is no user message row anchoring the transcript.
-    await persistMessage(runId, "system", [{ type: "text", text: prompt }]);
-    const result = await runOneTurn({
-      run,
-      cwd,
-      prompt,
-      abort,
-      author: "claude-executor",
-      onSdk: (m) => bus.emit("event", { type: "sdk", sdk: m }),
-    });
+    // asked to do. For the lightweight path the role MUST be 'user' — the
+    // loop's context loader skips system rows, and annotateCurrentUserMessage
+    // rewrites the latest user row in place to embed the pi-message metadata.
+    // The non-lightweight path keeps the historical 'system' role since the
+    // backend receives the prompt directly and the row is display-only.
+    const lightweight = isLightweightPiExecutorRun(run);
+    await persistMessage(
+      runId,
+      lightweight ? "user" : "system",
+      [{ type: "text", text: prompt }]
+    );
+
+    let result: {
+      sdkSessionId: string | null;
+      totalCostUsd: number | null;
+      inputTokens: number | null;
+      outputTokens: number | null;
+    };
+    if (lightweight) {
+      // Drive the in-process pi-ai loop instead of the SDK harness: same
+      // turn-end contract (parkReason/result are written by the event tools
+      // via the transport), no per-worker session files, lower latency.
+      const { runChatAiTurn } = await import("./chat-ai-loop");
+      const loopResult = await runChatAiTurn({
+        run,
+        inputText: prompt,
+        author: "claude-executor",
+        abort,
+      });
+      for (const event of loopResult.events) {
+        if (event.sdk) bus.emit("event", { type: "sdk", sdk: event.sdk });
+      }
+      result = {
+        sdkSessionId: null,
+        totalCostUsd: loopResult.totalCostUsd,
+        inputTokens: loopResult.inputTokens,
+        outputTokens: loopResult.outputTokens,
+      };
+    } else {
+      result = await runOneTurn({
+        run,
+        cwd,
+        prompt,
+        abort,
+        author: "claude-executor",
+        onSdk: (m) => bus.emit("event", { type: "sdk", sdk: m }),
+      });
+    }
 
     if (abort.signal.aborted) {
       runners.delete(runId);
