@@ -42,9 +42,15 @@ describe("runs.create backend column", () => {
     ).rejects.toMatchObject({ status: 400 });
   });
 
+  it("rejects non-pi chat backends", async () => {
+    await expect(
+      runs.create({ goal: "<chat>", backend: "claude", model: "anthropic/claude-sonnet-4-6", defer: true })
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
   it("rejects the claude backend with a non-Anthropic model (can never run)", async () => {
     await expect(
-      runs.create({ goal: "<chat>", backend: "claude", model: "openai/gpt-5", defer: true })
+      runs.create({ goal: "<implement>", backend: "claude", model: "openai/gpt-5", defer: true })
     ).rejects.toMatchObject({ status: 400 });
     // The same model on pi is fine.
     const ok = await runs.create({ goal: "<chat>", backend: "pi", model: "openai/gpt-5", defer: true });

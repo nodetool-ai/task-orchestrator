@@ -11,6 +11,7 @@ describe("driveDispatchedRun", () => {
   it("runs a chat turn per pre-persisted user message, then idles out", async () => {
     // Shrink the idle timeout so the loop exits promptly after draining.
     process.env.TASK_ORCH_CHAT_IDLE_MS = "150";
+    process.env.TASK_ORCH_LIGHTWEIGHT_CHATS = "0";
     vi.spyOn(backend, "getBackend").mockResolvedValue({
       id: "fake",
       listProviders: () => [],
@@ -49,6 +50,7 @@ describe("driveDispatchedRun", () => {
     expect((await get(run.id))!.workerScope).toBeNull();
 
     delete process.env.TASK_ORCH_CHAT_IDLE_MS;
+    delete process.env.TASK_ORCH_LIGHTWEIGHT_CHATS;
     vi.restoreAllMocks();
   });
 

@@ -5,10 +5,10 @@ import { seedPersonas } from "../db/seed-personas";
 import * as chat from "../lib/chat";
 import { isImplementWorktree, worktreeBranchName } from "../lib/runs";
 
-// Every chat session runs in its own git worktree (filesystem isolation) instead
-// of the shared repo checkout. Chat runs have no task, so the worktree machinery
-// must work taskless: a `claude/chat-<id>` branch, no auto-push, no PR, and an
-// `idle`/resumable lifecycle.
+// Chat sessions are lightweight by default: no git worktree, no branch, no PR.
+// Callers that need filesystem isolation can still request a taskless worktree:
+// a `claude/chat-<id>` branch, no auto-push, no PR, and an `idle`/resumable
+// lifecycle.
 
 beforeEach(async () => {
   await seedPersonas();
@@ -18,14 +18,15 @@ beforeEach(async () => {
 });
 
 describe("createChat cwd strategy", () => {
-  it("defaults to 'worktree' so every chat (web + Discord) is isolated", async () => {
+  it("defaults to 'none' so ordinary chats stay lightweight", async () => {
     const c = await chat.createChat(null, "New chat", null);
-    expect(c.cwdStrategy).toBe("worktree");
+    expect(c.cwdStrategy).toBe("none");
+    expect(c.backend).toBe("pi");
   });
 
   it("honors an explicit override", async () => {
-    const c = await chat.createChat(null, "scratch", null, "none");
-    expect(c.cwdStrategy).toBe("none");
+    const c = await chat.createChat(null, "scratch", null, "worktree");
+    expect(c.cwdStrategy).toBe("worktree");
   });
 });
 

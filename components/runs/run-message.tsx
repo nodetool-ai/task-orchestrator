@@ -101,6 +101,16 @@ function ContentBlock({
   if (block.type === "tool_use") {
     return <ToolUseBlock block={block} />;
   }
+  if (block.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string") {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={`data:${block.mimeType};base64,${block.data}`}
+        alt=""
+        className="max-h-80 max-w-full rounded-md border border-border/60 object-contain"
+      />
+    );
+  }
   return null;
 }
 

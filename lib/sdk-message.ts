@@ -11,6 +11,10 @@ export interface SdkContentBlock {
   input?: unknown;
   content?: unknown;
   tool_use_id?: string;
+  data?: string;
+  mimeType?: string;
+  /** Raw @earendil-works/pi-ai Message metadata for lightweight chat context. */
+  piMessage?: unknown;
 }
 
 export interface SdkMessageEnvelope {

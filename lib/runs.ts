@@ -17,9 +17,10 @@
 //   1. runs.create() inserts the row, optionally kicks off the implement-style
 //      worker (worktree → first agent turn → push → PR → idle/completed).
 //   2. runs.append() persists a new user/system message and, if the run is
-//      idle, resumes the SDK session with that message as the prompt.
-//      Concurrent appends on the same run are serialised by an in-process
-//      lock so the SDK session never races against itself.
+//      idle, drives one turn. Lightweight pi chat uses a direct pi-ai loop;
+//      implementation/review runs use the configured agent backend. Concurrent
+//      appends on the same run are serialised by an in-process lock so turns
+//      never race against themselves.
 //   3. On stream end the run lands at `idle` (chat-style) or `completed`
 //      (implement-style after PR). Errors → `failed`. Budget caps hit →
 //      `budget_exhausted`. User cancellation → `cancelled`.
@@ -121,6 +122,15 @@ const KEEP_WORKTREES = !!process.env.TASK_ORCH_KEEP_WORKTREES;
 
 function runnerProviderLabel(): "local" | "fly" {
   return process.env.TASK_ORCH_RUNNER === "fly" ? "fly" : "local";
+}
+
+function lightweightChatsEnabled(): boolean {
+  const v = process.env.TASK_ORCH_LIGHTWEIGHT_CHATS;
+  return v == null || (v !== "0" && v.toLowerCase() !== "false");
+}
+
+function isLightweightPiChatRun(run: { goal: string; backend: "pi" | "claude" | null }): boolean {
+  return run.goal === "<chat>" && (run.backend == null || run.backend === "pi") && lightweightChatsEnabled();
 }
 
 const SANDBOX_OPTS = {
@@ -551,17 +561,23 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   }
   const effectiveModel = input.model ?? DEFAULT_MODEL;
 
-  // Per-run backend choice. Normalize/validate eagerly so a typo'd backend is
-  // a 400 here rather than a failed first turn; null stays null (deployment
-  // default at turn time). An explicit 'claude' pick is additionally checked
-  // against the model's provider — the Claude backend is Anthropic-only, and
-  // this combination can never run.
+  // Per-run backend choice. Ad-hoc lightweight chat runs through pi-ai directly:
+  // a null backend is allowed for legacy/deployment-default rows, but an
+  // explicit chat backend must be pi. Other run kinds normalize/validate the
+  // requested backend eagerly; null stays null (deployment default at turn time).
+  // An explicit 'claude' pick is additionally checked against the model's
+  // provider — the Claude backend is Anthropic-only, and this combination can
+  // never run.
   let backend: "pi" | "claude" | null = null;
-  if (input.backend != null) {
+  const requestedBackend = input.backend;
+  if (requestedBackend != null) {
     try {
-      backend = resolveBackendId(input.backend);
+      backend = resolveBackendId(requestedBackend);
     } catch (err) {
       throw new repo.RepoError(err instanceof Error ? err.message : String(err), 400);
+    }
+    if (goal === "<chat>" && backend !== "pi") {
+      throw new repo.RepoError("Chat runs only support the 'pi' backend.", 400);
     }
     const { provider } = parseProviderQualifiedModel(effectiveModel);
     if (backend === "claude" && provider !== "anthropic") {
@@ -904,6 +920,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     if (
       isTerminalStatus(run.status) &&
       run.status !== "idle" &&
+      !(run.goal === "<chat>" && run.status === "completed") &&
       !isResumableWorktreeRun(run.status, run.cwdStrategy)
     ) {
       const why =
@@ -1010,6 +1027,56 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       if (digest) effectivePrompt = `${digest}\n\n${input.text}`;
     } catch {
       // pump sweep / next turn retries pending events
+    }
+
+    if (isLightweightPiChatRun(run)) {
+      try {
+        const { runChatAiTurn } = await import("./chat-ai-loop");
+        const chatResult = await runChatAiTurn({
+          run,
+          inputText: effectivePrompt,
+          author,
+          abort,
+        });
+
+        if (abort.signal.aborted) {
+          await repairAbortedRun(input.runId);
+          yield { type: "done" };
+          return;
+        }
+
+        for (const event of chatResult.events) {
+          if (event.sdk) bus.emit("event", { type: "sdk", sdk: event.sdk });
+          yield event;
+        }
+
+        await (await runTransport()).applyStatus(run.id, "idle", {
+          set: {
+            totalCostUsd:
+              chatResult.totalCostUsd == null
+                ? run.totalCostUsd
+                : (run.totalCostUsd ?? 0) + chatResult.totalCostUsd,
+            inputTokens: (run.inputTokens ?? 0) + (chatResult.inputTokens ?? 0),
+            outputTokens: (run.outputTokens ?? 0) + (chatResult.outputTokens ?? 0),
+            completedAt: null,
+          },
+          guard: "not-cancelled-closed",
+          retries: FINALIZE_RETRIES,
+        });
+
+        yield { type: "done" };
+        return;
+      } catch (err) {
+        if (abort.signal.aborted) {
+          await repairAbortedRun(input.runId);
+          yield { type: "done" };
+          return;
+        }
+        const msg = describe(err);
+        await setError(run.id, msg);
+        yield { type: "error", error: msg };
+        return;
+      }
     }
 
     let promptForTurn = effectivePrompt;
@@ -2577,6 +2644,15 @@ export async function* sendMessageToRun(opts: {
     yield { type: "error", error: `Run ${runId} not found` };
     return;
   }
+  // Chat runs are latency-sensitive and do not need the implementation runner's
+  // branch/container/PR lifecycle. Keep them in this web process by default so
+  // they can use the same backend + orchestrator tools without paying worker
+  // startup cost. Set TASK_ORCH_LIGHTWEIGHT_CHATS=0 to restore worker-backed
+  // chat sessions in deployments that require that isolation boundary.
+  if (isLightweightPiChatRun(run)) {
+    yield* append({ runId, role, text, author, abort });
+    return;
+  }
   // Remote runner deployments (Docker worker image or Fly Machines provider)
   // force turns through workers. Plain dev/test with no remote runner keeps the
   // old in-process streaming path.
@@ -2925,7 +3001,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
         provider: runnerProviderLabel(),
         runId: run.id,
         fields: {
-          backend: resolveBackendId(run.backend),
+          backend: backend.id,
           durationMs: firstEventMs,
           eventType: env.type,
         },
@@ -2963,12 +3039,13 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   };
 
   // Per-run backend; a null column falls back to the deployment default.
-  const backendId = resolveBackendId(run.backend);
+  const requestedBackendLabel = run.backend ?? process.env.TASK_ORCH_AGENT_BACKEND ?? "pi";
   const backend = await timeRunnerPhase(
     "backend_load",
     () => getBackend(run.backend),
-    { provider: runnerProviderLabel(), fields: { runId: run.id, backend: backendId } }
+    { provider: runnerProviderLabel(), fields: { runId: run.id, backend: requestedBackendLabel } }
   );
+  const backendId = backend.id;
   const resumeToken = run.sdkSessionId ?? null;
   const turnArgs = {
     cwd,
@@ -4187,7 +4264,11 @@ export function hydrateMessage(row: typeof agentMessages.$inferSelect): MessageR
     content = [{ type: "text", text: row.content }];
   }
   const role = (row.role as MessageRow["role"]) ?? "system";
-  return { id: row.id, runId: row.runId, role, content, createdAt: row.createdAt };
+  return { id: row.id, runId: row.runId, role, content: stripPiMessage(content), createdAt: row.createdAt };
+}
+
+function stripPiMessage(content: SdkContentBlock[]): SdkContentBlock[] {
+  return content.map(({ piMessage: _piMessage, ...block }) => block);
 }
 
 /** Bridge to AgentSessionFull for legacy consumers (lib/agent.ts shim). */

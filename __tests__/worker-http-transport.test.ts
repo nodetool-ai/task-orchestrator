@@ -214,6 +214,7 @@ describe("end-to-end HTTP worker", () => {
     await dbTransport.appendMessage(run.id, "user", [{ type: "text", text: "hi over http" }]);
 
     process.env.TASK_ORCH_CHAT_IDLE_MS = "150";
+    process.env.TASK_ORCH_LIGHTWEIGHT_CHATS = "0";
     process.env.TASK_ORCH_INSIDE_WORKER = "1";
     process.env.TASK_ORCH_WORKER_API_URL = baseUrl;
     process.env.TASK_ORCH_WORKER_TOKEN = mintWorkerToken(run.id);
@@ -242,6 +243,7 @@ describe("end-to-end HTTP worker", () => {
     } finally {
       vi.restoreAllMocks();
       delete process.env.TASK_ORCH_CHAT_IDLE_MS;
+      delete process.env.TASK_ORCH_LIGHTWEIGHT_CHATS;
       delete process.env.TASK_ORCH_INSIDE_WORKER;
       delete process.env.TASK_ORCH_WORKER_API_URL;
       delete process.env.TASK_ORCH_WORKER_TOKEN;

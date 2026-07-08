@@ -94,6 +94,14 @@ agent_messages           persisted assistant/tool/user message blocks
   content     TEXT     JSON array of content blocks
   created_at  INTEGER  ms epoch
 
+For ad-hoc pi chat, `agent_messages` remains the UI/streaming projection.
+The same row is also the model context: lightweight chat stores raw pi-ai
+`Message` metadata on the first content block as `piMessage`, preserving
+assistant provider/model, response id, usage, stop reason, diagnostics, tool
+calls, tool results, and text/image content without a second chat-message table.
+The frontend ignores `piMessage`; the chat server loads it from Postgres each
+turn rather than relying on process-local SDK session files.
+
 personas                 persona registry (seeded from lib/personas/*.ts)
   id                  TEXT  PK              e.g. 'reviewer', 'implementor'
   name                TEXT  NOT NULL        display name

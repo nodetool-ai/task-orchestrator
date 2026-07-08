@@ -243,6 +243,7 @@ export interface ChatRow {
   title: string;
   cwdStrategy: CwdStrategy;
   model: string | null;
+  backend: "pi" | "claude" | null;
   sdkSessionId: string | null;
   totalCostUsd: number | null;
   inputTokens: number | null;

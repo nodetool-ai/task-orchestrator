@@ -9,11 +9,35 @@
 // deferral for child CREATION (docs/nested-machine-dispatch.md).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("../lib/chat-ai-loop", () => ({
+  runChatAiTurn: vi.fn(async ({ run }: any) => {
+    const { runTransport } = await import("../lib/worker");
+    const blocks = [{ type: "text", text: "hi" }];
+    const message = await (await runTransport()).appendMessage(run.id, "agent", blocks);
+    return {
+      events: [
+        {
+          type: "sdk",
+          sdk: { type: "assistant", message: { content: blocks } },
+          message,
+        },
+      ],
+      summary: "hi",
+      totalCostUsd: null,
+      inputTokens: 0,
+      outputTokens: 0,
+      turns: 1,
+    };
+  }),
+}));
+
 import { and, desc, eq } from "drizzle-orm";
 import { db } from "../db";
 import { agentEvents, agentSessions } from "../db/schema";
 import { create, get, sendMessageToRun } from "../lib/runs";
 import * as dispatch from "../lib/run-dispatch";
+import * as chatLoop from "../lib/chat-ai-loop";
 
 const ENV_KEYS = [
   "TASK_ORCH_WORKER_ALLOW_DB",
@@ -22,6 +46,7 @@ const ENV_KEYS = [
   "TASK_ORCH_RUNNER",
   "TASK_ORCH_WORKER_IMAGE",
   "TASK_ORCH_DETACHED_RUNS",
+  "TASK_ORCH_LIGHTWEIGHT_CHATS",
 ] as const;
 let saved: Record<string, string | undefined>;
 
@@ -108,5 +133,26 @@ describe("sendMessageToRun on the server (unchanged behavior)", () => {
 
     expect(spy).toHaveBeenCalledWith(run.id);
     expect((await get(run.id))?.status).toBe("completed"); // parking is worker-only
+  });
+
+  it("keeps chat turns in-process even when remote runners are enabled", async () => {
+    process.env.TASK_ORCH_WORKER_IMAGE = "orch-worker:test";
+    process.env.TASK_ORCH_DETACHED_RUNS = "1";
+    const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
+    const run = await create({ goal: "<chat>", defer: true });
+
+    const abort = new AbortController();
+    const frames = [];
+    for await (const ev of sendMessageToRun({ runId: run.id, role: "user", text: "hello", abort })) {
+      frames.push(ev.type);
+      if (ev.type === "done" || ev.type === "error") break;
+    }
+
+    expect(frames).toContain("user_message");
+    expect(frames).toContain("sdk");
+    expect(frames).toContain("done");
+    expect(spy).not.toHaveBeenCalled();
+    expect(chatLoop.runChatAiTurn).toHaveBeenCalled();
+    expect((await get(run.id))?.status).toBe("idle");
   });
 });
