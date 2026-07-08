@@ -28,10 +28,9 @@ import { isTerminalStatus, type SessionStatus } from "@/lib/types";
 import type { RunRow, MessageRow } from "@/lib/runs";
 import type { SdkContentBlock, SdkMessageEnvelope } from "@/lib/sdk-message";
 import { SessionStatusPill } from "@/components/session-status-pill";
-import { RunMessage, ToolResultBlocks, ToolUseBlock } from "@/components/runs/run-message";
-import { ToolGroup } from "@/components/tool-group";
+import { RunMessage } from "@/components/runs/run-message";
+import { ToolGroup, type ToolInteraction } from "@/components/tool-group";
 import { segmentToolMessages } from "@/lib/tool-grouping";
-import { humanizeToolName } from "@/lib/builtin-tools";
 import { SystemEventRow } from "@/components/runs/system-event-row";
 import { EventDigestCard, type DigestEnvelope } from "@/components/runs/event-digest-card";
 import { InboxPanel } from "@/components/runs/inbox-panel";
@@ -361,14 +360,14 @@ export function RunView({
       if (blocks.length === 0) return;
       setMessages((prev) => [
         ...prev,
-        { id: nextTmpId(), role: "agent", content: blocks },
+        { id: nextTmpId(), role: "agent", content: blocks, createdAt: new Date() },
       ]);
     } else if (m.type === "user" && m.message?.content) {
       const toolResults = m.message.content.filter((b) => b.type === "tool_result");
       if (toolResults.length === 0) return;
       setMessages((prev) => [
         ...prev,
-        { id: nextTmpId(), role: "tool", content: toolResults },
+        { id: nextTmpId(), role: "tool", content: toolResults, createdAt: new Date() },
       ]);
     }
   }
@@ -403,7 +402,7 @@ export function RunView({
     const tmpId = nextTmpId();
     setMessages((prev) => [
       ...prev,
-      { id: tmpId, role: "user", content: [{ type: "text", text }] },
+      { id: tmpId, role: "user", content: [{ type: "text", text }], createdAt: new Date() },
     ]);
 
     // If the send fails before the server confirms it persisted the message
@@ -761,27 +760,9 @@ export function RunView({
               seg.kind === "tools" ? (
                 <ToolGroup
                   key={`tg-${seg.messages[0].id}`}
-                  count={seg.toolCount}
-                  toolName={
-                    seg.toolCount === 1
-                      ? humanizeToolName(
-                          seg.messages
-                            .flatMap((m) => m.content)
-                            .find((b) => b.type === "tool_use")?.name
-                        )
-                      : undefined
-                  }
-                >
-                  {seg.messages.flatMap((m) =>
-                    m.content.map((b, bi) =>
-                      b.type === "tool_use" ? (
-                        <ToolUseBlock key={`${m.id}-${bi}`} block={b} />
-                      ) : b.type === "tool_result" ? (
-                        <ToolResultBlocks key={`${m.id}-${bi}`} blocks={[b]} />
-                      ) : null
-                    )
-                  )}
-                </ToolGroup>
+                  createdAt={seg.messages[0].createdAt}
+                  interactions={buildToolInteractions(seg.messages)}
+                />
               ) : seg.message.role === "system" ? (
                 seg.message.systemKind === "event_digest" ? (
                   <EventDigestCard
@@ -805,6 +786,7 @@ export function RunView({
                   key={seg.message.id}
                   role={seg.message.role}
                   content={seg.message.content}
+                  createdAt={seg.message.createdAt}
                 />
               )
             )}
@@ -968,6 +950,60 @@ function toUiMessage(m: MessageRow): UiMessage {
     // the JSON fallback for everything.
     ...(m.role === "system" ? extractSystemMeta(m.content) : {}),
   };
+}
+
+function buildToolInteractions(
+  messages: Array<{ id: number | string; content: SdkContentBlock[] }>
+): ToolInteraction[] {
+  const interactions: ToolInteraction[] = [];
+  const unmatchedResults: SdkContentBlock[] = [];
+
+  for (const message of messages) {
+    for (const block of message.content) {
+      if (block.type === "tool_use") {
+        interactions.push({
+          id: block.id ?? `${message.id}-${interactions.length}`,
+          tool: block,
+          results: [],
+        });
+      } else if (block.type === "tool_result") {
+        const matched =
+          (block.tool_use_id &&
+            interactions.find(
+              (interaction) => interaction.tool.id === block.tool_use_id
+            )) ||
+          lastInteractionWithoutResult(interactions);
+        if (matched) {
+          matched.results.push(block);
+        } else {
+          unmatchedResults.push(block);
+        }
+      }
+    }
+  }
+
+  if (unmatchedResults.length > 0) {
+    if (interactions.length > 0) {
+      interactions[interactions.length - 1].results.push(...unmatchedResults);
+    } else {
+      interactions.push({
+        id: `result-${messages[0]?.id ?? "unknown"}`,
+        tool: { type: "tool_use", name: "tool" },
+        results: unmatchedResults,
+      });
+    }
+  }
+
+  return interactions;
+}
+
+function lastInteractionWithoutResult(
+  interactions: ToolInteraction[]
+): ToolInteraction | undefined {
+  for (let i = interactions.length - 1; i >= 0; i -= 1) {
+    if (interactions[i].results.length === 0) return interactions[i];
+  }
+  return undefined;
 }
 
 // Persisted system messages were written by migration 0009 (and by live

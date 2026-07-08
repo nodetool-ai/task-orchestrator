@@ -1,6 +1,6 @@
 // lib/tool-grouping.ts
 //
-// Fold consecutive tool-only messages into one collapsible "N tools called"
+// Fold consecutive tool-only messages into one collapsible tool summary
 // group so a long run of tool calls doesn't flood the transcript. Agents emit
 // one tool per message, so the grouping happens at the message-list level (not
 // within a message). Generic over the view's message shape — it only needs the
@@ -22,8 +22,8 @@ const countTools = (content: { type?: string }[]): number =>
  * `tool_result` row; treating both as one interaction prevents alternating
  * "Tool X" / "tool result" rows from flooding the transcript.
  *
- * A lone tool call still stays a normal message (no "1 tool called" noise), but
- * a call+result pair is grouped so the result does not break adjacent calls.
+ * Even a lone call+result pair is grouped so the result stays hidden under the
+ * call instead of rendering as a separate transcript row.
  */
 export function segmentToolMessages<T extends { content: { type?: string }[] }>(
   messages: T[]
@@ -32,7 +32,7 @@ export function segmentToolMessages<T extends { content: { type?: string }[] }>(
   let group: T[] = [];
   const flush = () => {
     const toolCount = group.reduce((n, m) => n + countTools(m.content), 0);
-    if (toolCount >= 2 || (toolCount === 1 && group.length >= 2)) {
+    if (toolCount > 0) {
       out.push({ kind: "tools", messages: group, toolCount });
     } else {
       for (const m of group) out.push({ kind: "message", message: m });

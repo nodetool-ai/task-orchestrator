@@ -5,6 +5,7 @@
 
 export interface SdkContentBlock {
   type?: string;
+  id?: string;
   text?: string;
   name?: string;
   input?: unknown;
