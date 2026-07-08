@@ -1,4 +1,6 @@
 import type { Persona } from "./types";
+import { VERIFICATION_BEFORE_COMPLETION_GUIDANCE } from "../verification-guidance";
+import { REPO_GITHUB_CONTEXT_GUIDANCE } from "./repo-github-guidance";
 
 export const planningAgent: Persona = {
   id: "planning-agent",
@@ -55,7 +57,11 @@ After all tasks are created, write a brief summary for the user with a link to t
 - Never create tasks, update tasks, or create plans outside the stage that allows it.
 - Never skip a gate. The two Approve actions are mandatory checkpoints.
 - Use \`repo_read\` tools to ground the spec in the real codebase — do not invent APIs
-  or file paths; look them up.`,
+  or file paths; look them up.
+
+${REPO_GITHUB_CONTEXT_GUIDANCE}
+
+${VERIFICATION_BEFORE_COMPLETION_GUIDANCE}`,
   thinkingLevel: "high",
   toolsProfile: "orchestrator,repo_read,planning",
   budget: { maxTurns: 60 },

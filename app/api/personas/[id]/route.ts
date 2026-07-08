@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
+import { PERSONAS } from "@/lib/personas";
 import * as repo from "@/lib/repo";
 
 export const dynamic = "force-dynamic";
@@ -13,6 +14,23 @@ const PatchBody = z.object({
   budgetMaxTurns: z.number().int().positive().nullable().optional(),
   budgetMaxSeconds: z.number().int().positive().nullable().optional(),
 });
+
+const PostBody = z.object({
+  action: z.literal("reset"),
+});
+
+function serialize(p: Awaited<ReturnType<typeof repo.getPersona>> & {}) {
+  return {
+    id: p.id,
+    name: p.name,
+    description: p.description,
+    systemPrompt: p.systemPrompt,
+    thinkingLevel: p.thinkingLevel,
+    toolsProfile: p.toolsProfile,
+    budgetMaxTurns: p.budgetMaxTurns,
+    budgetMaxSeconds: p.budgetMaxSeconds,
+  };
+}
 
 export async function PATCH(
   req: NextRequest,
@@ -65,16 +83,47 @@ export async function PATCH(
   };
   await repo.upsertPersona(merged);
   const next = (await repo.getPersona(id))!;
-  return NextResponse.json({
-    persona: {
-      id: next.id,
-      name: next.name,
-      description: next.description,
-      systemPrompt: next.systemPrompt,
-      thinkingLevel: next.thinkingLevel,
-      toolsProfile: next.toolsProfile,
-      budgetMaxTurns: next.budgetMaxTurns,
-      budgetMaxSeconds: next.budgetMaxSeconds,
-    },
+  return NextResponse.json({ persona: serialize(next) });
+}
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params;
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Bad JSON" }, { status: 400 });
+  }
+
+  const parsed = PostBody.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: parsed.error.issues.map((i) => i.message).join("; ") },
+      { status: 400 }
+    );
+  }
+
+  const defaults = PERSONAS.find((p) => p.id === id);
+  if (!defaults) {
+    return NextResponse.json({ error: "No hardcoded default for persona" }, { status: 404 });
+  }
+
+  await repo.upsertPersona({
+    id: defaults.id,
+    name: defaults.name,
+    description: defaults.description,
+    systemPrompt: defaults.systemPrompt,
+    thinkingLevel: defaults.thinkingLevel ?? null,
+    toolsProfile: defaults.toolsProfile,
+    skillPaths: [],
+    budgetMaxTurns: defaults.budget?.maxTurns ?? null,
+    budgetMaxSeconds: defaults.budget?.maxSeconds ?? null,
   });
+
+  const next = (await repo.getPersona(id))!;
+  return NextResponse.json({ persona: serialize(next) });
 }
