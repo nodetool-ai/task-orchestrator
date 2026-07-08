@@ -9,7 +9,6 @@ import {
   type RepositoryOption,
 } from "@/components/pickers/repository-picker";
 import { ModelPicker } from "@/components/chat/model-picker";
-import { BackendPicker } from "@/components/pickers/backend-picker";
 import { ThinkingLevelPicker, type ThinkingLevel } from "@/components/pickers/thinking-level-picker";
 import { stashPendingMessage } from "@/lib/pending-first-message";
 import {
@@ -38,7 +37,10 @@ interface Props {
 export function NewChatBox({ defaultModel, repositories }: Props) {
   const router = useRouter();
   const [input, setInput] = useState("");
-  const { model, setModel, modelOptions, backend, setBackend, backendOptions } = useModelOptions(defaultModel);
+  // Chat runs the lightweight pi-ai loop (lib/chat-ai-loop.ts) — always pi,
+  // never the Claude backend. Lock the picker to pi so no engine selector
+  // renders and only pi-provided models are offered.
+  const { model, setModel, modelOptions } = useModelOptions(defaultModel, true, "pi");
   const [reasoning, setReasoning] = useState<ThinkingLevel | null>(null);
   const [repoId, setRepoId] = useState<string>(repositories[0]?.id ?? "");
   const [pending, setPending] = useState(false);
@@ -77,7 +79,7 @@ export function NewChatBox({ defaultModel, repositories }: Props) {
           cwdStrategy,
           repoId: repoId || null,
           model,
-          backend,
+          backend: "pi",
           thinkingLevel: reasoning,
         }),
       });
@@ -117,12 +119,6 @@ export function NewChatBox({ defaultModel, repositories }: Props) {
           className="w-full px-3 pb-1 pt-3"
         />
         <div className="flex items-center gap-2 border-t border-border/60 px-3 py-2">
-          <BackendPicker
-            value={backend}
-            options={backendOptions}
-            onChange={setBackend}
-            disabled={pending}
-          />
           <ModelPicker
             value={model}
             options={modelOptions}

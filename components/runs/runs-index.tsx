@@ -266,7 +266,7 @@ export function RunsIndex({
   const hasFilter = Boolean(filterRepo || filterTask);
 
   return (
-    <div className="space-y-6">
+    <div className="mx-auto max-w-[1480px] px-3 py-4 pb-24 sm:px-5 sm:py-5 sm:pb-20 space-y-6">
       <header className="space-y-3">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h1 className="text-xl font-semibold tracking-tight">Runs</h1>

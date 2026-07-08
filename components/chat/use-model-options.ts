@@ -79,15 +79,25 @@ function loadCatalog(): Promise<BackendCatalog> {
  * spans every provider it has a credential for), and switching backends keeps
  * the current model when the other backend also offers it — otherwise it snaps
  * to the first model of the new catalog.
+ *
+ * Pass `lockBackend` to pin a composer to a single backend (e.g. the chat
+ * composer, which only ever runs on pi via the lightweight loop). The picker
+ * then surfaces just that backend's models and `backendOptions` is empty so no
+ * engine selector renders; `setBackend` becomes a no-op.
  */
-export function useModelOptions(defaultModel = DEFAULT_CHAT_MODEL, enabled = true) {
+export function useModelOptions(
+  defaultModel = DEFAULT_CHAT_MODEL,
+  enabled = true,
+  lockBackend?: BackendId
+) {
   const [model, setModel] = useState(defaultModel);
-  const [backend, setBackendState] = useState<BackendId | null>(null);
+  const [backend, setBackendState] = useState<BackendId | null>(lockBackend ?? null);
   const [catalog, setCatalog] = useState<BackendCatalog | null>(catalogCache);
 
-  const effectiveBackend = backend ?? catalog?.defaultBackend ?? null;
+  const effectiveBackend = lockBackend ?? backend ?? catalog?.defaultBackend ?? null;
   const modelOptions =
-    (effectiveBackend ? catalog?.modelsByBackend[effectiveBackend] : undefined) ?? [];
+    (effectiveBackend ? catalog?.modelsByBackend[effectiveBackend] : undefined) ??
+    [];
 
   useEffect(() => {
     if (!enabled) return;
@@ -95,16 +105,18 @@ export function useModelOptions(defaultModel = DEFAULT_CHAT_MODEL, enabled = tru
     loadCatalog().then((c) => {
       if (!alive) return;
       setCatalog(c);
-      const options = c.modelsByBackend[c.defaultBackend] ?? [];
+      const target = lockBackend ?? c.defaultBackend;
+      const options = c.modelsByBackend[target] ?? [];
       const qualified = options.map((o) => `${o.provider}/${o.id}`);
       setModel((cur) => (qualified.includes(cur) ? cur : qualified[0] ?? cur));
     });
     return () => {
       alive = false;
     };
-  }, [enabled]);
+  }, [enabled, lockBackend]);
 
   function setBackend(next: BackendId) {
+    if (lockBackend) return; // pinned — no-op
     setBackendState(next);
     const options = catalog?.modelsByBackend[next] ?? [];
     const qualified = options.map((o) => `${o.provider}/${o.id}`);
@@ -118,7 +130,8 @@ export function useModelOptions(defaultModel = DEFAULT_CHAT_MODEL, enabled = tru
     /** Selected backend ('pi'|'claude'), or null until the catalog loads. */
     backend: effectiveBackend,
     setBackend,
-    /** Backends offered by the server, deployment default first. */
-    backendOptions: catalog?.backendOptions ?? [],
+    /** Backends offered by the server, deployment default first. Empty when
+     *  `lockBackend` is set — the engine picker should not render. */
+    backendOptions: lockBackend ? [] : catalog?.backendOptions ?? [],
   };
 }

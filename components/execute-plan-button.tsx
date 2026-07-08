@@ -13,7 +13,6 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip } from "@/components/ui/tooltip";
 import { ModelPicker } from "@/components/chat/model-picker";
-import { BackendPicker } from "@/components/pickers/backend-picker";
 import { DEFAULT_CHAT_MODEL, useModelOptions } from "@/components/chat/use-model-options";
 
 interface Props {
@@ -37,7 +36,10 @@ interface Props {
 export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  const { model, setModel, modelOptions, backend, setBackend, backendOptions } = useModelOptions(DEFAULT_CHAT_MODEL, open);
+  // The plan executor runs on the lightweight pi loop by default — pi only,
+  // no engine picker. (Set TASK_ORCH_LIGHTWEIGHT_EXECUTOR=0 to fall back to
+  // the full backend harness, in which case the run still lands on pi here.)
+  const { model, setModel, modelOptions } = useModelOptions(DEFAULT_CHAT_MODEL, open, "pi");
   const [instructions, setInstructions] = useState("");
   const [maxUsd, setMaxUsd] = useState(Math.max(openTaskCount, 1) * 25);
   const [pending, startTransition] = useTransition();
@@ -66,7 +68,7 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
             planId,
             personaId: "executor",
             model,
-            backend,
+            backend: "pi",
             initialPrompt: instructions.trim() || undefined,
             budget: { maxUsd, maxTurns: 200 },
           }),
@@ -118,27 +120,20 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
             <div className="px-5 py-4 space-y-4">
               <p className="text-xs leading-relaxed text-muted-foreground">
                 Launches a plan-executor agent that implements all {openTaskCount} open
-                task{openTaskCount === 1 ? "" : "s"} (running independent tasks in parallel),
-                reviews each PR, auto-fixes on requested changes, and squash-merges approved
-                PRs into the default branch.
+                task{openTaskCount === 1 ? "" : "s"} (running independent tasks in parallel).
+                Each task gets its own implementor that opens a PR and arms GitHub
+                auto-merge; the executor orchestrates the fan-out and parks between
+                wakes.
               </p>
 
               <div className="grid grid-cols-2 gap-4 text-xs">
                 <Field label="Model">
-                  <div className="flex items-center gap-2">
-                    <BackendPicker
-                      value={backend}
-                      options={backendOptions}
-                      onChange={setBackend}
-                      disabled={pending}
-                    />
-                    <ModelPicker
-                      value={model}
-                      options={modelOptions}
-                      onChange={setModel}
-                      disabled={pending}
-                    />
-                  </div>
+                  <ModelPicker
+                    value={model}
+                    options={modelOptions}
+                    onChange={setModel}
+                    disabled={pending}
+                  />
                 </Field>
                 <Field label="Budget (max USD)">
                   <Input
