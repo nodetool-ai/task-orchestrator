@@ -85,10 +85,10 @@ export async function createChat(
   userId: number | null,
   title = "New chat",
   repoId?: string | null,
-  // Every chat runs in its own git worktree so concurrent conversations never
-  // share (and clobber) the repo's working tree. Callers can override, but both
-  // the web composer and the Discord pipe take the default.
-  cwdStrategy: CwdStrategy = "worktree"
+  // Chat is the lightweight path: no branch, PR lifecycle, or per-chat worktree
+  // by default. Callers that need filesystem isolation can still opt into
+  // "worktree" explicitly.
+  cwdStrategy: CwdStrategy = "none"
 ): Promise<ChatRow> {
   if (repoId === undefined) repoId = await repo.defaultRepoId();
   if (repoId && !(await repo.getRepository(repoId))) {
@@ -104,6 +104,7 @@ export async function createChat(
     userId,
     title,
     model: DEFAULT_MODEL,
+    backend: "pi",
   });
   return (await getChat(created.id, userId))!;
 }
@@ -297,6 +298,7 @@ function hydrateChat(row: typeof agentSessions.$inferSelect): ChatRow {
     title: row.title ?? "New chat",
     cwdStrategy: row.cwdStrategy as CwdStrategy,
     model: row.model,
+    backend: row.backend as "pi" | "claude" | null,
     sdkSessionId: row.sdkSessionId,
     totalCostUsd: row.totalCostUsd,
     inputTokens: row.inputTokens,
@@ -319,7 +321,7 @@ function hydrateMessage(row: typeof agentMessages.$inferSelect): ChatMessageRow 
     id: row.id,
     chatId: row.runId,
     role: messageRoleToChatRole(row.role),
-    content,
+    content: content.map(({ piMessage: _piMessage, ...block }) => block),
     createdAt: row.createdAt,
   };
 }
