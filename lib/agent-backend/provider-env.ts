@@ -27,6 +27,8 @@ export const AGENT_CREDENTIAL_ENV_KEYS: readonly string[] = [
   "ANT_LING_API_KEY",
   "NVIDIA_API_KEY",
   "OPENROUTER_API_KEY",
+  "FAL_API_KEY",
+  "KIE_API_KEY",
   "AI_GATEWAY_API_KEY",
   "ZAI_API_KEY",
   "ZAI_CODING_CN_API_KEY",

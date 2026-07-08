@@ -163,7 +163,8 @@ secret_args=(
 # web app holds is forwarded into each runner Machine's env by the server
 # (lib/agent-backend/provider-env.ts). Stage any that are set in the deploy env.
 for key in OPENAI_API_KEY GEMINI_API_KEY GROQ_API_KEY CEREBRAS_API_KEY XAI_API_KEY \
-           OPENROUTER_API_KEY ZAI_API_KEY MISTRAL_API_KEY DEEPSEEK_API_KEY FIREWORKS_API_KEY; do
+           OPENROUTER_API_KEY FAL_API_KEY KIE_API_KEY ZAI_API_KEY MISTRAL_API_KEY \
+           DEEPSEEK_API_KEY FIREWORKS_API_KEY; do
   [[ -n "${!key:-}" ]] && secret_args+=( "$key=${!key}" )
 done
 "$FLY" secrets set -a "$APP" --stage "${secret_args[@]}" >/dev/null
