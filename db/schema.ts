@@ -73,6 +73,7 @@ export const planRepositories = pgTable(
   (t) => ({
     pk: primaryKey({ columns: [t.planId, t.repoId] }),
     repoIdx: index("plan_repos_repo_idx").on(t.repoId),
+    planOrderIdx: index("plan_repos_plan_order_idx").on(t.planId, t.position, t.repoId),
   })
 );
 
@@ -108,6 +109,11 @@ export const tasks = pgTable(
     stateIdx: index("tasks_state_idx").on(t.state),
     assigneeIdx: index("tasks_assignee_idx").on(t.assignee),
     repoIdx: index("tasks_repo_idx").on(t.repoId),
+    planOrderIdx: index("tasks_plan_id_ord_idx").on(t.planId, t.id),
+    stateOrderIdx: index("tasks_state_id_ord_idx").on(t.state, t.id),
+    assigneeOrderIdx: index("tasks_assignee_id_ord_idx").on(t.assignee, t.id),
+    planStateOrderIdx: index("tasks_plan_state_id_ord_idx").on(t.planId, t.state, t.id),
+    assigneeStateOrderIdx: index("tasks_assignee_state_id_ord_idx").on(t.assignee, t.state, t.id),
     // The webhook matcher and the ~20s PR-sync poller look tasks up by pr_url;
     // index it so those stay indexed equality lookups, not table scans.
     prUrlIdx: index("tasks_pr_url_idx").on(t.prUrl),
@@ -143,6 +149,7 @@ export const taskNotes = pgTable(
   },
   (t) => ({
     taskIdx: index("task_notes_task_idx").on(t.taskId),
+    taskCreatedIdx: index("task_notes_task_created_idx").on(t.taskId, t.createdAt, t.id),
   })
 );
 
@@ -159,6 +166,7 @@ export const acceptanceCriteria = pgTable(
   },
   (t) => ({
     taskIdx: index("ac_task_idx").on(t.taskId),
+    taskPositionIdx: index("ac_task_position_idx").on(t.taskId, t.position, t.id),
   })
 );
 
@@ -182,6 +190,8 @@ export const attachments = pgTable(
   (t) => ({
     planIdx: index("attachments_plan_idx").on(t.planId),
     taskIdx: index("attachments_task_idx").on(t.taskId),
+    planOrderIdx: index("attachments_plan_id_ord_idx").on(t.planId, t.id),
+    taskOrderIdx: index("attachments_task_id_ord_idx").on(t.taskId, t.id),
     // Exactly one owner: plan XOR task.
     ownerXor: check(
       "attachments_owner_xor",
@@ -277,6 +287,21 @@ export const agentSessions = pgTable(
     userIdx: index("agent_runs_user_idx").on(t.userId),
     legacyChatIdx: index("agent_runs_legacy_chat_idx").on(t.legacyChatId),
     personaIdx: index("agent_runs_persona_idx").on(t.personaId),
+    startedIdx: index("agent_runs_started_idx").on(t.startedAt),
+    taskStartedIdx: index("agent_runs_task_started_idx").on(t.taskId, t.startedAt),
+    planStartedIdx: index("agent_runs_plan_started_idx").on(t.planId, t.startedAt),
+    statusStartedIdx: index("agent_runs_status_started_idx").on(t.status, t.startedAt),
+    repoStartedIdx: index("agent_runs_repo_started_idx").on(t.repoId, t.startedAt),
+    parentStartedIdx: index("agent_runs_parent_started_idx").on(t.parentRunId, t.startedAt),
+    userStartedIdx: index("agent_runs_user_started_idx").on(t.userId, t.startedAt),
+    goalStartedIdx: index("agent_runs_goal_started_idx").on(t.goal, t.startedAt),
+    statusIdIdx: index("agent_runs_status_id_idx").on(t.status, t.id),
+    taskPrIdx: index("agent_runs_task_pr_idx")
+      .on(t.taskId, t.id)
+      .where(sql`pr_url IS NOT NULL`),
+    liveWorkerHeartbeatIdx: index("agent_runs_live_worker_heartbeat_idx")
+      .on(t.heartbeatAt)
+      .where(sql`worker_scope IS NOT NULL`),
   })
 );
 
