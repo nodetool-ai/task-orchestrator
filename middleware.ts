@@ -26,9 +26,9 @@ export default auth((req) => {
   if (path === "/login" || path === "/login-link" || path.startsWith("/api/auth/")) {
     return NextResponse.next();
   }
-  // /api/health is an unauthenticated liveness/readiness probe (Fly health
-  // checks, uptime monitors). It exposes no data beyond up/down + DB reachability.
-  if (path === "/api/health") {
+  // /api/health is an unauthenticated liveness/readiness probe; /api/metrics is
+  // scraped by Fly's private Prometheus integration.
+  if (path === "/api/health" || path === "/api/metrics") {
     return NextResponse.next();
   }
   // /api/mcp has its own Bearer-token auth (lib/api-tokens). Bypass the

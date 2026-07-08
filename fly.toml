@@ -60,3 +60,7 @@ primary_region = "ams"
 [[vm]]
   size = "shared-cpu-2x"
   memory = "2gb"
+
+[metrics]
+  port = 3000
+  path = "/api/metrics"

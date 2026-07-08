@@ -74,6 +74,12 @@ import { personaMemoryFactory } from "./extensions/persona-memory";
 import { abortBridgeFactory } from "./extensions/abort-bridge";
 import { linkSharedWorktreeArtifacts } from "./worktree-env";
 import { applyPrewarmToCheckout } from "./prewarm";
+import {
+  observeRunnerPhase,
+  recordRunnerEvent,
+  recordStatusTransition,
+  timeRunnerPhase,
+} from "./runner/telemetry";
 // Namespace import (not `await import`) because reconcileOrphanedRuns() is
 // synchronous, and calling through the namespace (runDispatch.dispatchRun) keeps
 // vi.spyOn(dispatch, "dispatchRun") observable for the reconcile/routing tests.
@@ -112,6 +118,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
 const DEFAULT_MODEL = process.env.TASK_ORCH_AGENT_MODEL ?? "anthropic/claude-sonnet-4-6";
 const KEEP_WORKTREES = !!process.env.TASK_ORCH_KEEP_WORKTREES;
+
+function runnerProviderLabel(): "local" | "fly" {
+  return process.env.TASK_ORCH_RUNNER === "fly" ? "fly" : "local";
+}
 
 const SANDBOX_OPTS = {
   enabled: true as const,
@@ -956,8 +966,18 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // survives, so we recreate it).
     let cwd: string;
     try {
-      run = await ensureWorktreeBranch(run, input.baseBranch);
-      cwd = await prepareCwd(run);
+      const runForBranch = run;
+      run = await timeRunnerPhase(
+        "worktree_branch",
+        () => ensureWorktreeBranch(runForBranch, input.baseBranch),
+        { provider: runnerProviderLabel(), fields: { runId: runForBranch.id, cwdStrategy: runForBranch.cwdStrategy } }
+      );
+      const runForPrepare = run;
+      cwd = await timeRunnerPhase(
+        "worktree_prepare",
+        () => prepareCwd(runForPrepare),
+        { provider: runnerProviderLabel(), fields: { runId: runForPrepare.id, cwdStrategy: runForPrepare.cwdStrategy } }
+      );
     } catch (err) {
       if (abort.signal.aborted) {
         // cancel()/interrupt()/close() fired during prep; respect their row.
@@ -1529,8 +1549,16 @@ async function prepareCwd(run: RunRow): Promise<string> {
     // implement turn for implement runs, or fetched from the PR head for
     // review runs), so a plain `git worktree add <path> <branch>` is
     // sufficient — git checks out the existing branch into the new path.
-    await sh(["git", "worktree", "add", run.worktreePath, run.branch], root);
-    await linkSharedWorktreeArtifacts(run.worktreePath, root);
+    await timeRunnerPhase(
+      "git_worktree_add",
+      () => sh(["git", "worktree", "add", run.worktreePath!, run.branch!], root),
+      { provider: runnerProviderLabel(), fields: { runId: run.id, branch: run.branch } }
+    );
+    await timeRunnerPhase(
+      "worktree_artifact_link",
+      () => linkSharedWorktreeArtifacts(run.worktreePath!, root),
+      { provider: runnerProviderLabel(), fields: { runId: run.id } }
+    );
   }
   return validateCwd(run.worktreePath, { runId: run.id, repoId: run.repoId });
 }
@@ -1624,26 +1652,54 @@ async function containerCheckoutAt(
     // Blobless partial clone: history blobs are fetched on demand through the
     // image's git credential helper; pairs with the image-baked blobless mirror
     // so a cold clone moves only refs/commits/trees plus the checkout's blobs.
-    await sh(["git", "clone", "--filter=blob:none", ...reference, url, work], "/");
+    await timeRunnerPhase(
+      "git_clone",
+      () => sh(["git", "clone", "--filter=blob:none", ...reference, url, work], "/"),
+      { provider: runnerProviderLabel(), fields: { runId: run.id, repoId: run.repoId, reference: reference.length > 0 } }
+    );
   } else {
     await sh(["git", "-C", work, "remote", "set-url", "origin", url], "/").catch(() => {});
   }
-  await sh(["git", "-C", work, "fetch", "--prune", "origin"], "/").catch(() => {});
+  await timeRunnerPhase(
+    "git_fetch",
+    () => sh(["git", "-C", work, "fetch", "--prune", "origin"], "/").catch(() => {}),
+    { provider: runnerProviderLabel(), fields: { runId: run.id, repoId: run.repoId } }
+  );
   if (base) {
-    await sh(["git", "-C", work, "checkout", "-B", branch, `origin/${base}`], "/");
+    await timeRunnerPhase(
+      "git_checkout",
+      () => sh(["git", "-C", work, "checkout", "-B", branch, `origin/${base}`], "/"),
+      { provider: runnerProviderLabel(), fields: { runId: run.id, branch, base } }
+    );
   } else {
     try {
-      await sh(["git", "-C", work, "fetch", "origin", branch], "/");
-      await sh(["git", "-C", work, "checkout", "-B", branch, `origin/${branch}`], "/");
+      await timeRunnerPhase(
+        "git_fetch_branch",
+        () => sh(["git", "-C", work, "fetch", "origin", branch], "/"),
+        { provider: runnerProviderLabel(), fields: { runId: run.id, branch } }
+      );
+      await timeRunnerPhase(
+        "git_checkout",
+        () => sh(["git", "-C", work, "checkout", "-B", branch, `origin/${branch}`], "/"),
+        { provider: runnerProviderLabel(), fields: { runId: run.id, branch } }
+      );
     } catch {
       const def = await repoDefaultBranch(run);
-      await sh(["git", "-C", work, "checkout", "-B", branch, `origin/${def}`], "/");
+      await timeRunnerPhase(
+        "git_checkout",
+        () => sh(["git", "-C", work, "checkout", "-B", branch, `origin/${def}`], "/"),
+        { provider: runnerProviderLabel(), fields: { runId: run.id, branch, base: def, fallback: true } }
+      );
     }
   }
   // Link the image-baked node_modules tree (full `npm ci` + Playwright) into this
   // checkout when it is the prewarmed repo, so the agent starts with deps ready
   // instead of paying a cold install. No-op off Fly / for other repos. Best-effort.
-  await applyPrewarmToCheckout(work);
+  await timeRunnerPhase(
+    "prewarm_apply",
+    () => applyPrewarmToCheckout(work),
+    { provider: runnerProviderLabel(), fields: { runId: run.id, repoId: run.repoId } }
+  );
   return work;
 }
 
@@ -1726,8 +1782,16 @@ async function ensureWorktreeBranch(run: RunRow, baseBranch?: string): Promise<R
     const worktreeRoot = resolve(root, ".worktrees");
     worktreePath = resolve(worktreeRoot, String(run.id));
     await mkdir(worktreeRoot, { recursive: true });
-    await sh(["git", "worktree", "add", "-b", branch, worktreePath, base], root);
-    await linkSharedWorktreeArtifacts(worktreePath, root);
+    await timeRunnerPhase(
+      "git_worktree_add",
+      () => sh(["git", "worktree", "add", "-b", branch, worktreePath, base], root),
+      { provider: runnerProviderLabel(), fields: { runId: run.id, branch, base } }
+    );
+    await timeRunnerPhase(
+      "worktree_artifact_link",
+      () => linkSharedWorktreeArtifacts(worktreePath, root),
+      { provider: runnerProviderLabel(), fields: { runId: run.id } }
+    );
   }
   const transport = await runTransport();
   const task = run.taskId ? await transport.getTask(run.taskId) : null;
@@ -2791,11 +2855,19 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   const profileCtx: ProfileContext = {
     runId: run.id, run, author, taskId: run.taskId, planId: run.planId, cwd,
   };
-  const { factories: profileFactories } = await resolveProfiles(profileSpec, profileCtx);
+  const { factories: profileFactories } = await timeRunnerPhase(
+    "profile_resolve",
+    () => resolveProfiles(profileSpec, profileCtx),
+    { provider: runnerProviderLabel(), fields: { runId: run.id, profileSpec } }
+  );
   // Always-on extensions (docs/agent-events.md §7): the event/timer/result
   // tools mount regardless of tools_profile — no profile misconfiguration can
   // strand an agent without a way to park, report, or be woken.
-  const alwaysOnFactories = await alwaysOnExtensions(profileCtx);
+  const alwaysOnFactories = await timeRunnerPhase(
+    "extensions_always_on",
+    () => alwaysOnExtensions(profileCtx),
+    { provider: runnerProviderLabel(), fields: { runId: run.id } }
+  );
 
   const sandboxDbPath = sandboxDbPathFor(run, cwd);
   const personaForExt = {
@@ -2833,6 +2905,8 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   let sdkSessionId: string | null = null;
   let inputTokens: number | null = null;
   let outputTokens: number | null = null;
+  let sawFirstSdkEvent = false;
+  let sdkCallStarted: bigint | null = null;
 
   // Persist each mapped envelope as the turn streams. The shape is identical
   // across backends (RunEnvelope), so downstream is backend-agnostic.
@@ -2840,6 +2914,23 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   // a page load mid-turn — hours into a long executor run — replays the full
   // history from the DB instead of showing only tool results.
   const onEvent = async (env: RunEnvelope) => {
+    if (!sawFirstSdkEvent && sdkCallStarted != null) {
+      sawFirstSdkEvent = true;
+      const firstEventMs = Number(process.hrtime.bigint() - sdkCallStarted) / 1_000_000;
+      observeRunnerPhase("sdk_first_event", firstEventMs / 1000, {
+        provider: runnerProviderLabel(),
+        outcome: "success",
+      });
+      recordRunnerEvent("sdk_first_event", {
+        provider: runnerProviderLabel(),
+        runId: run.id,
+        fields: {
+          backend: resolveBackendId(run.backend),
+          durationMs: firstEventMs,
+          eventType: env.type,
+        },
+      });
+    }
     envelopes.push(env);
     onSdk?.(env);
 
@@ -2872,7 +2963,12 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   };
 
   // Per-run backend; a null column falls back to the deployment default.
-  const backend = await getBackend(run.backend);
+  const backendId = resolveBackendId(run.backend);
+  const backend = await timeRunnerPhase(
+    "backend_load",
+    () => getBackend(run.backend),
+    { provider: runnerProviderLabel(), fields: { runId: run.id, backend: backendId } }
+  );
   const resumeToken = run.sdkSessionId ?? null;
   const turnArgs = {
     cwd,
@@ -2901,7 +2997,12 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   // handled by another layer; this is the runs.ts-side safety net.
   let outcome;
   try {
-    outcome = await backend.runTurn({ ...turnArgs, resumeToken });
+    sdkCallStarted = process.hrtime.bigint();
+    outcome = await timeRunnerPhase(
+      "sdk_turn",
+      () => backend.runTurn({ ...turnArgs, resumeToken }),
+      { provider: runnerProviderLabel(), fields: { runId: run.id, backend: backendId, resume: !!resumeToken } }
+    );
   } catch (err) {
     if (resumeToken && !abort.signal.aborted && isMissingSessionError(err)) {
       await persistMessage(run.id, "system", [
@@ -2910,7 +3011,12 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
           text: `Previous session context could not be restored (${describe(err)}); continuing with a fresh session.`,
         },
       ]);
-      outcome = await backend.runTurn({ ...turnArgs, resumeToken: null });
+      sdkCallStarted = process.hrtime.bigint();
+      outcome = await timeRunnerPhase(
+        "sdk_turn_retry_fresh",
+        () => backend.runTurn({ ...turnArgs, resumeToken: null }),
+        { provider: runnerProviderLabel(), fields: { runId: run.id, backend: backendId } }
+      );
     } else {
       throw err;
     }
@@ -3392,6 +3498,7 @@ async function setStatus(runId: number, status: SessionStatus) {
   // transitions keep the cheap two-step write — there is no paired-event
   // atomicity to protect and a lost non-terminal mirror is self-healing.
   await (await runTransport()).setStatus(runId, status);
+  recordStatusTransition(status);
   if (!isTerminalStatus(status)) {
     // The live-bus mirror for non-terminal transitions stays in THIS process —
     // it feeds in-process SSE subscribers of the turn being driven here.
@@ -3935,6 +4042,7 @@ export async function applyStatusTx(
     });
   const committed = opts.retries ? await finalizeWithRetry(run, opts.retries) : await run();
   if (committed) {
+    recordStatusTransition(status);
     runners.get(runId)?.bus.emit("event", { type: "status", status, ...(opts.extra ?? {}) });
     // Child lifecycle producer (§3.1): any terminal transition on a child run
     // becomes a durable inbox event for its parent. Deduped per (run, attempt).

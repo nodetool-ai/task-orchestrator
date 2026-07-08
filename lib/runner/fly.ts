@@ -9,6 +9,7 @@ import { agentCredentialEnv } from "../agent-backend/provider-env";
 import { isTerminalStatus, type SessionStatus } from "../types";
 import { isWorkerClaimLive, nextLifecycleAction } from "./lifecycle";
 import { nestedDispatchMode } from "./provider";
+import { recordRunnerEvent, timeRunnerPhase } from "./telemetry";
 import { workerDispatchEnv } from "../worker/token";
 import type { CreateRunnerInput, RunnerProvider, RunnerRef, RunnerState } from "./provider";
 import { FlyApiError, type FlyClient, type FlyMachine, type FlyMachineConfig, type FlyVolume, makeFlyClient } from "./fly-client";
@@ -265,6 +266,7 @@ async function clearSdkSession(runId: number): Promise<void> {
 }
 
 async function emitRunnerEvent(runId: number, type: string, payload: Record<string, unknown> = {}): Promise<void> {
+  recordRunnerEvent(type, { provider: "fly", runId, fields: payload });
   try {
     await db.insert(agentEvents).values({
       sessionId: runId,
@@ -416,18 +418,28 @@ export class FlyRunnerProvider implements RunnerProvider {
     let volume: FlyVolume | null = null;
     let machine: FlyMachine | null = null;
     try {
-      volume = await this.flyClient.createVolume({
-        // Fly volume names allow only [a-z0-9_] (<=30 chars) — no hyphens,
-        // unlike Machine names. runId is numeric, so vol_run_<id> is always valid.
-        name: `vol_run_${input.runId}`,
-        region,
-        ...(seed ? { source_volume_id: seed.id } : { size_gb: configuredGb }),
-      });
-      machine = await this.flyClient.createMachine({
-        name: input.scope,
-        region,
-        config: buildFlyMachineConfig(input.runId, volume.id, { prewarmDir }),
-      });
+      volume = await timeRunnerPhase(
+        seed ? "fly_volume_fork" : "fly_volume_create",
+        () =>
+          this.flyClient.createVolume({
+            // Fly volume names allow only [a-z0-9_] (<=30 chars) — no hyphens,
+            // unlike Machine names. runId is numeric, so vol_run_<id> is always valid.
+            name: `vol_run_${input.runId}`,
+            region,
+            ...(seed ? { source_volume_id: seed.id } : { size_gb: configuredGb }),
+          }),
+        { provider: "fly", fields: { runId: input.runId, region, prewarm: !!seed } }
+      );
+      machine = await timeRunnerPhase(
+        "fly_machine_create",
+        () =>
+          this.flyClient.createMachine({
+            name: input.scope,
+            region,
+            config: buildFlyMachineConfig(input.runId, volume!.id, { prewarmDir }),
+          }),
+        { provider: "fly", fields: { runId: input.runId, region, scope: input.scope } }
+      );
 
       await db
         .insert(runnerInstances)
@@ -483,7 +495,11 @@ export class FlyRunnerProvider implements RunnerProvider {
         // live handle. Returning it here would hand the sweep a corpse it
         // re-death-detects and re-dispatches into forever.
         if (state === "suspended" || state === "stopped") {
-          await this.flyClient.startMachine(machine.id);
+          await timeRunnerPhase(
+            "fly_machine_start",
+            () => this.flyClient.startMachine(machine.id),
+            { provider: "fly", fields: { runId, machineId: machine.id, state } }
+          );
           await this.updateInstance(runId, {
             machineId: machine.id,
             state: "starting",
@@ -505,11 +521,18 @@ export class FlyRunnerProvider implements RunnerProvider {
     }
 
     try {
-      const machine = await this.flyClient.createMachine({
-        name: scope,
-        region,
-        config: buildFlyMachineConfig(runId, instance.volumeId),
-      });
+      const volumeId = instance.volumeId;
+      if (!volumeId) return null;
+      const machine = await timeRunnerPhase(
+        "fly_machine_cold_recover_create",
+        () =>
+          this.flyClient.createMachine({
+            name: scope,
+            region,
+            config: buildFlyMachineConfig(runId, volumeId),
+          }),
+        { provider: "fly", fields: { runId, region, scope } }
+      );
       await this.updateInstance(runId, {
         machineId: machine.id,
         state: "starting",
@@ -738,19 +761,29 @@ export class FlyRunnerProvider implements RunnerProvider {
     }
 
     const now = new Date();
+    const machineId = row.machineId;
+    if (!machineId) return;
     if (action.kind === "suspend") {
-      await this.flyClient.suspendMachine(row.machineId);
-      await this.releaseRunClaimIfCurrent(row.runId, row.machineId);
+      await timeRunnerPhase(
+        "fly_machine_suspend",
+        () => this.flyClient.suspendMachine(machineId),
+        { provider: "fly", fields: { runId: row.runId, machineId, idleMs } }
+      );
+      await this.releaseRunClaimIfCurrent(row.runId, machineId);
       await this.updateInstance(row.runId, { state: "suspended", lastSuspendedAt: now });
-      await emitRunnerEvent(row.runId, "runner_suspended", { machineId: row.machineId, idleMs });
+      await emitRunnerEvent(row.runId, "runner_suspended", { machineId, idleMs });
       return;
     }
 
     if (action.kind === "stop") {
-      await this.flyClient.stopMachine(row.machineId);
-      await this.releaseRunClaimIfCurrent(row.runId, row.machineId);
+      await timeRunnerPhase(
+        "fly_machine_stop",
+        () => this.flyClient.stopMachine(machineId),
+        { provider: "fly", fields: { runId: row.runId, machineId, idleMs } }
+      );
+      await this.releaseRunClaimIfCurrent(row.runId, machineId);
       await this.updateInstance(row.runId, { state: "stopped" });
-      await emitRunnerEvent(row.runId, "runner_stopped", { machineId: row.machineId, idleMs });
+      await emitRunnerEvent(row.runId, "runner_stopped", { machineId, idleMs });
       return;
     }
 
@@ -766,9 +799,19 @@ export class FlyRunnerProvider implements RunnerProvider {
         });
         return;
       }
-      await this.flyClient.destroyMachine(row.machineId, { force: true }).catch(() => {});
-      if (row.volumeId) await this.flyClient.destroyVolume(row.volumeId).catch(() => {});
-      await this.releaseRunClaimIfCurrent(row.runId, row.machineId);
+      await timeRunnerPhase(
+        "fly_machine_destroy",
+        () => this.flyClient.destroyMachine(machineId, { force: true }).catch(() => {}),
+        { provider: "fly", fields: { runId: row.runId, machineId, idleMs } }
+      );
+      if (row.volumeId) {
+        await timeRunnerPhase(
+          "fly_volume_destroy",
+          () => this.flyClient.destroyVolume(row.volumeId!).catch(() => {}),
+          { provider: "fly", fields: { runId: row.runId, volumeId: row.volumeId, idleMs } }
+        );
+      }
+      await this.releaseRunClaimIfCurrent(row.runId, machineId);
       // Both are now destroyed on Fly's side — clear the mapping too, or a later
       // dispatch would resume() into a dead machine/volume instead of creating
       // fresh ones.
@@ -777,7 +820,7 @@ export class FlyRunnerProvider implements RunnerProvider {
       // token so a later revival starts a fresh SDK session instead of dangling.
       if (row.volumeId) await clearSdkSession(row.runId);
       await emitRunnerEvent(row.runId, "runner_destroyed", {
-        machineId: row.machineId,
+        machineId,
         volumeId: row.volumeId,
         idleMs,
       });

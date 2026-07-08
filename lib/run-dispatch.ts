@@ -12,6 +12,7 @@ import { AGENT_CREDENTIAL_ENV_KEYS } from "./agent-backend/provider-env";
 import { fireDueTimers, parkedRunsWithPendingEvents } from "./inbox";
 import type { RunRow } from "./runs";
 import { getRunnerProvider, runnerProviderKindFromEnv, insideWorker, nestedDispatchMode } from "./runner/provider";
+import { recordDispatch, recordRunnerEvent, timeRunnerPhase } from "./runner/telemetry";
 import { isTerminalStatus } from "./types";
 import { workerDispatchEnv } from "./worker/token";
 
@@ -321,6 +322,16 @@ export async function dispatchRun(
   opts: { spawn?: SpawnFn; admit?: AdmitFn } = {}
 ): Promise<DispatchResult> {
   const admitFn = opts.admit ?? admit;
+  const provider = runnerProviderKindFromEnv();
+  const dispatchStarted = process.hrtime.bigint();
+  const finish = (result: DispatchResult): DispatchResult => {
+    recordDispatch(result, {
+      provider,
+      runId,
+      fields: { durationMs: Number(process.hrtime.bigint() - dispatchStarted) / 1_000_000 },
+    });
+    return result;
+  };
 
   // Critical section: decide admission, then atomically claim. Serialized so the
   // reservation count seen by the next caller already includes this claim. The
@@ -444,7 +455,8 @@ export async function dispatchRun(
     return { kind: "claimed", scope };
   });
 
-  if (outcome.kind !== "claimed") return outcome.kind;
+  if (outcome.kind !== "claimed") return finish(outcome.kind);
+  recordRunnerEvent("runner_claimed", { provider, runId, fields: { scope: outcome.scope } });
 
   // Start the worker through the selected provider. A throw/null must NOT leave
   // the run wedged in 'preparing' with no error — mark it failed and release the
@@ -454,20 +466,28 @@ export async function dispatchRun(
   let handle = outcome.scope;
   try {
     if (opts.spawn) {
-      const spawned = await opts.spawn(runId, outcome.scope);
+      const spawned = await timeRunnerPhase(
+        "runner_spawn",
+        () => Promise.resolve(opts.spawn!(runId, outcome.scope)),
+        { provider, fields: { runId, scope: outcome.scope } }
+      );
       if (spawned == null) {
-        return await failSpawn(runId, outcome.scope, "run worker did not start (spawn returned no pid — worker image/runtime available?)");
+        return finish(await failSpawn(runId, outcome.scope, "run worker did not start (spawn returned no pid — worker image/runtime available?)"));
       }
       pid = spawned;
     } else {
-      const ref = await getRunnerProvider().create({ runId, scope: outcome.scope });
+      const ref = await timeRunnerPhase(
+        "runner_create",
+        () => getRunnerProvider().create({ runId, scope: outcome.scope }),
+        { provider, fields: { runId, scope: outcome.scope } }
+      );
       if (!ref) {
-        return await failSpawn(runId, outcome.scope, "run worker did not start (spawn returned no pid — worker image/runtime available?)");
+        return finish(await failSpawn(runId, outcome.scope, "run worker did not start (spawn returned no pid — worker image/runtime available?)"));
       }
       handle = ref.handle;
     }
   } catch (err) {
-    return await failSpawn(runId, outcome.scope, `run worker failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
+    return finish(await failSpawn(runId, outcome.scope, `run worker failed to spawn: ${err instanceof Error ? err.message : String(err)}`));
   }
   // Condition the post-spawn write on THIS dispatch still owning the claim. A slow
   // create can outlast a sweep that declared the (container-less) run dead and
@@ -479,8 +499,9 @@ export async function dispatchRun(
     .update(agentSessions)
     .set({ workerPid: pid, workerScope: handle })
     .where(and(eq(agentSessions.id, runId), eq(agentSessions.workerScope, outcome.scope)));
-  if (owned.count === 0) return "already-claimed";
-  return "spawned";
+  if (owned.count === 0) return finish("already-claimed");
+  recordRunnerEvent("runner_spawned", { provider, runId, fields: { handle } });
+  return finish("spawned");
 }
 
 async function failSpawn(runId: number, scope: string, message: string): Promise<DispatchResult> {
