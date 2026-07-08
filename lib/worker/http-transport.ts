@@ -12,11 +12,13 @@
 //
 // Retry policy: GETs and idempotent POSTs (heartbeat, release, log, status —
 // status is CAS-guarded server-side, so a replay after an ambiguous failure is
-// a no-op) retry on network errors and 5xx with short backoff. Message/event
-// appends do NOT auto-retry: a replay would duplicate a row, and the callers
-// that need exit-path durability (applyStatus retries) opt in explicitly.
+// a no-op) retry on network errors and 5xx with short backoff. Message appends
+// use per-message idempotency keys, so they can be queued and retried without
+// duplicating rows; ordering boundaries flush that queue before status/event
+// writes that clients use as turn-complete markers.
 
 import { createLogger } from "./log";
+import { observeRunnerPhase } from "../runner/telemetry";
 import { reviveDates } from "./protocol";
 import type {
   ApplyStatusOpts,
@@ -33,6 +35,12 @@ const MESSAGE_APPEND_TIMEOUT_MS = 120_000;
 const RETRY_BACKOFF_MS = [500, 1000, 2000];
 /** SSE reconnect backoff (resets after a healthy connection). */
 const SSE_RECONNECT_MS = [1000, 2000, 5000, 10_000];
+
+function runnerProviderLabel(): "local" | "fly" | "unknown" {
+  if (process.env.TASK_ORCH_RUNNER === "fly" || process.env.FLY_APP_NAME) return "fly";
+  if (process.env.TASK_ORCH_WORKER_IMAGE || process.env.TASK_ORCH_INSIDE_WORKER) return "local";
+  return "unknown";
+}
 
 export class WorkerApiError extends Error {
   constructor(
@@ -59,6 +67,11 @@ export interface HttpTransportOpts {
 export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
   const base = opts.baseUrl.replace(/\/+$/, "");
   const doFetch = opts.fetchImpl ?? fetch;
+  const provider = runnerProviderLabel();
+  let tempMessageId = -1;
+  let messageAppendChain: Promise<void> = Promise.resolve();
+  let messageAppendError: unknown = null;
+  let queuedMessageAppends = 0;
 
   // Cancel push latch: the /control SSE channel can deliver a cancel signal
   // between heartbeats; the next heartbeat() answer folds it in so the turn
@@ -133,6 +146,65 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
         ? crypto.randomUUID()
         : Math.random().toString(36).slice(2);
     return `msg:${runId}:${Date.now()}:${random}`;
+  }
+
+  function enqueueMessageAppend(
+    runId: number,
+    role: "user" | "agent" | "tool" | "system",
+    content: unknown[],
+    idempotencyKey: string
+  ): void {
+    queuedMessageAppends++;
+    messageAppendChain = messageAppendChain
+      .catch(() => {
+        // Keep later queued appends moving; flushMessageAppends rethrows the
+        // first failure so the turn still lands as failed instead of silently
+        // completing with missing transcript rows.
+      })
+      .then(async () => {
+        const started = process.hrtime.bigint();
+        try {
+          await request<{ message: never }>(
+            "POST",
+            `runs/${runId}/messages`,
+            { role, content, idempotencyKey },
+            { retries: 2, timeoutMs: MESSAGE_APPEND_TIMEOUT_MS }
+          );
+          observeRunnerPhase(
+            "worker_message_append",
+            Number(process.hrtime.bigint() - started) / 1_000_000_000,
+            { provider, outcome: "success" }
+          );
+        } catch (err) {
+          if (messageAppendError == null) messageAppendError = err;
+          observeRunnerPhase(
+            "worker_message_append",
+            Number(process.hrtime.bigint() - started) / 1_000_000_000,
+            { provider, outcome: "error" }
+          );
+          log.error("queued message append failed", { runId, role, error: err as Error });
+        } finally {
+          queuedMessageAppends = Math.max(0, queuedMessageAppends - 1);
+        }
+      });
+  }
+
+  async function flushMessageAppends(reason: string): Promise<void> {
+    const pending = queuedMessageAppends;
+    if (pending === 0 && messageAppendError == null) return;
+    const started = process.hrtime.bigint();
+    await messageAppendChain.catch(() => {});
+    observeRunnerPhase(
+      "worker_message_flush",
+      Number(process.hrtime.bigint() - started) / 1_000_000_000,
+      { provider, outcome: messageAppendError == null ? "success" : "error" }
+    );
+    log.debug("message append queue flushed", { reason, pending });
+    if (messageAppendError != null) {
+      const err = messageAppendError;
+      messageAppendError = null;
+      throw err;
+    }
   }
 
   // ── /control SSE channel ──────────────────────────────────────────────────
@@ -220,29 +292,30 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
     },
 
     async listMessages(runId) {
+      await flushMessageAppends("listMessages");
       const { messages } = await request<{ messages: never[] }>("GET", `runs/${runId}/messages`);
       return messages;
     },
 
     async appendMessage(runId, role, content) {
-      const { message } = await request<{ message: never }>(
-        "POST",
-        `runs/${runId}/messages`,
-        {
-          role,
-          content,
-          idempotencyKey: messageIdempotencyKey(runId),
-        },
-        { retries: 2, timeoutMs: MESSAGE_APPEND_TIMEOUT_MS }
-      );
-      return message;
+      const idempotencyKey = messageIdempotencyKey(runId);
+      enqueueMessageAppend(runId, role, content, idempotencyKey);
+      return {
+        id: tempMessageId--,
+        runId,
+        role,
+        content,
+        createdAt: new Date(),
+      };
     },
 
     async appendEvent(runId, type, payload) {
+      await flushMessageAppends(`appendEvent:${type}`);
       await request("POST", `runs/${runId}/events`, { type, payload });
     },
 
     async countEvents(runId, type) {
+      await flushMessageAppends(`countEvents:${type}`);
       const { count } = await request<{ count: number }>(
         "GET",
         `runs/${runId}/events?type=${encodeURIComponent(type)}`
@@ -251,6 +324,7 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
     },
 
     async applyStatus(runId, status, o: ApplyStatusOpts = {}) {
+      await flushMessageAppends(`applyStatus:${status}`);
       // Two retry layers, both safe because the server-side write is
       // CAS-guarded (a replay after a landed write matches 0 rows →
       // applied:false, which callers already treat as "someone finalized"):
@@ -269,6 +343,7 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
     },
 
     async setStatus(runId, status) {
+      await flushMessageAppends(`setStatus:${status}`);
       await request("POST", `runs/${runId}/status`, { mode: "set", status }, { retries: 1 });
     },
 
@@ -293,6 +368,7 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
     },
 
     async releaseClaim(runId, { lastProcessedUserMsgId, idleIfNonTerminal }) {
+      await flushMessageAppends("releaseClaim");
       await request(
         "POST",
         `runs/${runId}/release`,
