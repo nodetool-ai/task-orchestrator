@@ -13,9 +13,9 @@
 // Retry policy: GETs and idempotent POSTs (heartbeat, release, log, status —
 // status is CAS-guarded server-side, so a replay after an ambiguous failure is
 // a no-op) retry on network errors and 5xx with short backoff. Message appends
-// use per-message idempotency keys, so they can be queued and retried without
-// duplicating rows; ordering boundaries flush that queue before status/event
-// writes that clients use as turn-complete markers.
+// use per-message idempotency keys, so they can be retried without duplicating
+// rows. appendMessage returns the real persisted row because callers use its id
+// for cursors and transcript anchoring.
 
 import { createLogger } from "./log";
 import { observeRunnerPhase } from "../runner/telemetry";
@@ -68,10 +68,6 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
   const base = opts.baseUrl.replace(/\/+$/, "");
   const doFetch = opts.fetchImpl ?? fetch;
   const provider = runnerProviderLabel();
-  let tempMessageId = -1;
-  let messageAppendChain: Promise<void> = Promise.resolve();
-  let messageAppendError: unknown = null;
-  let queuedMessageAppends = 0;
 
   // Cancel push latch: the /control SSE channel can deliver a cancel signal
   // between heartbeats; the next heartbeat() answer folds it in so the turn
@@ -148,63 +144,40 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
     return `msg:${runId}:${Date.now()}:${random}`;
   }
 
-  function enqueueMessageAppend(
+  async function appendMessageOverHttp(
     runId: number,
     role: "user" | "agent" | "tool" | "system",
     content: unknown[],
     idempotencyKey: string
-  ): void {
-    queuedMessageAppends++;
-    messageAppendChain = messageAppendChain
-      .catch(() => {
-        // Keep later queued appends moving; flushMessageAppends rethrows the
-        // first failure so the turn still lands as failed instead of silently
-        // completing with missing transcript rows.
-      })
-      .then(async () => {
-        const started = process.hrtime.bigint();
-        try {
-          await request<{ message: never }>(
-            "POST",
-            `runs/${runId}/messages`,
-            { role, content, idempotencyKey },
-            { retries: 2, timeoutMs: MESSAGE_APPEND_TIMEOUT_MS }
-          );
-          observeRunnerPhase(
-            "worker_message_append",
-            Number(process.hrtime.bigint() - started) / 1_000_000_000,
-            { provider, outcome: "success" }
-          );
-        } catch (err) {
-          if (messageAppendError == null) messageAppendError = err;
-          observeRunnerPhase(
-            "worker_message_append",
-            Number(process.hrtime.bigint() - started) / 1_000_000_000,
-            { provider, outcome: "error" }
-          );
-          log.error("queued message append failed", { runId, role, error: err as Error });
-        } finally {
-          queuedMessageAppends = Math.max(0, queuedMessageAppends - 1);
-        }
-      });
-  }
-
-  async function flushMessageAppends(reason: string): Promise<void> {
-    const pending = queuedMessageAppends;
-    if (pending === 0 && messageAppendError == null) return;
+  ) {
     const started = process.hrtime.bigint();
-    await messageAppendChain.catch(() => {});
-    observeRunnerPhase(
-      "worker_message_flush",
-      Number(process.hrtime.bigint() - started) / 1_000_000_000,
-      { provider, outcome: messageAppendError == null ? "success" : "error" }
-    );
-    log.debug("message append queue flushed", { reason, pending });
-    if (messageAppendError != null) {
-      const err = messageAppendError;
-      messageAppendError = null;
+    try {
+      const { message } = await request<{ message: never }>(
+        "POST",
+        `runs/${runId}/messages`,
+        { role, content, idempotencyKey },
+        { retries: 2, timeoutMs: MESSAGE_APPEND_TIMEOUT_MS }
+      );
+      observeRunnerPhase(
+        "worker_message_append",
+        Number(process.hrtime.bigint() - started) / 1_000_000_000,
+        { provider, outcome: "success" }
+      );
+      return message;
+    } catch (err) {
+      observeRunnerPhase(
+        "worker_message_append",
+        Number(process.hrtime.bigint() - started) / 1_000_000_000,
+        { provider, outcome: "error" }
+      );
+      log.error("message append failed", { runId, role, error: err as Error });
       throw err;
     }
+  }
+
+  async function flushMessageAppends(_reason: string): Promise<void> {
+    // Historical no-op boundary kept at event/status call sites. Appends now
+    // await their own persisted row, so there is no client-side queue to drain.
   }
 
   // ── /control SSE channel ──────────────────────────────────────────────────
@@ -299,14 +272,7 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
 
     async appendMessage(runId, role, content) {
       const idempotencyKey = messageIdempotencyKey(runId);
-      enqueueMessageAppend(runId, role, content, idempotencyKey);
-      return {
-        id: tempMessageId--,
-        runId,
-        role,
-        content,
-        createdAt: new Date(),
-      };
+      return appendMessageOverHttp(runId, role, content, idempotencyKey);
     },
 
     async appendEvent(runId, type, payload) {
