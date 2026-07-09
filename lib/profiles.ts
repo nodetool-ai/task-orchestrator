@@ -13,6 +13,9 @@
 // without approve — no pr_merge). Used for review runs, which check out an
 // untrusted third-party PR and must not be able to merge or approve it.
 // 'spawn' mounts the child-spawn extension.
+// Brave Search is always-on for chat/agent runs rather than a profile entry:
+// web lookup is broadly useful, read-only, and the tool itself fails closed
+// when BRAVE_SEARCH_API_KEY is not configured.
 
 import type { ExtensionFactory } from "./extensions/types";
 import type { RunRow } from "./runs";
@@ -109,7 +112,11 @@ export function listProfiles(): string[] {
  */
 export async function alwaysOnExtensions(ctx: ProfileContext): Promise<ExtensionFactory[]> {
   const { eventsExtension } = await import("./extensions/events");
-  return [eventsExtension({ runId: ctx.runId })];
+  const { braveSearchExtension } = await import("./extensions/brave-search");
+  return [
+    eventsExtension({ runId: ctx.runId }),
+    braveSearchExtension(),
+  ];
 }
 
 export interface ResolvedProfile {

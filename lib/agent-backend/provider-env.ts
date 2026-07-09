@@ -55,6 +55,9 @@ export const AGENT_CREDENTIAL_ENV_KEYS: readonly string[] = [
   "AZURE_OPENAI_RESOURCE_NAME",
   "AZURE_OPENAI_API_VERSION",
   "AZURE_OPENAI_DEPLOYMENT_NAME_MAP",
+  // Brave Search tool. BRAVE_API_KEY is accepted as a compatibility alias.
+  "BRAVE_SEARCH_API_KEY",
+  "BRAVE_API_KEY",
 ];
 
 /** The subset of AGENT_CREDENTIAL_ENV_KEYS currently set (possibly to ""),

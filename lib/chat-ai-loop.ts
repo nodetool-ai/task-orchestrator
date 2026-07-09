@@ -163,7 +163,8 @@ async function toolsForRun(run: RunRow, author: string): Promise<LightweightTool
   if (run.goal === "<chat>") {
     const repoCtx = await repoContextForRun(run);
     const names = profileNames(run.toolsProfile);
-    const extensions: Extension[] = [];
+    const { braveSearchExtension } = await import("./extensions/brave-search");
+    const extensions: Extension[] = [braveSearchExtension()];
     if (repoCtx.hasLocalCheckout && repoCtx.cwd && (names.has("repo_read") || names.has("repo_write"))) {
       const { repoReadExtension } = await import("./extensions/repo-read");
       extensions.push(repoReadExtension({ cwd: repoCtx.cwd }));

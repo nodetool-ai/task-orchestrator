@@ -7,7 +7,7 @@
 // legitimately manage their own PR) must stay exactly as it was.
 
 import { describe, expect, it } from "vitest";
-import { listProfiles, resolveProfiles } from "../lib/profiles";
+import { alwaysOnExtensions, listProfiles, resolveProfiles } from "../lib/profiles";
 import { makeRegistrar } from "./helpers/fake-registrar";
 import type { RunRow } from "../lib/runs";
 
@@ -122,5 +122,16 @@ describe("resolveProfiles unknown profile", () => {
     await expect(resolveProfiles("nonexistent_profile", baseCtx)).rejects.toThrow(
       "Unknown tools profile"
     );
+  });
+});
+
+describe("alwaysOnExtensions", () => {
+  it("mounts event tools and Brave Search for every agent run", async () => {
+    const factories = await alwaysOnExtensions(baseCtx);
+    const r = makeRegistrar();
+    for (const factory of factories) await factory(r.reg);
+
+    expect(r.tools.has("timer__sleep")).toBe(true);
+    expect(r.tools.has("brave__web_search")).toBe(true);
   });
 });
