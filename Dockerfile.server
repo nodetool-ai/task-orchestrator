@@ -20,6 +20,19 @@ RUN npm run build
 
 FROM node:24-bookworm-slim AS runtime
 WORKDIR /app
+# gh CLI: lib/extensions/gh-pr.ts shells out to `gh` in-process for lightweight
+# chat's GitHub tools (gh_pr__*, gh_repo__branches). It picks up GH_TOKEN /
+# GITHUB_TOKEN from the process env automatically — no `gh auth login` needed,
+# same as the worker/runner images (Dockerfile.worker, Dockerfile.fly-runner).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production
 # The migrator reads its .sql files from disk at boot; point it at the copied-in
 # folder (the bundled server's __dirname can't locate db/migrations otherwise).
