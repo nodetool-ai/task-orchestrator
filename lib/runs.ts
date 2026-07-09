@@ -707,7 +707,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
       // FIX 7 (M20): launchDetached persists a custom initialPrompt as the first
       // user message so driveDispatchedRun's <execute> branch can read it back and
       // pass it to runExecute as operator instructions.
-      if (detachedRunsEnabled()) {
+      if (detachedRunsEnabled() && !isLightweightPiExecutorRun(run)) {
         await launchDetached(run.id, input.initialPrompt, input.parentRunId ?? null);
       } else await runExecute(run.id, input.planId!, input.initialPrompt ?? null);
     })();

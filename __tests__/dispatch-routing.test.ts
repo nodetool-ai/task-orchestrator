@@ -9,19 +9,39 @@ import * as dispatch from "../lib/run-dispatch";
 import * as repo from "../lib/repo";
 import { create } from "../lib/runs";
 
+vi.mock("../lib/chat-ai-loop", () => ({
+  runChatAiTurn: async () => ({
+    events: [],
+    totalCostUsd: null,
+    inputTokens: null,
+    outputTokens: null,
+  }),
+}));
+
 afterEach(() => {
   delete process.env.TASK_ORCH_DETACHED_RUNS;
+  delete process.env.TASK_ORCH_LIGHTWEIGHT_EXECUTOR;
   vi.restoreAllMocks();
 });
 
 describe("create() routing under the flag", () => {
   it("dispatches instead of running in-process when the flag is on", async () => {
     process.env.TASK_ORCH_DETACHED_RUNS = "1";
+    process.env.TASK_ORCH_LIGHTWEIGHT_EXECUTOR = "0";
     const plan = await repo.createPlan({ title: "Dispatch On", date: "2026-07-02" });
     const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
     await create({ goal: "<execute>", planId: plan.id, defer: false } as any);
     await new Promise((r) => setTimeout(r, 20)); // allow the async launch branch to run
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the default pi plan executor on the lightweight loop even when detached runs are on", async () => {
+    process.env.TASK_ORCH_DETACHED_RUNS = "1";
+    const plan = await repo.createPlan({ title: "Lightweight Dispatch Bypass", date: "2026-07-02" });
+    const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
+    await create({ goal: "<execute>", planId: plan.id, backend: "pi", defer: false } as any);
+    await new Promise((r) => setTimeout(r, 20)); // allow the async launch branch to run
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it("does NOT dispatch when the flag is off", async () => {
