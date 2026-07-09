@@ -85,6 +85,62 @@ a different checkout. All `git worktree` operations and `gh pr create`
 calls run against that repo; if unset, the orchestrator works on its own
 source tree.
 
+### Run workers in Docker (local dev)
+
+By default a dispatched run executes in a detached `tsx` host process.
+For a clean, isolated, consistently-tooled worker environment, flip dev to
+spawn each run as an ad-hoc **Docker worker container** (the same `dockerSpawn`
+path the compose/test-deploy stack uses — `docs/test-deployment.md`). The Next.js
+server keeps running on the host with hot reload; only the per-run workers move
+into containers.
+
+```bash
+# one command: build the worker image, seed/refresh a repo-cache mirror,
+# and print the exact env block to drop into .env.local
+scripts/dev-workers.sh
+```
+
+The printed block is:
+
+```bash
+TASK_ORCH_DETACHED_RUNS=1
+TASK_ORCH_WORKER_IMAGE=task-orchestrator-worker:dev
+TASK_ORCH_WORKER_API_URL=http://host.docker.internal:3000   # worker → host dev server
+TASK_ORCH_CLAUDE_HOME_HOST=/home/you/.claude                # mounted RW so resume survives
+TASK_ORCH_REPO_CACHE_HOST_VOLUME=task-orch-dev-repo-cache   # mirror workers clone from
+```
+
+`GH_TOKEN` and your agent-backend credentials already in `.env.local` are
+forwarded into each worker container by the server (workers hold no database
+credentials — they speak the HTTP + SSE protocol, `docs/worker-http-api.md`).
+Workers clone from the seeded mirror (`git clone --reference`) into `/work/<id>`
+and push/PR with `GH_TOKEN`; resume re-clones from the mirror, so it survives
+the ephemeral container dying.
+
+Then `npm run dev` and trigger a run — watch the container appear:
+
+```bash
+docker ps --filter name=run- --format '{{.Names}}	{{.Status}}'
+```
+
+Rebuild the image after changing worker/lib code (the container carries a
+baked `COPY . .` snapshot):
+
+```bash
+scripts/dev-workers.sh --build
+```
+
+Refresh the repo mirror after upstream commits land on the target repo:
+
+```bash
+scripts/dev-workers.sh --refresh-cache
+```
+
+Revert to host `tsx` workers any time by unsetting `TASK_ORCH_WORKER_IMAGE` in
+`.env.local`. See `scripts/dev-workers.sh --help` (header) for prerequisites
+(Docker, `GH_TOKEN` with `repo` scope, `~/.claude` authenticated) and the full
+flag set.
+
 HTTP access is gated by email + password sign-in (Auth.js v5, Credentials
 provider). User accounts live in the `users` table with bcrypt password
 hashes. Set:

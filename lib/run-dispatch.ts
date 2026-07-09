@@ -716,6 +716,13 @@ export function buildWorkerContainerConfig(runId: number, scope: string): Record
       Binds: binds,
       // Bound the on-disk json log so a chatty worker can't fill the host disk.
       LogConfig: { Type: "json-file", Config: { "max-size": "5m", "max-file": "2" } },
+      // Always resolve `host.docker.internal` inside the worker. In the compose
+      // stack the worker reaches the server over the compose network instead, so
+      // this is inert there; but for host dev (`npm run dev` + TASK_ORCH_WORKER_IMAGE)
+      // the worker is on the default bridge and must reach the host server — on
+      // Linux that needs the explicit host-gateway mapping (macOS Docker Desktop
+      // provides it automatically; the duplicate is harmless).
+      ExtraHosts: ["host.docker.internal:host-gateway"],
       // Hard per-worker cgroup caps (Memory/MemorySwap/NanoCpus/PidsLimit) so a
       // single runaway worker can't take the host down. Opt-in via env; {} when
       // unset. Paired with the admission gate in dispatchRun, which bounds the
