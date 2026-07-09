@@ -50,7 +50,11 @@ import type { RunEnvelope } from "@/lib/pi-event-mapper";
 
 const DEFAULT_CHAT_MODEL = process.env.TASK_ORCH_AGENT_MODEL ?? "anthropic/claude-sonnet-4-6";
 const TOOL_PREFIX = "task_orch__";
-const DEFAULT_CHAT_MAX_TOOL_ROUNDS = 8;
+// Ordinary lightweight chats can legitimately do long orchestration bursts:
+// inspect a plan, list tasks, read notes/attachments, start children, park, or
+// answer event digests. Keep a runaway guard, but do not cut off normal work at
+// the old 8-round ceiling. Override with TASK_ORCH_CHAT_MAX_TOOL_ROUNDS.
+const DEFAULT_CHAT_MAX_TOOL_ROUNDS = 64;
 // The executor drives a multi-step orchestration loop per wake (re-scan tasks,
 // start N children, arm watchdog, park) and routinely needs more rounds than a
 // chat turn. The watchdog parking tools keep a single wake bounded, but give it
@@ -376,7 +380,11 @@ function fallbackToolResultMessage(row: RawMessageRow): ToolResultMessage | null
   };
 }
 
-async function listContextMessages(run: RunRow, currentInputText: string): Promise<Message[]> {
+async function listContextMessages(
+  run: RunRow,
+  currentInputText: string,
+  opts: { ephemeralInput?: boolean } = {}
+): Promise<Message[]> {
   const rows = (
     await db
       .select()
@@ -407,7 +415,13 @@ async function listContextMessages(run: RunRow, currentInputText: string): Promi
       if (toolResult) messages.push(toolResult);
     }
   }
-  if (lastUserIndex >= 0) {
+  if (opts.ephemeralInput) {
+    messages.push({
+      role: "user",
+      content: currentInputText,
+      timestamp: Date.now(),
+    });
+  } else if (lastUserIndex >= 0) {
     const current = messages[lastUserIndex] as UserMessage;
     if (typeof current.content === "string") {
       current.content = currentInputText;
@@ -535,6 +549,7 @@ export async function runChatAiTurn(args: {
   inputText: string;
   author: string;
   abort: AbortController;
+  ephemeralInput?: boolean;
 }): Promise<ChatAiTurnResult> {
   const { run, inputText, author, abort } = args;
   const transport = await runTransport();
@@ -543,9 +558,13 @@ export async function runChatAiTurn(args: {
     throw new Error(`Persona '${run.personaId ?? "implementor"}' not found; seed personas via db/seed-personas.ts.`);
   }
 
-  await annotateCurrentUserMessage(run.id, inputText);
+  if (!args.ephemeralInput) {
+    await annotateCurrentUserMessage(run.id, inputText);
+  }
 
-  const contextMessages = await listContextMessages(run, inputText);
+  const contextMessages = await listContextMessages(run, inputText, {
+    ephemeralInput: args.ephemeralInput === true,
+  });
   const entries = await toolsForRun(run, author);
   const tools = entries.map((entry) => entry.tool);
   const dispatch = new Map(entries.map((entry) => [entry.tool.name, entry]));

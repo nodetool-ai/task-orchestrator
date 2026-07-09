@@ -97,4 +97,36 @@ describe("driveChatSession message drain (BUG 2)", () => {
 
     expect(redispatch).toHaveBeenCalledWith(run.id);
   });
+
+  it("keeps an SDK-backed chat parked when a tool sets parkReason", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    vi.spyOn(backend, "getBackend").mockResolvedValue({
+      id: "fake",
+      async runTurn(args: any) {
+        await db
+          .update(agentSessions)
+          .set({ parkReason: "waiting" })
+          .where(eq(agentSessions.id, run.id));
+        args.onEvent({ type: "assistant", message: { content: [{ type: "text", text: "waiting" }] } });
+        args.onEvent({ type: "result", is_error: false, result: "waiting", usage: {} });
+        return {
+          summary: "waiting",
+          resumeToken: "sess-park",
+          turns: 1,
+          inputTokens: 0,
+          outputTokens: 0,
+          totalCostUsd: null,
+          envelopes: [],
+        };
+      },
+    } as any);
+    await insertUserMessage(run.id, "wait for child");
+
+    await driveChatSession(run.id);
+
+    const after = await get(run.id);
+    expect(after?.status).toBe("parked");
+    expect(after?.parkReason).toBe("waiting");
+    expect(after?.workerScope).toBeNull();
+  });
 });

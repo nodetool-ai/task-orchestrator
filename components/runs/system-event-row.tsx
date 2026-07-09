@@ -120,6 +120,40 @@ function render(
           </span>
         ),
       };
+    case "inbox_event": {
+      const eventType = String(payload.event_type ?? "event");
+      const runId = nestedNumber(payload, "run_id") ?? payload.source_id;
+      const audience = String(payload.audience ?? "owner");
+      const summary =
+        nestedString(payload, "summary") ??
+        nestedString(payload, "message") ??
+        nestedString(payload, "question") ??
+        nestedString(payload, "note");
+      return {
+        icon: eventType.startsWith("child.") ? (
+          <GitBranch className="size-3.5 text-state-review" />
+        ) : (
+          <Info className="size-3.5 text-muted-foreground" />
+        ),
+        body: (
+          <span>
+            event{" "}
+            <code className="font-mono text-foreground">{eventType}</code>
+            {runId != null && (
+              <>
+                {" "}
+                from run{" "}
+                <code className="font-mono text-foreground">#{String(runId)}</code>
+              </>
+            )}
+            {audience === "supervisor" && (
+              <span className="text-muted-foreground/80"> · supervisor</span>
+            )}
+            {summary && <span className="text-muted-foreground/90"> · {summary}</span>}
+          </span>
+        ),
+      };
+    }
     case "status": {
       const s = String(payload.status ?? "");
       return {
@@ -220,6 +254,25 @@ function render(
         body: <span>{text ?? JSON.stringify(payload)}</span>,
       };
   }
+}
+
+function nestedPayload(payload: Record<string, unknown>): Record<string, unknown> | null {
+  const nested = payload.payload;
+  return nested && typeof nested === "object" && !Array.isArray(nested)
+    ? (nested as Record<string, unknown>)
+    : null;
+}
+
+function nestedString(payload: Record<string, unknown>, key: string): string | null {
+  const nested = nestedPayload(payload);
+  const value = nested?.[key];
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function nestedNumber(payload: Record<string, unknown>, key: string): number | null {
+  const nested = nestedPayload(payload);
+  const value = nested?.[key];
+  return typeof value === "number" ? value : null;
 }
 
 function textFromContent(content: SdkContentBlock[]): string | null {

@@ -47,6 +47,18 @@ describe("releaseClaim re-dispatch gate", () => {
     expect((await get(run.id))!.status).toBe("idle");
   });
 
+  it("chat exit keeps a deliberately parked run parked", async () => {
+    const run = await strandedChatRun("parked");
+    const spy = vi.spyOn(runDispatch, "dispatchRun").mockResolvedValue("spawned" as never);
+    await db
+      .update(agentSessions)
+      .set({ parkReason: "waiting" })
+      .where(eq(agentSessions.id, run.id));
+    await dbTransport.releaseClaim(run.id, { lastProcessedUserMsgId: 999, idleIfNonTerminal: true });
+    expect(spy).not.toHaveBeenCalled();
+    expect((await get(run.id))!.status).toBe("parked");
+  });
+
   it("single-turn exit revives a completed run with a newer message (FIX 3a) but never a cancelled one", async () => {
     const completed = await strandedChatRun("completed");
     const spy = vi.spyOn(runDispatch, "dispatchRun").mockResolvedValue("spawned" as never);

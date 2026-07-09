@@ -155,4 +155,31 @@ describe("sendMessageToRun on the server (unchanged behavior)", () => {
     expect(chatLoop.runChatAiTurn).toHaveBeenCalled();
     expect((await get(run.id))?.status).toBe("idle");
   });
+
+  it("keeps a lightweight chat parked when a tool sets parkReason", async () => {
+    process.env.TASK_ORCH_WORKER_IMAGE = "orch-worker:test";
+    process.env.TASK_ORCH_DETACHED_RUNS = "1";
+    (chatLoop.runChatAiTurn as any).mockImplementationOnce(async ({ run }: any) => {
+      const { runTransport } = await import("../lib/worker");
+      await (await runTransport()).patchRun(run.id, { parkReason: "waiting" });
+      return {
+        events: [],
+        summary: "waiting",
+        totalCostUsd: null,
+        inputTokens: 0,
+        outputTokens: 0,
+        turns: 1,
+      };
+    });
+    const run = await create({ goal: "<chat>", defer: true });
+
+    const abort = new AbortController();
+    for await (const ev of sendMessageToRun({ runId: run.id, role: "user", text: "wait", abort })) {
+      if (ev.type === "done" || ev.type === "error") break;
+    }
+
+    const after = await get(run.id);
+    expect(after?.status).toBe("parked");
+    expect(after?.parkReason).toBe("waiting");
+  });
 });

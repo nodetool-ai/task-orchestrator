@@ -19,6 +19,7 @@ import { and, asc, desc, eq, inArray, lt, sql } from "drizzle-orm";
 
 import { db } from "@/db";
 import {
+  agentMessages,
   agentSessions,
   inboxEvents,
   runTimers,
@@ -178,6 +179,38 @@ async function insertEvent(
   return rows[0]?.id ?? null;
 }
 
+async function mirrorInboxEventMessage(input: {
+  targetRunId: number;
+  eventId: number;
+  type: string;
+  payload: Record<string, unknown>;
+  audience: Audience;
+  sourceKind: SourceKind;
+  sourceId?: string | null;
+  correlationId?: string | null;
+  attempt?: number | null;
+  bubbledFrom?: number | null;
+}): Promise<void> {
+  await db.insert(agentMessages).values({
+    runId: input.targetRunId,
+    role: "system",
+    content: JSON.stringify([
+      {
+        type: "inbox_event",
+        event_id: input.eventId,
+        event_type: input.type,
+        audience: input.audience,
+        source_kind: input.sourceKind,
+        source_id: input.sourceId ?? null,
+        correlation_id: input.correlationId ?? null,
+        attempt: input.attempt ?? null,
+        bubbled_from: input.bubbledFrom ?? null,
+        payload: input.payload,
+      },
+    ]),
+  });
+}
+
 /**
  * Emit one logical event. Handles, in order:
  *  1. target resolution through superseded_by chains (§9.1)
@@ -256,6 +289,20 @@ export async function emitInboxEvent(input: EmitInput): Promise<EmitResult> {
       .returning({ id: inboxEvents.id });
     return rows[0]?.id ?? null;
   });
+  if (eventId != null) {
+    await mirrorInboxEventMessage({
+      targetRunId: target.id,
+      eventId,
+      type: input.type,
+      payload: input.payload ?? {},
+      audience,
+      sourceKind: input.sourceKind,
+      sourceId: input.sourceId ?? null,
+      correlationId: input.correlationId ?? null,
+      attempt: input.attempt ?? null,
+      bubbledFrom,
+    }).catch(() => {});
+  }
 
   // Supervisor copy (§5.2) — informational AND wakes a parked parent (§5.2a):
   // a parked parent must not sleep through its child's lifecycle. Best-effort,
@@ -276,6 +323,20 @@ export async function emitInboxEvent(input: EmitInput): Promise<EmitResult> {
         bubbledFrom: target.id,
         dedupeKey: input.dedupeKey ? `sup:${input.dedupeKey}` : null,
       }).catch(() => null);
+      if (copyId != null) {
+        await mirrorInboxEventMessage({
+          targetRunId: parent.id,
+          eventId: copyId,
+          type: input.type,
+          payload: input.payload ?? {},
+          audience: "supervisor",
+          sourceKind: input.sourceKind,
+          sourceId: input.sourceId ?? null,
+          correlationId: input.correlationId ?? null,
+          attempt: input.attempt ?? null,
+          bubbledFrom: target.id,
+        }).catch(() => {});
+      }
       if (copyId != null && !input.noWake && parent.status === "parked") {
         try {
           const runDispatch = await import("./run-dispatch");

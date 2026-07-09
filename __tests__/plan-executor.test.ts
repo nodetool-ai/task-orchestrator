@@ -124,19 +124,20 @@ describe("await_session", () => {
     expect(out.pr_url).toBe("https://github.com/x/y/pull/1");
   });
 
-  it("resolves once a running session reaches a terminal status", async () => {
-    const id = await insertRun({ status: "running" });
-    // Flip to completed shortly after the poll loop starts.
-    setTimeout(async () => {
-      await db
-        .update(agentSessions)
-        .set({ status: "completed", outcome: JSON.stringify({ verdict: "request_changes" }) })
-        .where(eq(agentSessions.id, id));
-    }, 100);
-    const res = await tool("await_session").execute({ session_id: id }, ctx);
+  it("parks the caller instead of blocking for a running session", async () => {
+    const parent = await insertRun({ goal: "<chat>", status: "running" });
+    const id = await insertRun({ status: "running", parentRunId: parent });
+    const res = await tool("await_session").execute(
+      { session_id: id, timeout_seconds: 60 },
+      { ...ctx, runId: parent }
+    );
     const out = JSON.parse((res.content[0] as { text: string }).text);
-    expect(out.status).toBe("completed");
-    expect(out.verdict).toBe("request_changes");
+    expect(out.status).toBe("running");
+    expect(out.waiting).toBe(true);
+    expect(out.caller_run_id).toBe(parent);
+    expect(out.timeout_timer_id).toEqual(expect.any(Number));
+    const parentRow = await runs.get(parent);
+    expect(parentRow?.parkReason).toBe("waiting");
   });
 });
 

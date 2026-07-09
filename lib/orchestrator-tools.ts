@@ -10,6 +10,9 @@ import * as agentLib from "./agent";
 import * as runs from "./runs";
 import { parseReviewVerdict } from "./run-templates";
 import { parsePrUrl } from "./gh-url";
+import { db } from "@/db";
+import { agentSessions } from "@/db/schema";
+import { eq } from "drizzle-orm";
 import {
   PLAN_STATES,
   TASK_STATES,
@@ -18,6 +21,7 @@ import {
   type PlanState,
   type TaskState,
 } from "./types";
+import { createTimer, TIMER_MAX_MINUTES, TIMER_MIN_MINUTES } from "./inbox";
 
 // Derived from TASK_TRANSITIONS so the transition_task description can never
 // drift from the actual allowed edges (a hardcoded list silently goes stale
@@ -137,8 +141,6 @@ const findCriterion = async (taskId: string, needle: string) => {
     null
   );
 };
-
-const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
 
 // States a plan may be *created* in. Full PLAN_STATES also includes
 // 'accepted'/'done'/'cancelled' — allowing those at creation would let a
@@ -1048,7 +1050,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "start_session",
     label: "Start Session",
     description:
-      "Kick off a background Claude agent to implement a task. Creates a worktree, runs the agent, opens a PR when done, and moves the task to review. Returns the session id immediately (non-blocking) — call await_session to wait for it to finish.",
+      "Kick off a background Claude agent to implement a task. Creates a worktree, runs the agent, opens a PR when done, and moves the task to review. Returns the session id immediately (non-blocking). To wait, call await_session; it parks your run and child events wake you later.",
     parameters: Type.Object({
       task_id: Type.String({ minLength: 1 }),
       model: Type.Optional(Type.String()),
@@ -1082,44 +1084,76 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "await_session",
     label: "Await Session",
     description:
-      "Block until an agent session reaches a terminal status (completed | failed | cancelled | closed | budget_exhausted), then return its status, outcome, review verdict (if any), PR url, error, and cost. Use after start_session to wait for a child run to finish. Times out after timeout_seconds (default 1800, max 7200) and returns the current (non-terminal) status with timed_out=true.",
+      "Wait for an agent session without polling. If the session is already terminal, returns its status, outcome, review verdict (if any), PR url, error, and cost. Otherwise parks the caller and returns immediately; child.result/child.exception/child.cancelled/child.budget_exhausted events wake the caller when the child finishes. A timeout timer wakes the caller as a backstop.",
     parameters: Type.Object({
       session_id: Type.Integer(),
       timeout_seconds: Type.Optional(
         Type.Integer({
           minimum: 1,
           maximum: 7200,
-          description: "Seconds to wait before returning non-terminal status. Default 1800, max 7200 (2h) — this call blocks the turn, it shouldn't pin it for longer than that.",
+          description: "Backstop wakeup delay in seconds. Default 1800, max 7200 (2h). The tool does not block for this duration.",
         })
       ),
     }),
-    execute: async ({ session_id, timeout_seconds }, _ctx) => {
-      const timeoutMs = (timeout_seconds ?? 1800) * 1000;
-      const intervalMs = 1500;
-      const startedAt = Date.now();
+    execute: async ({ session_id, timeout_seconds }, ctx) => {
       let run = await runs.get(session_id);
       if (!run) return errResult(`Error: Session ${session_id} not found`);
-      while (!isTerminalStatus(run.status)) {
-        if (Date.now() - startedAt > timeoutMs) {
-          return jsonResult({
-            session_id,
-            status: run.status,
-            timed_out: true,
-            pr_url: run.prUrl,
-          });
-        }
-        await sleep(intervalMs);
-        run = await runs.get(session_id);
-        if (!run) return errResult(`Error: Session ${session_id} disappeared`);
+      if (isTerminalStatus(run.status)) {
+        return jsonResult({
+          session_id,
+          status: run.status,
+          outcome: run.outcome,
+          verdict: parseReviewVerdict(run.outcome),
+          pr_url: run.prUrl,
+          error: run.error,
+          total_cost_usd: run.totalCostUsd,
+        });
       }
+
+      if (!ctx.runId) {
+        return jsonResult({
+          session_id,
+          status: run.status,
+          waiting: false,
+          message:
+            "Session is still running. await_session only parks when called from inside a run.",
+          pr_url: run.prUrl,
+        });
+      }
+
+      const timeoutSeconds = timeout_seconds ?? 1800;
+      const minutes = Math.max(
+        TIMER_MIN_MINUTES,
+        Math.min(TIMER_MAX_MINUTES, Math.ceil(timeoutSeconds / 60))
+      );
+      const timer = await createTimer({
+        runId: ctx.runId,
+        minutes,
+        note: `await_session #${session_id} timeout`,
+        correlationId: `await-session:${session_id}`,
+      });
+      await db
+        .update(agentSessions)
+        .set({ parkReason: "waiting" })
+        .where(eq(agentSessions.id, ctx.runId));
+
       return jsonResult({
         session_id,
         status: run.status,
-        outcome: run.outcome,
-        verdict: parseReviewVerdict(run.outcome),
+        waiting: true,
+        caller_run_id: ctx.runId,
+        wake_events: [
+          "child.result",
+          "child.exception",
+          "child.cancelled",
+          "child.budget_exhausted",
+        ],
+        timeout_timer_id: timer.ok ? timer.timerId : null,
+        timeout_fire_at: timer.ok ? timer.fireAt.toISOString() : null,
+        timer_error: timer.ok ? null : timer.error,
+        message:
+          "Caller parked. End your turn now; the run will wake when the child emits an event or the timeout fires.",
         pr_url: run.prUrl,
-        error: run.error,
-        total_cost_usd: run.totalCostUsd,
       });
     },
   },

@@ -223,9 +223,10 @@ export const dbTransport: RunTransport = {
     const cur = await this.getRun(runId);
     if (!cur) return;
     // Chat-loop exit: land the run resumable-idle unless cancel/close already
-    // wrote a terminal row. Ordered BEFORE the stranded re-dispatch so a fresh
-    // dispatch's 'preparing' claim is never clobbered back to 'idle'.
-    if (idleIfNonTerminal && !isTerminalStatus(cur.status)) {
+    // wrote a terminal row or the turn deliberately parked for an event/timer.
+    // Ordered BEFORE the stranded re-dispatch so a fresh dispatch's 'preparing'
+    // claim is never clobbered back to 'idle'.
+    if (idleIfNonTerminal && !isTerminalStatus(cur.status) && cur.status !== "parked") {
       await this.setStatus(runId, "idle");
     }
     // Stranded-message drain: a non-empty user message that arrived while the

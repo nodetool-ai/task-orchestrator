@@ -309,6 +309,9 @@ export interface AppendInput {
    *  the worker). The worker then runs the turn on `text` without re-inserting a
    *  duplicate user row. In-process/legacy callers leave it unset. */
   persistUser?: boolean;
+  /** True for event-only wakeups: `text` is an ephemeral model prompt, not an
+   *  existing user row and not something that should be shown in the transcript. */
+  ephemeralInput?: boolean;
 }
 
 export interface AppendStreamEvent {
@@ -1060,6 +1063,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
           inputText: effectivePrompt,
           author,
           abort,
+          ephemeralInput: input.ephemeralInput === true,
         });
 
         if (abort.signal.aborted) {
@@ -1073,7 +1077,16 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
           yield event;
         }
 
-        await (await runTransport()).applyStatus(run.id, "idle", {
+        const turnEnd = await readTurnEndState(run.id);
+        const nextStatus = decideTurnEndStatus({
+          goal: run.goal,
+          freshStatus: turnEnd.status,
+          parkReason: turnEnd.parkReason,
+          result: turnEnd.result,
+          budgetHit: false,
+          defaultStatus: "idle",
+        });
+        await (await runTransport()).applyStatus(run.id, nextStatus, {
           set: {
             totalCostUsd:
               chatResult.totalCostUsd == null
@@ -1081,7 +1094,8 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
                 : (run.totalCostUsd ?? 0) + chatResult.totalCostUsd,
             inputTokens: (run.inputTokens ?? 0) + (chatResult.inputTokens ?? 0),
             outputTokens: (run.outputTokens ?? 0) + (chatResult.outputTokens ?? 0),
-            completedAt: null,
+            parkReason: nextStatus === "parked" ? turnEnd.parkReason : null,
+            completedAt: isTerminalStatus(nextStatus) ? new Date() : null,
           },
           guard: "not-cancelled-closed",
           retries: FINALIZE_RETRIES,
@@ -2601,6 +2615,7 @@ export async function driveChatSession(runId: number): Promise<void> {
     wake = null;
   };
   abort.signal.addEventListener("abort", onAbort);
+  let handledEventWake = false;
 
   try {
     for (;;) {
@@ -2609,6 +2624,34 @@ export async function driveChatSession(runId: number): Promise<void> {
       const msgs = (await listMessages(runId)).filter(
         (m) => m.role === "user" && m.id > lastProcessed
       );
+      if (msgs.length === 0) {
+        const run = await get(runId);
+        if (!run || run.status === "closed") return;
+        // Event wake: a parked chat resumed because emitInboxEvent dispatched it,
+        // but no human message was added. Run one turn with a small synthetic
+        // prompt; append() injects the claimed inbox digest before this text, so
+        // the model sees the actual child/timer events that woke it.
+        if (
+          !handledEventWake &&
+          run.parkReason != null &&
+          (run.status === "preparing" || run.status === "parked")
+        ) {
+          handledEventWake = true;
+          for await (const _ev of append({
+            runId,
+            role: "user",
+            text: "Continue from the newly delivered run events.",
+            persistUser: false,
+            ephemeralInput: true,
+            takeover: run.status === "preparing",
+            abort,
+          })) {
+            void _ev;
+          }
+          await emitTurnDone(runId);
+          continue;
+        }
+      }
       for (const m of msgs) {
         if (abort.signal.aborted) return;
         const run = await get(runId);
@@ -3465,8 +3508,9 @@ export interface TurnEndDecisionInput {
  *   3. budget exhaustion beats parking — an exhausted run must not sleep.
  *   4. implement-style PR requirements beat parking; the agent must either
  *      produce a PR or explicitly fail.
- *   5. park_reason set on a goal-driven (non-chat) run that would otherwise
- *      land completed/idle → 'parked'. Chat runs keep their idle behavior.
+ *   5. park_reason set on a run that would otherwise land completed/idle →
+ *      'parked'. This includes chat runs: await_session/timer tools must yield
+ *      the chat turn and let inbox events wake it without a polling loop.
  *   6. otherwise the legacy default.
  */
 export function decideTurnEndStatus(i: TurnEndDecisionInput): SessionStatus {
@@ -3483,7 +3527,6 @@ export function decideTurnEndStatus(i: TurnEndDecisionInput): SessionStatus {
   if (i.requiresPrUrl && !i.prUrl) return "running";
   if (
     i.parkReason != null &&
-    i.goal !== "<chat>" &&
     (i.defaultStatus === "completed" || i.defaultStatus === "idle")
   ) {
     return "parked";

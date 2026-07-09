@@ -213,10 +213,10 @@ describe("decideTurnEndStatus", () => {
     ).toBe("running");
   });
 
-  it("chat runs keep their idle behavior even with a park_reason", () => {
+  it("parks chat runs when a tool sets park_reason", () => {
     expect(
       decideTurnEndStatus({ ...base, goal: "<chat>", parkReason: "sleeping", defaultStatus: "idle" })
-    ).toBe("idle");
+    ).toBe("parked");
   });
 
   it("budget exhaustion beats parking", () => {
@@ -348,15 +348,24 @@ describe("injectPendingInboxEvents (integration)", () => {
     // Owner event first even though the supervisor copy has the lower id.
     expect(digest!.indexOf("child.result")).toBeLessThan(digest!.indexOf("gh.pr.merged"));
 
-    // Exactly one system frame carrying a single event_digest block.
+    // Inline event frames arrive at event time; the digest frame later records
+    // exactly what the model claimed at wake/turn start.
     const frames = await db
       .select()
       .from(agentMessages)
       .where(eq(agentMessages.runId, parent))
       .orderBy(asc(agentMessages.id));
-    expect(frames).toHaveLength(1);
-    expect(frames[0].role).toBe("system");
-    const blocks = JSON.parse(frames[0].content) as Array<{ type: string; events: unknown[] }>;
+    expect(frames).toHaveLength(3);
+    const inlineBlocks = frames
+      .map((frame) => JSON.parse(frame.content)[0] as { type: string; event_type?: string })
+      .filter((block) => block.type === "inbox_event");
+    expect(inlineBlocks.map((block) => block.event_type)).toEqual([
+      "gh.pr.merged",
+      "child.result",
+    ]);
+    const digestFrame = frames.find((frame) => JSON.parse(frame.content)[0]?.type === "event_digest")!;
+    expect(digestFrame.role).toBe("system");
+    const blocks = JSON.parse(digestFrame.content) as Array<{ type: string; events: unknown[] }>;
     expect(blocks).toHaveLength(1);
     expect(blocks[0].type).toBe("event_digest");
     expect(blocks[0].events).toHaveLength(2);
@@ -370,7 +379,7 @@ describe("injectPendingInboxEvents (integration)", () => {
     expect(rows).toHaveLength(2);
     for (const row of rows) {
       expect(row.status).toBe("injected");
-      expect(row.runTurnId).toBe(frames[0].id);
+      expect(row.runTurnId).toBe(digestFrame.id);
     }
 
     // Nothing left pending: a second injection is a no-op.
