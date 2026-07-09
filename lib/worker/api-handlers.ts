@@ -17,9 +17,43 @@ import { authorizeWorkerRequest } from "./token";
 import { dbTransport } from "./db-transport";
 import { createLogger } from "./log";
 import { SESSION_STATUSES, TASK_STATES, type SessionStatus } from "../types";
+import { WORKER_PROTOCOL_VERSION, WORKER_PROTOCOL_HEADER } from "./protocol";
 import type { ApplyStatusOpts, WireStatusGuard } from "./protocol";
 
 const log = createLogger("worker-api");
+
+/** Runs we've already logged as talking the unversioned protocol — once per
+ *  run, not once per request (an old worker beats/polls constantly). */
+const unversionedLogged = new Set<number>();
+
+/**
+ * Enforce the wire-protocol major version. Returns a 409 Response on a
+ * mismatch (terminal for the worker — it should exit and be re-dispatched),
+ * null to proceed. A missing header is served (a pre-versioning worker) but
+ * flagged once per run via the `runner_protocol_unversioned` log.
+ */
+function checkProtocol(req: Request, runId: number): Response | null {
+  const raw = req.headers.get(WORKER_PROTOCOL_HEADER);
+  if (raw === null || raw === "") {
+    if (!unversionedLogged.has(runId)) {
+      unversionedLogged.add(runId);
+      log.warn("runner_protocol_unversioned", {
+        runId,
+        server: WORKER_PROTOCOL_VERSION,
+        note: "worker sent no X-Worker-Protocol header; serving as legacy",
+      });
+    }
+    return null;
+  }
+  const client = parseInt(raw, 10);
+  if (Number.isInteger(client) && client === WORKER_PROTOCOL_VERSION) return null;
+  log.warn("protocol_mismatch", { runId, server: WORKER_PROTOCOL_VERSION, client: raw });
+  return json(409, {
+    error: "protocol_mismatch",
+    server: WORKER_PROTOCOL_VERSION,
+    client: Number.isInteger(client) ? client : null,
+  });
+}
 
 /** How often the /control stream re-checks the cancel flag without a wake. */
 const CONTROL_POLL_MS = 3_000;
@@ -107,6 +141,11 @@ async function route(
   const auth = authorizeWorkerRequest(req, root === "runs" ? parseRunId(id) : undefined);
   if (!auth.ok) return json(auth.status, { error: auth.error });
   sawRun(auth.runId);
+
+  // Wire-protocol version gate (after auth so we have the run id for the
+  // once-per-run unversioned log; the token format itself is unchanged).
+  const versionMismatch = checkProtocol(req, auth.runId);
+  if (versionMismatch) return versionMismatch;
 
   // Note: Next's catch-all params (and the tests' adapter) hand us segments
   // that are ALREADY percent-decoded — do not decode again.

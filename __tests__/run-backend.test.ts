@@ -1,8 +1,7 @@
 // Per-run agent-backend selection: agent_runs.backend picks the SDK adapter
-// for that run ('pi' | 'claude'); NULL inherits the deployment default
-// (TASK_ORCH_AGENT_BACKEND). Chosen at run creation (UI pickers / API / CLI),
-// validated eagerly, and inherited by resumes so a backend-tagged resume token
-// stays usable.
+// for that run ('pi' | 'claude'). The deployment default is resolved and
+// persisted at creation so placement and backend cannot diverge after an env
+// change; legacy NULL rows still resolve the deployment default when read.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
@@ -27,13 +26,13 @@ async function makeTask(title: string): Promise<string> {
 }
 
 describe("runs.create backend column", () => {
-  it("persists an explicit backend and defaults to null (deployment default)", async () => {
+  it("persists both an explicit backend and the resolved deployment default", async () => {
     const picked = await runs.create({ goal: "<chat>", backend: "pi", defer: true });
     expect(picked.backend).toBe("pi");
     expect((await runs.get(picked.id))?.backend).toBe("pi");
 
     const unpicked = await runs.create({ goal: "<chat>", defer: true });
-    expect(unpicked.backend).toBeNull();
+    expect(unpicked.backend).toBe("pi");
   });
 
   it("rejects an unknown backend with a 400", async () => {

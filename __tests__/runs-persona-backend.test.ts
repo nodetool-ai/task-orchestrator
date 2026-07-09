@@ -56,9 +56,9 @@ describe("runs.create persona backend inheritance", () => {
     });
   });
 
-  it("a null persona backend stays null (deployment default)", async () => {
+  it("a null persona backend persists the resolved deployment default", async () => {
     await db.update(personasTable).set({ backend: null }).where(eq(personasTable.id, "implementor"));
     const run = await runs.create({ goal: "<implement>", defer: true });
-    expect(run.backend).toBeNull();
+    expect(run.backend).toBe("pi");
   });
 });

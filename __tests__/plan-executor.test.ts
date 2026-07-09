@@ -15,6 +15,7 @@ import {
 import * as repo from "../lib/repo";
 import * as runs from "../lib/runs";
 import { ORCHESTRATOR_TOOLS } from "../lib/orchestrator-tools";
+import { decideTurnEndStatus } from "../lib/run-state";
 import { buildExecutePrompt } from "../lib/run-templates";
 import { PERSONAS } from "../lib/personas";
 import { seedPersonas } from "../db/seed-personas";
@@ -138,6 +139,38 @@ describe("await_session", () => {
     expect(out.timeout_timer_id).toEqual(expect.any(Number));
     const parentRow = await runs.get(parent);
     expect(parentRow?.parkReason).toBe("waiting");
+  });
+
+  it("await on a live child parks the turn end at 'parked' (event path, no held connection)", async () => {
+    // R7b: await_session never blocks — it writes the park effect and returns
+    // immediately. The turn-end decision then lands 'parked' from that
+    // parkReason, so the run waits on the child's terminal EVENT rather than a
+    // held HTTP connection. This ties the tool's park write to decideTurnEndStatus.
+    const parent = await insertRun({ goal: "<chat>", status: "running" });
+    const child = await insertRun({ status: "running", parentRunId: parent });
+
+    const res = await tool("await_session").execute(
+      { session_id: child, timeout_seconds: 60 },
+      { ...ctx, runId: parent }
+    );
+    // Returned immediately with a park directive, not a blocking wait.
+    const out = JSON.parse((res.content[0] as { text: string }).text);
+    expect(out.waiting).toBe(true);
+
+    const parentRow = await runs.get(parent);
+    expect(parentRow?.parkReason).toBe("waiting");
+
+    // Re-reading state at turn end (chat default 'idle') with the park reason
+    // set lands the run 'parked'.
+    const landed = decideTurnEndStatus({
+      goal: "<chat>",
+      freshStatus: "running",
+      parkReason: parentRow?.parkReason ?? null,
+      result: null,
+      budgetHit: false,
+      defaultStatus: "idle",
+    });
+    expect(landed).toBe("parked");
   });
 });
 

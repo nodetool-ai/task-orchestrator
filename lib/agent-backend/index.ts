@@ -5,6 +5,7 @@
 // (default "pi"). Backend modules are dynamically imported and cached per id
 // so an unused SDK — and its native bits — never loads.
 
+import { config } from "../config";
 import type { AgentBackend, BackendId } from "./types";
 
 export * from "./types";
@@ -16,9 +17,9 @@ export const BACKEND_IDS: readonly BackendId[] = ["pi", "claude"];
 /** Normalize + validate a backend id. `raw` may be a per-run value; when
  *  null/undefined the deployment default (TASK_ORCH_AGENT_BACKEND) applies. */
 export function resolveBackendId(
-  raw: string | null | undefined = process.env.TASK_ORCH_AGENT_BACKEND
+  raw: string | null | undefined = config.agent.backend
 ): BackendId {
-  const id = (raw ?? process.env.TASK_ORCH_AGENT_BACKEND ?? "pi").trim().toLowerCase();
+  const id = (raw ?? config.agent.backend ?? "pi").trim().toLowerCase();
   if (id === "pi" || id === "claude") return id;
   throw new Error(`Unknown agent backend '${raw}'. Expected 'pi' or 'claude'.`);
 }

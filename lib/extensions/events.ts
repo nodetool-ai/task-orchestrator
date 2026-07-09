@@ -14,13 +14,12 @@
 // in the execute bodies may run worker-side.
 //
 // CONTRACT WITH lib/runs.ts (the turn-end handler): tools registered here
-// NEVER set agent_runs.status directly. They write columns only:
-//   - park_reason        -> runs.ts maps to status='parked' at turn end
-//   - result             -> runs.ts maps to a terminal status + emits
-//                           child.result / child.exception to the parent
-//   - pending_question    -> runs.ts/UI surface the open question
-// Tool results return instructive text ("End your turn now...") but never
-// mutate status themselves.
+// NEVER set agent_runs.status directly. They write mutable columns only
+// (park_reason / result / pending_question), and the turn-end handler maps
+// those to a landing status. The contract, the column semantics, and the typed
+// TurnEffect writer (recordTurnEffect) now live in lib/run-state.ts — its module
+// header is the single home for the documentation. These tools express their
+// intent as a TurnEffect and funnel every column write through recordTurnEffect.
 //
 // Pure helpers are exported for direct unit testing without DB setup.
 
@@ -47,6 +46,20 @@ import {
 import type { OrchestratorTool, OrchestratorToolResult } from "../orchestrator-tools";
 import { runTransport } from "@/lib/worker";
 import type { ExtensionFactory } from "./types";
+import { recordTurnEffect } from "../run-state";
+import type {
+  PendingQuestion,
+  ResultReport,
+  ResultException,
+  TurnEffectColumns,
+} from "../run-state";
+
+/** Patch mutable agent_runs columns for `runId` — the single write path the
+ *  parking-contract tools hand to recordTurnEffect (see lib/run-state.ts). */
+const patchRunColumns =
+  (runId: number) =>
+  (columns: TurnEffectColumns): Promise<unknown> =>
+    db.update(agentSessions).set(columns).where(eq(agentSessions.id, runId));
 
 const ok = (text: string): OrchestratorToolResult => ({
   content: [{ type: "text" as const, text }],
@@ -60,16 +73,9 @@ const errResult = (text: string): OrchestratorToolResult => ({
 // Pure helpers (exported for unit tests)
 // ────────────────────────────────────────
 
-export interface PendingQuestion {
-  question_id: string;
-  question: string;
-  context?: unknown;
-  asked_at: string;
-  deadline: string;
-  state: "open" | "answered" | "expired";
-  answered_at?: string;
-  assumption?: string;
-}
+// PendingQuestion moved to lib/run-state.ts (the parking-contract owner);
+// re-exported here so existing `lib/extensions/events` importers keep working.
+export type { PendingQuestion };
 
 /**
  * Pure validator for answer_question's state-machine gate (§8): can THIS
@@ -261,10 +267,7 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
       if (!runId) return NO_RUN;
       const res = await createTimer({ runId, minutes, note: note ?? null, correlationId: null });
       if (!res.ok) return errResult(res.error);
-      await db
-        .update(agentSessions)
-        .set({ parkReason: "sleeping" })
-        .where(eq(agentSessions.id, runId));
+      await recordTurnEffect(patchRunColumns(runId), { kind: "park", reason: "sleeping" });
       return ok(
         `Timer #${res.timerId} armed, firing at ${res.fireAt.toISOString()}. ` +
           `End your turn now — you will be woken by this timer or by any earlier event.`
@@ -438,20 +441,20 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
     execute: async ({ status, summary, data, pr_url, needs }, ctx) => {
       const runId = requireRunId(ctx);
       if (!runId) return NO_RUN;
-      await db
-        .update(agentSessions)
-        .set({
-          result: {
-            kind: "result",
-            status,
-            summary,
-            data: data ?? null,
-            pr_url: pr_url ?? null,
-            needs: needs ?? null,
-            reported_at: new Date().toISOString(),
-          },
-        })
-        .where(eq(agentSessions.id, runId));
+      const payload: ResultReport = {
+        kind: "result",
+        status,
+        summary,
+        data: data ?? null,
+        pr_url: pr_url ?? null,
+        needs: needs ?? null,
+        reported_at: new Date().toISOString(),
+      };
+      await recordTurnEffect(patchRunColumns(runId), {
+        kind: "result",
+        payload,
+        resultKind: "result",
+      });
       return ok("Result recorded. End your turn now — this is your final report.");
     },
   },
@@ -474,19 +477,19 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
     execute: async ({ code, message, recoverable, details }, ctx) => {
       const runId = requireRunId(ctx);
       if (!runId) return NO_RUN;
-      await db
-        .update(agentSessions)
-        .set({
-          result: {
-            kind: "exception",
-            code,
-            message,
-            recoverable,
-            details: details ?? null,
-            raised_at: new Date().toISOString(),
-          },
-        })
-        .where(eq(agentSessions.id, runId));
+      const payload: ResultException = {
+        kind: "exception",
+        code,
+        message,
+        recoverable,
+        details: details ?? null,
+        raised_at: new Date().toISOString(),
+      };
+      await recordTurnEffect(patchRunColumns(runId), {
+        kind: "result",
+        payload,
+        resultKind: "exception",
+      });
       return ok("Exception recorded. End your turn now.");
     },
   },
@@ -530,10 +533,7 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
         state: "open",
       };
 
-      await db
-        .update(agentSessions)
-        .set({ pendingQuestion, parkReason: "question" })
-        .where(eq(agentSessions.id, runId));
+      await recordTurnEffect(patchRunColumns(runId), { kind: "question", question: pendingQuestion });
 
       const timerRes = await createTimer({
         runId,

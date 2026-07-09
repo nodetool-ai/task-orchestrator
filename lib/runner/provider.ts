@@ -1,7 +1,15 @@
 // lib/runner/provider.ts
 
+import {
+  runnerProviderKind,
+  insideWorker as insideWorkerCfg,
+  nestedDispatchMode as nestedDispatchModeCfg,
+  type NestedDispatchMode,
+} from "../config";
 import { FlyRunnerProvider } from "./fly";
 import { LocalRunnerProvider } from "./local";
+
+export type { NestedDispatchMode } from "../config";
 
 export type RunnerState =
   | "creating"
@@ -37,60 +45,32 @@ export interface RunnerProvider {
   startMonitor(): void;
 }
 
+/** @deprecated alias — reads via lib/config's runnerProviderKind(). Kept for the
+ *  many call sites that import it from here; the semantics live in config. */
 export function runnerProviderKindFromEnv(): "local" | "fly" {
-  return process.env.TASK_ORCH_RUNNER === "fly" ? "fly" : "local";
+  return runnerProviderKind();
 }
 
 /**
- * True when this process is a worker (a Fly Machine / Docker worker container),
- * where TASK_ORCH_INSIDE_WORKER is set by buildFlyWorkerEnv (Fly) and the worker
- * container config (Docker). Used to branch nested-dispatch behavior: a worker
- * holds no Fly credentials and none of the admission/pump/sweep machinery, so it
- * must not dispatch child runs itself. Mirrors the "TASK_ORCH_DETACHED_RUNS"
- * truthiness convention ("0"/"false" ⇒ off).
+ * True when this process is a worker (a Fly Machine / Docker worker container).
+ * Branches nested-dispatch behavior: a worker holds no Fly credentials and none
+ * of the admission/pump/sweep machinery, so it must not dispatch child runs
+ * itself. Semantics + docs live in lib/config's insideWorker(); re-exported here
+ * because run-dispatch re-exports it as part of the dispatch-policy surface.
  */
 export function insideWorker(): boolean {
-  const v = process.env.TASK_ORCH_INSIDE_WORKER;
-  return !!v && v !== "0" && v.toLowerCase() !== "false";
+  return insideWorkerCfg();
 }
-
-export type NestedDispatchMode = "isolate" | "inline";
 
 /**
  * Nested-dispatch policy: how a run created INSIDE a worker (start_session /
  * start_review / execute → runs.create's launch branches) gets its worker.
- * See docs/nested-machine-dispatch.md, Decision 5.
- *
- *  - "isolate": the worker does NOT call dispatchRun for the child. It parks the
- *    child at status 'pending' (its initialStatus) so the SERVER's pending pump
- *    claims it and gives it its own Fly Machine — the whole point of the design
- *    (worker-spawned children become independent Machines, admission-gated,
- *    per-child volume/logs, independently swept).
- *  - "inline": today's behavior — the worker dispatches the child in-process /
- *    in-container (dispatchRun). Correct off Fly (local dev, Docker workers).
- *
- * Resolution:
- *  1. Explicit env TASK_ORCH_NESTED_DISPATCH ("isolate"/"inline",
- *     case-insensitive) wins; any other value falls through to the default.
- *  2. Default: "isolate" when the runner provider is Fly, else "inline".
- *
- * On the SERVER the Fly default (runnerProviderKindFromEnv() === "fly") is what
- * makes worker-spawned children isolate onto their own Machines. INSIDE a WORKER
- * the value arrives already RESOLVED via buildFlyWorkerEnv: workers never set
- * TASK_ORCH_RUNNER (they hold no Fly token), so the Fly default would resolve to
- * "inline" there — it is the env passthrough of the server's effective policy,
- * not the default, that turns isolation on inside the worker (and its children).
- * Rollback: set TASK_ORCH_NESTED_DISPATCH=inline on the web app + restart.
+ * See docs/nested-machine-dispatch.md, Decision 5. Semantics live in lib/config's
+ * nestedDispatchMode(); re-exported here so callers reasoning about dispatch
+ * policy find it next to insideWorker().
  */
 export function nestedDispatchMode(): NestedDispatchMode {
-  const raw = process.env.TASK_ORCH_NESTED_DISPATCH;
-  if (raw) {
-    const v = raw.toLowerCase();
-    if (v === "isolate") return "isolate";
-    if (v === "inline") return "inline";
-    // any other value → fall through to the provider default
-  }
-  return runnerProviderKindFromEnv() === "fly" ? "isolate" : "inline";
+  return nestedDispatchModeCfg();
 }
 
 const PROVIDER_KEY = "__taskOrchRunnerProvider";

@@ -64,10 +64,6 @@ export const TERMINAL_CHILD_TYPES = new Set<string>([
 const SUPERVISOR_COPY_PREFIXES = ["gh.", "task.", "plan."];
 const SUPERVISOR_COPY_TYPES = new Set<string>(["budget.warning"]);
 
-/** Wake-priority types always wake a parked target, even under wake-loop
- *  suppression (§6.6 corollary). */
-export const WAKE_PRIORITY_TYPES = new Set<string>(["child.died", "budget.warning"]);
-
 function wantsSupervisorCopy(type: string): boolean {
   return (
     SUPERVISOR_COPY_TYPES.has(type) ||
@@ -113,9 +109,13 @@ interface TargetRow {
   id: number;
   status: string;
   parentRunId: number | null;
-  supersededBy: number | null;
 }
 
+// Generation rollover (§9.1) is unbuilt: nothing writes agent_sessions.superseded_by
+// yet, so a run always IS its own current generation. When rollover ships, target
+// resolution must follow that pointer chain to the live successor (so in-flight
+// children/webhooks addressed to the old run id land in the successor's inbox);
+// until then getTargetRow is the whole of "resolve to the current run".
 async function getTargetRow(id: number): Promise<TargetRow | null> {
   const row = (
     await db
@@ -123,28 +123,11 @@ async function getTargetRow(id: number): Promise<TargetRow | null> {
         id: agentSessions.id,
         status: agentSessions.status,
         parentRunId: agentSessions.parentRunId,
-        supersededBy: agentSessions.supersededBy,
       })
       .from(agentSessions)
       .where(eq(agentSessions.id, id))
   )[0];
   return row ?? null;
-}
-
-/** Follow the generation-rollover chain (§9.1) to the current successor. */
-export async function resolveThroughSupersession(runId: number, maxSteps = 16): Promise<TargetRow | null> {
-  let row = await getTargetRow(runId);
-  let steps = 0;
-  const seen = new Set<number>();
-  while (row && row.supersededBy != null && steps < maxSteps) {
-    if (seen.has(row.id)) break; // cycle guard
-    seen.add(row.id);
-    const next = await getTargetRow(row.supersededBy);
-    if (!next) break;
-    row = next;
-    steps++;
-  }
-  return row;
 }
 
 /** Walk parent_run_id upward to the nearest NON-terminal ancestor (§5.3). */
@@ -222,7 +205,7 @@ async function mirrorInboxEventMessage(input: {
  *  6. waking a parked target for owner-audience notify events (§6.2)
  */
 export async function emitInboxEvent(input: EmitInput): Promise<EmitResult> {
-  const resolved = await resolveThroughSupersession(input.targetRunId);
+  const resolved = await getTargetRow(input.targetRunId);
   if (!resolved) return { eventId: null, targetRunId: input.targetRunId, woke: false };
 
   let target: TargetRow = resolved;
@@ -304,11 +287,15 @@ export async function emitInboxEvent(input: EmitInput): Promise<EmitResult> {
     }).catch(() => {});
   }
 
-  // Supervisor copy (§5.2) — informational AND wakes a parked parent (§5.2a):
-  // a parked parent must not sleep through its child's lifecycle. Best-effort,
-  // mirroring the owner wake below; the pump sweep is the durable backstop.
+  // Supervisor copy (§5.2) — informational AND wakes a parked parent (§5.2a): a
+  // parked coordinator must not sleep through anything it is supervising. The copy
+  // is informational (no action expected — the owning run acts), but its ARRIVAL
+  // wakes, because a completed plan can reach a parked executor ONLY as a
+  // supervisor copy: gh.pr.merged targets the implementor child that owns the PR,
+  // which is terminal by merge time, so the copy to the parent is the sole wake.
+  // Best-effort, mirroring the owner wake below; the pump sweep is the backstop.
   if (audience === "owner" && wantsSupervisorCopy(input.type) && target.parentRunId != null) {
-    const parent = await resolveThroughSupersession(target.parentRunId);
+    const parent = await getTargetRow(target.parentRunId);
     if (parent && !isTerminalStatus(parent.status as SessionStatus)) {
       const copyId = await insertEvent({
         targetRunId: parent.id,
@@ -386,61 +373,86 @@ export interface ClaimOptions {
   runTurnId?: number | null;
 }
 
+/** The drizzle transaction handle type (the callback param of db.transaction). */
+export type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
 /**
- * THE claim primitive (§6.3). PRECONDITION: the caller holds the per-run
- * lock for `runId` — both call sites (turn-boundary injection, events__poll)
- * run inside it. The inner SELECT ... FOR UPDATE SKIP LOCKED is defense in
- * depth: even a rogue concurrent claimer gets a disjoint set, never dupes.
+ * The claim SQL (§6.3), runnable inside a CALLER-OWNED transaction. This is the
+ * half of the primitive that flips pending→injected: the inner SELECT ...
+ * FOR UPDATE SKIP LOCKED + ordered subquery makes the claim atomic and ordered
+ * (concurrent claimers get disjoint sets, never dupes), and the UPDATE stamps
+ * the claimed rows. Control-class events are excluded HERE, not by caller
+ * convention: the LLM never processes its own death warrant.
  *
- * Control-class events are excluded HERE, not by caller convention: the LLM
- * never processes its own death warrant.
+ * Digest injection (§6.4) runs this inside the SAME tx as the frame INSERT, so
+ * claim + transcript-persist commit together — "claimed but never written
+ * anywhere" cannot exist. events__poll uses the self-contained wrapper below.
  */
-export async function claimInboxEvents(
+export async function claimInboxEventsTx(
+  tx: DbTx,
   runId: number,
   opts: ClaimOptions = {}
 ): Promise<InboxEvent[]> {
   const audiences = opts.audiences ?? ["owner", "supervisor"];
   const max = Math.max(1, Math.min(opts.max ?? 200, 500));
-
-  return db.transaction(async (tx) => {
-    const conditions = [
-      eq(inboxEvents.targetRunId, runId),
-      eq(inboxEvents.status, "pending"),
-      inArray(inboxEvents.audience, audiences),
-      sql`${inboxEvents.type} NOT IN (${sql.join(
-        [...CONTROL_TYPES].map((t) => sql`${t}`),
-        sql`, `
-      )})`,
-    ];
-    if (opts.types && opts.types.length > 0) {
-      conditions.push(inArray(inboxEvents.type, opts.types));
-    }
-    const picked = await tx
-      .select({ id: inboxEvents.id })
-      .from(inboxEvents)
-      .where(and(...conditions))
-      .orderBy(asc(inboxEvents.id))
-      .limit(max)
-      .for("update", { skipLocked: true });
-    if (picked.length === 0) return [];
-    const claimed = await tx
-      .update(inboxEvents)
-      .set({
-        status: "injected",
-        runTurnId: opts.runTurnId ?? null,
-        injectedAt: new Date(),
-      })
-      .where(inArray(inboxEvents.id, picked.map((p) => p.id)))
-      .returning();
-    claimed.sort((a, b) => a.id - b.id);
-    return claimed;
-  });
+  const conditions = [
+    eq(inboxEvents.targetRunId, runId),
+    eq(inboxEvents.status, "pending"),
+    inArray(inboxEvents.audience, audiences),
+    sql`${inboxEvents.type} NOT IN (${sql.join(
+      [...CONTROL_TYPES].map((t) => sql`${t}`),
+      sql`, `
+    )})`,
+  ];
+  if (opts.types && opts.types.length > 0) {
+    conditions.push(inArray(inboxEvents.type, opts.types));
+  }
+  const picked = await tx
+    .select({ id: inboxEvents.id })
+    .from(inboxEvents)
+    .where(and(...conditions))
+    .orderBy(asc(inboxEvents.id))
+    .limit(max)
+    .for("update", { skipLocked: true });
+  if (picked.length === 0) return [];
+  const claimed = await tx
+    .update(inboxEvents)
+    .set({
+      status: "injected",
+      runTurnId: opts.runTurnId ?? null,
+      injectedAt: new Date(),
+    })
+    .where(inArray(inboxEvents.id, picked.map((p) => p.id)))
+    .returning();
+  claimed.sort((a, b) => a.id - b.id);
+  return claimed;
 }
 
-/** Stamp already-claimed events with the digest frame that carried them. */
-export async function setClaimTurn(eventIds: number[], runTurnId: number): Promise<void> {
+/**
+ * THE claim primitive (§6.3), self-contained variant. PRECONDITION: the caller
+ * holds the per-run lock for `runId` — both call sites (turn-boundary injection,
+ * events__poll) run inside it. Wraps claimInboxEventsTx in its own transaction
+ * for callers (events__poll) that only claim and do not also persist a frame in
+ * the same commit; injectPendingInboxEvents drives claimInboxEventsTx directly
+ * so the claim and the digest frame land atomically (§6.4).
+ */
+export async function claimInboxEvents(
+  runId: number,
+  opts: ClaimOptions = {}
+): Promise<InboxEvent[]> {
+  return db.transaction((tx) => claimInboxEventsTx(tx, runId, opts));
+}
+
+/** Stamp already-claimed events with the digest frame that carried them. Runs on
+ *  the caller's transaction when one is supplied (§6.4 — same commit as the claim
+ *  + frame insert), otherwise on the base connection. */
+export async function setClaimTurn(
+  eventIds: number[],
+  runTurnId: number,
+  executor: DbTx | typeof db = db
+): Promise<void> {
   if (eventIds.length === 0) return;
-  await db
+  await executor
     .update(inboxEvents)
     .set({ runTurnId })
     .where(inArray(inboxEvents.id, eventIds));
@@ -473,8 +485,11 @@ export async function markControlInjected(runId: number, type: string): Promise<
  * claimInboxEvents on purpose: control facts are enforced by the platform,
  * only their visibility flows through the digest.
  */
-export async function takeUnrenderedControlEvents(runId: number): Promise<InboxEvent[]> {
-  const rows = await db
+export async function takeUnrenderedControlEvents(
+  runId: number,
+  executor: DbTx | typeof db = db
+): Promise<InboxEvent[]> {
+  const rows = await executor
     .select()
     .from(inboxEvents)
     .where(
@@ -489,9 +504,15 @@ export async function takeUnrenderedControlEvents(runId: number): Promise<InboxE
   return rows;
 }
 
-/** Quarantine a poison event (§6.5). */
-export async function quarantineEvent(eventId: number, reason: string): Promise<void> {
-  await db
+/** Quarantine a poison event (§6.5). Runs on the caller's transaction when one is
+ *  supplied so a poison event claimed in the digest tx is marked 'error' in the
+ *  same commit — the quarantine UPDATE never aborts the surrounding claim. */
+export async function quarantineEvent(
+  eventId: number,
+  reason: string,
+  executor: DbTx | typeof db = db
+): Promise<void> {
+  await executor
     .update(inboxEvents)
     .set({ status: "error", errorReason: reason.slice(0, 500) })
     .where(eq(inboxEvents.id, eventId));
@@ -554,7 +575,8 @@ export async function listRunTimers(runId: number, limit = 50): Promise<RunTimer
 
 /**
  * Pump wake sweep (§6.2 belt): parked runs with pending owner-OR-supervisor
- * audience notify events. Bounded; the pending partial index keeps this cheap.
+ * audience notify events (§5.2a — a supervisor copy's arrival wakes a parked
+ * coordinator too). Bounded; the pending partial index keeps this cheap.
  */
 export async function parkedRunsWithPendingEvents(limit = 50): Promise<number[]> {
   const rows = await db
@@ -710,6 +732,42 @@ export async function cancelTimer(runId: number, timerId: number): Promise<boole
       and(eq(runTimers.id, timerId), eq(runTimers.runId, runId), eq(runTimers.status, "pending"))
     );
   return (res as unknown as { count?: number }).count !== 0;
+}
+
+/**
+ * Cancel a run's still-pending timers that carry a given correlationId. Used to
+ * defuse the await_session backstop (correlationId `await-session:<child>`): when
+ * the awaited child emits its terminal event the parent no longer needs the
+ * timeout timer, which would otherwise fire a spurious `timer.fired` later.
+ * Returns the number cancelled.
+ */
+export async function cancelTimersByCorrelation(
+  runId: number,
+  correlationId: string
+): Promise<number> {
+  const rows = await db
+    .update(runTimers)
+    .set({ status: "cancelled" })
+    .where(
+      and(
+        eq(runTimers.runId, runId),
+        eq(runTimers.status, "pending"),
+        eq(runTimers.correlationId, correlationId)
+      )
+    )
+    .returning({ id: runTimers.id });
+  return rows.length;
+}
+
+/** Cancel all still-pending timers owned by a run. Terminal/closed runs cannot
+ * consume timer.fired events, so pending watchdogs should not survive them. */
+export async function cancelPendingTimersForRun(runId: number): Promise<number> {
+  const rows = await db
+    .update(runTimers)
+    .set({ status: "cancelled" })
+    .where(and(eq(runTimers.runId, runId), eq(runTimers.status, "pending")))
+    .returning({ id: runTimers.id });
+  return rows.length;
 }
 
 /**

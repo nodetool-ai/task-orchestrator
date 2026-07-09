@@ -30,6 +30,7 @@ function makeRun(overrides: Partial<RunRow> = {}): RunRow {
     backend: null,
     toolsProfile: "orchestrator,repo_read,planning",
     cwdStrategy: "none",
+    runtime: "server",
     model: null,
     thinkingLevel: null,
     branch: null,

@@ -57,7 +57,7 @@ declare global {
 // reads it in the temporal dead zone whenever the boot DB actually has an
 // implement run to filter — a TDZ ReferenceError swallowed as "reaper failed"
 // (empty test DBs never enter the filter callback, so the suite stayed green).
-const NON_TERMINAL_BUT_DEAD = ["pending", "preparing", "running", "pushing", "opening_pr"];
+const NON_TERMINAL_BUT_DEAD = ["pending", "preparing", "running"];
 
 // Grace period for pending rows before treating as orphaned. Fresh pending rows
 // are the dispatch queue — owned by the creating process's kickoff or the

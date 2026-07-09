@@ -10,20 +10,19 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../lib/chat-ai-loop", () => ({
-  runChatAiTurn: vi.fn(async ({ run }: any) => {
-    const { runTransport } = await import("../lib/worker");
-    const blocks = [{ type: "text", text: "hi" }];
-    const message = await (await runTransport()).appendMessage(run.id, "agent", blocks);
+// A lightweight chat drives through runOneTurn → the pi backend's postgres mode
+// (R3). Stub that loop: emit one assistant envelope through onEvent (runOneTurn
+// persists + streams it) and return the turn's usage totals.
+vi.mock("../lib/agent-backend/postgres-turn", () => ({
+  runPostgresTurn: vi.fn(async (args: any) => {
+    await args.onEvent({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "hi" }] },
+    });
     return {
-      events: [
-        {
-          type: "sdk",
-          sdk: { type: "assistant", message: { content: blocks } },
-          message,
-        },
-      ],
+      envelopes: [],
       summary: "hi",
+      resumeToken: null,
       totalCostUsd: null,
       inputTokens: 0,
       outputTokens: 0,
@@ -37,7 +36,7 @@ import { db } from "../db";
 import { agentEvents, agentSessions } from "../db/schema";
 import { create, get, sendMessageToRun } from "../lib/runs";
 import * as dispatch from "../lib/run-dispatch";
-import * as chatLoop from "../lib/chat-ai-loop";
+import * as pgTurn from "../lib/agent-backend/postgres-turn";
 
 const ENV_KEYS = [
   "TASK_ORCH_WORKER_ALLOW_DB",
@@ -152,19 +151,20 @@ describe("sendMessageToRun on the server (unchanged behavior)", () => {
     expect(frames).toContain("sdk");
     expect(frames).toContain("done");
     expect(spy).not.toHaveBeenCalled();
-    expect(chatLoop.runChatAiTurn).toHaveBeenCalled();
+    expect(pgTurn.runPostgresTurn).toHaveBeenCalled();
     expect((await get(run.id))?.status).toBe("idle");
   });
 
   it("keeps a lightweight chat parked when a tool sets parkReason", async () => {
     process.env.TASK_ORCH_WORKER_IMAGE = "orch-worker:test";
     process.env.TASK_ORCH_DETACHED_RUNS = "1";
-    (chatLoop.runChatAiTurn as any).mockImplementationOnce(async ({ run }: any) => {
+    (pgTurn.runPostgresTurn as any).mockImplementationOnce(async (args: any) => {
       const { runTransport } = await import("../lib/worker");
-      await (await runTransport()).patchRun(run.id, { parkReason: "waiting" });
+      await (await runTransport()).patchRun(args.contextSource.runId, { parkReason: "waiting" });
       return {
-        events: [],
+        envelopes: [],
         summary: "waiting",
+        resumeToken: null,
         totalCostUsd: null,
         inputTokens: 0,
         outputTokens: 0,

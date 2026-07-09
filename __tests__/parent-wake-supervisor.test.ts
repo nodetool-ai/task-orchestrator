@@ -2,7 +2,11 @@
 //
 // A parked PARENT must wake for a child's supervisor-audience events
 // (gh.*, task.*, plan.*, budget.warning, terminal child.*), not just for its
-// own owner-audience events. Covers both belts:
+// own owner-audience events (§5.2a): a parked coordinator must not sleep through
+// anything it supervises. The load-bearing case is gh.pr.merged — it targets the
+// implementor child that owns the PR (terminal by merge time), so the supervisor
+// copy to the parent is the ONLY thing that wakes a parked executor on a merge.
+// Covers both belts:
 //   - emitInboxEvent's emit-time wake on the supervisor copy
 //   - parkedRunsWithPendingEvents, the pump sweep backstop
 
@@ -43,6 +47,31 @@ beforeEach(async () => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("parent wake on child (supervisor) events", () => {
+  it("wakes a parked parent when a gh.pr.merged owner event lands on its child", async () => {
+    // The incident-shaped case: the child owns the PR and is terminal by merge
+    // time, so its owner event is never claimed — the parked parent learns the
+    // merge ONLY through the supervisor copy, whose arrival must wake it.
+    const parent = await insertRun({ status: "parked" });
+    const child = await insertRun({ parentRunId: parent, status: "completed" });
+
+    const spy = vi.spyOn(runDispatch, "dispatchRun").mockResolvedValue("spawned" as never);
+
+    await emitInboxEvent({
+      targetRunId: child,
+      type: "gh.pr.merged",
+      sourceKind: "github",
+      sourceId: "merge1",
+      payload: { pr_url: "https://github.com/o/r/pull/7", merged_by: "octocat" },
+    });
+
+    expect(spy).toHaveBeenCalledWith(parent);
+
+    const copy = await db.select().from(inboxEvents).where(eq(inboxEvents.targetRunId, parent));
+    expect(copy).toHaveLength(1);
+    expect(copy[0].audience).toBe("supervisor");
+    expect(copy[0].type).toBe("gh.pr.merged");
+  });
+
   it("wakes a parked parent when a gh.* owner event lands on its child", async () => {
     const parent = await insertRun({ status: "parked" });
     const child = await insertRun({ parentRunId: parent, status: "idle" });
@@ -51,22 +80,19 @@ describe("parent wake on child (supervisor) events", () => {
 
     await emitInboxEvent({
       targetRunId: child,
-      type: "gh.pr.merged",
+      type: "gh.pr.review_submitted",
       sourceKind: "github",
       sourceId: "d1",
-      payload: { pr_url: "https://github.com/o/r/pull/7" },
+      payload: { pr_url: "https://github.com/o/r/pull/7", state: "approved" },
     });
 
     expect(spy).toHaveBeenCalledWith(parent);
 
     // The supervisor copy did land on the parent.
-    const copy = await db
-      .select()
-      .from(inboxEvents)
-      .where(eq(inboxEvents.targetRunId, parent));
+    const copy = await db.select().from(inboxEvents).where(eq(inboxEvents.targetRunId, parent));
     expect(copy).toHaveLength(1);
     expect(copy[0].audience).toBe("supervisor");
-    expect(copy[0].type).toBe("gh.pr.merged");
+    expect(copy[0].type).toBe("gh.pr.review_submitted");
   });
 
   it("wakes a parked parent when a task.* owner event lands on its child", async () => {
@@ -101,10 +127,7 @@ describe("parent wake on child (supervisor) events", () => {
     });
 
     expect(spy).not.toHaveBeenCalled();
-    const copy = await db
-      .select()
-      .from(inboxEvents)
-      .where(eq(inboxEvents.targetRunId, parent));
+    const copy = await db.select().from(inboxEvents).where(eq(inboxEvents.targetRunId, parent));
     expect(copy).toHaveLength(0);
   });
 
@@ -124,10 +147,7 @@ describe("parent wake on child (supervisor) events", () => {
     });
 
     expect(spy).not.toHaveBeenCalled();
-    const copy = await db
-      .select()
-      .from(inboxEvents)
-      .where(eq(inboxEvents.targetRunId, parent));
+    const copy = await db.select().from(inboxEvents).where(eq(inboxEvents.targetRunId, parent));
     expect(copy).toHaveLength(1); // copy still written; only the wake is suppressed
   });
 

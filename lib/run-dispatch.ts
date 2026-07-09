@@ -11,6 +11,16 @@ import { AGENT_CREDENTIAL_ENV_KEYS } from "./agent-backend/provider-env";
 // dynamic import), so this edge is cycle-free.
 import { fireDueTimers, parkedRunsWithPendingEvents } from "./inbox";
 import type { RunRow } from "./runs";
+import {
+  config,
+  detachedRunsEnabled as detachedRunsEnabledCfg,
+  intEnv,
+  floatEnv,
+  runnerProviderKind,
+} from "./config";
+import { isWorkerLive } from "./run-liveness";
+import { runNonce } from "./run-nonce";
+import { HARD_TERMINAL_STATUSES } from "./run-state";
 import { getRunnerProvider, runnerProviderKindFromEnv, insideWorker, nestedDispatchMode } from "./runner/provider";
 import { recordDispatch, recordRunnerEvent, timeRunnerPhase } from "./runner/telemetry";
 import { isTerminalStatus } from "./types";
@@ -30,7 +40,10 @@ export type DispatchResult =
   | "already-claimed"
   | "not-found"
   | "spawn-failed"
-  | "deferred";
+  | "deferred"
+  // R2: the run's persisted placement is 'server' — dispatchRun handed it to the
+  // in-process server resume path and provisioned NO worker.
+  | "server-resumed";
 
 // Late-bound bridge back into lib/runs (avoids a static import cycle; runs.ts
 // injects these on load). See the longer note kept from the systemd era.
@@ -62,6 +75,10 @@ type RunsApi = {
    *  already checks this before insert, but a worker writing rows directly
    *  would bypass that. */
   checkTreeLimits: (runId: number) => Promise<string | null>;
+  /** Drive one in-process turn for a 'server'-placement run (R2): claim →
+   *  bounded turn → release. dispatchRun routes here instead of provisioning a
+   *  worker when the run's runtime column is 'server'. */
+  resumeServerRun: (runId: number) => Promise<void>;
 };
 let runsApi: RunsApi | null = null;
 export function __setRunsApi(api: RunsApi): void {
@@ -83,9 +100,7 @@ export { insideWorker, nestedDispatchMode };
 export type { NestedDispatchMode } from "./runner/provider";
 
 export function detachedRunsEnabled(): boolean {
-  if (runnerProviderKindFromEnv() === "fly") return true;
-  const v = process.env.TASK_ORCH_DETACHED_RUNS;
-  return !!v && v !== "0" && v.toLowerCase() !== "false";
+  return detachedRunsEnabledCfg();
 }
 
 /** True when the server must route user turns through an out-of-process runner.
@@ -97,33 +112,11 @@ export function detachedRunsEnabled(): boolean {
  *  in exactly the environment that most needs the remote path. */
 export function remoteRunnerEnabled(): boolean {
   if (insideWorker() && nestedDispatchMode() === "isolate") return true;
-  return detachedRunsEnabled() && (runnerProviderKindFromEnv() === "fly" || !!process.env.TASK_ORCH_WORKER_IMAGE);
-}
-
-let nonceCounter = 0;
-function nonce(): string {
-  nonceCounter += 1;
-  // Must be unique across container restarts: PID is 1 every boot, so a bare
-  // `${pid}-${counter}` repeats and a stale row's leftover container name would
-  // collide → createContainer 409 → the run fails. A time + random component
-  // makes the scope (= container name) unique regardless of restarts.
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${process.pid}-${Date.now().toString(36)}-${nonceCounter}-${rand}`;
+  return detachedRunsEnabled() && (runnerProviderKind() === "fly" || !!config.deployment.workerImage);
 }
 
 // ── env helpers ────────────────────────────────────────────────────────────
-function intEnv(key: string, dflt: number): number {
-  const raw = process.env[key];
-  if (raw == null || raw === "") return dflt;
-  const n = Number(raw);
-  return Number.isFinite(n) ? Math.floor(n) : dflt;
-}
-function floatEnv(key: string, dflt: number): number {
-  const raw = process.env[key];
-  if (raw == null || raw === "") return dflt;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : dflt;
-}
+// intEnv / floatEnv now live in lib/config (single parsing convention).
 
 // ── per-worker resource caps ───────────────────────────────────────────────
 // Hard cgroup limits applied to each worker container at create time. Every knob
@@ -242,35 +235,15 @@ export function admissionDecision(i: {
   return "admit";
 }
 
-// Mirrors runs.ts's HEARTBEAT_STALE_MS. Duplicated here (not imported) because
-// run-dispatch has no static import of runs.ts — runs.ts injects its helpers
-// into this module instead (see the RunsApi comment above) to avoid a boot-time
-// import cycle. Keep this in sync if that value ever changes.
-const WORKER_CLAIM_STALE_MS = 5 * 60_000;
-
-/**
- * True when `row` currently holds a live worker claim — worker_scope set and a
- * heartbeat fresher than the stale window — regardless of status. Mirrors
- * runs.ts's isWorkerLive(): this stays true for a plan-executor mid-turn
- * (status 'running', blocked in await_session) AND for a long-lived chat
- * worker parked at 'idle' between turns holding its claim. Computed locally
- * from the RunRow fields runs().get() already returns, rather than adding a
- * new method to RunsApi.
- */
-function hasLiveWorkerClaim(row: { workerScope: string | null; heartbeatAt: Date | null }): boolean {
-  return (
-    row.workerScope != null &&
-    row.heartbeatAt != null &&
-    Date.now() - row.heartbeatAt.getTime() < WORKER_CLAIM_STALE_MS
-  );
-}
+// hasLiveWorkerClaim was a third copy of the worker-liveness predicate; it now
+// lives in lib/run-liveness as isWorkerLive (R8). The stale window is that
+// module's single HEARTBEAT_STALE_MS.
 
 /** The gate only runs for managed worker backends, and can be turned off. */
 function admissionEnabled(): boolean {
-  const v = process.env.TASK_ORCH_ADMISSION_ENABLED;
-  if (v != null && (v === "0" || v.toLowerCase() === "false")) return false;
-  if (runnerProviderKindFromEnv() === "fly") return intEnv("TASK_ORCH_MAX_MACHINES", 0) > 0;
-  return !!process.env.TASK_ORCH_WORKER_IMAGE;
+  if (!config.dispatch.admissionFlag) return false;
+  if (runnerProviderKind() === "fly") return config.dispatch.maxMachines > 0;
+  return !!config.deployment.workerImage;
 }
 
 const FLY_ADMISSION_STATES = ["creating", "starting", "running"];
@@ -333,6 +306,26 @@ export async function dispatchRun(
     return result;
   };
 
+  // Placement routing (R2): dispatchRun is the single front door. A run whose
+  // persisted placement is 'server' runs its turns IN-PROCESS on the web server
+  // (the lightweight loop needs DB access a worker doesn't have), so we must NOT
+  // provision a worker for it — hand it to the server resume path instead. This
+  // is the fix for the run-131 incident: the emit-time inbox wakes (lib/inbox)
+  // and the pump's parked-wake sweep both call dispatchRun, so they inherit this
+  // routing for free — no per-caller placement logic. The resume path takes its
+  // own server-turn claim (duplicate wakes short-circuit there), and drives the
+  // turn in the background so a caller awaiting dispatchRun (the pump loop) isn't
+  // blocked for the whole turn. A test-injected `opts.spawn` is deliberately
+  // ignored here: a server-placement run never spawns a provider.
+  const placementRun = await runs().get(runId);
+  if (!placementRun) return finish("not-found");
+  if (placementRun.runtime === "server") {
+    void runs().resumeServerRun(runId).catch((err) => {
+      console.error(`Server resume failed for run ${runId}:`, err);
+    });
+    return finish("server-resumed");
+  }
+
   // Critical section: decide admission, then atomically claim. Serialized so the
   // reservation count seen by the next caller already includes this claim. The
   // spawn itself (a slow Docker round-trip) runs OUTSIDE the lock.
@@ -381,7 +374,7 @@ export async function dispatchRun(
       // bounded by the run tree's own depth/spawn caps, not by this gate.
       if (decision === "defer" && run.parentRunId != null) {
         const parent = await runs().get(run.parentRunId);
-        if (parent && hasLiveWorkerClaim(parent)) decision = "admit";
+        if (parent && isWorkerLive(parent)) decision = "admit";
       }
       if (decision === "never-fits") {
         await runs().failRun(
@@ -415,7 +408,7 @@ export async function dispatchRun(
       }
     }
 
-    const scope = `run-${runId}-${nonce()}`;
+    const scope = `run-${runId}-${runNonce()}`;
     // Atomic claim: only succeeds if worker_scope is still NULL AND the status is
     // still claimable. 'cancelled'/'closed' are terminal decisions that must NEVER
     // be resurrected — a claim landing on them would flip the row to 'preparing'
@@ -448,7 +441,7 @@ export async function dispatchRun(
         and(
           eq(agentSessions.id, runId),
           isNull(agentSessions.workerScope),
-          notInArray(agentSessions.status, ["cancelled", "closed"])
+          notInArray(agentSessions.status, HARD_TERMINAL_STATUSES)
         )
       );
     if (claimed.count === 0) return { kind: "already-claimed" };
@@ -608,19 +601,20 @@ async function pumpTick(): Promise<void> {
   }
 }
 
-/** Start the periodic pump (idempotent). No-op off the containerized path or when
- *  the interval is disabled (TASK_ORCH_PENDING_PUMP_MS=0).
+/** Start the periodic pump (idempotent). Runs wherever a database is configured
+ *  (DATABASE_URL set); disabled only by TASK_ORCH_PENDING_PUMP_MS=0.
  *
- *  TODO(agent-events): in dev / non-containerized mode this pump never starts,
- *  so run_timers don't fire and the parked wake sweep (pumpTick halves 3/4)
- *  never runs. emitInboxEvent's emit-time wake still works there — dispatchRun
- *  falls through to detachedSpawn (a local tsx run-worker process), which
- *  drives the append/resume path that injects the digest — but timer-only
- *  wakes are dev-degraded. Driving an in-process runs.append fallback from
- *  here would re-entangle run-dispatch with runs.ts (the injected-API split
- *  exists to prevent exactly that cycle), so it is deliberately deferred. */
+ *  Post-Phase-1 the pump is dev-safe on every half. Its two dispatch halves route
+ *  through dispatchRun, which sends runtime='server' rows to the in-process resume
+ *  path (no worker needed) and runtime='worker' rows to the provider — in dev that
+ *  is detachedSpawn (a local tsx run-worker process), the same path emitInboxEvent's
+ *  emit-time wake already uses; a run that can't be admitted simply stays 'pending'
+ *  and is retried, never errors. Halves 3/4 (fireDueTimers + the parked wake sweep)
+ *  are the reason to run in dev at all: without a ticking pump, run_timers never
+ *  fire and a wake lost between event-insert and dispatch is never re-swept. The
+ *  old gate (worker image / fly only) stranded all of that in dev. */
 export function startPendingRunPump(): void {
-  if (!process.env.TASK_ORCH_WORKER_IMAGE && runnerProviderKindFromEnv() !== "fly") return;
+  if (!process.env.DATABASE_URL) return;
   const ms = pumpIntervalMs();
   if (ms <= 0) return;
   const g = globalThis as Record<string, unknown>;

@@ -63,11 +63,14 @@ describe("classifyRun", () => {
   it("active statuses are running", () => {
     expect(classifyRun("running", null, "in_progress")).toBe("running");
     expect(classifyRun("preparing", null, "in_progress")).toBe("running");
-    expect(classifyRun("pushing", null, "in_progress")).toBe("running");
   });
 
-  it("opening_pr is review", () => {
-    expect(classifyRun("opening_pr", null, "in_progress")).toBe("review");
+  it("the retired pushing / opening_pr statuses no longer bucket", () => {
+    // R4 removed them from the vocabulary; a hydrated row can never carry them
+    // (coerceRunStatus maps a legacy row to 'running' upstream). Review is now
+    // derived solely from a completed run with an open PR (see below).
+    expect(classifyRun("pushing", null, "in_progress")).toBeNull();
+    expect(classifyRun("opening_pr", null, "in_progress")).toBeNull();
   });
 
   it("failed/budget statuses are blocked", () => {
@@ -101,7 +104,6 @@ describe("classifyRun", () => {
 describe("bucketFor (live sidebar)", () => {
   it("mirrors classifyRun for live buckets", () => {
     expect(bucketFor("running", null, "in_progress")).toBe("running");
-    expect(bucketFor("opening_pr", null, "in_progress")).toBe("review");
     expect(bucketFor("failed", null, "blocked")).toBe("blocked");
     expect(bucketFor("completed", PR, "testing")).toBe("review");
   });

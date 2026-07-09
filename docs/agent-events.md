@@ -65,8 +65,11 @@ export const inboxEvents = pgTable(
     // ── Delivery role (§5) ─────────────────────────────────────────────
     // 'owner'      — operational: addressed to the run expected to ACT.
     // 'supervisor' — informational copy for a parent/ancestor: visibility
-    //                and audit, NOT a request to act. Does not wake by
-    //                itself; rides along in the next digest.
+    //                and audit, NOT a request to act. Rides along in the next
+    //                digest's "for your awareness" section — but its ARRIVAL
+    //                still wakes a PARKED parent (§5.2a), so a coordinator does
+    //                not sleep through an event on something it supervises (e.g.
+    //                a child's PR merging, which reaches the parent only here).
     audience: text("audience").notNull().default("owner"),
 
     // ── Provenance & correlation (§4) ──────────────────────────────────
@@ -398,9 +401,45 @@ run owning the PR. Timer → the run that set it. Owner events wake (§6.2).
 
 For parent-visible types (`gh.*`, `task.*`, `budget.warning`, and terminal
 child events), one copy to the direct parent — **informational**. Supervisor
-events do NOT wake a parked run; they ride along in the next digest, rendered
-in a separate "for your awareness" section. This is how "the parent sees the
-child's PR events" without creating duplicate reasoning: seeing ≠ acting.
+events ride along in the next digest, rendered in a separate "for your
+awareness" section. This is how "the parent sees the child's PR events" without
+creating duplicate reasoning: seeing ≠ acting.
+
+Informational is about the *action*, not the *wake*: a supervisor copy does not
+ask the parent to act (the owning run acts, §5.3's tool guard fences it), but its
+**arrival wakes a parked parent** — see §5.2a.
+
+### 5.2a Parent-wake on any supervised event
+
+The wake rule is deliberately broad: **inserting a pending event for a parked run
+dispatches it when the event is `owner`-audience OR a `supervisor` copy** — a
+parked coordinator must not sleep through anything it is supervising. The reason
+this can't be narrowed to "only child-lifecycle copies wake" is the load-bearing
+merge case: `gh.pr.merged` is addressed (owner) to the run that owns the PR — the
+**implementor child** — which is terminal by the time the merge lands, so its
+owner event is never claimed. The parked executor learns the plan advanced *only*
+through the `supervisor` copy fanned to it; if that copy did not wake, the
+executor would sleep through the merge until a watchdog timer fired (~45 min
+later). The same holds for a child lifecycle event re-addressed past a terminal
+parent to a live ancestor (§5.3): the ancestor holds a `supervisor` row and must
+still wake.
+
+`emitInboxEvent()` performs the parent-wake inline when it writes the supervisor
+copy, and the pump's wake sweep (§6.2) is the durable backstop — its parked-run
+scan includes both `owner` and `supervisor` pending events, so a wake lost to a
+crash between insert and dispatch is retried within the tick.
+
+**Open tuning question — wake churn.** Broad waking has a cost: a chatty PR fans
+`gh.pr.comment` / `gh.ci.completed` supervisor copies at the parent, and each one
+wakes a parked executor for a turn that usually decides "not mine, the child owns
+it" and re-parks. This is bounded by the digest's coalescing (a burst that
+arrives during one park becomes one wake) — and further, once built, by the
+wake-loop guard (§6.2, designed but not yet implemented) — but it is not
+*eliminated*. Narrowing the wake by type (e.g. lifecycle + merge + review only)
+is a plausible future refinement; it is deferred rather than adopted because the
+failure mode of narrowing (a real advance silently not waking, as the merge case
+shows) is worse than the failure mode of over-waking (a few cheap no-op turns).
+Left as a tuning knob, not silently "fixed".
 
 Acting is additionally fenced at the tool layer, not just by prompt: `gh_pr__*`
 mutation tools refuse to operate on a PR another live run owns — "your
@@ -615,9 +654,8 @@ machinery fires again. So the taxonomy is split into two classes:
   enforcement happens, never claimed by a poll.
 
 Corollary for `child.died` / `budget.warning`: these stay `notify` (the
-parent deciding is the point), but they are **wake-priority** — a mid-turn
-poll that returns them is fine, and if they arrive while parked they always
-wake even when a `supervisor`-suppression (§6.2 wake-loop guard) is active.
+parent deciding is the point) — a mid-turn poll that returns them is fine, and
+as `owner` events they wake a parked target through the normal §6.2 path.
 
 ---
 

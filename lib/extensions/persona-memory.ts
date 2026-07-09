@@ -244,6 +244,16 @@ export const personaMemoryFactory =
   async (reg) => {
     const transport = await runTransport();
 
+    // Compose the memory guidance into the system prompt via the extension seam.
+    // Before R3 the lightweight loop hardcoded `persona.systemPrompt + MEMORY_
+    // SYSTEM_GUIDANCE` while the full-SDK path never surfaced the guidance at all;
+    // routing it through here makes every backend (pi session, Claude, and the
+    // postgres/lightweight loop) carry the same instructions for the memory tools
+    // this factory also registers.
+    reg.transformSystemPrompt((base) =>
+      base.length > 0 ? `${base}\n\n${MEMORY_SYSTEM_GUIDANCE}` : MEMORY_SYSTEM_GUIDANCE
+    );
+
     // Ambient skill: the persona's memory blocks, loaded server-side. A load
     // failure must not break the mount — the agent just starts without the
     // ambient notes (and can still read/write via the tools).

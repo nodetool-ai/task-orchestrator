@@ -33,6 +33,22 @@ import type { MessageRow, RunRow } from "../runs";
 import type { SdkContentBlock } from "../sdk-message";
 import type { PlanFull, RepositoryRow, SessionStatus, TaskFull, TaskState } from "../types";
 
+/**
+ * Wire-protocol major version, sent as `X-Worker-Protocol` on every worker
+ * request and checked server-side. The token prefix (`wt1`) versions only the
+ * TOKEN; this versions the message SHAPES. Bump on a BREAKING change to any
+ * request/response body or endpoint semantics — additive changes (a new
+ * optional field, a new endpoint) do NOT bump. See docs/worker-http-api.md
+ * (§ Versioning & rolling deploys) for the mismatch policy: a long-lived worker
+ * that outlives a server redeploy to an incompatible version gets a 409, exits
+ * nonzero (worker suicide), and the reaper re-dispatches the run on a fresh
+ * worker built from the new image.
+ */
+export const WORKER_PROTOCOL_VERSION = 1;
+
+/** The request header carrying WORKER_PROTOCOL_VERSION. */
+export const WORKER_PROTOCOL_HEADER = "x-worker-protocol";
+
 /** The personas table row shape repo.getPersona returns (NOT the code-defined
  *  lib/personas Persona — DB personas carry nullable/denormalized fields). */
 export interface PersonaRecord {

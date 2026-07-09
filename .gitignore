@@ -3,6 +3,7 @@ dist/
 .next
 .next.prev
 out
+tmp/
 *.tsbuildinfo
 .env*.local
 .env
@@ -16,3 +17,4 @@ cloudflared.local.yml
 *.cloudflared.json
 .env.test
 .env.docker
+.pi/

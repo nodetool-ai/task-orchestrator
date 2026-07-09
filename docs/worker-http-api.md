@@ -77,6 +77,13 @@ run to be the token run; task/plan writes additionally require the target to
 be the run's own task/plan. `middleware.ts` bypasses the session gate for
 `/api/worker/*`; the routes do their own auth.
 
+### Protocol version header
+
+Every request (including the `/control` SSE connect) carries
+`X-Worker-Protocol: <major>` — the current major is `WORKER_PROTOCOL_VERSION`
+in `lib/worker/protocol.ts` (today `1`). See § Versioning & rolling deploys for
+the negotiation policy.
+
 ### Endpoints
 
 All JSON unless noted; dates travel as ISO-8601 and are revived client-side.
@@ -173,6 +180,37 @@ the CLI.
   run's entire protocol conversation.
 - Worker logs still land in `agent_runs.worker_log`
   (`GET /api/runs/:id/worker-log`), shipped over `POST runs/:id/log`.
+
+## Versioning & rolling deploys
+
+The token prefix (`wt1`) versions the *token*; `X-Worker-Protocol` versions the
+*message shapes*. They move independently.
+
+- **Additive changes do NOT bump** `WORKER_PROTOCOL_VERSION`: a new optional
+  request field, a new response field a client can ignore, a brand-new
+  endpoint. Old and new workers both keep working.
+- **Breaking changes bump it**: renaming/removing a field, changing a field's
+  meaning or type, changing an endpoint's semantics. Bump `WORKER_PROTOCOL_VERSION`
+  in `lib/worker/protocol.ts` in the same change.
+
+Negotiation, per request:
+
+- **Header present, major matches** → served normally.
+- **Header missing** → served anyway (a pre-versioning worker), and the server
+  logs `runner_protocol_unversioned` **once per run** (not per request).
+- **Header present, major differs** → `409 { error: "protocol_mismatch",
+  server, client }`. This is **not** retriable (it is not a 5xx/429). The
+  client raises a terminal `ProtocolMismatchError`, logs a clear message, and
+  exits nonzero.
+
+Why worker-suicide instead of in-place adaptation: Fly Machines and detached
+local workers are long-lived and can outlive a server redeploy. Rather than
+teach every worker to speak N protocol versions, an incompatible worker simply
+dies (nonzero exit). The stale-lease reaper then re-dispatches the run onto a
+**fresh** worker built from the new image — the exact same path the system
+already uses for any other worker death, so no new machinery is needed. The
+mismatch is deliberately checked *after* auth so the once-per-run log can name
+the run; the token format itself is unchanged across a protocol bump.
 
 ## Compatibility
 

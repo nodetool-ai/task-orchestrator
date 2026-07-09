@@ -23,12 +23,15 @@ const h = vi.hoisted(() => ({
   snapshot: null as null | (() => Promise<Array<{ role: string }>>),
 }));
 
-// Mock BOTH executor turn paths so a single file can cover them. The
-// runOneTurn path (getBackend.runTurn) is used when
-// TASK_ORCH_LIGHTWEIGHT_EXECUTOR=0; the lightweight loop (runChatAiTurn) is
-// the default. Each implementation mirrors the other's streaming shape so the
-// mid-turn snapshot captures the same "kickoff + first assistant" state.
+// After R3 BOTH executor paths drive through runOneTurn → getBackend().runTurn:
+// the lightweight (default) path selects the pi backend's postgres mode and the
+// heavy path (TASK_ORCH_LIGHTWEIGHT_EXECUTOR=0) its SDK-session mode. One fake
+// backend covers both — it streams a fixed kickoff+assistant+tool+assistant
+// sequence through onEvent (runOneTurn persists each), and runExecute persists
+// the kickoff row itself ('user' for lightweight, 'system' for heavy).
 vi.mock("../lib/agent-backend", () => ({
+  resolveBackendId: (backend: string | null | undefined) =>
+    (backend ?? process.env.TASK_ORCH_AGENT_BACKEND ?? "pi").trim().toLowerCase(),
   getBackend: async () => ({
     id: "pi",
     listProviders: () => [],
@@ -71,39 +74,6 @@ vi.mock("../lib/agent-backend", () => ({
   }),
 }));
 
-vi.mock("../lib/chat-ai-loop", () => ({
-  // Mirror getBackend.runTurn's streaming shape: persist a 'system'/tool pair
-  // via the transport so the snapshot sees the same "kickoff + first assistant"
-  // state, then return the same final result. The lightweight path emits one
-  // AppendStreamEvent per assistant / tool-result envelope.
-  runChatAiTurn: async ({ run }: { run: { id: number } }) => {
-    const { runTransport } = await import("../lib/worker");
-    const transport = await runTransport();
-    const firstBlocks = [{ type: "text", text: "starting task A" }];
-    const firstMessage = await transport.appendMessage(run.id, "agent", firstBlocks as any);
-    // Page load snapshot after the first assistant envelope is persisted.
-    if (h.snapshot) h.midTurn = await h.snapshot();
-    const toolBlocks = [
-      { type: "tool_result", tool_use_id: "t1", content: "ok" },
-    ];
-    await transport.appendMessage(run.id, "tool", toolBlocks as any);
-    const finalBlocks = [{ type: "text", text: "task A merged" }];
-    const finalMessage = await transport.appendMessage(run.id, "agent", finalBlocks as any);
-    return {
-      events: [
-        { type: "sdk", sdk: { type: "assistant", message: { content: firstBlocks } }, message: firstMessage },
-        { type: "sdk", sdk: { type: "user", message: { content: toolBlocks } } },
-        { type: "sdk", sdk: { type: "assistant", message: { content: finalBlocks } }, message: finalMessage },
-      ],
-      summary: "plan done",
-      totalCostUsd: 0.01,
-      inputTokens: 10,
-      outputTokens: 20,
-      turns: 1,
-    };
-  },
-}));
-
 vi.mock("../auth", () => ({
   auth: async () => ({ user: { email: "test@example.com" } }),
 }));
@@ -113,10 +83,9 @@ import * as runs from "../lib/runs";
 import { GET as getLiveSessions } from "../app/api/live-sessions/route";
 
 beforeEach(async () => {
-  // This file mocks lib/agent-backend's runTurn — the runOneTurn / full
-  // SDK harness path. Disable the lightweight executor loop so executors
-  // route through that harness here; the lightweight path has its own
-  // persistence test below.
+  // The default here exercises the heavy (SDK-session) executor path; the
+  // lightweight (postgres) path — which shares the same getBackend().runTurn
+  // driver after R3 — has its own describe block that flips the flag on.
   process.env.TASK_ORCH_LIGHTWEIGHT_EXECUTOR = "0";
   await seedPersonas();
   await db.delete(agentMessages);
@@ -169,10 +138,10 @@ describe("plan-executor run history", () => {
   });
 });
 
-// Lightweight executor loop (the default): same mid-turn persistence guarantee
-// as the runOneTurn path above, but driving @earendil-works/pi-ai directly via
-// runChatAiTurn. The kickoff prompt lands as a 'user' row (the loop's context
-// loader keys on the latest user row) instead of 'system'.
+// Lightweight executor path (the default): same mid-turn persistence guarantee
+// as the heavy path above — it now shares the runOneTurn → getBackend().runTurn
+// driver (postgres mode). The only difference is the kickoff prompt lands as a
+// 'user' row (the postgres loader keys on the latest user row) instead of 'system'.
 describe("plan-executor run history (lightweight loop)", () => {
   beforeEach(() => {
     process.env.TASK_ORCH_LIGHTWEIGHT_EXECUTOR = "1";

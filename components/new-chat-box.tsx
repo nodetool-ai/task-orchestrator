@@ -37,9 +37,10 @@ interface Props {
 export function NewChatBox({ defaultModel, repositories }: Props) {
   const router = useRouter();
   const [input, setInput] = useState("");
-  // Chat runs the lightweight pi-ai loop (lib/chat-ai-loop.ts) — always pi,
-  // never the Claude backend. Lock the picker to pi so no engine selector
-  // renders and only pi-provided models are offered.
+  // Chat runs the lightweight in-process loop (the pi backend's 'postgres'
+  // context mode, lib/agent-backend/postgres-turn.ts) — always pi, never the
+  // Claude backend. Lock the picker to pi so no engine selector renders and
+  // only pi-provided models are offered.
   const { model, setModel, modelOptions } = useModelOptions(defaultModel, true, "pi");
   const [reasoning, setReasoning] = useState<ThinkingLevel | null>(null);
   const [repoId, setRepoId] = useState<string>(repositories[0]?.id ?? "");

@@ -3,8 +3,10 @@
 // (app/api/live-sessions/route.ts) derive their groupings from classifyRun so
 // the "completed run still showing as in review" rule lives in exactly one place.
 
-export const ACTIVE_STATUSES = new Set(["preparing", "running", "pushing"]);
-export const REVIEW_STATUSES = new Set(["opening_pr"]);
+export const ACTIVE_STATUSES = new Set(["preparing", "running"]);
+// The old 'opening_pr' status was never written; "review" is now derived
+// entirely from a completed run whose task still has an open PR (see below).
+export const REVIEW_STATUSES = new Set<string>([]);
 export const BLOCKED_STATUSES = new Set(["failed", "budget_exhausted"]);
 export const SHIPPED_STATUSES = new Set(["completed"]);
 

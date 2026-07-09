@@ -85,14 +85,22 @@ natural evolution if sub-second nested dispatch is ever needed: option C's
 worker-side change ("park as pending") is a subset of B's, so C → B is
 additive, not a rewrite.
 
-**C. Queue-via-DB.** The clincher is the trust model: **the DB is already
-the worker's interface**. Workers hold `DATABASE_URL` and already create
-child run rows through `runs.create` in-process — option C adds *zero* new
-credential or network surface, and removes an execution capability from the
-worker rather than adding one. It reuses the admission gate, the pump, boot
+**C. Queue-via-DB.** The clincher is the trust model: **orchestrator state is
+already the worker's interface**. A worker already creates child run rows
+through the same `runs.create` path it uses for its own state — option C adds
+*zero* new credential or network surface, and removes an execution capability
+from the worker rather than adding one. It reuses the admission gate, the pump, boot
 reconcile, and the sweep verbatim, so there is one dispatch code path for
 every run in the system regardless of who asked for it. Costs, honestly
 stated:
+
+> **Update (2026-07):** this option was chosen when workers held
+> `DATABASE_URL` and wrote child rows to Postgres directly. The worker-HTTP-API
+> migration since withheld `DATABASE_URL` from workers — `runs.create` inside a
+> worker now goes over `/api/worker/*` with a run-scoped HMAC token (see
+> [worker-http-api.md](./worker-http-api.md)), landing on the *same* server-side
+> dispatch path. The decision stands: the child row still flows through one
+> orchestrator entry point, only the transport under it changed.
 
 - *Latency*: up to one pump interval (`TASK_ORCH_PENDING_PUMP_MS`, default
   15s) before the child's Machine is even requested, plus Machine boot. For

@@ -1,0 +1,374 @@
+// lib/config.ts
+//
+// The single reader for every TASK_ORCH_* environment variable and the one
+// place the "flag" truthiness convention, numeric parsing, and cross-flag
+// derivations live. Before this module those were re-implemented ad hoc across
+// lib/, db/, and scripts/ — a truthiness predicate copied a dozen times, the
+// 5-minute stale window written three times, "fly forces detached" and the
+// isolate-on-fly default buried in three functions.
+//
+// DESIGN — lazy, not frozen-at-import. Every accessor reads process.env at CALL
+// time, because the test suite mutates process.env per-test and expects the
+// change to take effect (dozens of sites). The win here is therefore NOT an
+// import-time snapshot; it is: one parsing convention, one derivation, one
+// documented registry. `snapshot()` returns a frozen plain-value copy for
+// logging/telemetry — never read it in hot control-flow, it will not reflect a
+// later env mutation.
+//
+// CONVENTIONS
+//  - `truthy(v)`  — a flag that DEFAULTS OFF: on iff set and not "0"/"false".
+//  - `flag(k,d)`  — `d` is the value when the var is UNSET. Preserves both of
+//                   the historical conventions exactly (default-off vs the
+//                   default-ON flags like LIGHTWEIGHT_CHATS).
+//  - `intEnv`     — finite → floor, else default (negatives pass through, as the
+//                   dispatch tuning readers always did; they are counts where a
+//                   negative is a config error, not a sentinel).
+//
+// Any file still reading process.env.TASK_ORCH_* directly is tracked by the
+// guard test in __tests__/config-guard.test.ts; that allowlist only shrinks.
+
+/** A flag that defaults OFF: true iff set to something other than "0"/"false"
+ *  (case-insensitive). The convention copied across the codebase pre-R6. */
+export function truthy(v: string | undefined | null): boolean {
+  return !!v && v !== "0" && v.toLowerCase() !== "false";
+}
+
+/**
+ * Read a boolean flag. `dflt` is the value when the variable is UNSET.
+ *  - dflt=false → historical `truthy()` convention (absent ⇒ off).
+ *  - dflt=true  → the default-ON convention (`v == null || not "0"/"false"`),
+ *    used by LIGHTWEIGHT_CHATS / LIGHTWEIGHT_EXECUTOR / ADMISSION_ENABLED.
+ * Both branches reproduce the exact pre-R6 predicates (including empty-string:
+ * "" ⇒ off under default-off, "" ⇒ on under default-on).
+ */
+export function flag(key: string, dflt: boolean): boolean {
+  const v = process.env[key];
+  if (dflt) return v == null || (v !== "0" && v.toLowerCase() !== "false");
+  return truthy(v);
+}
+
+/** Non-negative-ish integer env: finite → floor, else `dflt`. Mirrors the
+ *  dispatch tuning reader (negatives floor through — a negative count is a
+ *  config error, not a sentinel). */
+export function intEnv(key: string, dflt: number): number {
+  const raw = process.env[key];
+  if (raw == null || raw === "") return dflt;
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.floor(n) : dflt;
+}
+
+/** Float env: finite → value, else `dflt`. */
+export function floatEnv(key: string, dflt: number): number {
+  const raw = process.env[key];
+  if (raw == null || raw === "") return dflt;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : dflt;
+}
+
+/** Trimmed string env, or `dflt` (default undefined) when unset/empty. */
+function strEnv(key: string): string | undefined;
+function strEnv(key: string, dflt: string): string;
+function strEnv(key: string, dflt?: string): string | undefined {
+  const v = process.env[key];
+  return v == null || v === "" ? dflt : v;
+}
+
+export type RunnerProviderKind = "local" | "fly";
+export type NestedDispatchMode = "isolate" | "inline";
+
+// ── Derived values (were duplicated across modules) ────────────────────────
+
+/** The execution backend. Exact-equality on "fly" (NOT truthiness): any other
+ *  value — including "local", "docker", "" — means the local provider. */
+export function runnerProviderKind(): RunnerProviderKind {
+  return process.env.TASK_ORCH_RUNNER === "fly" ? "fly" : "local";
+}
+
+/** True inside a worker process (Fly Machine / Docker worker container).
+ *  buildFlyWorkerEnv (Fly) and the worker container config (Docker) set
+ *  TASK_ORCH_INSIDE_WORKER=1. A worker holds no Fly credentials and none of the
+ *  admission/pump/sweep machinery, so this gates the nested-dispatch branch and
+ *  the DB guard (workers never touch Postgres). */
+export function insideWorker(): boolean {
+  return truthy(process.env.TASK_ORCH_INSIDE_WORKER);
+}
+
+/**
+ * True when user turns run out-of-process (detached worker per turn).
+ * INTERACTION: the Fly provider FORCES this on — a Fly deployment is detached
+ * by construction — so an unset/"0" TASK_ORCH_DETACHED_RUNS is overridden to
+ * true whenever runnerProviderKind() === "fly". Off Fly it is the plain flag.
+ */
+export function detachedRunsEnabled(): boolean {
+  if (runnerProviderKind() === "fly") return true;
+  return truthy(process.env.TASK_ORCH_DETACHED_RUNS);
+}
+
+/**
+ * Nested-dispatch policy for a run created INSIDE a worker (see
+ * docs/nested-machine-dispatch.md, Decision 5, and lib/runner/provider.ts for
+ * the long form).
+ *  1. Explicit TASK_ORCH_NESTED_DISPATCH "isolate"/"inline" (case-insensitive)
+ *     wins; any other value falls through.
+ *  2. Default: "isolate" on Fly, else "inline".
+ * INTERACTION: inside a worker the value arrives already RESOLVED via
+ * buildFlyWorkerEnv (workers never set TASK_ORCH_RUNNER), so the env passthrough
+ * — not this default — is what turns isolation on inside the worker.
+ */
+export function nestedDispatchMode(): NestedDispatchMode {
+  const raw = process.env.TASK_ORCH_NESTED_DISPATCH;
+  if (raw) {
+    const v = raw.toLowerCase();
+    if (v === "isolate") return "isolate";
+    if (v === "inline") return "inline";
+  }
+  return runnerProviderKind() === "fly" ? "isolate" : "inline";
+}
+
+// ── Grouped registry ───────────────────────────────────────────────────────
+// Getters read process.env lazily on each access. Grouped by concern; each
+// entry is the documented home of that flag. Object.freeze prevents structural
+// mutation, not getter evaluation.
+
+export const config = Object.freeze({
+  /** Deployment / execution backend. */
+  deployment: Object.freeze({
+    /** "fly" | "local". @see runnerProviderKind */
+    get runnerKind(): RunnerProviderKind {
+      return runnerProviderKind();
+    },
+    /** Out-of-process turns; Fly forces on. @see detachedRunsEnabled */
+    get detachedRuns(): boolean {
+      return detachedRunsEnabled();
+    },
+    /** Docker worker image; presence ⇒ Docker-worker mode (spawn containers). */
+    get workerImage(): string | undefined {
+      return strEnv("TASK_ORCH_WORKER_IMAGE");
+    },
+    /** Distinguishes co-located orchestrator instances for container naming. */
+    get instanceId(): string | undefined {
+      return strEnv("TASK_ORCH_INSTANCE_ID");
+    },
+    /** Docker network to attach worker containers to. */
+    get dockerNetwork(): string | undefined {
+      return strEnv("TASK_ORCH_DOCKER_NETWORK");
+    },
+    /** Host ~/.claude mount for worker containers. */
+    get claudeHomeHost(): string | undefined {
+      return strEnv("TASK_ORCH_CLAUDE_HOME_HOST");
+    },
+    /** Host volume / dir for the shared repo cache. */
+    get repoCacheHostVolume(): string | undefined {
+      return strEnv("TASK_ORCH_REPO_CACHE_HOST_VOLUME");
+    },
+    get repoCacheDir(): string | undefined {
+      return strEnv("TASK_ORCH_REPO_CACHE_DIR");
+    },
+    /** tsx CLI path for the worker entrypoint (test/dev override). */
+    get tsxCli(): string | undefined {
+      return strEnv("TASK_ORCH_TSX_CLI");
+    },
+  }),
+
+  /** Worker identity + transport (set on the worker process by dispatch). */
+  worker: Object.freeze({
+    /** This process is a run worker. @see insideWorker */
+    get inside(): boolean {
+      return insideWorker();
+    },
+    /** How a worker-spawned child gets its runner. @see nestedDispatchMode */
+    get nestedDispatch(): NestedDispatchMode {
+      return nestedDispatchMode();
+    },
+    get apiUrl(): string | undefined {
+      return strEnv("TASK_ORCH_WORKER_API_URL");
+    },
+    get apiToken(): string | undefined {
+      return strEnv("TASK_ORCH_WORKER_TOKEN");
+    },
+    /** HMAC secret the orchestrator signs run-scoped worker tokens with. */
+    get apiSecret(): string | undefined {
+      return strEnv("TASK_ORCH_WORKER_API_SECRET");
+    },
+    /** Test-only escape hatch: let a simulated worker env touch Postgres. */
+    get allowDb(): boolean {
+      return truthy(process.env.TASK_ORCH_WORKER_ALLOW_DB);
+    },
+    get cpus(): number {
+      return intEnv("TASK_ORCH_WORKER_CPUS", 0);
+    },
+    get memoryMb(): number {
+      return intEnv("TASK_ORCH_WORKER_MEMORY_MB", 0);
+    },
+    get memorySwapMb(): number {
+      return intEnv("TASK_ORCH_WORKER_MEMORY_SWAP_MB", 0);
+    },
+    get memoryReservationMb(): number {
+      return intEnv("TASK_ORCH_WORKER_MEMORY_RESERVATION_MB", 0);
+    },
+    get pidsLimit(): number {
+      return intEnv("TASK_ORCH_WORKER_PIDS_LIMIT", 0);
+    },
+  }),
+
+  /** Dispatch / admission / pump tuning. */
+  dispatch: Object.freeze({
+    /** Admission-gate feature flag (default ON; further gated by provider —
+     *  see admission logic in lib/run-dispatch.ts). */
+    get admissionFlag(): boolean {
+      return flag("TASK_ORCH_ADMISSION_ENABLED", true);
+    },
+    get maxWorkers(): number {
+      return intEnv("TASK_ORCH_MAX_WORKERS", 0);
+    },
+    get maxMachines(): number {
+      return intEnv("TASK_ORCH_MAX_MACHINES", 0);
+    },
+    get hostMemoryReserveMb(): number {
+      return intEnv("TASK_ORCH_HOST_MEMORY_RESERVE_MB", 0);
+    },
+    get maxRunDepth(): number {
+      return intEnv("TASK_ORCH_MAX_RUN_DEPTH", 3);
+    },
+    get maxTreeRuns(): number {
+      return intEnv("TASK_ORCH_MAX_TREE_RUNS", 32);
+    },
+    get treeBudgetMult(): number {
+      const value = floatEnv("TASK_ORCH_TREE_BUDGET_MULT", 3);
+      return value > 0 ? value : 3;
+    },
+    get pendingPumpMs(): number {
+      return intEnv("TASK_ORCH_PENDING_PUMP_MS", 15_000);
+    },
+    get maxDeferMs(): number {
+      return intEnv("TASK_ORCH_MAX_DEFER_MS", 30 * 60_000);
+    },
+  }),
+
+  /** Agent backend + model defaults. */
+  agent: Object.freeze({
+    /** Deployment default backend ("pi"/"claude") when a run has no per-run
+     *  choice. Normalized/validated by resolveBackendId. */
+    get backend(): string | undefined {
+      return strEnv("TASK_ORCH_AGENT_BACKEND");
+    },
+    get model(): string | undefined {
+      return strEnv("TASK_ORCH_AGENT_MODEL");
+    },
+    get chatModel(): string | undefined {
+      return strEnv("TASK_ORCH_CHAT_MODEL");
+    },
+    get titleModel(): string | undefined {
+      return strEnv("TASK_ORCH_TITLE_MODEL");
+    },
+    get chatIdleMs(): number {
+      const value = intEnv("TASK_ORCH_CHAT_IDLE_MS", 600_000);
+      return value > 0 ? value : 600_000;
+    },
+    get chatMaxToolRounds(): number {
+      const value = intEnv("TASK_ORCH_CHAT_MAX_TOOL_ROUNDS", 64);
+      return value > 0 ? value : 64;
+    },
+    get executorMaxToolRounds(): number {
+      const value = intEnv("TASK_ORCH_EXECUTOR_MAX_TOOL_ROUNDS", 30);
+      return value > 0 ? value : 30;
+    },
+  }),
+
+  /** Feature gates. */
+  features: Object.freeze({
+    /** Lightweight in-process pi loop for chats (default ON). Also gates the
+     *  lightweight executor path. */
+    get lightweightChats(): boolean {
+      return flag("TASK_ORCH_LIGHTWEIGHT_CHATS", true);
+    },
+    /** Lightweight in-process pi loop for the plan executor (default ON). */
+    get lightweightExecutor(): boolean {
+      return flag("TASK_ORCH_LIGHTWEIGHT_EXECUTOR", true);
+    },
+    get autoLaunch(): boolean {
+      return truthy(process.env.TASK_ORCH_AUTO_LAUNCH);
+    },
+    get ciAutofix(): boolean {
+      return truthy(process.env.TASK_ORCH_CI_AUTOFIX);
+    },
+    /** Keep worktrees after a run finishes (debugging). */
+    get keepWorktrees(): boolean {
+      return truthy(process.env.TASK_ORCH_KEEP_WORKTREES);
+    },
+    get worktreeGc(): boolean {
+      return truthy(process.env.TASK_ORCH_WORKTREE_GC);
+    },
+    /** Archive worker logs/artifacts to R2. */
+    get archiveR2(): string | undefined {
+      return strEnv("TASK_ORCH_ARCHIVE_R2");
+    },
+  }),
+
+  /** Fly.io provider settings. */
+  fly: Object.freeze({
+    get app(): string | undefined {
+      return strEnv("TASK_ORCH_FLY_APP") ?? strEnv("FLY_APP_NAME");
+    },
+    get region(): string | undefined {
+      return strEnv("TASK_ORCH_FLY_REGION");
+    },
+    get cpus(): number {
+      return intEnv("TASK_ORCH_FLY_CPUS", 4);
+    },
+    get memoryMb(): number {
+      return intEnv("TASK_ORCH_FLY_MEMORY_MB", 4096);
+    },
+    get pollMs(): number {
+      return intEnv("TASK_ORCH_FLY_POLL_MS", 10_000);
+    },
+    get volumeGb(): number {
+      return intEnv("TASK_ORCH_RUNNER_VOLUME_GB", 10);
+    },
+  }),
+
+  /** Storage / persistence. */
+  db: Object.freeze({
+    /** SQLite/pg path override (TASK_ORCH_DB); DATABASE_URL is separate. */
+    get path(): string | undefined {
+      return strEnv("TASK_ORCH_DB");
+    },
+    get pgSchema(): string | undefined {
+      return strEnv("TASK_ORCH_PG_SCHEMA");
+    },
+    get migrationsDir(): string | undefined {
+      return strEnv("TASK_ORCH_MIGRATIONS_DIR");
+    },
+    get targetRepo(): string | undefined {
+      return strEnv("TASK_ORCH_TARGET_REPO");
+    },
+  }),
+});
+
+/**
+ * A frozen, plain-value snapshot of the whole config for logging/telemetry.
+ * Evaluates every getter ONCE at call time — do not cache it across an env
+ * mutation. Not for control-flow (use the live accessors above).
+ */
+export function snapshot() {
+  const dump = (o: object): Record<string, unknown> => {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(o)) out[k] = (o as Record<string, unknown>)[k];
+    return Object.freeze(out);
+  };
+  return Object.freeze({
+    deployment: dump(config.deployment),
+    worker: dump(config.worker),
+    dispatch: dump(config.dispatch),
+    agent: dump(config.agent),
+    features: dump(config.features),
+    fly: dump(config.fly),
+    db: dump(config.db),
+    derived: Object.freeze({
+      runnerProviderKind: runnerProviderKind(),
+      insideWorker: insideWorker(),
+      detachedRunsEnabled: detachedRunsEnabled(),
+      nestedDispatchMode: nestedDispatchMode(),
+    }),
+  });
+}

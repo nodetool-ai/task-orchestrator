@@ -6,6 +6,7 @@ import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { agentEvents, agentSessions, runnerInstances } from "@/db/schema";
 import { agentCredentialEnv } from "../agent-backend/provider-env";
+import { config } from "../config";
 import { isTerminalStatus, type SessionStatus } from "../types";
 import { isWorkerClaimLive, nextLifecycleAction } from "./lifecycle";
 import { nestedDispatchMode } from "./provider";
@@ -18,7 +19,6 @@ const DEFAULT_REGION = "ams";
 // Measured default: a repo checkout + npm cache footprint fits comfortably in
 // 10 GB for the vast majority of runs. Overridable per-deployment via
 // TASK_ORCH_RUNNER_VOLUME_GB (see create()) for heavy repos that need more.
-const DEFAULT_VOLUME_GB = 10;
 
 // Prewarm seed volume: a persistent volume (populated by
 // scripts/seed-prewarm-volume.ts) holding a baked nodetool `npm ci` under
@@ -30,7 +30,6 @@ const PREWARM_SEED_VOLUME_NAME = process.env.TASK_ORCH_PREWARM_SEED_VOLUME ?? "p
 // Where the seed's prewarm tree lands once the forked volume is mounted at
 // /mnt/session. Must match scripts/seed-prewarm-volume.ts.
 const PREWARM_MOUNT_DIR = "/mnt/session/prewarm";
-const DEFAULT_POLL_MS = 10_000;
 const SWEEP_MIN_SILENCE_MS = 30_000;
 // Grace window so a just-created, not-yet-attached volume isn't reaped mid-
 // provision. create() runs createVolume → createMachine → insert runner_instances
@@ -41,13 +40,6 @@ const REAP_MIN_AGE_MS = 10 * 60_000; // 10 min
 const FLY_MONITOR_KEY = "__taskOrchFlyRunnerMonitor";
 
 const LEASE_STATUSES = new Set<string>(["preparing", "running", "pushing", "opening_pr"]);
-
-function intEnv(key: string, dflt: number): number {
-  const raw = process.env[key];
-  if (raw == null || raw === "") return dflt;
-  const n = Number(raw);
-  return Number.isFinite(n) ? Math.floor(n) : dflt;
-}
 
 function envValue(key: string): string | undefined {
   const value = process.env[key];
@@ -348,8 +340,8 @@ export function buildFlyMachineConfig(
   // Default bumped from 2→4 vCPU alongside the existing 4096MB memory default:
   // 4 vCPU supports up to 8192MB, matching the memory ceiling operators reach
   // for first under OOM pressure (see incident note above).
-  const cpus = intEnv("TASK_ORCH_FLY_CPUS", 4);
-  const memoryMb = intEnv("TASK_ORCH_FLY_MEMORY_MB", 4096);
+  const cpus = config.fly.cpus;
+  const memoryMb = config.fly.memoryMb;
   assertValidSharedMachineResources(cpus, memoryMb);
   return {
     image: process.env.FLY_RUNNER_IMAGE || "fly-runner:latest",
@@ -378,7 +370,7 @@ export class FlyRunnerProvider implements RunnerProvider {
   private async resolvePrewarmSeed(region: string): Promise<FlyVolume | null> {
     if (!PREWARM_SEED_VOLUME_NAME) return null;
     try {
-      const requiredGb = intEnv("TASK_ORCH_RUNNER_VOLUME_GB", DEFAULT_VOLUME_GB);
+      const requiredGb = config.fly.volumeGb;
       const volumes = await this.flyClient.listVolumes();
       const seed =
         volumes.find(
@@ -408,7 +400,7 @@ export class FlyRunnerProvider implements RunnerProvider {
     if (existing?.volumeId) return this.resume(input.runId, input.scope);
 
     const region = process.env.TASK_ORCH_FLY_REGION || DEFAULT_REGION;
-    const configuredGb = intEnv("TASK_ORCH_RUNNER_VOLUME_GB", DEFAULT_VOLUME_GB);
+    const configuredGb = config.fly.volumeGb;
     // Fork the prewarm seed when one exists: the run boots with warm deps at
     // PREWARM_MOUNT_DIR and skips the cold install. Fly rejects size_gb on fork
     // requests, so forked volumes inherit the seed size. No seed → blank volume
@@ -669,7 +661,7 @@ export class FlyRunnerProvider implements RunnerProvider {
   startMonitor(): void {
     const g = globalThis as Record<string, unknown>;
     if (g[FLY_MONITOR_KEY]) return;
-    const intervalMs = intEnv("TASK_ORCH_FLY_POLL_MS", DEFAULT_POLL_MS);
+    const intervalMs = config.fly.pollMs;
     if (intervalMs <= 0) return;
     // A slow/hung Fly API call can make one sweep tick outlive the poll interval;
     // without this guard setInterval piles up overlapping sweeps indefinitely.

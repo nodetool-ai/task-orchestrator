@@ -60,19 +60,28 @@ command.
    browser / API / CLI ──▶│  task-orchestrator  (web)   │   Next.js server
                           │  Dockerfile.server          │   • dashboard + REST + MCP
                           │  1 always-on Machine        │   • migrations on boot
-                          └───────┬──────────────┬──────┘   • run-lifecycle pumps
-                                  │              │            • Fly runner monitor
-             DATABASE_URL (6PN)   │              │  Fly Machines API (FLY_API_TOKEN)
-                                  ▼              ▼
-                     ┌────────────────┐   ┌──────────────────────────────┐
-                     │ task-orch…-db  │   │ task-orchestrator-runners     │
-                     │ Fly Postgres   │◀──│ Dockerfile.fly-runner         │
-                     └────────────────┘   │ 1 Machine + Volume per run,   │
-                            ▲              │ created/suspended/stopped/    │
-                            └──────────────│ destroyed on demand           │
-                          DATABASE_URL     │ (lib/runner/fly.ts)           │
-                          (6PN, org-wide)  └──────────────────────────────┘
+                          └──────┬───────────┬────▲─────┘   • run-lifecycle pumps
+                                 │           │    │           • Fly runner monitor
+            DATABASE_URL (6PN)   │           │    │  /api/worker over 6PN
+              (web app ONLY)     │           │    │  (run-scoped HMAC token)
+                                 ▼           ▼    │
+                    ┌────────────────┐   ┌────────┴─────────────────────┐
+                    │ task-orch…-db  │   │ task-orchestrator-runners     │
+                    │ Fly Postgres   │   │ Dockerfile.fly-runner         │
+                    └────────────────┘   │ 1 Machine + Volume per run,   │
+                                         │ created/suspended/stopped/    │
+                Fly Machines API         │ destroyed on demand           │
+                (FLY_API_TOKEN)          │ (lib/runner/fly.ts)           │
+                                         └──────────────────────────────┘
 ```
+
+> **Runner Machines hold no `DATABASE_URL`.** Since the worker-HTTP-API
+> migration (2026-07) the orchestrator withholds Postgres credentials from
+> runner Machines; every read/write a run needs flows through the web app's
+> `/api/worker/*` endpoints, authenticated by a per-run HMAC token minted at
+> dispatch (`lib/runner/fly.ts` `buildFlyWorkerEnv`; the DB guard in
+> `db/index.ts` fails fast if a worker ever reaches Postgres directly). See
+> **[worker-http-api.md](./worker-http-api.md)** for the protocol.
 
 ### The three apps
 

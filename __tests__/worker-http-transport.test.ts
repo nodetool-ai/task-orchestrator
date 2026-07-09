@@ -16,7 +16,8 @@ import * as backend from "../lib/agent-backend";
 import { create, get, listMessages, driveDispatchedRun } from "../lib/runs";
 import { handleWorkerApi } from "../lib/worker/api-handlers";
 import { dbTransport } from "../lib/worker/db-transport";
-import { createHttpTransport } from "../lib/worker/http-transport";
+import { createHttpTransport, ProtocolMismatchError } from "../lib/worker/http-transport";
+import { WORKER_PROTOCOL_VERSION, WORKER_PROTOCOL_HEADER } from "../lib/worker/protocol";
 import { mintWorkerToken } from "../lib/worker/token";
 import { __resetRunTransportForTests } from "../lib/worker";
 
@@ -109,6 +110,57 @@ describe("http transport over the wire", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(bodies[0].idempotencyKey).toMatch(/^msg:1:/);
     expect(bodies[1].idempotencyKey).toBe(bodies[0].idempotencyKey);
+  });
+
+  it("sends the X-Worker-Protocol header on every request", async () => {
+    const seen: (string | null)[] = [];
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      seen.push(new Headers(init.headers).get(WORKER_PROTOCOL_HEADER));
+      return new Response(JSON.stringify({ run: null }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const t = createHttpTransport({
+      baseUrl: "http://worker.test",
+      token: "token",
+      fetchImpl: fetchMock as any,
+    });
+    await t.getRun(7);
+    expect(seen).toEqual([String(WORKER_PROTOCOL_VERSION)]);
+  });
+
+  it("raises a terminal ProtocolMismatchError on a 409 and does NOT retry it", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ error: "protocol_mismatch", server: WORKER_PROTOCOL_VERSION + 3, client: WORKER_PROTOCOL_VERSION }),
+        { status: 409, headers: { "content-type": "application/json" } }
+      )
+    );
+    const t = createHttpTransport({
+      baseUrl: "http://worker.test",
+      token: "token",
+      fetchImpl: fetchMock as any,
+    });
+    // getRun retries GETs twice on retriable failures — a 409 mismatch must be
+    // terminal, so exactly ONE call and a ProtocolMismatchError.
+    await expect(t.getRun(1)).rejects.toBeInstanceOf(ProtocolMismatchError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-throws a ProtocolMismatchError out of heartbeat (not swallowed like a missed beat)", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ error: "protocol_mismatch", server: 99 }), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    const t = createHttpTransport({
+      baseUrl: "http://worker.test",
+      token: "token",
+      fetchImpl: fetchMock as any,
+    });
+    await expect(t.heartbeat(1)).rejects.toBeInstanceOf(ProtocolMismatchError);
   });
 
   it("reads runs with dates revived and appends messages", async () => {

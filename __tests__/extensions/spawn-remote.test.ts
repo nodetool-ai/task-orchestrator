@@ -1,16 +1,17 @@
 // __tests__/extensions/spawn-remote.test.ts
 //
-// Behavioural tests for spawn__append_message's worker-routing + timeout fixes:
+// Behavioural tests for spawn__append_message's worker-routing:
 //
 //   BUG M3 — in remote-runner mode, append_message must route the child's turn
 //     through runs.sendMessageToRun (persist + dispatch a worker, relay the
 //     stream) instead of driving runs.append DIRECTLY inside the caller's
-//     container. await=false must persist+dispatch and DETACH (close the relay
-//     iterator) rather than float the tail past the tool return.
+//     container. It must persist+dispatch and DETACH (close the relay iterator)
+//     rather than float the tail past the tool return.
 //
-//   BUG M2 — await=true is time-bounded: a wedged child returns status
-//     'timed_out' with the child STILL running (not cancelled), and the relay
-//     iterator is torn down (its finally runs) so it is not leaked.
+//   R7b — append_message is always non-blocking: it returns {status:"running"}
+//     immediately and never holds the turn (or the server-side HTTP connection)
+//     open waiting on the child. Waiting is await_session's park/event job. The
+//     `await`/`timeout_seconds` blocking params are gone from the tool surface.
 //
 //   Plus: lastAgentText reports the LATEST agent text (ORDER BY id).
 //
@@ -58,7 +59,7 @@ afterEach(async () => {
 });
 
 describe("append_message → remote-runner routing (BUG M3)", () => {
-  it("await=false routes through sendMessageToRun, persists+dispatches, then detaches", async () => {
+  it("routes through sendMessageToRun, persists+dispatches, then detaches", async () => {
     vi.spyOn(runDispatch, "remoteRunnerEnabled").mockReturnValue(true);
     // Target run is idle/appendable.
     vi.spyOn(runs, "get").mockImplementation(async (id: number) =>
@@ -94,7 +95,6 @@ describe("append_message → remote-runner routing (BUG M3)", () => {
     const res = await tools.get("spawn__append_message")!.execute("c", {
       run_id: 42,
       text: "hello child",
-      await: false,
     });
 
     // Routed through the worker model, NOT the in-process append.
@@ -111,7 +111,7 @@ describe("append_message → remote-runner routing (BUG M3)", () => {
     expect(body).toMatchObject({ run_id: 42, status: "running", awaited: false });
   });
 
-  it("await=false surfaces an up-front error frame from sendMessageToRun", async () => {
+  it("surfaces an up-front error frame from sendMessageToRun", async () => {
     vi.spyOn(runDispatch, "remoteRunnerEnabled").mockReturnValue(true);
     vi.spyOn(runs, "get").mockImplementation(async (id: number) =>
       id === CALLER_ROW.id ? CALLER_ROW : ({ status: "idle", cwdStrategy: "none" } as any)
@@ -126,52 +126,36 @@ describe("append_message → remote-runner routing (BUG M3)", () => {
     const res = await tools.get("spawn__append_message")!.execute("c", {
       run_id: 42,
       text: "hi",
-      await: false,
     });
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toMatch(/run vanished/);
   });
-
-  it("await=true drains the relay to done and returns awaited result", async () => {
-    vi.spyOn(runDispatch, "remoteRunnerEnabled").mockReturnValue(true);
-    vi.spyOn(runs, "get").mockImplementation(async (id: number) =>
-      id === CALLER_ROW.id
-        ? CALLER_ROW
-        : ({ status: "idle", cwdStrategy: "none", totalCostUsd: 0.5 } as any)
-    );
-    const appendSpy = vi.spyOn(runs, "append");
-    async function* doneGen(): AsyncGenerator<AppendStreamEvent> {
-      yield { type: "user_message", message: {} as any };
-      yield { type: "sdk", sdk: {} as any };
-      yield { type: "done" };
-    }
-    const sendSpy = vi.spyOn(runs, "sendMessageToRun").mockImplementation(() => doneGen());
-
-    const tools = registerTools(CALLER_ROW.id, CALLER_ROW);
-    const res = await tools.get("spawn__append_message")!.execute("c", {
-      run_id: 42,
-      text: "finish up",
-      await: true,
-    });
-    expect(sendSpy).toHaveBeenCalledTimes(1);
-    expect(appendSpy).not.toHaveBeenCalled();
-    const body = parse(res);
-    expect(body).toMatchObject({ run_id: 42, awaited: true, status: "idle" });
-  });
 });
 
-describe("append_message → await=true timeout (BUG M2)", () => {
-  it("returns 'timed_out' without cancelling the child, and tears down the relay", async () => {
+describe("append_message → no blocking await param (R7b)", () => {
+  it("does not expose await/timeout_seconds on the tool schema", () => {
+    const tools = registerTools(CALLER_ROW.id, CALLER_ROW);
+    const def: any = tools.get("spawn__append_message");
+    const schema = def.parameters ?? def.def?.parameters;
+    expect(schema?.properties?.await).toBeUndefined();
+    expect(schema?.properties?.timeout_seconds).toBeUndefined();
+    // Still takes the essentials.
+    expect(schema?.properties?.run_id).toBeTruthy();
+    expect(schema?.properties?.text).toBeTruthy();
+  });
+
+  it("returns immediately with status 'running' even while the child turn keeps streaming", async () => {
     vi.spyOn(runDispatch, "remoteRunnerEnabled").mockReturnValue(true);
     vi.spyOn(runs, "get").mockImplementation(async (id: number) =>
-      id === CALLER_ROW.id ? CALLER_ROW : ({ status: "running", cwdStrategy: "worktree" } as any)
+      id === CALLER_ROW.id ? CALLER_ROW : ({ status: "idle", cwdStrategy: "none" } as any)
     );
     const appendSpy = vi.spyOn(runs, "append");
 
     let finallyRan = false;
-    // A wedged child turn: never yields a terminal frame; only ends when the
-    // relay's abort fires (which our timeout path triggers to unsubscribe).
-    async function* hangGen(opts: { abort: AbortController }): AsyncGenerator<AppendStreamEvent> {
+    // A long-running child turn: it yields the first (persist+dispatch) frame,
+    // then would keep streaming until the relay is aborted. append_message must
+    // NOT wait for it — it detaches after the first frame and returns 'running'.
+    async function* longGen(opts: { abort: AbortController }): AsyncGenerator<AppendStreamEvent> {
       try {
         yield { type: "user_message", message: {} as any };
         await new Promise<void>((res) => {
@@ -182,38 +166,21 @@ describe("append_message → await=true timeout (BUG M2)", () => {
         finallyRan = true;
       }
     }
-    vi.spyOn(runs, "sendMessageToRun").mockImplementation((opts: any) => hangGen(opts));
+    vi.spyOn(runs, "sendMessageToRun").mockImplementation((opts: any) => longGen(opts));
 
     const tools = registerTools(CALLER_ROW.id, CALLER_ROW);
     const started = Date.now();
     const res = await tools.get("spawn__append_message")!.execute("c", {
       run_id: 42,
-      text: "are you stuck?",
-      await: true,
-      timeout_seconds: 1, // minimum; keeps the test ~1s
+      text: "take your time",
     });
-    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
-
+    // Returned promptly (detached), not after any multi-second/hour drain.
+    expect(Date.now() - started).toBeLessThan(2000);
     const body = parse(res);
-    expect(body).toMatchObject({ run_id: 42, status: "timed_out", child_in_flight: true });
-    expect(body.message).toMatch(/NOT cancelled/i);
-    // The child was NOT driven in-process, and the relay iterator was closed
-    // (finally ran) so the subscription is not leaked.
-    expect(appendSpy).not.toHaveBeenCalled();
+    expect(body).toMatchObject({ run_id: 42, status: "running", awaited: false });
+    // Detached: relay iterator closed (finally ran), child NOT driven in-process.
     expect(finallyRan).toBe(true);
-  }, 10_000);
-
-  it("accepts timeout_seconds within [1, 7200] on the schema", () => {
-    const tools = registerTools(CALLER_ROW.id, CALLER_ROW);
-    const def: any = tools.get("spawn__append_message");
-    // TypeBox schema is exposed on the tool def's parameters.
-    const schema = def.parameters ?? def.def?.parameters;
-    // Locate the timeout_seconds property schema regardless of TypeBox internals.
-    const prop = schema?.properties?.timeout_seconds;
-    expect(prop).toBeTruthy();
-    expect(prop.minimum).toBe(1);
-    expect(prop.maximum).toBe(7200);
-    expect(prop.default).toBe(1800);
+    expect(appendSpy).not.toHaveBeenCalled();
   });
 });
 

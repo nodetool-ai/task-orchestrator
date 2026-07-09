@@ -226,6 +226,13 @@ export const agentSessions = pgTable(
     resumeOf: integer("resume_of"),
     repoId: text("repo_id").references(() => repositories.id, { onDelete: "set null" }),
     goal: text("goal").notNull().default("<implement>"),
+    // Persisted placement (docs/nested-machine-dispatch.md): WHERE this run's
+    // turns execute — 'server' (the in-process lightweight loop on the web
+    // process) or 'worker' (a detached process/container/Machine). Decided ONCE
+    // by resolvePlacement() at create time, then honored by dispatchRun instead
+    // of re-derived from env predicates at every dispatch site. Defaults to
+    // 'worker' so pre-migration rows (and any raw insert) take the worker path.
+    runtime: text("runtime").notNull().default("worker"),
     // Reasoning level: low | medium | high | xhigh. NULL inherits the persona's
     // level (which may itself be NULL = model default).
     thinkingLevel: text("thinking_level"),
@@ -274,8 +281,10 @@ export const agentSessions = pgTable(
     // Open ask_parent exchange (§8): { question_id, question, asked_at,
     // deadline, state: 'open'|'answered'|'expired', assumption? }.
     pendingQuestion: jsonb("pending_question"),
-    // Generation rollover (§9.1): the successor run that replaced this one.
-    // emitInboxEvent resolves targets through this chain.
+    // Generation rollover (§9.1, unbuilt): the successor run that replaced this
+    // one. Nothing writes this column yet; when rollover ships it is populated at
+    // roll time and inbox target resolution follows the pointer to the live
+    // successor. Kept as forward-provision so the schema is ready.
     supersededBy: integer("superseded_by"),
   },
   (t) => ({

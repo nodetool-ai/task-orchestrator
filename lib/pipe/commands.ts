@@ -5,6 +5,7 @@
 // (no tokens spent). Unknown slashes fall through and are treated as a prompt.
 
 import * as chat from "@/lib/chat";
+import { isLeaseLive } from "@/lib/run-liveness";
 import * as runs from "@/lib/runs";
 import { currentRunId, getOrCreateRun, resetThread } from "./session-store";
 import type { InboundMessage, PipeConfig } from "./types";
@@ -20,16 +21,10 @@ export interface CommandResult {
 // in-process runners map — or in the web server process, which shares the SQLite
 // DB. The web turn is invisible to isLive/interrupt, so /status and /stop also
 // consult the DB liveness lease: an active status with a fresh heartbeat.
-//
-// NOTE: runs.ts keeps isLeaseLive (and these constants) private, so we recompute
-// the lease locally. If runs.ts later exports isLeaseLive, prefer importing it.
-const LEASE_STATUSES = new Set(["running", "preparing", "pushing", "opening_pr"]);
-const HEARTBEAT_STALE_MS = 5 * 60_000;
 
 /** True when the run holds a live DB lease (active status + fresh heartbeat). */
 function leaseLive(run: runs.RunRow | null): boolean {
-  if (!run || !LEASE_STATUSES.has(run.status)) return false;
-  return run.heartbeatAt != null && Date.now() - run.heartbeatAt.getTime() < HEARTBEAT_STALE_MS;
+  return run != null && isLeaseLive(run);
 }
 
 const HELP = [

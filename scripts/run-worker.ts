@@ -17,6 +17,7 @@ import { insideWorker } from "../lib/runner/provider";
 import { startWorkerLogFlusher } from "../lib/runner/worker-log-store";
 import { installProcessSafetyNet } from "../lib/transient-errors";
 import { httpTransportConfigured } from "../lib/worker";
+import { ProtocolMismatchError } from "../lib/worker/http-transport";
 import { createLogger } from "../lib/worker/log";
 
 const log = createLogger("run-worker");
@@ -62,7 +63,19 @@ async function main() {
     await driveDispatchedRun(runId);
     log.info("worker finished", { runId });
   } catch (e) {
-    log.error("worker fatal", { runId, error: e instanceof Error ? (e.stack ?? e.message) : String(e) });
+    if (e instanceof ProtocolMismatchError) {
+      // The server redeployed with an incompatible worker protocol. Exiting
+      // nonzero kills this Machine; the stale-lease reaper then re-dispatches
+      // the run onto a fresh worker built from the new image — the system
+      // already handles this exactly like any other worker death.
+      log.error("worker protocol mismatch — exiting for reaper re-dispatch", {
+        runId,
+        server: e.serverVersion,
+        client: e.clientVersion,
+      });
+    } else {
+      log.error("worker fatal", { runId, error: e instanceof Error ? (e.stack ?? e.message) : String(e) });
+    }
     exitCode = 1;
   } finally {
     // Terminal flush of runner.log — wraps BOTH the success and the catch path

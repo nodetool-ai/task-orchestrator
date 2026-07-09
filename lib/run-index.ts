@@ -19,8 +19,6 @@ export type RunGroup = "active" | "idle" | "closed";
 const ACTIVE_STATUSES = new Set<string>([
   "preparing",
   "running",
-  "pushing",
-  "opening_pr",
 ]);
 const IDLE_STATUSES = new Set<string>(["pending", "idle"]);
 const CLOSED_STATUSES = new Set<string>([

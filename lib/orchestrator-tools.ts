@@ -22,6 +22,7 @@ import {
   type TaskState,
 } from "./types";
 import { createTimer, TIMER_MAX_MINUTES, TIMER_MIN_MINUTES } from "./inbox";
+import { recordTurnEffect } from "./run-state";
 
 // Derived from TASK_TRANSITIONS so the transition_task description can never
 // drift from the actual allowed edges (a hardcoded list silently goes stale
@@ -1132,10 +1133,14 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
         note: `await_session #${session_id} timeout`,
         correlationId: `await-session:${session_id}`,
       });
-      await db
-        .update(agentSessions)
-        .set({ parkReason: "waiting" })
-        .where(eq(agentSessions.id, ctx.runId));
+      // Park via the shared turn-effect writer (lib/run-state.ts) — the same
+      // path the events.ts tools use — instead of a bespoke db.update. Keeps the
+      // parking-contract column writes in exactly one place.
+      const callerRunId = ctx.runId;
+      await recordTurnEffect(
+        (columns) => db.update(agentSessions).set(columns).where(eq(agentSessions.id, callerRunId)),
+        { kind: "park", reason: "waiting" }
+      );
 
       return jsonResult({
         session_id,

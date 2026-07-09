@@ -371,75 +371,6 @@ const NO_RUN = errResult(
   "Spawn tools need a caller run context (mounted without a run id — this is a bug in the mount, not your call)."
 );
 
-/**
- * Drain an AppendStreamEvent generator (from runs.append or
- * runs.sendMessageToRun) to its terminal frame (`done`/`error`), bounded by
- * `timeoutMs`. Returns { timedOut:false, error } on natural completion — `error`
- * is the last error-frame message, or null.
- *
- * On timeout it stops tailing WITHOUT killing the child turn: it aborts
- * `relayAbort` (so a remote relay's finally unsubscribes from run_stream, i.e.
- * the iterator is not leaked) and closes the generator. The child keeps running
- * on its worker; the caller can await_session / spawn__get_run later. `relayAbort`
- * is null for the in-process dev path, where there is no separate relay to abort.
- */
-async function drainAppend(
-  gen: AsyncGenerator<AppendStreamEvent>,
-  timeoutMs: number,
-  relayAbort: AbortController | null
-): Promise<{ timedOut: boolean; error: string | null }> {
-  let error: string | null = null;
-  const drain = (async () => {
-    for await (const event of gen) {
-      if (event.type === "error") error = event.error ?? "append failed";
-      if (event.type === "done" || event.type === "error") break;
-    }
-  })().catch((err) => {
-    error = err instanceof Error ? err.message : String(err);
-  });
-
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  const timeout = new Promise<"timeout">((res) => {
-    timer = setTimeout(() => res("timeout"), timeoutMs);
-  });
-  const outcome = await Promise.race([drain.then(() => "done" as const), timeout]);
-  if (timer) clearTimeout(timer);
-
-  if (outcome === "timeout") {
-    // Do NOT kill the child: only tear down our tail of its stream.
-    relayAbort?.abort();
-    await gen.return(undefined).catch(() => {});
-    return { timedOut: true, error: null };
-  }
-  return { timedOut: false, error };
-}
-
-/**
- * Result envelope for a bounded await=true drain that hit its time limit. The
- * child turn is still in flight (NOT cancelled) — the executor should treat this
- * like await_session's timed_out and check back later.
- */
-function timedOutResult(runIdArg: number, seconds: number, rootId: number) {
-  return ok(
-    JSON.stringify(
-      {
-        run_id: runIdArg,
-        status: "timed_out",
-        awaited: true,
-        child_in_flight: true,
-        timeout_seconds: seconds,
-        message:
-          `append_message did not observe run ${runIdArg} return within ${seconds}s. ` +
-          `The child turn is still running on its worker (it was NOT cancelled); ` +
-          `await_session or spawn__get_run later to read the result.`,
-        tree_root_id: rootId,
-      },
-      null,
-      2
-    )
-  );
-}
-
 export const SPAWN_TOOLS: OrchestratorTool[] = [
     {
       name: "spawn__spawn_agent",
@@ -669,22 +600,10 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
       name: "spawn__append_message",
       label: "Append Message",
       description:
-        "Send a user message to an existing run, resuming its SDK session. Uses the same per-run lock as the UI composer, so this is safe to call concurrently with the UI. When await=true, blocks until the run returns to idle (or a terminal state) and returns the new agent text; if the child does not return within timeout_seconds (default 1800) the call returns status 'timed_out' with the child STILL running (not cancelled) — await_session or spawn__get_run later. Refuses on closed/cancelled runs, and on completed/failed/budget_exhausted runs that are NOT resumable worktree (implement-style) children — those can be resumed even after they land 'completed'. Cannot target your own run or a mid-turn ancestor (that would deadlock). Same tree-budget cap as spawn__spawn_agent.",
+        "Send a user message to an existing run, resuming its SDK session, and return immediately (non-blocking) with status 'running'. Uses the same per-run lock as the UI composer, so this is safe to call concurrently with the UI. To wait for the resumed child's reply, call await_session on it (or spawn__get_run to poll) — it parks your run and the child's terminal event wakes you; do NOT hold a turn open waiting here. Refuses on closed/cancelled runs, and on completed/failed/budget_exhausted runs that are NOT resumable worktree (implement-style) children — those can be resumed even after they land 'completed'. Cannot target your own run or a mid-turn ancestor (that would deadlock). Same tree-budget cap as spawn__spawn_agent.",
       parameters: Type.Object({
         run_id: Type.Integer({ minimum: 1 }),
         text: Type.String({ minLength: 1 }),
-        await: Type.Optional(Type.Boolean()),
-        timeout_seconds: Type.Optional(
-          Type.Integer({
-            minimum: 1,
-            maximum: 7200,
-            default: 1800,
-            description:
-              "Only honored when await=true: max seconds to wait for the child to return " +
-              "before giving up with status 'timed_out' (the child keeps running). Mirrors " +
-              "await_session's timeout. Default 1800.",
-          })
-        ),
       }),
       execute: async (args: any, ctx) => {
         const runRow = await callerRun(ctx);
@@ -746,12 +665,9 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
           return errResult(refusal);
         }
 
-        const awaitIdle = args.await === true;
-        const timeoutSeconds = args.timeout_seconds ?? 1800;
-        const timeoutMs = timeoutSeconds * 1000;
-
         // Envelope for a fire-and-forget append (the message is persisted + a
-        // turn is running, but we did not wait for it).
+        // turn is running, but we did not wait for it). To read the reply, the
+        // agent parks on await_session / polls spawn__get_run.
         const runningResult = () =>
           ok(
             JSON.stringify(
@@ -765,23 +681,6 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
                   callerRoot.budgetMaxUsd != null
                     ? callerRoot.budgetMaxUsd * treeBudgetMult()
                     : null,
-              },
-              null,
-              2
-            )
-          );
-
-        // Envelope for a completed await=true drain.
-        const awaitedResult = (after: RunRow | null, latestText: string | null) =>
-          ok(
-            JSON.stringify(
-              {
-                run_id: args.run_id,
-                status: after?.status ?? "idle",
-                awaited: true,
-                last_text: latestText,
-                total_cost_usd: after?.totalCostUsd ?? null,
-                tree_root_id: callerRoot.id,
               },
               null,
               2
@@ -818,95 +717,63 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
             abort: relayAbort,
           });
 
-          if (!awaitIdle) {
-            // INVARIANT: sendMessageToRun persists the user message AND fires the
-            // worker dispatch BEFORE its first yield — both are awaited ahead of
-            // the `yield* relayRunStream(...)` tail (see lib/runs.ts). So a single
-            // gen.next() is enough to guarantee persist+dispatch have completed:
-            // whatever it yields (the just-persisted user_message frame, or an
-            // up-front error frame) proves the message is durable and a worker was
-            // asked to run it. We then DETACH — abort the relay + close the
-            // iterator so its finally unsubscribes — rather than float the tail
-            // past this tool return (that float is exactly what process.exit
-            // truncated). The child's turn continues on its worker regardless.
-            let first: IteratorResult<AppendStreamEvent>;
-            try {
-              first = await gen.next();
-            } catch (err) {
-              relayAbort.abort();
-              await gen.return(undefined).catch(() => {});
-              return errResult(
-                `append failed: ${err instanceof Error ? err.message : String(err)}`
-              );
-            }
+          // INVARIANT: sendMessageToRun persists the user message AND fires the
+          // worker dispatch BEFORE its first yield — both are awaited ahead of
+          // the `yield* relayRunStream(...)` tail (see lib/runs.ts). So a single
+          // gen.next() is enough to guarantee persist+dispatch have completed:
+          // whatever it yields (the just-persisted user_message frame, or an
+          // up-front error frame) proves the message is durable and a worker was
+          // asked to run it. We then DETACH — abort the relay + close the
+          // iterator so its finally unsubscribes — rather than float the tail
+          // past this tool return (that float is exactly what process.exit
+          // truncated). The child's turn continues on its worker regardless; the
+          // agent parks on await_session to learn when it finishes.
+          let first: IteratorResult<AppendStreamEvent>;
+          try {
+            first = await gen.next();
+          } catch (err) {
             relayAbort.abort();
             await gen.return(undefined).catch(() => {});
-            if (!first.done && first.value?.type === "error") {
-              return errResult(`append failed: ${first.value.error ?? "append failed"}`);
-            }
-            return runningResult();
+            return errResult(
+              `append failed: ${err instanceof Error ? err.message : String(err)}`
+            );
           }
-
-          // await=true: drain the relay to terminal, bounded by timeout (BUG M2)
-          // so a wedged child cannot wedge the executor forever.
-          const { timedOut, error } = await drainAppend(gen, timeoutMs, relayAbort);
-          if (timedOut) {
-            return timedOutResult(args.run_id, timeoutSeconds, callerRoot.id);
-          }
-          if (error) {
-            return errResult(`append failed: ${error}`);
-          }
-          const after = await runs.get(args.run_id);
-          const latestText = await lastAgentText(args.run_id);
-          return awaitedResult(after, latestText);
-        }
-
-        // ── In-process (dev / non-remote) mode ──────────────────────────────
-        if (!awaitIdle) {
-          // Fire-and-forget: drive the turn in-process on a floated drain. Race
-          // it against one setImmediate tick so a synchronously-failing append
-          // (target not found / already in flight in another process /
-          // non-resumable terminal / prepareCwd failure that rejects
-          // immediately) surfaces a real error instead of a false
-          // {status:'running'} — those errors yield within microtasks, which
-          // settle before the setImmediate macrotask fires.
-          let appendError: string | null = null;
-          const drain = (async () => {
-            try {
-              for await (const event of runs.append({
-                runId: args.run_id,
-                role: "user",
-                text: args.text,
-              })) {
-                if (event.type === "error") appendError = event.error ?? "append failed";
-                if (event.type === "done" || event.type === "error") break;
-              }
-            } catch (err) {
-              appendError = err instanceof Error ? err.message : String(err);
-            }
-          })();
-          await Promise.race([drain, new Promise<void>((res) => setImmediate(res))]);
-          if (appendError) {
-            return errResult(`append failed: ${appendError}`);
+          relayAbort.abort();
+          await gen.return(undefined).catch(() => {});
+          if (!first.done && first.value?.type === "error") {
+            return errResult(`append failed: ${first.value.error ?? "append failed"}`);
           }
           return runningResult();
         }
 
-        // await=true (dev): drain runs.append's generator, bounded by timeout
-        // (BUG M2). The generator completes once the turn hits a terminal status
-        // (it yields `done` last). relayAbort is null here — there is no separate
-        // relay; on timeout we just stop iterating.
-        const gen = runs.append({ runId: args.run_id, role: "user", text: args.text });
-        const { timedOut, error } = await drainAppend(gen, timeoutMs, null);
-        if (timedOut) {
-          return timedOutResult(args.run_id, timeoutSeconds, callerRoot.id);
+        // ── In-process (dev / non-remote) mode ──────────────────────────────
+        // Fire-and-forget: drive the turn in-process on a floated drain. Race
+        // it against one setImmediate tick so a synchronously-failing append
+        // (target not found / already in flight in another process /
+        // non-resumable terminal / prepareCwd failure that rejects
+        // immediately) surfaces a real error instead of a false
+        // {status:'running'} — those errors yield within microtasks, which
+        // settle before the setImmediate macrotask fires.
+        let appendError: string | null = null;
+        const drain = (async () => {
+          try {
+            for await (const event of runs.append({
+              runId: args.run_id,
+              role: "user",
+              text: args.text,
+            })) {
+              if (event.type === "error") appendError = event.error ?? "append failed";
+              if (event.type === "done" || event.type === "error") break;
+            }
+          } catch (err) {
+            appendError = err instanceof Error ? err.message : String(err);
+          }
+        })();
+        await Promise.race([drain, new Promise<void>((res) => setImmediate(res))]);
+        if (appendError) {
+          return errResult(`append failed: ${appendError}`);
         }
-        if (error) {
-          return errResult(`append failed: ${error}`);
-        }
-        const after = await runs.get(args.run_id);
-        const latestText = await lastAgentText(args.run_id);
-        return awaitedResult(after, latestText);
+        return runningResult();
       },
     },
 ];

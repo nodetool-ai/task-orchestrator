@@ -160,38 +160,12 @@ export interface PlanProgress {
   open: number;
 }
 
-export const SESSION_STATUSES = [
-  "pending",
-  "preparing",
-  "running",
-  "pushing",
-  "opening_pr",
-  "completed",
-  "failed",
-  "cancelled",
-  // v2 (lib/runs.ts): chat-style runs sit `idle` between turns and resume
-  // back into `running` when a new message is appended. `budget_exhausted`
-  // is a soft stop when a configured budget is hit; `closed` is the user
-  // archiving an idle run.
-  "idle",
-  "budget_exhausted",
-  "closed",
-  // Event system (docs/agent-events.md §6.1): the run ended its turn waiting
-  // for inbox events — no worker, no heartbeat, woken by emitInboxEvent /
-  // the pump wake sweep. The nuance ('waiting' | 'sleeping' | 'question')
-  // lives in agent_runs.park_reason; the status machinery sees one state.
-  // NOT terminal: like `idle`, a parked run resumes.
-  "parked",
-] as const;
-export type SessionStatus = (typeof SESSION_STATUSES)[number];
-
-/** Statuses that mean "a turn is in flight" — the only ones a heartbeat lease
- *  covers. 'parked' (like 'idle') is deliberately NOT a lease status: a parked
- *  run has no worker and no heartbeat and that is HEALTHY (§6.1). Single
- *  source of truth for runs.ts (lease/orphan logic) and the worker transport
- *  (claim-release guard) — the two must never drift, or a claim release could
- *  clear a healthy worker's claim mid-turn. */
-export const LEASE_STATUSES: SessionStatus[] = ["running", "preparing", "pushing", "opening_pr"];
+// The run status vocabulary, the lease set, and isTerminalStatus now live in
+// lib/run-state.ts (the single owner of run status semantics). Re-exported here
+// so the ~100 existing `@/lib/types` import sites keep working unchanged.
+import type { SessionStatus } from "./run-state";
+export { SESSION_STATUSES, LEASE_STATUSES, isTerminalStatus } from "./run-state";
+export type { SessionStatus };
 
 export interface AgentSessionFull {
   id: number;
@@ -220,19 +194,6 @@ export interface AgentEventRow {
   type: string;
   payload: unknown;
   createdAt: Date;
-}
-
-export function isTerminalStatus(s: SessionStatus): boolean {
-  // 'idle' is intentionally NOT terminal: an idle run is waiting for the
-  // next user message and can be resumed. 'closed' / 'budget_exhausted' are
-  // terminal; the user must explicitly fork or extend the budget to revive.
-  return (
-    s === "completed" ||
-    s === "failed" ||
-    s === "cancelled" ||
-    s === "closed" ||
-    s === "budget_exhausted"
-  );
 }
 
 export type ChatRole = "user" | "assistant" | "tool_result";

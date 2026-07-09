@@ -1,5 +1,6 @@
 // lib/runner/lifecycle.ts
 import type { RunnerState } from "./provider";
+import { isWorkerLive } from "../run-liveness";
 import { isTerminalStatus, type SessionStatus } from "../types";
 
 export type LifecycleAction =
@@ -37,27 +38,11 @@ function intEnv(key: string, dflt: number): number {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : dflt;
 }
 
-// Mirrors runs.ts's HEARTBEAT_STALE_MS. Duplicated here (not imported) because
-// lifecycle.ts is a pure, dependency-free policy module and must not import
-// runs.ts. Keep this in sync if that value ever changes.
-const WORKER_CLAIM_STALE_MS = 5 * 60_000;
-
-/**
- * True when a run's detached worker claim (worker_scope set + a fresh
- * heartbeat) is still live, independent of runStatus. A chat worker
- * idle-waiting within its own idle timeout holds this at runStatus='idle' (not
- * a lease status); a plan-executor mid-turn holds it at 'running'. Exported so
- * fly.ts can re-apply the identical check immediately before executing a
- * suspend/stop, since the sweep's decision snapshot can go stale between the
- * decision and the action actually executing.
- */
-export function isWorkerClaimLive(i: { workerScope?: string | null; heartbeatAt?: Date | null }): boolean {
-  return (
-    i.workerScope != null &&
-    i.heartbeatAt != null &&
-    Date.now() - i.heartbeatAt.getTime() < WORKER_CLAIM_STALE_MS
-  );
-}
+// The worker-claim liveness predicate + the single HEARTBEAT_STALE_MS live in
+// lib/run-liveness now (R8). Re-exported under the historical name so fly.ts's
+// pre-action re-check (`isWorkerClaimLive(row)`) keeps working; run-liveness is
+// a leaf module, so importing it does not break lifecycle's dependency-lightness.
+export { isWorkerLive as isWorkerClaimLive };
 
 /** Terminal statuses dispatchRun will happily re-claim for a follow-up turn
  *  (everything terminal except the hard stops cancelled/closed). */
@@ -78,13 +63,7 @@ export function isConversationalTerminal(i: { runStatus: string; goal?: string |
 }
 
 function isActiveRunStatus(status: string): boolean {
-  return (
-    status === "pending" ||
-    status === "preparing" ||
-    status === "running" ||
-    status === "pushing" ||
-    status === "opening_pr"
-  );
+  return status === "pending" || status === "preparing" || status === "running";
 }
 
 /**
@@ -128,7 +107,7 @@ export function nextLifecycleAction(i: LifecycleInput): LifecycleAction {
   // strips its claim. Only once the worker itself releases the claim (a
   // parked chat worker winds down after its own idle timeout; an executor
   // finishes its turn) does the machine become eligible for suspend/stop.
-  if (isWorkerClaimLive(i)) return { kind: "none" };
+  if (isWorkerLive(i)) return { kind: "none" };
 
   // Terminal runs hold no live worker, but a completed/failed/budget_exhausted
   // run is still revivable by dispatchRun (a follow-up turn or operator restart),

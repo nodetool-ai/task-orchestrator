@@ -169,11 +169,7 @@ export function RunView({
   sendingRef.current = sending;
   const closed = status === "closed";
   const composerDisabled = closed;
-  const canCancel =
-    status === "running" ||
-    status === "preparing" ||
-    status === "pushing" ||
-    status === "opening_pr";
+  const canCancel = status === "running" || status === "preparing";
   const canClose = !closed;
 
   const selectedRepo = useMemo(

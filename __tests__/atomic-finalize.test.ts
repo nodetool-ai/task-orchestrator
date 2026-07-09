@@ -12,11 +12,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { and, eq, notInArray, sql } from "drizzle-orm";
 import { db } from "../db";
-import { agentSessions, agentEvents } from "../db/schema";
+import { agentSessions, agentEvents, runTimers } from "../db/schema";
 import {
   create,
   get,
   cancel,
+  close,
   setError,
   applyStatusTx,
   failPendingRun,
@@ -64,6 +65,25 @@ describe("applyStatusTx idempotency", () => {
     expect((await get(run.id))?.status).toBe("completed");
     expect(await statusEvents(run.id, "completed")).toHaveLength(1);
   });
+
+  it("cancels pending timers when a run reaches a terminal status", async () => {
+    const run = await create({ goal: "<execute>", defer: true });
+    await setRun(run.id, { status: "running" });
+    await db.insert(runTimers).values({
+      runId: run.id,
+      fireAt: new Date(Date.now() + 60_000),
+      note: "await child",
+      status: "pending",
+    });
+
+    await applyStatusTx(run.id, "completed", {
+      set: { completedAt: new Date() },
+      guard: NOT_TERMINAL,
+    });
+
+    const rows = await db.select({ status: runTimers.status }).from(runTimers).where(eq(runTimers.runId, run.id));
+    expect(rows.map((r) => r.status)).toEqual(["cancelled"]);
+  });
 });
 
 describe("setError idempotency", () => {
@@ -106,6 +126,23 @@ describe("cancel idempotency", () => {
 
     expect((await get(run.id))?.status).toBe("cancelled");
     expect(await statusEvents(run.id, "cancelled")).toHaveLength(1);
+  });
+});
+
+describe("close cleanup", () => {
+  it("cancels pending timers owned by the closed run", async () => {
+    const run = await create({ goal: "<execute>", defer: true });
+    await db.insert(runTimers).values({
+      runId: run.id,
+      fireAt: new Date(Date.now() + 60_000),
+      note: "await child",
+      status: "pending",
+    });
+
+    await close(run.id);
+
+    const rows = await db.select({ status: runTimers.status }).from(runTimers).where(eq(runTimers.runId, run.id));
+    expect(rows.map((r) => r.status)).toEqual(["cancelled"]);
   });
 });
 

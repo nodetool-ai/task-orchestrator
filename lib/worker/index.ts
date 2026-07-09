@@ -17,6 +17,7 @@
 // calls runTransport() in many code paths) never forms an import cycle, and so
 // an http-mode worker doesn't touch the db module at selection time.
 
+import { config } from "../config";
 import { createLogger } from "./log";
 import type { RunTransport } from "./protocol";
 
@@ -26,23 +27,17 @@ export * from "./protocol";
 const log = createLogger("worker-transport");
 
 function insideWorkerProcess(): boolean {
-  const v = process.env.TASK_ORCH_INSIDE_WORKER;
-  return !!v && v !== "0" && v.toLowerCase() !== "false";
+  return config.worker.inside;
 }
 
 /** True when this process should (and can) speak the worker HTTP protocol. */
 export function httpTransportConfigured(): boolean {
-  return (
-    insideWorkerProcess() &&
-    !!process.env.TASK_ORCH_WORKER_API_URL &&
-    !!process.env.TASK_ORCH_WORKER_TOKEN
-  );
+  return insideWorkerProcess() && !!config.worker.apiUrl && !!config.worker.apiToken;
 }
 
 /** Test-only escape hatch (see the module docstring). */
 function dbAllowedInWorker(): boolean {
-  const v = process.env.TASK_ORCH_WORKER_ALLOW_DB;
-  return !!v && v !== "0" && v.toLowerCase() !== "false";
+  return config.worker.allowDb;
 }
 
 let cached: Promise<RunTransport> | null = null;
@@ -70,10 +65,10 @@ export function runTransport(): Promise<RunTransport> {
       if (httpTransportConfigured()) {
         const { createHttpTransport } = await import("./http-transport");
         const t = createHttpTransport({
-          baseUrl: process.env.TASK_ORCH_WORKER_API_URL!,
-          token: process.env.TASK_ORCH_WORKER_TOKEN!,
+          baseUrl: config.worker.apiUrl!,
+          token: config.worker.apiToken!,
         });
-        log.info("worker transport selected", { kind: "http", baseUrl: process.env.TASK_ORCH_WORKER_API_URL });
+        log.info("worker transport selected", { kind: "http", baseUrl: config.worker.apiUrl });
         return t;
       }
       const { dbTransport } = await import("./db-transport");

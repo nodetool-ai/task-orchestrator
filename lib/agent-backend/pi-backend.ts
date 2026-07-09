@@ -21,6 +21,8 @@ import { mapPiEvent, type RunEnvelope } from "../pi-event-mapper";
 import { interceptorToolName } from "../builtin-tools";
 import { resolveCodexAccessToken } from "../codex-oauth-token";
 import { collectExtensions, composeSystemPrompt } from "./collect";
+import { createUsageAccumulator } from "./usage";
+import { runPostgresTurn } from "./postgres-turn";
 import type { AgentBackend, AmbientSkill, RunTurnArgs, TurnOutcome } from "./types";
 
 const TAG = "pi:";
@@ -46,6 +48,13 @@ export class PiBackend implements AgentBackend {
   readonly id = "pi" as const;
 
   async runTurn(args: RunTurnArgs): Promise<TurnOutcome> {
+    // Postgres mode: no session files — replay the conversation from the DB and
+    // drive pi-ai's completeSimple directly. This is the former lib/chat-ai-loop
+    // machinery, now a mode of this backend (R3).
+    if (args.contextSource?.kind === "postgres") {
+      return runPostgresTurn(args);
+    }
+
     const { cwd, model, thinkingLevel, extensions, abort, prompt, onEvent } = args;
 
     const collected = await collectExtensions(extensions);
@@ -147,11 +156,9 @@ export class PiBackend implements AgentBackend {
     });
 
     const envelopes: RunEnvelope[] = [];
+    const usage = createUsageAccumulator();
     let summary: string | null = null;
     let lastAssistantText: string | null = null;
-    let inputTokens: number | null = null;
-    let outputTokens: number | null = null;
-    let totalCostUsd: number | null = null;
     let turns = 0;
 
     // onEvent persists each envelope to the DB (async). session.subscribe fires
@@ -189,9 +196,11 @@ export class PiBackend implements AgentBackend {
         }
         if (env.type === "result") {
           if (!env.is_error && typeof env.result === "string") summary = env.result.trim() || null;
-          inputTokens = env.usage?.input_tokens ?? inputTokens;
-          outputTokens = env.usage?.output_tokens ?? outputTokens;
-          totalCostUsd = env.total_cost_usd ?? totalCostUsd;
+          usage.observeResult({
+            inputTokens: env.usage?.input_tokens,
+            outputTokens: env.usage?.output_tokens,
+            totalCostUsd: env.total_cost_usd,
+          });
         }
       }
     });
@@ -216,15 +225,16 @@ export class PiBackend implements AgentBackend {
     }
 
     const file = sessionManager.getSessionFile();
+    // pi surfaces cost per AssistantMessage (usage.cost.total); pi-event-mapper
+    // sums it onto the result envelope, so the accumulator forwards the real total.
+    const totals = usage.totals();
     return {
       envelopes,
       summary: summary ?? lastAssistantText,
       resumeToken: file ? `${TAG}${file}` : args.resumeToken,
-      // pi surfaces cost per AssistantMessage (usage.cost.total); pi-event-mapper
-      // sums it onto the result envelope, so we forward the real total here.
-      totalCostUsd,
-      inputTokens,
-      outputTokens,
+      totalCostUsd: totals.totalCostUsd,
+      inputTokens: totals.inputTokens,
+      outputTokens: totals.outputTokens,
       turns,
     };
   }

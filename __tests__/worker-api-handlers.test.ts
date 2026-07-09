@@ -11,6 +11,7 @@ import { agentMessages, agentSessions } from "../db/schema";
 import * as repo from "../lib/repo";
 import { create, get, listMessages } from "../lib/runs";
 import { handleWorkerApi } from "../lib/worker/api-handlers";
+import { WORKER_PROTOCOL_VERSION, WORKER_PROTOCOL_HEADER } from "../lib/worker/protocol";
 import { mintWorkerToken } from "../lib/worker/token";
 
 beforeAll(() => {
@@ -58,6 +59,52 @@ describe("worker API auth", () => {
   it("404s unknown endpoints", async () => {
     const run = await create({ goal: "<chat>", defer: true });
     expect((await call(run.id, "GET", `runs/${run.id}/nope`)).status).toBe(404);
+  });
+});
+
+describe("worker API protocol version (R7a)", () => {
+  function callVersioned(runId: number, protocol: string | null): Promise<Response> {
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${mintWorkerToken(runId)}`,
+    };
+    if (protocol !== null) headers[WORKER_PROTOCOL_HEADER] = protocol;
+    const path = `runs/${runId}`;
+    return handleWorkerApi(
+      new Request(`http://orch.test/api/worker/${path}`, { headers }),
+      path.split("/")
+    );
+  }
+
+  it("serves a request whose protocol major matches", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    const res = await callVersioned(run.id, String(WORKER_PROTOCOL_VERSION));
+    expect(res.status).toBe(200);
+  });
+
+  it("409s a protocol_mismatch with a structured body and does not retry-flag it", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    const res = await callVersioned(run.id, String(WORKER_PROTOCOL_VERSION + 1));
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body).toEqual({
+      error: "protocol_mismatch",
+      server: WORKER_PROTOCOL_VERSION,
+      client: WORKER_PROTOCOL_VERSION + 1,
+    });
+  });
+
+  it("serves an unversioned (header-less) worker as legacy", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    const res = await callVersioned(run.id, null);
+    expect(res.status).toBe(200);
+  });
+
+  it("reports client:null when the header is non-numeric garbage", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    const res = await callVersioned(run.id, "banana");
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body).toMatchObject({ error: "protocol_mismatch", server: WORKER_PROTOCOL_VERSION, client: null });
   });
 });
 

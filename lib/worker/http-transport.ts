@@ -19,7 +19,7 @@
 
 import { createLogger } from "./log";
 import { observeRunnerPhase } from "../runner/telemetry";
-import { reviveDates } from "./protocol";
+import { reviveDates, WORKER_PROTOCOL_VERSION, WORKER_PROTOCOL_HEADER } from "./protocol";
 import type {
   ApplyStatusOpts,
   HeartbeatResult,
@@ -32,6 +32,17 @@ const log = createLogger("worker-transport-http");
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const MESSAGE_APPEND_TIMEOUT_MS = 120_000;
+/**
+ * Ceiling for a single server-side tool execution (callTool). The slowest
+ * legitimate non-blocking tool is a spawn/dispatch or a `gh` round-trip — all
+ * seconds-scale DB + subprocess work, nowhere near this. The old 2.5h value
+ * existed ONLY to hold the connection open while spawn__append_message(await)
+ * drained a child's whole turn server-side; that blocking mode is gone (the
+ * agent waits via await_session's park/event path instead), so 10 minutes is
+ * ample headroom for any real tool without keeping a multi-hour HTTP connection
+ * hostage to intermediary idle timeouts.
+ */
+const TOOL_CALL_TIMEOUT_MS = 10 * 60 * 1000;
 const RETRY_BACKOFF_MS = [500, 1000, 2000];
 /** SSE reconnect backoff (resets after a healthy connection). */
 const SSE_RECONNECT_MS = [1000, 2000, 5000, 10_000];
@@ -50,6 +61,29 @@ export class WorkerApiError extends Error {
   ) {
     super(message);
     this.name = "WorkerApiError";
+  }
+}
+
+/**
+ * Terminal error raised when the server rejects our wire protocol version (409
+ * `protocol_mismatch`): the server was redeployed with an incompatible worker
+ * protocol while this long-lived worker kept running the old one. NOT retriable
+ * — the fix is worker suicide (exit nonzero so the Machine dies) and reaper
+ * re-dispatch onto a fresh worker built from the new image. Distinct from
+ * WorkerApiError so the drive loop and the heartbeat swallow can special-case
+ * it (see heartbeat below and scripts/run-worker.ts).
+ */
+export class ProtocolMismatchError extends Error {
+  constructor(
+    readonly serverVersion: number | null,
+    readonly clientVersion: number
+  ) {
+    super(
+      `Worker protocol mismatch: server speaks v${serverVersion ?? "?"}, this worker speaks ` +
+        `v${clientVersion}. The server was redeployed with an incompatible worker protocol — ` +
+        `this run will be re-dispatched by the reaper onto a fresh worker.`
+    );
+    this.name = "ProtocolMismatchError";
   }
 }
 
@@ -89,6 +123,7 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
           method,
           headers: {
             authorization: `Bearer ${opts.token}`,
+            [WORKER_PROTOCOL_HEADER]: String(WORKER_PROTOCOL_VERSION),
             ...(body !== undefined ? { "content-type": "application/json" } : {}),
           },
           body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -97,10 +132,29 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
         const ms = Date.now() - started;
         if (!res.ok) {
           let detail = "";
+          let parsed: { error?: string; server?: number } = {};
           try {
-            detail = ((await res.json()) as { error?: string }).error ?? "";
+            parsed = (await res.json()) as { error?: string; server?: number };
+            detail = parsed.error ?? "";
           } catch {
             // non-JSON error body
+          }
+          // A 409 protocol_mismatch is terminal and NOT retriable: the server
+          // redeployed with an incompatible worker protocol. Surface a clear
+          // error and let it propagate to a nonzero exit so the Machine dies and
+          // the reaper re-dispatches on a fresh worker.
+          if (res.status === 409 && parsed.error === "protocol_mismatch") {
+            const mismatch = new ProtocolMismatchError(
+              typeof parsed.server === "number" ? parsed.server : null,
+              WORKER_PROTOCOL_VERSION
+            );
+            log.error("worker protocol mismatch — worker will exit", {
+              method,
+              path,
+              server: parsed.server ?? null,
+              client: WORKER_PROTOCOL_VERSION,
+            });
+            throw mismatch;
           }
           const err = new WorkerApiError(
             `${method} /api/worker/${path} → ${res.status}${detail ? `: ${detail}` : ""}`,
@@ -118,7 +172,7 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
         log.debug("api", { method, path, status: res.status, ms });
         return reviveDates((await res.json()) as T);
       } catch (err) {
-        if (err instanceof WorkerApiError) throw err;
+        if (err instanceof WorkerApiError || err instanceof ProtocolMismatchError) throw err;
         // Network-level failure (ECONNREFUSED, timeout, reset).
         if (attempt < retries) {
           log.warn("network error, retrying", { method, path, attempt, error: err as Error });
@@ -196,7 +250,11 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
       while (!stopped) {
         try {
           const res = await doFetch(`${base}/api/worker/runs/${runId}/control`, {
-            headers: { authorization: `Bearer ${opts.token}`, accept: "text/event-stream" },
+            headers: {
+              authorization: `Bearer ${opts.token}`,
+              [WORKER_PROTOCOL_HEADER]: String(WORKER_PROTOCOL_VERSION),
+              accept: "text/event-stream",
+            },
             signal: abort.signal,
           });
           if (!res.ok || !res.body) {
@@ -322,6 +380,10 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
         const r = await request<HeartbeatResult>("POST", `runs/${runId}/heartbeat`, {}, { retries: 1 });
         return { cancelRequested: r.cancelRequested || cancelLatch.has(runId) };
       } catch (err) {
+        // A protocol mismatch is terminal — it must NOT be swallowed like a
+        // missed beat, or the worker would soldier on against a server that
+        // can no longer talk to it. Re-throw so the drive loop exits nonzero.
+        if (err instanceof ProtocolMismatchError) throw err;
         // A missed beat must never crash a turn; the lease has minutes of slack.
         log.warn("heartbeat failed", { runId, error: err as Error });
         return { cancelRequested: cancelLatch.has(runId) };
@@ -427,10 +489,11 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
         "POST",
         `runs/${runId}/tools/call`,
         { tool, params, ctx },
-        // Tool executions can legitimately block for a long time —
-        // spawn__append_message with await=true waits up to 2h for a child
-        // turn. Give the call ample headroom instead of the default 30s.
-        { timeoutMs: 2.5 * 60 * 60 * 1000 }
+        // Server-side tool executions are seconds-scale (DB writes, a spawn
+        // dispatch, a `gh` round-trip). Waiting on a child turn is no longer a
+        // tool concern — await_session parks and wakes on the child's event —
+        // so a generous 10-minute ceiling replaces the old multi-hour hold.
+        { timeoutMs: TOOL_CALL_TIMEOUT_MS }
       );
       return result;
     },

@@ -18,6 +18,7 @@ type TelemetryState = {
   dispatches: Counter<string>;
   metricsRefreshErrors: Counter<string>;
   statusTransitions: Counter<string>;
+  illegalTransitions: Counter<string>;
   phaseDuration: Histogram<string>;
   activeRuns: Gauge<string>;
   runnerInstances: Gauge<string>;
@@ -64,6 +65,12 @@ function makeState(): TelemetryState {
       name: "task_orch_run_status_transitions_total",
       help: "Run status transitions written by the orchestrator.",
       labelNames: ["status"] as const,
+      registers: [registry],
+    }),
+    illegalTransitions: new Counter({
+      name: "task_orch_run_illegal_transitions_total",
+      help: "Run status transitions that violated the run-state legal-transition table (allowed, not rejected).",
+      labelNames: ["from", "to"] as const,
       registers: [registry],
     }),
     phaseDuration: new Histogram({
@@ -170,6 +177,12 @@ export function recordDispatch(
 
 export function recordStatusTransition(status: string): void {
   telemetry().statusTransitions.labels(status).inc();
+}
+
+/** An illegal run-status edge that applyStatusTx allowed but the transition
+ *  table did not sanction (see lib/run-state.ts assertTransition). */
+export function recordIllegalTransition(from: string, to: string): void {
+  telemetry().illegalTransitions.labels(from, to).inc();
 }
 
 export function recordMetricsRefreshError(source: string, err: unknown): void {

@@ -17,6 +17,7 @@
 import { randomUUID } from "node:crypto";
 import { mapClaudeMessage } from "./claude-event-mapper";
 import { collectExtensions, composeSystemPrompt, runInterceptors } from "./collect";
+import { createUsageAccumulator } from "./usage";
 import { toZodRawShape } from "./typebox-to-zod";
 import { interceptorToolName, isFileTool } from "../builtin-tools";
 import { scrubClaudeCliEnv } from "./env-scrub";
@@ -93,6 +94,18 @@ export class ClaudeBackend implements AgentBackend {
 
   async runTurn(args: RunTurnArgs): Promise<TurnOutcome> {
     const { cwd, model, thinkingLevel, extensions, abort, prompt, onEvent } = args;
+
+    // Postgres mode (the lightweight in-process loop) is a pi-only capability:
+    // it drives @earendil-works/pi-ai directly, which the Claude Agent SDK has no
+    // equivalent for. A lightweight-shaped run is always pi-backed (the placement
+    // predicates require backend pi/null), so this only fires as a guard against a
+    // future miswiring — fail loud rather than silently ignoring the request.
+    if (args.contextSource?.kind === "postgres") {
+      throw new Error(
+        "The Claude agent backend does not support contextSource='postgres' " +
+          "(the postgres/lightweight loop is pi-only). Use the pi backend for lightweight runs."
+      );
+    }
 
     // The Claude backend speaks only to Anthropic. Fail early with an actionable
     // message rather than letting a non-Anthropic provider reach the SDK and
@@ -178,11 +191,9 @@ export class ClaudeBackend implements AgentBackend {
     });
 
     const envelopes: RunEnvelope[] = [];
+    let usage = createUsageAccumulator();
     let summary: string | null = null;
     let lastAssistantText: string | null = null;
-    let inputTokens: number | null = null;
-    let outputTokens: number | null = null;
-    let totalCostUsd: number | null = null;
     let turns = 0;
     let sessionId: string | null = null;
 
@@ -198,11 +209,9 @@ export class ClaudeBackend implements AgentBackend {
     // the prompt, so the fresh session still receives the actual instruction.
     for (let attempt = 0; ; attempt++) {
       envelopes.length = 0;
+      usage = createUsageAccumulator();
       summary = null;
       lastAssistantText = null;
-      inputTokens = null;
-      outputTokens = null;
-      totalCostUsd = null;
       turns = 0;
       sessionId = null;
 
@@ -272,9 +281,11 @@ export class ClaudeBackend implements AgentBackend {
             }
             if (env.type === "result") {
               if (!env.is_error && typeof env.result === "string") summary = env.result.trim() || null;
-              inputTokens = env.usage?.input_tokens ?? inputTokens;
-              outputTokens = env.usage?.output_tokens ?? outputTokens;
-              totalCostUsd = env.total_cost_usd ?? totalCostUsd;
+              usage.observeResult({
+                inputTokens: env.usage?.input_tokens,
+                outputTokens: env.usage?.output_tokens,
+                totalCostUsd: env.total_cost_usd,
+              });
             }
           }
         }
@@ -304,13 +315,14 @@ export class ClaudeBackend implements AgentBackend {
       throw new Error("Turn aborted");
     }
 
+    const totals = usage.totals();
     return {
       envelopes,
       summary: summary ?? lastAssistantText,
       resumeToken: sessionId ? `${TAG}${sessionId}` : args.resumeToken,
-      totalCostUsd,
-      inputTokens,
-      outputTokens,
+      totalCostUsd: totals.totalCostUsd,
+      inputTokens: totals.inputTokens,
+      outputTokens: totals.outputTokens,
       turns,
     };
   }

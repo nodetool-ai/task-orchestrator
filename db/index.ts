@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { eq, and, or, isNull, ne } from "drizzle-orm";
 import * as schema from "./schema";
+import { config } from "@/lib/config";
 import { PERSONAS } from "@/lib/personas";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -12,7 +13,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // into .next/server rather than the source db/ dir, so the migration .sql files
 // aren't beside it. TASK_ORCH_MIGRATIONS_DIR lets the runtime point at the
 // copied-in migrations folder; dev/tests (tsx, unbundled) use the default.
-const MIGRATIONS_DIR = process.env.TASK_ORCH_MIGRATIONS_DIR || join(__dirname, "migrations");
+const MIGRATIONS_DIR = config.db.migrationsDir ?? join(__dirname, "migrations");
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -39,7 +40,7 @@ declare global {
 // per worker process so parallel test files get fully isolated tables (the
 // Postgres analog of the old file-per-process SQLite setup). Unset in prod →
 // the default `public` schema.
-const PG_SCHEMA = process.env.TASK_ORCH_PG_SCHEMA;
+const PG_SCHEMA = config.db.pgSchema;
 
 // A single lazily-CREATED and lazily-connecting postgres.js client, reused
 // across HMR / module reloads via globals. Creation is deferred to first use
@@ -87,13 +88,11 @@ function createClient(): Client {
 }
 
 function insideWorker(): boolean {
-  const v = process.env.TASK_ORCH_INSIDE_WORKER;
-  return !!v && v !== "0" && v.toLowerCase() !== "false";
+  return config.worker.inside;
 }
 
 function dbAllowedInWorker(): boolean {
-  const v = process.env.TASK_ORCH_WORKER_ALLOW_DB;
-  return !!v && v !== "0" && v.toLowerCase() !== "false";
+  return config.worker.allowDb;
 }
 
 function ensureClient(): Client {
@@ -246,7 +245,7 @@ export async function seedRequiredPersonas(): Promise<void> {
 // One-shot bridge: if TASK_ORCH_TARGET_REPO is set, ensure R-default's local_path
 // reflects it. Lets users run the "one repo per deployment" setup purely via env.
 async function syncDefaultRepoFromEnv(): Promise<void> {
-  const target = process.env.TASK_ORCH_TARGET_REPO;
+  const target = config.db.targetRepo;
   if (!target) return;
   try {
     await db
