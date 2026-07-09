@@ -4,7 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Tooltip } from "@/components/ui/tooltip";
-import { Icon, StateIcon, MonoTag, ElapsedTimer, type PiState } from "./primitives";
+import { Icon, StateIcon, ElapsedTimer, type PiState } from "./primitives";
 import { useIsMobile } from "./use-is-mobile";
 
 export type LiveSessionItem = {
@@ -129,7 +129,35 @@ export function LiveSidebar({ enabled }: { enabled: boolean }) {
 
   // Render nothing while we don't know the mobile state, to keep SSR/CSR stable.
   // The layout reserves space via CSS so this won't cause layout shift on desktop.
-  const { items, chats, error } = useLiveSessions(enabled && !isMobile);
+  const { items: rawItems, chats, error } = useLiveSessions(enabled && !isMobile);
+
+  // Optimistic dismissal: closing a run PATCHes it to `closed` (which drops it
+  // from the next poll), but the poll is 6s away — track dismissed runs locally
+  // so the card disappears the instant the X is clicked. A failed close reverts.
+  const [dismissed, setDismissed] = React.useState<ReadonlySet<number>>(new Set());
+  const items = React.useMemo(
+    () => rawItems.filter((i) => !dismissed.has(i.runDbId)),
+    [rawItems, dismissed]
+  );
+
+  const closeRun = React.useCallback(async (runDbId: number) => {
+    setDismissed((prev) => new Set(prev).add(runDbId));
+    try {
+      const res = await fetch(`/api/runs/${runDbId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "close" }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch {
+      // Revert on failure so the run reappears rather than silently vanishing.
+      setDismissed((prev) => {
+        const next = new Set(prev);
+        next.delete(runDbId);
+        return next;
+      });
+    }
+  }, []);
 
   // ⌘J / Ctrl-J → cycle to next attention-needing run.
   React.useEffect(() => {
@@ -200,7 +228,12 @@ export function LiveSidebar({ enabled }: { enabled: boolean }) {
           collapsed ? (
             <SidebarPip key={item.runDbId} item={item} active={isActive(pathname, item.runDbId)} />
           ) : (
-            <SidebarRow key={item.runDbId} item={item} active={isActive(pathname, item.runDbId)} />
+            <SidebarRow
+              key={item.runDbId}
+              item={item}
+              active={isActive(pathname, item.runDbId)}
+              onClose={closeRun}
+            />
           )
         )}
         {error && !collapsed && (
@@ -362,125 +395,101 @@ function ringVar(bucket: LiveSessionItem["bucket"]): React.CSSProperties {
   return { ["--s-attn" as string]: `var(--s-${bucket})` } as React.CSSProperties;
 }
 
-function SidebarRow({ item, active }: { item: LiveSessionItem; active: boolean }) {
+function SidebarRow({
+  item,
+  active,
+  onClose,
+}: {
+  item: LiveSessionItem;
+  active: boolean;
+  onClose: (runDbId: number) => void;
+}) {
   const state = BUCKET_TO_STATE[item.bucket];
+  const [hover, setHover] = React.useState(false);
   return (
-    <Link
-      href={`/runs/${item.runDbId}`}
+    <div
       className={ringClass(item.bucket)}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       style={{
         position: "relative",
-        display: "flex",
-        flexDirection: "column",
-        gap: 6,
-        padding: "9px 10px",
         borderRadius: 6,
         border: "1px solid var(--pi-hairline)",
         background: active ? "var(--pi-surface-2)" : "var(--pi-surface)",
-        textDecoration: "none",
-        color: "var(--pi-fg)",
         transition: "border-color 120ms, background 120ms",
         ...ringVar(item.bucket),
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-        <StateIcon state={state} size={11} spin={item.bucket === "running"} />
-        <span
-          style={{
-            fontSize: 9,
-            fontWeight: 600,
-            color: `var(--s-${item.bucket === "running" ? "progress" : item.bucket})`,
-            textTransform: "uppercase",
-            letterSpacing: "0.06em",
-            flexShrink: 0,
-          }}
-        >
-          {BUCKET_LABEL[item.bucket]}
-        </span>
-        <span style={{ flex: 1 }} />
-        <span
-          className="pi-mono"
-          style={{
-            fontSize: 10,
-            color: "var(--pi-muted-2)",
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 2,
-            flexShrink: 0,
-          }}
-        >
-          <Icon name="clock" size={9} />
-          <ElapsedTimer startMs={item.startedAt} />
-        </span>
-      </div>
-
-      <div
-        style={{
-          fontSize: 12,
-          fontWeight: 500,
-          color: "var(--pi-fg)",
-          lineHeight: 1.35,
-          overflow: "hidden",
-          display: "-webkit-box",
-          WebkitLineClamp: 2,
-          WebkitBoxOrient: "vertical",
-        }}
-      >
-        {item.title}
-      </div>
-
-      <div
+      <Link
+        href={`/runs/${item.runDbId}`}
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 8,
-          color: "var(--pi-muted-2)",
-          fontSize: 10,
-          flexWrap: "wrap",
+          gap: 7,
+          padding: "6px 8px",
+          // Reserve room on the right so the title never slides under the X.
+          paddingRight: 26,
+          borderRadius: 6,
+          textDecoration: "none",
+          color: "var(--pi-fg)",
+          minWidth: 0,
         }}
       >
-        {item.taskId && <MonoTag style={{ fontSize: 9, padding: "1px 5px" }}>{item.taskId}</MonoTag>}
-        {!item.taskId && item.planId && (
-          <MonoTag style={{ fontSize: 9, padding: "1px 5px" }}>{item.planId}</MonoTag>
-        )}
-        {item.prNum != null && (
-          <Tooltip content="Pull request">
-            <span className="pi-mono" style={{ color: "var(--s-review)", fontWeight: 500 }}>
-              #{item.prNum}
-            </span>
-          </Tooltip>
-        )}
-        {item.branch && (
-          <span
-            style={{ display: "inline-flex", alignItems: "center", gap: 3, minWidth: 0, overflow: "hidden" }}
-          >
-            <Icon name="branch" size={10} />
-            <span
-              className="pi-mono"
-              style={{
-                fontSize: 10,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-                maxWidth: 120,
-              }}
-            >
-              {item.branch}
-            </span>
-          </span>
-        )}
-        <span style={{ flex: 1 }} />
-        {item.cost > 0 && (
-          <span className="pi-mono" style={{ fontSize: 10 }}>
-            ${item.cost.toFixed(2)}
-          </span>
-        )}
-      </div>
-
-      {item.reason && (
-        <div style={{ fontSize: 10, color: "var(--s-blocked)", lineHeight: 1.4 }}>{item.reason}</div>
-      )}
-    </Link>
+        <StateIcon state={state} size={11} spin={item.bucket === "running"} />
+        <span
+          style={{
+            flex: 1,
+            minWidth: 0,
+            fontSize: 12,
+            fontWeight: 500,
+            color: "var(--pi-fg)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {item.title}
+        </span>
+        <span
+          className="pi-mono"
+          style={{ fontSize: 10, color: "var(--pi-muted-2)", flexShrink: 0 }}
+        >
+          <ElapsedTimer startMs={item.startedAt} />
+        </span>
+      </Link>
+      <Tooltip content="Close run" side="bottom">
+        <button
+          type="button"
+          aria-label="Close run"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onClose(item.runDbId);
+          }}
+          style={{
+            position: "absolute",
+            top: "50%",
+            right: 5,
+            transform: "translateY(-50%)",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 18,
+            height: 18,
+            borderRadius: 4,
+            background: "transparent",
+            border: "none",
+            color: "var(--pi-muted-2)",
+            cursor: "pointer",
+            fontFamily: "inherit",
+            opacity: hover ? 1 : 0,
+            transition: "opacity 120ms, color 120ms",
+          }}
+        >
+          <Icon name="x" size={11} />
+        </button>
+      </Tooltip>
+    </div>
   );
 }
 
