@@ -381,6 +381,18 @@ export async function planProgressBatch(planIds: string[]): Promise<Map<string, 
   return out;
 }
 
+/** Batched plan-title lookup — one IN query instead of getPlan() per id. */
+export async function planTitlesByIds(ids: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (ids.length === 0) return out;
+  const rows = await db
+    .select({ id: plans.id, title: plans.title })
+    .from(plans)
+    .where(inArray(plans.id, ids));
+  for (const r of rows) out.set(r.id, r.title);
+  return out;
+}
+
 // ──────────────────────────────────────────────────────────
 // Task queries
 // ──────────────────────────────────────────────────────────
@@ -389,13 +401,18 @@ export interface TaskFilters {
   state?: TaskState;
   planId?: string;
   assignee?: string;
+  /** Restrict to these task ids — batch hydration for read paths that would
+   *  otherwise call getTask() per id. */
+  ids?: string[];
 }
 
 export async function listTasks(filters: TaskFilters = {}): Promise<TaskFull[]> {
+  if (filters.ids && filters.ids.length === 0) return [];
   const wheres = [];
   if (filters.state) wheres.push(eq(tasks.state, filters.state));
   if (filters.planId) wheres.push(eq(tasks.planId, filters.planId));
   if (filters.assignee) wheres.push(eq(tasks.assignee, filters.assignee));
+  if (filters.ids) wheres.push(inArray(tasks.id, filters.ids));
   const where = wheres.length ? and(...wheres) : undefined;
   const rows = where
     ? await db.select().from(tasks).where(where).orderBy(asc(tasks.id))
@@ -441,6 +458,23 @@ export async function listTasks(filters: TaskFilters = {}): Promise<TaskFull[]> 
       prByTask.get(r.id) ?? null
     )
   );
+}
+
+/** Lean projection of every task — enough for index-page counts and the
+ *  palette without hydrating deps, notes, criteria, and attachments. */
+export interface TaskSummaryRow {
+  id: string;
+  title: string;
+  planId: string;
+  state: TaskState;
+}
+
+export async function listTaskSummaries(): Promise<TaskSummaryRow[]> {
+  const rows = await db
+    .select({ id: tasks.id, title: tasks.title, planId: tasks.planId, state: tasks.state })
+    .from(tasks)
+    .orderBy(asc(tasks.id));
+  return rows.map((r) => ({ ...r, state: r.state as TaskState }));
 }
 
 export async function getTask(id: string): Promise<TaskFull | null> {

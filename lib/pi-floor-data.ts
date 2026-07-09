@@ -45,7 +45,7 @@ function defaultActivity(task: string): string[] {
 }
 
 type RunWithTask = {
-  run: runsLib.RunRow;
+  run: runsLib.TaskRunSummary;
   task: TaskFull | null;
   planTitle: string | null;
 };
@@ -56,38 +56,28 @@ async function loadRunsByGroup(): Promise<{
   blocked: RunWithTask[];
   shipped: RunWithTask[];
 }> {
-  const allRuns = (await runsLib.listRuns()).filter((r) => r.origin === "task");
-  const taskCache = new Map<string, TaskFull | null>();
-  const planCache = new Map<string, string | null>();
-  async function joinTask(taskId: string | null): Promise<TaskFull | null> {
-    if (!taskId) return null;
-    if (taskCache.has(taskId)) return taskCache.get(taskId)!;
-    const t = await repo.getTask(taskId);
-    taskCache.set(taskId, t);
-    return t;
-  }
-  async function planTitle(planId: string | null): Promise<string | null> {
-    if (!planId) return null;
-    if (planCache.has(planId)) return planCache.get(planId)!;
-    const p = await repo.getPlan(planId);
-    const title = p?.title ?? null;
-    planCache.set(planId, title);
-    return title;
-  }
+  // One lean run query plus batched task/plan-title hydration. The previous
+  // per-run getTask()/getPlan() loop issued ~6 sequential queries per distinct
+  // task, which dominated the floor and plans-index load time.
+  const allRuns = await runsLib.listTaskRunSummaries();
+  const taskIds = Array.from(new Set(allRuns.map((r) => r.taskId)));
+  const taskById = new Map((await repo.listTasks({ ids: taskIds })).map((t) => [t.id, t]));
+  const planIds = Array.from(new Set(Array.from(taskById.values(), (t) => t.planId)));
+  const planTitleById = await repo.planTitlesByIds(planIds);
 
   const groups = { running: [] as RunWithTask[], review: [] as RunWithTask[], blocked: [] as RunWithTask[], shipped: [] as RunWithTask[] };
   for (const run of allRuns) {
-    const task = await joinTask(run.taskId);
-    const plan = await planTitle(task?.planId ?? null);
-    const wrapped = { run, task, planTitle: plan };
+    const task = taskById.get(run.taskId) ?? null;
+    const planTitle = task ? planTitleById.get(task.planId) ?? null : null;
+    const wrapped = { run, task, planTitle };
     const cat = classifyRun(run.status, run.prUrl, task?.state);
     if (cat === "running") groups.running.push(wrapped);
     else if (cat === "review") groups.review.push(wrapped);
     else if (cat === "blocked") groups.blocked.push(wrapped);
     else if (cat === "shipped") groups.shipped.push(wrapped);
   }
-  // Return the full shipped list (ordered most-recent-first by listRuns). Callers
-  // that render the floor's shipped table truncate to the 8 newest themselves;
+  // Return the full shipped list (ordered most-recent-first). Callers that
+  // render the floor's shipped table truncate to the 8 newest themselves;
   // per-plan shippedCount must count against the full list, not a global top-8.
   return groups;
 }
@@ -158,9 +148,12 @@ export async function loadFloorData(): Promise<{
   queue: QueueRow[];
   shipped: ShippedRow[];
 }> {
-  const groups = await loadRunsByGroup();
-  const todoTasks = (await repo.listTasks({ state: "todo" })).slice(0, 12);
-  const plans = await repo.listPlans();
+  const [groups, allTodoTasks, plans] = await Promise.all([
+    loadRunsByGroup(),
+    repo.listTasks({ state: "todo" }),
+    repo.listPlans(),
+  ]);
+  const todoTasks = allTodoTasks.slice(0, 12);
   const planTitleById = new Map(plans.map((p) => [p.id, p.title]));
 
   const queue: QueueRow[] = todoTasks.map((t) => ({
@@ -205,38 +198,54 @@ const TASK_STATE_TO_PI: Record<TaskState, PiState> = {
 };
 
 export async function loadPlansIndexData(): Promise<PlanCardData[]> {
-  const plans = await repo.listPlans();
-  const progress = await repo.planProgressBatch(plans.map((p) => p.id));
-  const tasks = await repo.listTasks();
-  const groups = await loadRunsByGroup();
-  const planTitleById = new Map(plans.map((p) => [p.id, p.title]));
+  const [plans, taskSummaries, groups] = await Promise.all([
+    repo.listPlans(),
+    repo.listTaskSummaries(),
+    loadRunsByGroup(),
+  ]);
 
-  const tasksByPlan = new Map<string, TaskFull[]>();
-  for (const t of tasks) {
-    const arr = tasksByPlan.get(t.planId) || [];
-    arr.push(t);
-    tasksByPlan.set(t.planId, arr);
+  // Per-plan progress and queue counts from the lean task projection — the
+  // cards only need counts, not fully hydrated tasks. Same rules as
+  // repo.planProgress: cancelled tasks don't count, merged is the sole
+  // success terminal.
+  const progress = new Map<string, { done: number; total: number }>();
+  for (const p of plans) progress.set(p.id, { done: 0, total: 0 });
+  const queuedByPlan = new Map<string, number>();
+  for (const t of taskSummaries) {
+    if (t.state === "todo") queuedByPlan.set(t.planId, (queuedByPlan.get(t.planId) ?? 0) + 1);
+    if (t.state === "cancelled") continue;
+    const prog = progress.get(t.planId);
+    if (!prog) continue;
+    prog.total += 1;
+    if (t.state === "merged") prog.done += 1;
   }
 
-  // Match runs to a plan by id, not title: plan titles aren't unique, so filtering
-  // by title double-counts runs across same-titled plans (each RunWithTask already
-  // carries task.planId, which disambiguates).
-  function runsForPlan(planId: string, bucket: RunWithTask[]): RunWithTask[] {
-    return bucket.filter((g) => g.task?.planId === planId);
+  // Match runs to a plan by id, not title: plan titles aren't unique, so keying
+  // by title double-counts runs across same-titled plans (each RunWithTask
+  // already carries task.planId, which disambiguates).
+  function countsByPlan(bucket: RunWithTask[]): Map<string, number> {
+    const m = new Map<string, number>();
+    for (const g of bucket) {
+      const pid = g.task?.planId;
+      if (pid) m.set(pid, (m.get(pid) ?? 0) + 1);
+    }
+    return m;
+  }
+  const liveByPlan = countsByPlan(groups.running);
+  const reviewByPlan = countsByPlan(groups.review);
+  const blockedByPlan = countsByPlan(groups.blocked);
+  const shippedByPlan = countsByPlan(groups.shipped);
+  const personasByPlan = new Map<string, Set<string>>();
+  for (const g of groups.running) {
+    const pid = g.task?.planId;
+    if (!pid || !g.run.personaId) continue;
+    const set = personasByPlan.get(pid) ?? new Set<string>();
+    set.add(g.run.personaId);
+    personasByPlan.set(pid, set);
   }
 
   return plans.map((p) => {
-    const prog = progress.get(p.id) ?? { done: 0, total: 0, pct: 0, open: 0 };
-    const planTasks = tasksByPlan.get(p.id) || [];
-    const queued = planTasks.filter((t) => t.state === "todo").length;
-    const live = runsForPlan(p.id, groups.running);
-    const review = runsForPlan(p.id, groups.review);
-    const blocked = runsForPlan(p.id, groups.blocked);
-    const shipped = runsForPlan(p.id, groups.shipped);
-    const personas = Array.from(
-      new Set(live.map((w) => w.run.personaId).filter(Boolean) as string[])
-    );
-
+    const prog = progress.get(p.id)!;
     return {
       id: p.id,
       title: p.title,
@@ -245,12 +254,12 @@ export async function loadPlansIndexData(): Promise<PlanCardData[]> {
       owner: p.owner,
       done: prog.done,
       total: prog.total,
-      liveRuns: live.length,
-      reviewRuns: review.length,
-      blockedRuns: blocked.length,
-      queueCount: queued,
-      shippedCount: shipped.length,
-      activePersonas: personas,
+      liveRuns: liveByPlan.get(p.id) ?? 0,
+      reviewRuns: reviewByPlan.get(p.id) ?? 0,
+      blockedRuns: blockedByPlan.get(p.id) ?? 0,
+      queueCount: queuedByPlan.get(p.id) ?? 0,
+      shippedCount: shippedByPlan.get(p.id) ?? 0,
+      activePersonas: Array.from(personasByPlan.get(p.id) ?? []),
     };
   });
 }
@@ -276,15 +285,16 @@ export async function loadTasksIndexData(): Promise<{
   rows: TaskRowData[];
   plans: { id: string; title: string }[];
 }> {
-  const tasks = await repo.listTasks();
-  const plans = await repo.listPlans();
+  const [tasks, plans, allRuns] = await Promise.all([
+    repo.listTasks(),
+    repo.listPlans(),
+    // Map taskId → most recent active/review/blocked run for quick "Open" jump.
+    runsLib.listTaskRunSummaries(),
+  ]);
   const planTitleById = new Map(plans.map((p) => [p.id, p.title]));
 
-  // Map taskId → most recent active/review/blocked run for quick "Open" jump.
-  const allRuns = await runsLib.listRuns();
   const liveRunByTask = new Map<string, number>();
   for (const r of allRuns) {
-    if (!r.taskId) continue;
     if (liveRunByTask.has(r.taskId)) continue;
     if (
       ACTIVE_STATUSES.has(r.status) ||
@@ -323,9 +333,14 @@ export type PaletteItem = {
 };
 
 export async function loadPaletteItems(): Promise<PaletteItem[]> {
-  const plans = await repo.listPlans();
-  const tasks = (await repo.listTasks()).slice(0, 40);
-  const runs = (await runsLib.listRuns()).slice(0, 30);
+  // Lean loads: the palette renders on every page (layout), so it must not
+  // hydrate full tasks or drag every run row along.
+  const [plans, taskSummaries, runs] = await Promise.all([
+    repo.listPlans(),
+    repo.listTaskSummaries(),
+    runsLib.listRuns({ limit: 30 }),
+  ]);
+  const tasks = taskSummaries.slice(0, 40);
   const planTitleById = new Map(plans.map((p) => [p.id, p.title]));
 
   const planItems: PaletteItem[] = plans.map((p) => ({

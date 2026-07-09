@@ -283,6 +283,8 @@ export interface ListFilter {
   parentRunId?: number;
   /** When true, exclude terminal statuses. */
   activeOnly?: boolean;
+  /** Cap the number of rows returned (most-recent-first). */
+  limit?: number;
 }
 
 export interface AppendInput {
@@ -863,8 +865,10 @@ export async function list(filter: ListFilter = {}): Promise<RunRow[]> {
     conditions.push(notInArray(agentSessions.status, TERMINAL_STATUS_LIST));
   }
   const where = conditions.length === 0 ? undefined : conditions.length === 1 ? conditions[0] : and(...conditions);
-  const q = db.select().from(agentSessions).orderBy(desc(agentSessions.startedAt));
-  const rows = where ? await q.where(where) : await q;
+  let q = db.select().from(agentSessions).orderBy(desc(agentSessions.startedAt)).$dynamic();
+  if (where) q = q.where(where);
+  if (filter.limit !== undefined) q = q.limit(filter.limit);
+  const rows = await q;
   return rows.map(hydrateRun);
 }
 
@@ -4440,11 +4444,62 @@ export interface RunFilters {
   repoId?: string;
   taskId?: string;
   planId?: string;
+  /** Cap the number of rows returned (most-recent-first). */
+  limit?: number;
 }
 
 /** /runs UI lister — a thin, narrower-typed wrapper over list(). */
 export async function listRuns(filters: RunFilters = {}): Promise<RunRow[]> {
   return await list(filters);
+}
+
+/** Lean projection of a task-derived run — just what the Pi floor and plans
+ *  index render. */
+export interface TaskRunSummary {
+  id: number;
+  taskId: string;
+  status: SessionStatus;
+  prUrl: string | null;
+  error: string | null;
+  branch: string | null;
+  title: string | null;
+  personaId: string | null;
+  totalCostUsd: number | null;
+  budgetMaxUsd: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  startedAt: Date;
+  completedAt: Date | null;
+}
+
+/**
+ * Task-derived runs only (taskId set — the SQL form of origin === 'task'),
+ * selecting only the columns above. list() drags every column of every run
+ * along, including wide ones like worker_log and result, which dominate
+ * transfer time on the floor/plans read path once run history grows.
+ */
+export async function listTaskRunSummaries(): Promise<TaskRunSummary[]> {
+  const rows = await db
+    .select({
+      id: agentSessions.id,
+      taskId: agentSessions.taskId,
+      status: agentSessions.status,
+      prUrl: agentSessions.prUrl,
+      error: agentSessions.error,
+      branch: agentSessions.branch,
+      title: agentSessions.title,
+      personaId: agentSessions.personaId,
+      totalCostUsd: agentSessions.totalCostUsd,
+      budgetMaxUsd: agentSessions.budgetMaxUsd,
+      inputTokens: agentSessions.inputTokens,
+      outputTokens: agentSessions.outputTokens,
+      startedAt: agentSessions.startedAt,
+      completedAt: agentSessions.completedAt,
+    })
+    .from(agentSessions)
+    .where(isNotNull(agentSessions.taskId))
+    .orderBy(desc(agentSessions.startedAt));
+  return rows.map((r) => ({ ...r, taskId: r.taskId!, status: r.status as SessionStatus }));
 }
 
 // Lookup any run by id, regardless of whether it's task-derived or
