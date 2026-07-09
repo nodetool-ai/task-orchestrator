@@ -39,8 +39,11 @@ dev, a throwaway container is enough — schema migrations apply automatically
 on boot (`instrumentation.ts` → `initDb()`), there's no separate migrate step.
 
 ```bash
-# 1. Start a dev Postgres (matches the default DATABASE_URL below)
-docker run -d --name taskorch-pg-dev -p 127.0.0.1:5433:5432 \
+# 1. Start a dev Postgres (matches the default DATABASE_URL below).
+#    --shm-size matters: Docker's 64MB default fills up under the parallel
+#    test suite and Postgres starts failing with "could not resize shared
+#    memory segment ... No space left on device".
+docker run -d --name taskorch-pg-dev --shm-size=1g -p 127.0.0.1:5433:5432 \
   -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=devpw -e POSTGRES_DB=taskorch \
   postgres:16-alpine
 
