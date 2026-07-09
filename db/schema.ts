@@ -501,6 +501,10 @@ export const personas = pgTable("personas", {
   modelId: text("model_id").notNull().default("claude-sonnet-4-6"),
   thinkingLevel: text("thinking_level"),
   toolsProfile: text("tools_profile").notNull(),
+  // Agent backend default for runs that pick this persona without an explicit
+  // backend: 'pi' | 'claude'. NULL inherits the deployment default
+  // (TASK_ORCH_AGENT_BACKEND).
+  backend: text("backend"),
   skillPaths: text("skill_paths").notNull().default("[]"),
   budgetMaxTurns: integer("budget_max_turns"),
   budgetMaxSeconds: integer("budget_max_seconds"),

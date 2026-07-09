@@ -231,6 +231,7 @@ export async function seedRequiredPersonas(): Promise<void> {
       systemPrompt: p.systemPrompt,
       thinkingLevel: p.thinkingLevel ?? null,
       toolsProfile: p.toolsProfile,
+      backend: p.backend ?? null,
       budgetMaxTurns: p.budget?.maxTurns ?? null,
       budgetMaxSeconds: p.budget?.maxSeconds ?? null,
     }));

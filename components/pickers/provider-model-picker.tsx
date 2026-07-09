@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Field } from "@/components/ui/field";
 import { Select } from "@/components/ui/select";
 
-interface ProviderCatalog {
+export interface ProviderCatalog {
   id: string;
   models: { id: string; name: string }[];
 }
@@ -13,6 +13,9 @@ interface Props {
   provider: string;
   model: string;
   onChange: (next: { provider: string; model: string }) => void;
+  /** Scope the catalog to a specific agent backend (e.g. "pi" or "claude").
+   *  Omit to use the deployment-default backend's catalog. */
+  backend?: string;
   /** Render the two selects side-by-side (default) or stacked. */
   layout?: "row" | "column";
   className?: string;
@@ -20,20 +23,68 @@ interface Props {
   selectClassName?: string;
 }
 
+interface ProvidersResponse {
+  providers: ProviderCatalog[];
+  backends?: { id: string; providers: ProviderCatalog[] }[];
+  defaultBackend?: string;
+}
+
+export interface Catalog {
+  defaultBackend: string;
+  byBackend: Map<string, ProviderCatalog[]>;
+}
+
+/** React hook over the shared provider catalog. Returns null until the
+ *  /api/providers fetch resolves (cached module-level after the first call). */
+export function useProviderCatalog(): Catalog | null {
+  const [catalog, setCatalog] = useState<Catalog | null>(catalogCache);
+  useEffect(() => {
+    if (catalogCache) return;
+    let alive = true;
+    loadProviders().then((c) => {
+      if (alive) setCatalog(c);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return catalog;
+}
+
+/** First provider/model pair offered by `backend`'s catalog, or null if the
+ *  backend has no models. Used to snap a persona's provider/model when the
+ *  engine changes to one that doesn't offer the current pair. */
+export function firstModelForBackend(
+  catalog: Catalog | null,
+  backend: string
+): { provider: string; model: string } | null {
+  const providers = catalog?.byBackend.get(backend) ?? [];
+  const first = providers[0]?.models[0];
+  if (!first) return null;
+  return { provider: providers[0].id, model: first.id };
+}
+
 // Module-level catalog cache — loaded once per page, shared across editors.
-let providersCache: ProviderCatalog[] | null = null;
-let providersPromise: Promise<ProviderCatalog[]> | null = null;
-function loadProviders(): Promise<ProviderCatalog[]> {
-  if (providersCache) return Promise.resolve(providersCache);
-  if (providersPromise) return providersPromise;
-  providersPromise = fetch("/api/providers")
-    .then((r) => r.json() as Promise<{ providers: ProviderCatalog[] }>)
+let catalogCache: Catalog | null = null;
+let catalogPromise: Promise<Catalog> | null = null;
+function loadProviders(): Promise<Catalog> {
+  if (catalogCache) return Promise.resolve(catalogCache);
+  if (catalogPromise) return catalogPromise;
+  catalogPromise = fetch("/api/providers")
+    .then((r) => r.json() as Promise<ProvidersResponse>)
     .then((b) => {
-      providersCache = b.providers;
-      return providersCache;
+      const defaultBackend = b.defaultBackend ?? "pi";
+      const byBackend = new Map<string, ProviderCatalog[]>();
+      if (b.backends?.length) {
+        for (const be of b.backends) byBackend.set(be.id, be.providers ?? []);
+      } else {
+        byBackend.set(defaultBackend, b.providers ?? []);
+      }
+      catalogCache = { defaultBackend, byBackend };
+      return catalogCache;
     })
-    .catch(() => []);
-  return providersPromise;
+    .catch((): Catalog => ({ defaultBackend: "pi", byBackend: new Map() }));
+  return catalogPromise;
 }
 
 /**
@@ -41,29 +92,26 @@ function loadProviders(): Promise<ProviderCatalog[]> {
  * the new provider when the provider changes. If the saved provider/model
  * isn't in pi-ai's catalog, both stay reachable as "(custom)" options so a
  * round-trip through the form doesn't silently rewrite them.
+ *
+ * Pass `backend` to scope the catalog to a specific agent backend (e.g. the
+ * persona editor, which lets you pick the engine). Omit it to use the
+ * deployment-default backend's catalog (legacy behavior).
  */
 export function ProviderModelPicker({
   provider,
   model,
   onChange,
+  backend,
   layout = "row",
   className = "",
   selectClassName = "w-full",
 }: Props) {
-  const [providers, setProviders] = useState<ProviderCatalog[]>(
-    providersCache ?? []
-  );
+  const catalog = useProviderCatalog();
 
-  useEffect(() => {
-    if (providersCache) return;
-    let alive = true;
-    loadProviders().then((p) => {
-      if (alive) setProviders(p);
-    });
-    return () => {
-      alive = false;
-    };
-  }, []);
+  const providers =
+    (backend
+      ? catalog?.byBackend.get(backend)
+      : catalog?.byBackend.get(catalog?.defaultBackend ?? "pi")) ?? [];
 
   const providerOptions = useMemo(() => {
     const ids = providers.map((p) => p.id);

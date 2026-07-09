@@ -12,6 +12,7 @@ const PatchBody = z.object({
   modelProvider: z.string().min(1).optional(),
   modelId: z.string().min(1).optional(),
   thinkingLevel: z.enum(["low", "medium", "high", "xhigh"]).nullable().optional(),
+  backend: z.enum(["pi", "claude"]).nullable().optional(),
   toolsProfile: z.string().min(1).optional(),
   budgetMaxTurns: z.number().int().positive().nullable().optional(),
   budgetMaxSeconds: z.number().int().positive().nullable().optional(),
@@ -31,6 +32,7 @@ function serialize(p: Awaited<ReturnType<typeof repo.getPersona>> & {}) {
     modelId: p.modelId,
     thinkingLevel: p.thinkingLevel,
     toolsProfile: p.toolsProfile,
+    backend: p.backend,
     budgetMaxTurns: p.budgetMaxTurns,
     budgetMaxSeconds: p.budgetMaxSeconds,
   };
@@ -76,6 +78,10 @@ export async function PATCH(
       parsed.data.thinkingLevel !== undefined
         ? parsed.data.thinkingLevel
         : existing.thinkingLevel,
+    backend:
+      (parsed.data.backend !== undefined
+        ? parsed.data.backend
+        : existing.backend) as "pi" | "claude" | null,
     toolsProfile: parsed.data.toolsProfile ?? existing.toolsProfile,
     skillPaths: [],
     budgetMaxTurns:
@@ -127,6 +133,7 @@ export async function POST(
     modelId: defaults.modelId ?? "claude-sonnet-4-6",
     thinkingLevel: defaults.thinkingLevel ?? null,
     toolsProfile: defaults.toolsProfile,
+    backend: defaults.backend ?? null,
     skillPaths: [],
     budgetMaxTurns: defaults.budget?.maxTurns ?? null,
     budgetMaxSeconds: defaults.budget?.maxSeconds ?? null,

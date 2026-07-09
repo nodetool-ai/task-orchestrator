@@ -591,7 +591,8 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   // Per-run backend choice. Ad-hoc lightweight chat runs through pi-ai directly:
   // a null backend is allowed for legacy/deployment-default rows, but an
   // explicit chat backend must be pi. Other run kinds normalize/validate the
-  // requested backend eagerly; null stays null (deployment default at turn time).
+  // requested backend eagerly; null falls through to the persona's backend
+  // default (if set), then the deployment default at turn time.
   // An explicit 'claude' pick is additionally checked against the model's
   // provider — the Claude backend is Anthropic-only, and this combination can
   // never run.
@@ -613,6 +614,28 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
           `Pick an anthropic/* model or the 'pi' backend.`,
         400
       );
+    }
+  } else if (persona.backend) {
+    // No per-run pick: inherit the persona's engine default when set. Validate
+    // it the same way as an explicit pick so a misconfigured persona surfaces
+    // here rather than at turn time. Chat runs stay pinned to pi regardless.
+    try {
+      backend = resolveBackendId(persona.backend);
+    } catch (err) {
+      throw new repo.RepoError(err instanceof Error ? err.message : String(err), 400);
+    }
+    if (goal === "<chat>") {
+      // Chat only runs on pi; force it and ignore the persona default.
+      backend = "pi";
+    } else {
+      const { provider } = parseProviderQualifiedModel(effectiveModel);
+      if (backend === "claude" && provider !== "anthropic") {
+        throw new repo.RepoError(
+          `The 'claude' backend only supports Anthropic models, but the run's model is '${effectiveModel}'. ` +
+            `Pick an anthropic/* model or the 'pi' backend.`,
+          400
+        );
+      }
     }
   }
 

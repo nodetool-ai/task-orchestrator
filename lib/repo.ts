@@ -1366,6 +1366,7 @@ export interface PersonaUpsert {
   modelId?: string;
   thinkingLevel?: string | null;
   toolsProfile: string;
+  backend?: "pi" | "claude" | null;
   skillPaths: string[];
   budgetMaxTurns?: number | null;
   budgetMaxSeconds?: number | null;
@@ -1400,6 +1401,7 @@ export async function upsertPersona(p: PersonaUpsert): Promise<void> {
       modelId: p.modelId ?? "claude-sonnet-4-6",
       thinkingLevel: p.thinkingLevel ?? null,
       toolsProfile: p.toolsProfile,
+      backend: p.backend ?? null,
       skillPaths: JSON.stringify(p.skillPaths),
       budgetMaxTurns: p.budgetMaxTurns ?? null,
       budgetMaxSeconds: p.budgetMaxSeconds ?? null,
@@ -1416,6 +1418,7 @@ export async function upsertPersona(p: PersonaUpsert): Promise<void> {
         modelId: p.modelId ?? "claude-sonnet-4-6",
         thinkingLevel: p.thinkingLevel ?? null,
         toolsProfile: p.toolsProfile,
+        backend: p.backend ?? null,
         skillPaths: JSON.stringify(p.skillPaths),
         budgetMaxTurns: p.budgetMaxTurns ?? null,
         budgetMaxSeconds: p.budgetMaxSeconds ?? null,

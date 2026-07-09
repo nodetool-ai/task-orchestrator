@@ -7,5 +7,6 @@ export interface Persona {
   modelId?: string;
   thinkingLevel?: "low" | "medium" | "high" | "xhigh";
   toolsProfile: string;
+  backend?: "pi" | "claude";
   budget?: { maxTurns?: number; maxSeconds?: number };
 }

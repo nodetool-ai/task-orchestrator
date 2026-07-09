@@ -31,6 +31,7 @@ export default async function SettingsPage({
     modelId: p.modelId,
     thinkingLevel: p.thinkingLevel,
     toolsProfile: p.toolsProfile,
+    backend: p.backend,
     budgetMaxTurns: p.budgetMaxTurns,
     budgetMaxSeconds: p.budgetMaxSeconds,
   }));
