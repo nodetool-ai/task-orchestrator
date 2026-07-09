@@ -7,15 +7,13 @@
 
 import type { ExtensionFactory } from "./types";
 import type { Persona } from "@/lib/personas/types";
-import { MEMORY_SYSTEM_GUIDANCE } from "./persona-memory";
 
 export const personaPromptFactory =
   (persona: Persona): ExtensionFactory =>
   (reg) => {
     reg.transformSystemPrompt((base) => {
-      const personaPrompt = `${persona.systemPrompt}\n\n${MEMORY_SYSTEM_GUIDANCE}`;
       return base.length > 0
-        ? `${personaPrompt}\n\n${base}`
-        : personaPrompt;
+        ? `${persona.systemPrompt}\n\n${base}`
+        : persona.systemPrompt;
     });
   };
