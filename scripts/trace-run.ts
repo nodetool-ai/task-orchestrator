@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { config } from "dotenv";
-config({ path: ".env.local" });
+import { config as loadEnv } from "dotenv";
+loadEnv({ path: ".env.local" });
 
+import { config } from "../lib/config";
 import { execFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -46,7 +47,7 @@ function parseArgs(argv: string[]): Args {
     _: [],
     fly: false,
     app: process.env.FLY_APP ?? "task-orchestrator",
-    runnerApp: process.env.TASK_ORCH_FLY_APP ?? process.env.FLY_RUNNER_APP ?? "task-orchestrator-runners",
+    runnerApp: config.fly.app ?? process.env.FLY_RUNNER_APP ?? "task-orchestrator-runners",
     json: false,
     tailEvents: 25,
     tailMessages: 10,
