@@ -119,6 +119,67 @@ describe("start_session userId propagation", () => {
   });
 });
 
+describe("start_session persona model inheritance", () => {
+  it("uses the implementor persona's model when start_session omits model", async () => {
+    // Reproduces run 123: an executor spawns a child implementor via
+    // start_session without passing `model`. The child must inherit the
+    // implementor persona's modelProvider/modelId (as set in Settings →
+    // Personas), NOT the deployment DEFAULT_MODEL. startSession used to
+    // pre-fill `model: input.model ?? DEFAULT_MODEL`, shadowing runs.create's
+    // own persona fallback (which only fires when input.model is null).
+    await repo.upsertPersona({
+      id: "implementor",
+      name: "Implementor",
+      description: "",
+      systemPrompt: "x",
+      modelProvider: "openai",
+      modelId: "gpt-5-codex",
+      toolsProfile: "orchestrator,repo_write,gh_pr,gh_ci",
+      skillPaths: [],
+    });
+    const plan = await repo.createPlan({ title: "Model inheritance", date: "2026-07-04" });
+    const task = await repo.createTask({ planId: plan.id, title: "Task", date: "2026-07-04" });
+    const spawnerId = await insertRun({ goal: "<execute>", planId: plan.id });
+    createSpy.mockResolvedValue(fakeRunRow({ id: 5001, taskId: task.id }));
+
+    await tool("start_session").execute(
+      { task_id: task.id },
+      { author: "test", runId: spawnerId }
+    );
+
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(createSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "openai/gpt-5-codex" })
+    );
+  });
+
+  it("still honors an explicit model passed to start_session over the persona", async () => {
+    await repo.upsertPersona({
+      id: "implementor",
+      name: "Implementor",
+      description: "",
+      systemPrompt: "x",
+      modelProvider: "openai",
+      modelId: "gpt-5-codex",
+      toolsProfile: "orchestrator,repo_write,gh_pr,gh_ci",
+      skillPaths: [],
+    });
+    const plan = await repo.createPlan({ title: "Explicit model", date: "2026-07-04" });
+    const task = await repo.createTask({ planId: plan.id, title: "Task", date: "2026-07-04" });
+    const spawnerId = await insertRun({ goal: "<execute>", planId: plan.id });
+    createSpy.mockResolvedValue(fakeRunRow({ id: 5002, taskId: task.id }));
+
+    await tool("start_session").execute(
+      { task_id: task.id, model: "anthropic/claude-opus-4-5" },
+      { author: "test", runId: spawnerId }
+    );
+
+    expect(createSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "anthropic/claude-opus-4-5" })
+    );
+  });
+});
+
 describe("runs.list parentRunId filter", () => {
   it("returns only the children of the given run, not siblings or the parent", async () => {
     const parentId = await insertRun({ goal: "<execute>", status: "running" });
