@@ -44,6 +44,7 @@ import { runTransport } from "@/lib/worker";
 import { resolveCodexAccessToken } from "@/lib/codex-oauth-token";
 import { collectExtensions } from "@/lib/agent-backend/collect";
 import type { Extension, NeutralTool, ToolResult } from "@/lib/agent-backend/types";
+import { MEMORY_SYSTEM_GUIDANCE } from "@/lib/extensions/persona-memory";
 
 import type { AppendStreamEvent, MessageRow, RunRow } from "@/lib/runs";
 import type { RunEnvelope } from "@/lib/pi-event-mapper";
@@ -134,6 +135,27 @@ async function toolsForRun(run: RunRow, author: string): Promise<LightweightTool
       },
     };
   });
+  const { MEMORY_TOOLS } = await import("./extensions/persona-memory");
+  entries.push(...MEMORY_TOOLS
+    .filter((tool) => tool.name !== "memory__load")
+    .map((tool): LightweightToolEntry => ({
+      tool: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      },
+      execute: async (_callId, params) => {
+        const result = await (await runTransport()).callTool(run.id, tool.name, params, {
+          author,
+          defaultTaskId: run.taskId ?? undefined,
+          defaultPlanId: run.planId ?? undefined,
+        });
+        return {
+          content: result.content,
+          isError: result.isError ?? false,
+        };
+      },
+    })));
   // The plan executor also needs the always-on event tools (timer__sleep,
   // report_result, raise, ask_parent, answer_question, events__poll) to drive
   // its wake/park loop, plus the spawn tools (spawn__get_run,
@@ -572,7 +594,7 @@ export async function runChatAiTurn(args: {
   const apiKey = model.provider === "openai-codex" ? await resolveCodexAccessToken() : undefined;
   const reasoning = (run.thinkingLevel ?? persona.thinkingLevel ?? undefined) as ThinkingLevel | undefined;
   const context: Context = {
-    systemPrompt: persona.systemPrompt,
+    systemPrompt: `${persona.systemPrompt}\n\n${MEMORY_SYSTEM_GUIDANCE}`,
     messages: contextMessages,
     tools,
   };

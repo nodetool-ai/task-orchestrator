@@ -574,18 +574,19 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     );
   }
 
-  // Resolve the effective model. The model is a per-run choice (the run-agent
-  // dialog / chat composers emit "provider/model-id"; model-id itself may
-  // contain slashes, e.g. OpenRouter ids). It is no longer tied to the persona.
-  // Fall back to the env default when the caller omits one. We persist the
-  // resolved value so the UI shows what was used.
+  // Resolve the effective model. The run-agent dialog / chat composers may
+  // explicitly emit "provider/model-id"; model-id itself may contain slashes,
+  // e.g. OpenRouter ids. When omitted, use the persona's model default. We
+  // persist the resolved value so the UI shows what was used.
   const personaId = input.personaId ?? "implementor";
-  if (!(await repo.getPersona(personaId))) {
+  const persona = await repo.getPersona(personaId);
+  if (!persona) {
     // persona_id is a foreign key; surface a clear 404 instead of letting the
     // insert fail with an opaque "FOREIGN KEY constraint failed".
     throw new repo.RepoError(`Persona '${personaId}' not found`, 404);
   }
-  const effectiveModel = input.model ?? DEFAULT_MODEL;
+  const personaModel = `${persona.modelProvider}/${persona.modelId}`;
+  const effectiveModel = input.model ?? personaModel ?? DEFAULT_MODEL;
 
   // Per-run backend choice. Ad-hoc lightweight chat runs through pi-ai directly:
   // a null backend is allowed for legacy/deployment-default rows, but an

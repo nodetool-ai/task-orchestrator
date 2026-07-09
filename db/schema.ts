@@ -497,6 +497,8 @@ export const personas = pgTable("personas", {
   name: text("name").notNull(),
   description: text("description"),
   systemPrompt: text("system_prompt").notNull(),
+  modelProvider: text("model_provider").notNull().default("anthropic"),
+  modelId: text("model_id").notNull().default("claude-sonnet-4-6"),
   thinkingLevel: text("thinking_level"),
   toolsProfile: text("tools_profile").notNull(),
   skillPaths: text("skill_paths").notNull().default("[]"),
@@ -520,6 +522,27 @@ export const personaMemories = pgTable(
   (t) => ({
     personaIdx: index("persona_memories_persona_idx").on(t.personaId),
     uniq: uniqueIndex("persona_memories_persona_scope_uniq").on(t.personaId, t.scope),
+  })
+);
+
+export const memories = pgTable(
+  "memories",
+  {
+    id: serial("id").primaryKey(),
+    scope: text("scope").notNull().default("global"),
+    scopeKey: text("scope_key"),
+    body: text("body").notNull(),
+    keywords: text("keywords").notNull().default("[]"),
+    author: text("author").notNull().default("agent"),
+    createdByRunId: integer("created_by_run_id").references(() => agentSessions.id, {
+      onDelete: "set null",
+    }),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    scopeIdx: index("memories_scope_idx").on(t.scope, t.scopeKey),
+    updatedIdx: index("memories_updated_idx").on(t.updatedAt),
   })
 );
 
@@ -559,6 +582,7 @@ export type ChannelThread = typeof channelThreads.$inferSelect;
 export type Repository = typeof repositories.$inferSelect;
 export type Persona = typeof personas.$inferSelect;
 export type PersonaMemory = typeof personaMemories.$inferSelect;
+export type Memory = typeof memories.$inferSelect;
 export type InboxEvent = typeof inboxEvents.$inferSelect;
 export type RunTimer = typeof runTimers.$inferSelect;
 export type ResourceLock = typeof resourceLocks.$inferSelect;

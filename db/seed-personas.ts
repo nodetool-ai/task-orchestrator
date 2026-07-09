@@ -21,6 +21,8 @@ export async function seedPersonas(opts: { force?: boolean } = {}): Promise<void
       name: p.name,
       description: p.description,
       systemPrompt: p.systemPrompt,
+      modelProvider: p.modelProvider ?? "anthropic",
+      modelId: p.modelId ?? "claude-sonnet-4-6",
       thinkingLevel: p.thinkingLevel ?? null,
       toolsProfile: p.toolsProfile,
       skillPaths: [],

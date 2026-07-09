@@ -113,8 +113,8 @@ personas                 persona registry (seeded from lib/personas/*.ts)
   name                TEXT  NOT NULL        display name
   description         TEXT
   system_prompt       TEXT  NOT NULL
-  model_provider      TEXT  NOT NULL        e.g. 'anthropic'
-  model_id            TEXT  NOT NULL        e.g. 'claude-opus-4-5'
+  model_provider      TEXT  NOT NULL        default provider for new runs
+  model_id            TEXT  NOT NULL        default model for new runs
   thinking_level      TEXT                  'low' | 'medium' | 'high' | NULL
   tools_profile       TEXT  NOT NULL        composed profile keys
   skill_paths         TEXT  NOT NULL        JSON array of repo-relative paths
@@ -129,6 +129,22 @@ persona_memories         per-persona cross-session notes
   body        TEXT     NOT NULL DEFAULT ''   markdown bullets
   updated_at  INTEGER  ms epoch
   UNIQUE(persona_id, scope)
+
+memories                 shared long-term memory for chats and agents
+  id                 INTEGER  AUTOINC PK
+  scope              TEXT     NOT NULL       'global' | 'repo' | 'task'
+  scope_key          TEXT                    NULL for global, repo_id/task_id otherwise
+  body               TEXT     NOT NULL
+  keywords           TEXT     NOT NULL       JSON array used for BM25 search
+  author             TEXT     NOT NULL
+  created_by_run_id  INTEGER  FK → agent_runs.id ON DELETE SET NULL
+  created_at         INTEGER  ms epoch
+  updated_at         INTEGER  ms epoch
+
+The memory tools search scoped candidate rows with application-level BM25 over
+`body` plus boosted `keywords`. Agents and chats can write memories with
+`memory_remember`, search them with `memory_search`, and remove stale entries
+with `memory_forget`.
 ```
 
 ## ID format

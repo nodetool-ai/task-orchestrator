@@ -40,6 +40,8 @@ export interface PersonaRecord {
   name: string;
   description: string | null;
   systemPrompt: string;
+  modelProvider: string;
+  modelId: string;
   thinkingLevel: string | null;
   toolsProfile: string;
   budgetMaxTurns: number | null;

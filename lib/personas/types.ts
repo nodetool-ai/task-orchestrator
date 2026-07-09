@@ -3,6 +3,8 @@ export interface Persona {
   name: string;
   description: string;
   systemPrompt: string;
+  modelProvider?: string;
+  modelId?: string;
   thinkingLevel?: "low" | "medium" | "high" | "xhigh";
   toolsProfile: string;
   budget?: { maxTurns?: number; maxSeconds?: number };

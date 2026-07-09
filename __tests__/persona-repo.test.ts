@@ -1,11 +1,12 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
-import { personas as personasTable, personaMemories } from "../db/schema";
+import { memories, personas as personasTable, personaMemories } from "../db/schema";
 import * as repo from "../lib/repo";
 
 async function clear() {
   await db.delete(personaMemories);
+  await db.delete(memories);
   await db.delete(personasTable);
 }
 
@@ -116,5 +117,37 @@ describe("persona repo", () => {
            toolsProfile: "repo_read", skillPaths: [],
     });
     expect((await repo.getPersona("qa"))!.systemPrompt).toBe("test all the things");
+  });
+
+  it("searchMemories ranks scoped keyword matches with BM25", async () => {
+    await seedReviewer();
+    await repo.createMemory({
+      scope: "global",
+      body: "The user prefers concise implementation summaries.",
+      keywords: ["final answer", "concise"],
+    });
+    await repo.createMemory({
+      scope: "repo",
+      scopeKey: "R-test",
+      body: "This repository uses Vitest for unit tests.",
+      keywords: ["test runner", "vitest"],
+    });
+    await repo.createMemory({
+      scope: "repo",
+      scopeKey: "R-other",
+      body: "Another repo uses a different runner.",
+      keywords: ["vitest"],
+    });
+
+    const results = await repo.searchMemories({
+      query: "vitest test runner",
+      scopes: [
+        { scope: "global" },
+        { scope: "repo", scopeKey: "R-test" },
+      ],
+    });
+
+    expect(results[0].memory.scopeKey).toBe("R-test");
+    expect(results.some((r) => r.memory.scopeKey === "R-other")).toBe(false);
   });
 });

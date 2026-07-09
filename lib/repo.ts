@@ -1,9 +1,10 @@
-import { and, asc, count, desc, eq, inArray, isNotNull, like, notInArray, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNotNull, like, notInArray, or, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
   acceptanceCriteria,
   agentSessions,
   attachments,
+  memories,
   personaMemories,
   personas as personasTable,
   planRepositories,
@@ -13,6 +14,7 @@ import {
   taskNotes,
   tasks,
   type Attachment as AttachmentRow,
+  type Memory,
   type Persona,
   type Plan as PlanRow,
   type Repository as RepositoryDbRow,
@@ -1360,6 +1362,8 @@ export interface PersonaUpsert {
   name: string;
   description?: string | null;
   systemPrompt: string;
+  modelProvider?: string;
+  modelId?: string;
   thinkingLevel?: string | null;
   toolsProfile: string;
   skillPaths: string[];
@@ -1392,6 +1396,8 @@ export async function upsertPersona(p: PersonaUpsert): Promise<void> {
       name: p.name,
       description: p.description ?? null,
       systemPrompt: p.systemPrompt,
+      modelProvider: p.modelProvider ?? "anthropic",
+      modelId: p.modelId ?? "claude-sonnet-4-6",
       thinkingLevel: p.thinkingLevel ?? null,
       toolsProfile: p.toolsProfile,
       skillPaths: JSON.stringify(p.skillPaths),
@@ -1406,6 +1412,8 @@ export async function upsertPersona(p: PersonaUpsert): Promise<void> {
         name: p.name,
         description: p.description ?? null,
         systemPrompt: p.systemPrompt,
+        modelProvider: p.modelProvider ?? "anthropic",
+        modelId: p.modelId ?? "claude-sonnet-4-6",
         thinkingLevel: p.thinkingLevel ?? null,
         toolsProfile: p.toolsProfile,
         skillPaths: JSON.stringify(p.skillPaths),
@@ -1414,6 +1422,141 @@ export async function upsertPersona(p: PersonaUpsert): Promise<void> {
         updatedAt: now,
       },
     });
+}
+
+// ──────────────────────────────────────────────────────────
+// Shared memory
+// ──────────────────────────────────────────────────────────
+
+export type MemoryScope = "global" | "repo" | "task";
+
+export interface MemoryCreate {
+  scope: MemoryScope;
+  scopeKey?: string | null;
+  body: string;
+  keywords?: string[];
+  author?: string;
+  createdByRunId?: number | null;
+}
+
+export interface MemorySearchResult {
+  memory: Memory;
+  score: number;
+}
+
+function normalizeKeywords(keywords: string[] | undefined): string[] {
+  return Array.from(new Set((keywords ?? [])
+    .map((k) => k.trim().toLowerCase())
+    .filter(Boolean))).slice(0, 24);
+}
+
+function parseKeywords(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((k): k is string => typeof k === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function memoryTokens(text: string): string[] {
+  return text
+    .toLowerCase()
+    .match(/[a-z0-9][a-z0-9_-]*/g) ?? [];
+}
+
+export async function createMemory(input: MemoryCreate): Promise<Memory> {
+  const now = new Date();
+  const body = input.body.trim();
+  if (!body) throw new RepoError("Memory body is required.", 400);
+  if (input.scope !== "global" && !input.scopeKey) {
+    throw new RepoError(`Memory scope '${input.scope}' requires a scope key.`, 400);
+  }
+  const row = (await db.insert(memories)
+    .values({
+      scope: input.scope,
+      scopeKey: input.scope === "global" ? null : input.scopeKey ?? null,
+      body,
+      keywords: JSON.stringify(normalizeKeywords(input.keywords)),
+      author: input.author ?? "agent",
+      createdByRunId: input.createdByRunId ?? null,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning())[0];
+  return row;
+}
+
+export async function listRecentMemories(args: {
+  scopes: Array<{ scope: MemoryScope; scopeKey?: string | null }>;
+  limit?: number;
+}): Promise<Memory[]> {
+  const predicates = args.scopes.map((s) =>
+    s.scope === "global"
+      ? eq(memories.scope, "global")
+      : and(eq(memories.scope, s.scope), eq(memories.scopeKey, s.scopeKey ?? ""))
+  );
+  if (predicates.length === 0) return [];
+  return await db
+    .select()
+    .from(memories)
+    .where(predicates.length === 1 ? predicates[0] : or(...predicates))
+    .orderBy(desc(memories.updatedAt), desc(memories.id))
+    .limit(Math.max(1, Math.min(args.limit ?? 12, 50)));
+}
+
+export async function searchMemories(args: {
+  query: string;
+  scopes: Array<{ scope: MemoryScope; scopeKey?: string | null }>;
+  limit?: number;
+}): Promise<MemorySearchResult[]> {
+  const queryTokens = Array.from(new Set(memoryTokens(args.query)));
+  if (queryTokens.length === 0) return [];
+  const candidates = await listRecentMemories({ scopes: args.scopes, limit: 500 });
+  if (candidates.length === 0) return [];
+
+  const docs = candidates.map((memory) => {
+    const keywords = parseKeywords(memory.keywords);
+    const tokens = [
+      ...memoryTokens(memory.body),
+      ...keywords.flatMap((k) => [k, k, k]).flatMap(memoryTokens),
+    ];
+    return { memory, tokens, length: Math.max(tokens.length, 1) };
+  });
+  const avgLen = docs.reduce((sum, d) => sum + d.length, 0) / docs.length;
+  const k1 = 1.2;
+  const b = 0.75;
+
+  const scored = docs.map((doc) => {
+    let score = 0;
+    for (const term of queryTokens) {
+      const tf = doc.tokens.filter((t) => t === term).length;
+      if (tf === 0) continue;
+      const df = docs.filter((d) => d.tokens.includes(term)).length;
+      const idf = Math.log(1 + (docs.length - df + 0.5) / (df + 0.5));
+      score += idf * ((tf * (k1 + 1)) / (tf + k1 * (1 - b + b * (doc.length / avgLen))));
+    }
+    return { memory: doc.memory, score };
+  });
+
+  return scored
+    .filter((r) => r.score > 0)
+    .sort((a, b) => b.score - a.score || b.memory.updatedAt.getTime() - a.memory.updatedAt.getTime())
+    .slice(0, Math.max(1, Math.min(args.limit ?? 8, 25)));
+}
+
+export async function removeMemoriesBySubstring(args: {
+  scopes: Array<{ scope: MemoryScope; scopeKey?: string | null }>;
+  match: string;
+}): Promise<number> {
+  const rows = await listRecentMemories({ scopes: args.scopes, limit: 500 });
+  const needle = args.match.toLowerCase();
+  const matching = rows.filter((m) => m.body.toLowerCase().includes(needle));
+  if (matching.length === 0) return 0;
+  await db.delete(memories).where(inArray(memories.id, matching.map((m) => m.id)));
+  return matching.length;
 }
 
 export async function getPersonaMemory(personaId: string, scope: string): Promise<string | null> {

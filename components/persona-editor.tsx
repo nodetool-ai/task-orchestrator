@@ -13,12 +13,15 @@ import {
   ThinkingLevelPicker,
   type ThinkingLevel,
 } from "@/components/pickers/thinking-level-picker";
+import { ProviderModelPicker } from "@/components/pickers/provider-model-picker";
 
 export interface PersonaDto {
   id: string;
   name: string;
   description: string | null;
   systemPrompt: string;
+  modelProvider: string;
+  modelId: string;
   thinkingLevel: string | null;
   toolsProfile: string;
   budgetMaxTurns: number | null;
@@ -54,6 +57,8 @@ export function PersonaEditor({ persona }: Props) {
           name: draft.name,
           description: draft.description ?? "",
           systemPrompt: draft.systemPrompt,
+          modelProvider: draft.modelProvider,
+          modelId: draft.modelId,
           thinkingLevel: draft.thinkingLevel || null,
           toolsProfile: draft.toolsProfile,
           budgetMaxTurns: draft.budgetMaxTurns ?? null,
@@ -139,6 +144,15 @@ export function PersonaEditor({ persona }: Props) {
           className={`${fieldClass} text-xs leading-5 resize-y`}
         />
       </Field>
+
+      <ProviderModelPicker
+        provider={draft.modelProvider}
+        model={draft.modelId}
+        onChange={(next) => {
+          update("modelProvider", next.provider);
+          update("modelId", next.model);
+        }}
+      />
 
       <Field label="Reasoning">
         <ThinkingLevelPicker

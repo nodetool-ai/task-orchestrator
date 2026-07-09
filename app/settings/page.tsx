@@ -27,6 +27,8 @@ export default async function SettingsPage({
     name: p.name,
     description: p.description,
     systemPrompt: p.systemPrompt,
+    modelProvider: p.modelProvider,
+    modelId: p.modelId,
     thinkingLevel: p.thinkingLevel,
     toolsProfile: p.toolsProfile,
     budgetMaxTurns: p.budgetMaxTurns,
@@ -99,7 +101,8 @@ export default async function SettingsPage({
               <h2 className="text-base font-semibold tracking-tight">Personas</h2>
               <p className="text-sm text-muted-foreground">
                 Each persona bundles a system prompt, tools profile, and budget
-                defaults. The model is chosen per-run when you launch the agent.
+                defaults. The model is a persona default and can still be
+                overridden per-run when you launch the agent.
                 Skills are loaded automatically from the project
                 (<code>.pi/skills/</code>, <code>.agents/skills/</code>) — no
                 per-persona setup needed. Edits saved here override the seed in{" "}
