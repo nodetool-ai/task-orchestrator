@@ -31,8 +31,10 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   let personaIds: string[] = [];
   if (email) {
     try {
-      paletteItems = await loadPaletteItems();
-      personaIds = await repo.listPersonaIds();
+      [paletteItems, personaIds] = await Promise.all([
+        loadPaletteItems(),
+        repo.listPersonaIds(),
+      ]);
     } catch {
       // DB may be uninitialized on first boot — palette/spawn will be empty.
     }
