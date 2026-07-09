@@ -19,6 +19,7 @@ describe("SECRET_ENV_DENYLIST", () => {
     expect(SECRET_ENV_DENYLIST).toContain("ANTHROPIC_OAUTH_TOKEN");
     expect(SECRET_ENV_DENYLIST).toContain("CLAUDE_CODE_OAUTH_TOKEN");
     expect(SECRET_ENV_DENYLIST).toContain("OPENAI_API_KEY");
+    expect(SECRET_ENV_DENYLIST).toContain("CODEX_ACCESS_TOKEN");
     expect(SECRET_ENV_DENYLIST).toContain("GEMINI_API_KEY");
     expect(SECRET_ENV_DENYLIST).toContain("COPILOT_GITHUB_TOKEN");
     expect(SECRET_ENV_DENYLIST).toContain("AZURE_OPENAI_API_KEY");
@@ -41,6 +42,7 @@ describe("scrubEnv", () => {
       HOME: "/root",
       DATABASE_URL: "postgres://leak",
       ANTHROPIC_API_KEY: "sk-ant-leak",
+      CODEX_ACCESS_TOKEN: "codex-leak",
       GH_TOKEN: "gh-keep",
       GITHUB_TOKEN: "ghtok-keep",
     };
@@ -51,6 +53,7 @@ describe("scrubEnv", () => {
     expect(result.GITHUB_TOKEN).toBe("ghtok-keep");
     expect(result.DATABASE_URL).toBeUndefined();
     expect(result.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(result.CODEX_ACCESS_TOKEN).toBeUndefined();
   });
 
   it("does not mutate the input", () => {

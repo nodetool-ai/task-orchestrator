@@ -316,10 +316,14 @@ Requires:
   `ANTHROPIC_API_KEY` when set, otherwise the claude.ai subscription (`claude login`,
   or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` for headless hosts). The
   default `pi` backend reads per-provider keys (`ANTHROPIC_API_KEY`,
-  `OPENAI_API_KEY`, `GEMINI_API_KEY`, …) or `~/.pi/agent/auth.json`. On the
+  `OPENAI_API_KEY`, `GEMINI_API_KEY`, …), `~/.pi/agent/auth.json`, and the Codex
+  login stored at `CODEX_HOME/auth.json` (default `~/.codex/auth.json`) for
+  `openai-codex` models. `CODEX_ACCESS_TOKEN` is accepted as an explicit
+  override, but local Codex OAuth login is the intended source. On the
   containerized paths (Docker workers, Fly runner Machines) every recognized
-  provider key set on the server is forwarded into the run container, so either
-  backend works there — see `lib/agent-backend/provider-env.ts` for the list.
+  provider credential set on the server is forwarded into the run container, so
+  either backend works there — see `lib/agent-backend/provider-env.ts` for the
+  list.
 - `gh` CLI installed and authenticated for PR creation
 - A `main` branch on `origin` (override per-session via `baseBranch`)
 

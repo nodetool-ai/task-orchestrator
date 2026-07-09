@@ -8,10 +8,13 @@
 // fails its first provider call for want of a key that only the server had.
 //
 // The pi entries mirror @earendil-works/pi-ai's env-api-keys map (AuthStorage
-// falls back to these when ~/.pi/agent/auth.json has no entry for a provider).
-// A unit test (__tests__/agent-backend/provider-env.test.ts) asserts this list
-// covers every provider key pi-ai knows, so a pi upgrade that adds a provider
-// fails the suite instead of silently starving containers of the new key.
+// falls back to these when ~/.pi/agent/auth.json has no entry for a provider),
+// plus CODEX_ACCESS_TOKEN for pi's OAuth-only openai-codex provider. A unit
+// test (__tests__/agent-backend/provider-env.test.ts) asserts this list covers
+// every provider key pi-ai knows, so a pi upgrade that adds a provider fails
+// the suite instead of silently starving containers of the new key.
+import { CODEX_ACCESS_TOKEN_ENV, resolveCodexAccessTokenSync } from "../codex-oauth-token";
+
 export const AGENT_CREDENTIAL_ENV_KEYS: readonly string[] = [
   // Claude backend (resolved like the Claude Code CLI) + pi's anthropic provider.
   "ANTHROPIC_API_KEY",
@@ -19,6 +22,7 @@ export const AGENT_CREDENTIAL_ENV_KEYS: readonly string[] = [
   "CLAUDE_CODE_OAUTH_TOKEN",
   // pi multi-provider API keys.
   "OPENAI_API_KEY",
+  "CODEX_ACCESS_TOKEN",
   "GEMINI_API_KEY",
   "GOOGLE_CLOUD_API_KEY",
   "GROQ_API_KEY",
@@ -67,6 +71,10 @@ export function agentCredentialEnv(): Record<string, string> {
   for (const key of AGENT_CREDENTIAL_ENV_KEYS) {
     const value = process.env[key];
     if (value != null) env[key] = value;
+  }
+  if (env[CODEX_ACCESS_TOKEN_ENV] == null) {
+    const token = resolveCodexAccessTokenSync();
+    if (token) env[CODEX_ACCESS_TOKEN_ENV] = token;
   }
   return env;
 }

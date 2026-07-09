@@ -19,6 +19,7 @@ import {
 
 import { mapPiEvent, type RunEnvelope } from "../pi-event-mapper";
 import { interceptorToolName } from "../builtin-tools";
+import { resolveCodexAccessToken } from "../codex-oauth-token";
 import { collectExtensions, composeSystemPrompt } from "./collect";
 import type { AgentBackend, AmbientSkill, RunTurnArgs, TurnOutcome } from "./types";
 
@@ -113,6 +114,8 @@ export class PiBackend implements AgentBackend {
     }
 
     const authStorage = AuthStorage.create();
+    const codexAccessToken = await resolveCodexAccessToken();
+    if (codexAccessToken) authStorage.setRuntimeApiKey("openai-codex", codexAccessToken);
     const modelRegistry = ModelRegistry.create(authStorage);
     const agentDir = getAgentDir();
     const resourceLoader = new DefaultResourceLoader({

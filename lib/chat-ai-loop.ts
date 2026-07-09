@@ -41,6 +41,7 @@ import {
 import { parseProviderQualifiedModel } from "@/lib/model-id";
 import { assistantText, type SdkContentBlock } from "@/lib/sdk-message";
 import { runTransport } from "@/lib/worker";
+import { resolveCodexAccessToken } from "@/lib/codex-oauth-token";
 import { collectExtensions } from "@/lib/agent-backend/collect";
 import type { Extension, NeutralTool, ToolResult } from "@/lib/agent-backend/types";
 
@@ -549,6 +550,7 @@ export async function runChatAiTurn(args: {
   const tools = entries.map((entry) => entry.tool);
   const dispatch = new Map(entries.map((entry) => [entry.tool.name, entry]));
   const model = await resolveModel(run.model ?? DEFAULT_CHAT_MODEL);
+  const apiKey = model.provider === "openai-codex" ? await resolveCodexAccessToken() : undefined;
   const reasoning = (run.thinkingLevel ?? persona.thinkingLevel ?? undefined) as ThinkingLevel | undefined;
   const context: Context = {
     systemPrompt: persona.systemPrompt,
@@ -567,6 +569,7 @@ export async function runChatAiTurn(args: {
   for (let round = 0; round < maxToolRounds(run); round += 1) {
     if (abort.signal.aborted) throw new Error("Turn aborted");
     const assistant = await models().completeSimple(model, context, {
+      apiKey,
       reasoning,
       signal: abort.signal,
       sessionId: `task-orch-chat-${run.id}`,

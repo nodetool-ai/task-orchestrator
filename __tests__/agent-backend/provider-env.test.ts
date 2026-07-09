@@ -4,6 +4,9 @@
 // with TASK_ORCH_AGENT_BACKEND=pi boots fine and then fails its first provider
 // call if only the Anthropic pair was forwarded.
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { getProviders, findEnvKeys } from "@earendil-works/pi-ai/compat";
 import {
   AGENT_CREDENTIAL_ENV_KEYS,
@@ -16,9 +19,9 @@ import { buildWorkerContainerConfig } from "../../lib/run-dispatch";
 // separately (and unconditionally) by both worker paths for git/gh itself.
 const FORWARDED_ELSEWHERE = ["GH_TOKEN"];
 
-// Providers that don't authenticate via a plain env API key: amazon-bedrock
-// uses the AWS SDK credential chain, openai-codex is OAuth-only. Deployments
-// using them must configure credentials on the worker image/Machine directly.
+// Providers that pi-ai's legacy env-key helper does not classify as plain env
+// API-key providers. amazon-bedrock uses the AWS SDK credential chain;
+// openai-codex is OAuth-only and is covered below by our Codex login resolver.
 const NO_ENV_KEY_PROVIDERS = new Set(["amazon-bedrock", "openai-codex"]);
 
 // Keys guaranteed absent from the ambient test env, one per assertion role.
@@ -52,6 +55,23 @@ describe("AGENT_CREDENTIAL_ENV_KEYS", () => {
     const env = agentCredentialEnv();
     expect(env[PI_KEY]).toBe("sk-or-test");
     expect(UNSET_KEY in env).toBe(false);
+  });
+
+  it("agentCredentialEnv forwards the Codex login access token when no env token is set", () => {
+    const dir = mkdtempSync(join(tmpdir(), "task-orch-codex-home-"));
+    try {
+      vi.stubEnv("CODEX_HOME", dir);
+      vi.stubEnv("CODEX_ACCESS_TOKEN", "");
+      delete process.env.CODEX_ACCESS_TOKEN;
+      writeFileSync(
+        join(dir, "auth.json"),
+        JSON.stringify({ tokens: { access_token: "codex-oauth-token" } })
+      );
+
+      expect(agentCredentialEnv().CODEX_ACCESS_TOKEN).toBe("codex-oauth-token");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
