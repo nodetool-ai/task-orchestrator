@@ -5,6 +5,7 @@ import { agentSessions, runnerInstances } from "../db/schema";
 import { create, get } from "../lib/runs";
 import { dispatchRun } from "../lib/run-dispatch";
 import { FlyRunnerProvider, isEligibleForLifecycleAction, isReapableVolume } from "../lib/runner/fly";
+import { FlyApiError } from "../lib/runner/fly-client";
 import type { FlyClient, FlyMachine, FlyMachineConfig, FlyVolume } from "../lib/runner/fly-client";
 
 type FakeOptions = {
@@ -12,6 +13,9 @@ type FakeOptions = {
   getMachine?: FlyMachine | null;
   /** Volume ids whose createMachine call should throw (simulates a dead volume). */
   createMachineFailsForVolume?: Set<string>;
+  /** Machine id → number of times startMachine should throw a Fly 409
+   *  ("machine exited abruptly") before succeeding. */
+  startMachine409s?: Map<string, number>;
   /** Machine ids whose stopMachine call should throw. */
   stopMachineFailsFor?: Set<string>;
   /** Volumes returned by listVolumes() (orphan-reaper tests). */
@@ -67,6 +71,11 @@ function fakeFlyClient(calls: string[] = [], opts: FakeOptions = {}): FlyClient 
     },
     async startMachine(id: string) {
       calls.push(`startMachine:${id}`);
+      const remaining = opts.startMachine409s?.get(id) ?? 0;
+      if (remaining > 0) {
+        opts.startMachine409s!.set(id, remaining - 1);
+        throw new FlyApiError(409, "machine exited abruptly");
+      }
     },
     async suspendMachine(id: string) {
       calls.push(`suspendMachine:${id}`);
@@ -230,6 +239,88 @@ describe("FlyRunnerProvider", () => {
     expect(calls).not.toContain("createMachine");
   });
 
+  // Wake-intent lease (run-139 incident): the intent must be on the row BEFORE
+  // Fly is told to start the machine, so a lifecycle sweep tick landing between
+  // "machine started" and "worker's first heartbeat" spares it.
+  it("resume() records a wake intent before starting the machine", async () => {
+    const calls: string[] = [];
+    const run = await create({ goal: "<implement>", defer: true });
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      machineId: "m1",
+      volumeId: "v1",
+      region: "ams",
+      state: "suspended",
+    });
+    const provider = new FlyRunnerProvider(
+      fakeFlyClient(calls, { getMachine: { id: "m1", state: "suspended", region: "ams" } })
+    );
+
+    const before = Date.now();
+    await provider.resume(run.id);
+
+    const [row] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(row.wakeRequestedAt).toBeTruthy();
+    expect(row.wakeRequestedAt!.getTime()).toBeGreaterThanOrEqual(before - 1000);
+  });
+
+  // Run-135 incident: a single Fly 409 ("machine exited abruptly") on the wake
+  // propagated straight to failSpawn and failed the run. The wake now retries
+  // bounded before giving up.
+  it("resume() retries startMachine on a transient 409 and still returns the machine", async () => {
+    const calls: string[] = [];
+    const run = await create({ goal: "<implement>", defer: true });
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      machineId: "m1",
+      volumeId: "v1",
+      region: "ams",
+      state: "suspended",
+    });
+    const provider = new FlyRunnerProvider(
+      fakeFlyClient(calls, {
+        getMachine: { id: "m1", state: "suspended", region: "ams" },
+        startMachine409s: new Map([["m1", 1]]),
+      })
+    );
+
+    const ref = await provider.resume(run.id);
+
+    expect(ref?.handle).toBe("m1");
+    expect(calls.filter((c) => c === "startMachine:m1")).toHaveLength(2);
+    expect(calls).not.toContain("createMachine");
+  });
+
+  it("resume() cold-recovers a fresh machine on the same volume when the 409s never stop", async () => {
+    const calls: string[] = [];
+    const run = await create({ goal: "<implement>", defer: true });
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      machineId: "m-wedged",
+      volumeId: "v-stable",
+      region: "ams",
+      state: "suspended",
+    });
+    const provider = new FlyRunnerProvider(
+      fakeFlyClient(calls, {
+        getMachine: { id: "m-wedged", state: "suspended", region: "ams" },
+        // More 409s than the retry budget: the machine is unrecoverable.
+        startMachine409s: new Map([["m-wedged", 10]]),
+      })
+    );
+
+    const ref = await provider.resume(run.id);
+
+    // The corpse is destroyed and a fresh machine is created on the SAME volume
+    // (its warm checkout + SDK transcript survive) instead of failing the run.
+    expect(calls).toContain("destroyMachine:m-wedged");
+    expect(calls).toContain("createMachineVolume:v-stable");
+    expect(ref?.handle).toBe("m1");
+    const [row] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(row.machineId).toBe("m1");
+    expect(row.volumeId).toBe("v-stable");
+  });
+
   it("cold-recovers by creating a new machine on the same volume", async () => {
     const calls: string[] = [];
     const run = await create({ goal: "<implement>", defer: true });
@@ -271,6 +362,36 @@ describe("FlyRunnerProvider", () => {
     const [row] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
     expect(row.state).toBe("suspended");
     expect((await get(run.id))?.workerScope).toBeNull();
+  });
+
+  // The run-139 race end-to-end at the sweep level: machine running, run parked,
+  // NO live worker claim — but a wake intent was just stamped by resume(). The
+  // sweep must leave the machine alone until the worker's first heartbeat (or
+  // the intent's expiry) instead of suspending it out from under the boot.
+  it("sweep spares a just-woken machine (fresh wake intent, no claim yet)", async () => {
+    const calls: string[] = [];
+    const run = await create({ goal: "<chat>", defer: true });
+    await db.update(agentSessions)
+      .set({ status: "parked", workerScope: null, heartbeatAt: null })
+      .where(eq(agentSessions.id, run.id));
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      // Unique machine id: earlier tests leave "m1" runner rows behind, and the
+      // sweep walks EVERY row — a shared id would attribute their suspends to us.
+      machineId: "m-wake",
+      volumeId: "v1",
+      region: "ams",
+      state: "running",
+      lastStartedAt: new Date(Date.now() - 2 * 3600_000),
+      wakeRequestedAt: new Date(),
+    });
+
+    const provider = new FlyRunnerProvider(fakeFlyClient(calls, { machines: [{ id: "m-wake", state: "started", region: "ams" }] }));
+    await provider.sweep();
+
+    expect(calls).not.toContain("suspendMachine:m-wake");
+    const [row] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(row.state).toBe("running");
   });
 
   it("defers dispatch when TASK_ORCH_MAX_MACHINES would be exceeded", async () => {

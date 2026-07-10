@@ -22,6 +22,12 @@ export interface LifecycleInput {
   workerScope?: string | null;
   /** agent_sessions.heartbeat_at for this run. */
   heartbeatAt?: Date | null;
+  /** runner_instances.wake_requested_at: stamped just before the Fly start/create
+   *  call that wakes this runner, cleared by the worker's first heartbeat. A
+   *  fresh intent (younger than TASK_ORCH_RUNNER_WAKE_GRACE_MS) is treated
+   *  exactly like a live worker claim — see isWakeIntentFresh. Optional/
+   *  undefined keeps today's claim-only behavior. */
+  wakeRequestedAt?: Date | null;
   /** agent_sessions.goal for this run ('<execute>', '<chat>', a task goal, …).
    *  Used with runStatus to classify conversational terminal runs (see
    *  isConversationalTerminal). Optional/undefined keeps the status-only
@@ -43,6 +49,27 @@ function intEnv(key: string, dflt: number): number {
 // pre-action re-check (`isWorkerClaimLive(row)`) keeps working; run-liveness is
 // a leaf module, so importing it does not break lifecycle's dependency-lightness.
 export { isWorkerLive as isWorkerClaimLive };
+
+/**
+ * True while a recorded wake intent is still within its grace window
+ * (TASK_ORCH_RUNNER_WAKE_GRACE_MS, default 120s). Between "machine told to
+ * start" and "worker writes its first heartbeat" there is NO live claim to
+ * protect the machine — the resume path wakes it, and a sweep tick landing in
+ * that window sees a running machine with a parked/idle run and suspends it
+ * mid-boot; the reaper then fails the run for the heartbeat it never wrote
+ * (incident: run 139, suspended 64ms after its wake). A fresh intent must
+ * therefore be honored exactly like isWorkerLive. The window only needs to
+ * cover machine boot + first heartbeat (seconds); 120s leaves slack for a slow
+ * Fly start. A stale intent (worker never came up) expires naturally so the
+ * cost-control policy resumes.
+ */
+export function isWakeIntentFresh(
+  i: { wakeRequestedAt?: Date | null },
+  now = Date.now()
+): boolean {
+  const graceMs = intEnv("TASK_ORCH_RUNNER_WAKE_GRACE_MS", 120_000);
+  return i.wakeRequestedAt != null && now - i.wakeRequestedAt.getTime() < graceMs;
+}
 
 /** Terminal statuses dispatchRun will happily re-claim for a follow-up turn
  *  (everything terminal except the hard stops cancelled/closed). */
@@ -108,6 +135,14 @@ export function nextLifecycleAction(i: LifecycleInput): LifecycleAction {
   // parked chat worker winds down after its own idle timeout; an executor
   // finishes its turn) does the machine become eligible for suspend/stop.
   if (isWorkerLive(i)) return { kind: "none" };
+
+  // A fresh wake intent is a claim-in-the-making: the resume path just told Fly
+  // to start this machine so a worker can boot and take the run over, but the
+  // worker hasn't written its first heartbeat yet — so isWorkerLive above is
+  // still false. Acting on the snapshot here would suspend the machine out from
+  // under the boot (run-139 incident). Treated exactly like a live claim until
+  // the worker's first heartbeat clears the intent or it ages out.
+  if (isWakeIntentFresh(i)) return { kind: "none" };
 
   // Terminal runs hold no live worker, but a completed/failed/budget_exhausted
   // run is still revivable by dispatchRun (a follow-up turn or operator restart),
