@@ -524,6 +524,34 @@ suspenders — a wake lost to a crash between insert and dispatch is retried
 within 15s, forever, because the state ("parked + pending owner events") is
 durable. No wake is ever load-bearing on an in-process callback.
 
+### 6.2a Burst events — coalescing + debounced wake
+
+A single push to a PR fans out into MANY GitHub deliveries (check_run +
+check_suite + workflow_run + status, one set per check), each mapping to its
+own inbox event. Under the plain §6.2 rule that costs one wake — one whole
+LLM turn — per delivery, and whatever isn't woken individually piles into a
+25-event digest that bloats the next turn's prompt. Burst-class types
+(`gh.ci.completed`, `gh.pr.pushed` — `BURST_EVENT_TYPES` in `lib/inbox.ts`)
+therefore get two defenses:
+
+- **Coalescing at emit time:** a newer pending event supersedes older pending
+  ones with the same identity — same target, audience and type, plus the same
+  check name for `gh.ci.completed` (distinct checks coalesce independently;
+  *which* check failed is the information). Only the latest state of each
+  check / branch head is ever claimed and injected; the superseded rows are
+  retained for audit like §4.3 supersession.
+- **Debounced wake:** burst types never dispatch at emit time. The pump wake
+  sweep (§6.2 half 3) is their only wake path, and it holds a parked run whose
+  pending notify events are ALL burst-class until the newest is at least
+  `TASK_ORCH_EVENT_WAKE_QUIET_MS` old (default 90s — the storm settled), or
+  the oldest has waited `TASK_ORCH_EVENT_WAKE_MAX_DELAY_MS` (default 5min —
+  a continuous stream must not starve the run). Any pending non-burst notify
+  event still wakes immediately. Setting the quiet window to 0 disables the
+  debounce entirely.
+
+Net effect: a CI pipeline's whole webhook storm lands in ONE turn, as a short
+digest, instead of up to a turn per delivery.
+
 **Wake-loop guard:** a parked run woken more than N times (default 10) within
 an hour whose turns each end with no tool calls besides re-parking gets a
 `system.wake_loop` supervisor event on its parent and a UI flag, and further

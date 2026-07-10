@@ -11,9 +11,9 @@
 //                          through it. Control-class events are excluded
 //                          inside the primitive, not by caller convention.
 //
-// This module depends only on db/schema and lib/types; anything that needs
-// the runner (waking a parked run) goes through a lazy dynamic import so
-// runs.ts / run-dispatch.ts can import us without a cycle.
+// This module depends only on db/schema, lib/config and lib/types; anything
+// that needs the runner (waking a parked run) goes through a lazy dynamic
+// import so runs.ts / run-dispatch.ts can import us without a cycle.
 
 import { and, asc, desc, eq, inArray, lt, sql } from "drizzle-orm";
 
@@ -26,6 +26,7 @@ import {
   type InboxEvent,
   type RunTimer,
 } from "@/db/schema";
+import { intEnv } from "./config";
 import { isTerminalStatus, type SessionStatus } from "./types";
 
 // ────────────────────────────────────────
@@ -56,6 +57,38 @@ export const TERMINAL_CHILD_TYPES = new Set<string>([
   "child.died",
   "child.cancelled",
 ]);
+
+/**
+ * Burst-class events (§6.2a): a single push to a PR fans out into MANY GitHub
+ * deliveries (check_run + check_suite + workflow_run + status, one set per
+ * check), each of which maps to its own inbox event. Left alone, one CI storm
+ * piles up dozens of near-identical pending rows — a 25-event digest that
+ * bloats the next turn's prompt — and, worse, each arrival wakes the parked
+ * run individually, burning one whole LLM turn per delivery. Two defenses,
+ * both keyed off this set:
+ *   1. COALESCING at emit time: a newer pending event supersedes older pending
+ *      ones with the same identity (same target/audience/type — and for
+ *      gh.ci.completed the same check name, since distinct checks carry
+ *      distinct information). Only the latest state of each check/branch head
+ *      is ever injected.
+ *   2. DEBOUNCED WAKE: burst types never dispatch at emit time. The pump wake
+ *    sweep (parkedRunsWithPendingEvents) wakes the run once the burst has gone
+ *    quiet for eventWakeQuietMs, or unconditionally after eventWakeMaxDelayMs —
+ *    so a whole CI pipeline lands in ONE turn instead of one turn per check.
+ */
+export const BURST_EVENT_TYPES = new Set<string>(["gh.ci.completed", "gh.pr.pushed"]);
+
+/** Quiet window for the debounced wake: a parked run with only burst-class
+ *  pending events is woken once no new one has arrived for this long. */
+export function eventWakeQuietMs(): number {
+  return intEnv("TASK_ORCH_EVENT_WAKE_QUIET_MS", 90_000);
+}
+
+/** Hard ceiling on the debounce: a burst event pending at least this long
+ *  wakes the run even while new deliveries keep streaming in. */
+export function eventWakeMaxDelayMs(): number {
+  return intEnv("TASK_ORCH_EVENT_WAKE_MAX_DELAY_MS", 5 * 60_000);
+}
 
 /**
  * Parent-visible types (§5.2): when the direct target has a live parent,
@@ -149,6 +182,46 @@ async function nearestLiveAncestor(startParentId: number | null, maxSteps = 8): 
   // No live ancestor: return the topmost we saw (the root) so the caller can
   // still flag an unhandled tree failure — events must never vanish.
   return last;
+}
+
+/**
+ * Burst coalescing (§6.2a): mark still-pending events that a freshly inserted
+ * burst-class event makes redundant as `superseded`, so only the newest state
+ * of each identity is ever claimed/injected. Identity = (target, audience,
+ * type), plus the check name for gh.ci.completed — different checks coalesce
+ * independently (which check failed IS the information). Runs AFTER the insert
+ * and only supersedes rows older than it: an insert deduped away must not
+ * supersede anything (the surviving row already carries this fact), and a
+ * concurrently inserted newer event must stay pending. No-op for non-burst
+ * types.
+ */
+async function supersedeCoalescedPending(
+  executor: DbTx | typeof db,
+  input: {
+    targetRunId: number;
+    newEventId: number;
+    audience: Audience;
+    type: string;
+    payload: Record<string, unknown>;
+  }
+): Promise<void> {
+  if (!BURST_EVENT_TYPES.has(input.type)) return;
+  const conditions = [
+    eq(inboxEvents.targetRunId, input.targetRunId),
+    eq(inboxEvents.audience, input.audience),
+    eq(inboxEvents.type, input.type),
+    eq(inboxEvents.status, "pending"),
+    lt(inboxEvents.id, input.newEventId),
+  ];
+  if (input.type === "gh.ci.completed") {
+    const check = typeof input.payload.check === "string" ? input.payload.check : null;
+    conditions.push(
+      check == null
+        ? sql`${inboxEvents.payload}->>'check' IS NULL`
+        : sql`${inboxEvents.payload}->>'check' = ${check}`
+    );
+  }
+  await executor.update(inboxEvents).set({ status: "superseded" }).where(and(...conditions));
 }
 
 async function insertEvent(
@@ -270,7 +343,19 @@ export async function emitInboxEvent(input: EmitInput): Promise<EmitResult> {
       })
       .onConflictDoNothing()
       .returning({ id: inboxEvents.id });
-    return rows[0]?.id ?? null;
+    const insertedId = rows[0]?.id ?? null;
+    // Burst coalescing (§6.2a): same tx as the insert, so a claimer never
+    // observes the new event alongside the stale ones it replaces.
+    if (insertedId != null) {
+      await supersedeCoalescedPending(tx, {
+        targetRunId: target.id,
+        newEventId: insertedId,
+        audience,
+        type: input.type,
+        payload: input.payload ?? {},
+      });
+    }
+    return insertedId;
   });
   if (eventId != null) {
     await mirrorInboxEventMessage({
@@ -311,6 +396,16 @@ export async function emitInboxEvent(input: EmitInput): Promise<EmitResult> {
         dedupeKey: input.dedupeKey ? `sup:${input.dedupeKey}` : null,
       }).catch(() => null);
       if (copyId != null) {
+        // Best-effort coalescing for the copy, mirroring the owner insert above.
+        await supersedeCoalescedPending(db, {
+          targetRunId: parent.id,
+          newEventId: copyId,
+          audience: "supervisor",
+          type: input.type,
+          payload: input.payload ?? {},
+        }).catch(() => {});
+      }
+      if (copyId != null) {
         await mirrorInboxEventMessage({
           targetRunId: parent.id,
           eventId: copyId,
@@ -324,7 +419,13 @@ export async function emitInboxEvent(input: EmitInput): Promise<EmitResult> {
           bubbledFrom: target.id,
         }).catch(() => {});
       }
-      if (copyId != null && !input.noWake && parent.status === "parked") {
+      if (
+        copyId != null &&
+        !input.noWake &&
+        // Burst types wake through the debounced pump sweep instead (§6.2a).
+        !BURST_EVENT_TYPES.has(input.type) &&
+        parent.status === "parked"
+      ) {
         try {
           const runDispatch = await import("./run-dispatch");
           void runDispatch.dispatchRun(parent.id).catch(() => {});
@@ -337,14 +438,18 @@ export async function emitInboxEvent(input: EmitInput): Promise<EmitResult> {
 
   // Wake (§6.2): pending owner-audience notify event + parked target →
   // dispatch. Control events never wake through this path (the platform
-  // enforcement they mirror has its own machinery). Lazy import to avoid a
-  // module cycle; failure is fine — the pump wake sweep is the durable belt.
+  // enforcement they mirror has its own machinery), and burst-class events
+  // deliberately don't either — they wake through the pump sweep's debounce
+  // (§6.2a) so a webhook storm costs one turn, not one turn per delivery.
+  // Lazy import to avoid a module cycle; failure is fine — the pump wake
+  // sweep is the durable belt.
   let woke = false;
   if (
     eventId != null &&
     !input.noWake &&
     audience === "owner" &&
     !CONTROL_TYPES.has(input.type) &&
+    !BURST_EVENT_TYPES.has(input.type) &&
     target.status === "parked"
   ) {
     try {
@@ -577,24 +682,58 @@ export async function listRunTimers(runId: number, limit = 50): Promise<RunTimer
  * Pump wake sweep (§6.2 belt): parked runs with pending owner-OR-supervisor
  * audience notify events (§5.2a — a supervisor copy's arrival wakes a parked
  * coordinator too). Bounded; the pending partial index keeps this cheap.
+ *
+ * Burst-class events (§6.2a) are debounced HERE — this sweep is their only
+ * wake path (emit skips the immediate dispatch for them). A run whose pending
+ * notify events are ALL burst-class wakes only once the newest of them is at
+ * least eventWakeQuietMs old (the storm has settled), or once the oldest has
+ * waited eventWakeMaxDelayMs (a continuous stream must not starve the run
+ * forever). Any pending non-burst notify event still wakes immediately.
  */
-export async function parkedRunsWithPendingEvents(limit = 50): Promise<number[]> {
+export async function parkedRunsWithPendingEvents(
+  limit = 50,
+  now = new Date()
+): Promise<number[]> {
+  const controlList = sql.join(
+    [...CONTROL_TYPES].map((t) => sql`${t}`),
+    sql`, `
+  );
+  const burstList = sql.join(
+    [...BURST_EVENT_TYPES].map((t) => sql`${t}`),
+    sql`, `
+  );
+  const quietMs = Math.max(0, eventWakeQuietMs());
+  // ISO strings, not Date objects: params inside a raw sql`` fragment carry no
+  // column type info, and the postgres driver rejects bare Dates there.
+  const quietCutoff = new Date(now.getTime() - quietMs).toISOString();
+  const maxCutoff = new Date(
+    now.getTime() - Math.max(quietMs, eventWakeMaxDelayMs())
+  ).toISOString();
+  // Base predicate shared by every branch: a pending notify event addressed to
+  // this parked run. Control-class rows never wake (§6.6).
+  const pendingNotify = (extra: ReturnType<typeof sql>) => sql`
+    EXISTS (SELECT 1 FROM ${inboxEvents}
+      WHERE ${inboxEvents.targetRunId} = ${agentSessions.id}
+        AND ${inboxEvents.status} = 'pending'
+        AND ${inboxEvents.audience} IN ('owner', 'supervisor')
+        AND ${inboxEvents.type} NOT IN (${controlList})
+        ${extra})`;
+  const wakeCondition =
+    quietMs <= 0
+      ? // Debounce disabled: original behavior — any pending notify event wakes.
+        pendingNotify(sql``)
+      : sql`(
+          ${pendingNotify(sql`AND ${inboxEvents.type} NOT IN (${burstList})`)}
+          OR ${pendingNotify(sql`AND ${inboxEvents.type} IN (${burstList}) AND ${inboxEvents.createdAt} <= ${maxCutoff}`)}
+          OR (
+            ${pendingNotify(sql`AND ${inboxEvents.type} IN (${burstList})`)}
+            AND NOT ${pendingNotify(sql`AND ${inboxEvents.type} IN (${burstList}) AND ${inboxEvents.createdAt} > ${quietCutoff}`)}
+          )
+        )`;
   const rows = await db
     .select({ id: agentSessions.id })
     .from(agentSessions)
-    .where(
-      and(
-        eq(agentSessions.status, "parked"),
-        sql`EXISTS (SELECT 1 FROM ${inboxEvents}
-              WHERE ${inboxEvents.targetRunId} = ${agentSessions.id}
-                AND ${inboxEvents.status} = 'pending'
-                AND ${inboxEvents.audience} IN ('owner', 'supervisor')
-                AND ${inboxEvents.type} NOT IN (${sql.join(
-                  [...CONTROL_TYPES].map((t) => sql`${t}`),
-                  sql`, `
-                )}))`
-      )
-    )
+    .where(and(eq(agentSessions.status, "parked"), wakeCondition))
     .limit(limit);
   return rows.map((r) => r.id);
 }

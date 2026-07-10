@@ -32,6 +32,7 @@ import { RunMessage } from "@/components/runs/run-message";
 import { ToolGroup, type ToolInteraction } from "@/components/tool-group";
 import { SystemEventRow } from "@/components/runs/system-event-row";
 import { EventDigestCard, type DigestEnvelope } from "@/components/runs/event-digest-card";
+import { InboxEventFoldRow } from "@/components/runs/inbox-event-fold";
 import { InboxPanel } from "@/components/runs/inbox-panel";
 import { PlanningReviewCard } from "@/components/runs/planning-review-card";
 import { StartupIndicator } from "@/components/runs/startup-indicator";
@@ -772,6 +773,16 @@ export function RunView({
                   createdAt={seg.createdAt}
                   interactions={buildToolInteractions(seg.messages)}
                 />
+              ) : seg.kind === "inbox_events" ? (
+                <InboxEventFoldRow
+                  key={seg.key}
+                  events={seg.messages.map((m) => ({
+                    key: `m-${m.id}`,
+                    when: m.createdAt ?? new Date(),
+                    payload: m.systemPayload ?? {},
+                    content: m.content,
+                  }))}
+                />
               ) : seg.message.role === "system" ? (
                 seg.message.systemKind === "event_digest" ? (
                   <EventDigestCard
@@ -981,7 +992,10 @@ type TranscriptSegment =
       key: string;
       createdAt?: Date;
       messages: Array<{ id: number | string; content: SdkContentBlock[] }>;
-    };
+    }
+  // A consecutive stretch of 2+ per-event `inbox_event` mirror rows, folded
+  // into one compact expandable row (a webhook storm writes one per delivery).
+  | { kind: "inbox_events"; key: string; messages: UiMessage[] };
 
 function segmentTranscript(messages: UiMessage[]): TranscriptSegment[] {
   const out: TranscriptSegment[] = [];
@@ -990,6 +1004,7 @@ function segmentTranscript(messages: UiMessage[]): TranscriptSegment[] {
     content: SdkContentBlock[];
     createdAt?: Date;
   }> = [];
+  let inboxRows: UiMessage[] = [];
 
   const flushTools = () => {
     if (tools.length === 0) return;
@@ -1002,7 +1017,23 @@ function segmentTranscript(messages: UiMessage[]): TranscriptSegment[] {
     tools = [];
   };
 
+  const flushInbox = () => {
+    if (inboxRows.length === 0) return;
+    if (inboxRows.length === 1) {
+      out.push({ kind: "message", key: `m-${inboxRows[0].id}`, message: inboxRows[0] });
+    } else {
+      out.push({ kind: "inbox_events", key: `ie-${inboxRows[0].id}`, messages: inboxRows });
+    }
+    inboxRows = [];
+  };
+
   for (const message of messages) {
+    if (message.role === "system" && message.systemKind === "inbox_event") {
+      flushTools();
+      inboxRows.push(message);
+      continue;
+    }
+    flushInbox();
     if (message.role === "system") {
       flushTools();
       out.push({ kind: "message", key: `m-${message.id}`, message });
@@ -1040,6 +1071,7 @@ function segmentTranscript(messages: UiMessage[]): TranscriptSegment[] {
     flushText();
   }
 
+  flushInbox();
   flushTools();
   return out;
 }

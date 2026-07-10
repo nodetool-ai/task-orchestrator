@@ -1,7 +1,10 @@
 "use client";
 
+import { useState } from "react";
 import {
   AlarmClock,
+  ChevronDown,
+  ChevronRight,
   Eye,
   GitPullRequest,
   ListTodo,
@@ -34,10 +37,26 @@ export interface DigestEnvelope {
 // the db singleton, which must not reach the client bundle).
 const CONTROL_TYPES = new Set(["run.cancel_requested", "run.budget_exhausted"]);
 
+/**
+ * Per-type counts for the folded summary line, most frequent first (ties by
+ * first appearance). Pure; exported for unit tests.
+ */
+export function summarizeDigestTypes(rows: Array<{ type: string }>): Array<[string, number]> {
+  const counts = new Map<string, number>();
+  for (const r of rows) counts.set(r.type, (counts.get(r.type) ?? 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+}
+
 // The "woken by: …" card (docs/agent-events.md §11): a digest frame persisted
 // at turn start is exactly what the agent saw, so the timeline renders the
 // same data — owner events (the ones the run must act on) first, then the
 // informational supervisor section. Every wake is explainable in place.
+//
+// FOLDED by default: a webhook storm can wake a run with dozens of events, and
+// one row per event turns the timeline into noise. The card collapses to a
+// single line — "Woken by N events" plus per-type counts — and expands on
+// click to the full per-event rows. A single-event wake needs no fold and
+// renders expanded.
 export function EventDigestCard({
   when,
   events,
@@ -48,32 +67,72 @@ export function EventDigestCard({
   const rows = (Array.isArray(events) ? events : []).filter(
     (e): e is DigestEnvelope => !!e && typeof e === "object" && typeof e.type === "string"
   );
+  const foldable = rows.length > 1;
+  const [expanded, setExpanded] = useState(false);
+  const open = !foldable || expanded;
   const owner = rows.filter((e) => e.audience !== "supervisor");
   const supervisor = rows.filter((e) => e.audience === "supervisor");
+  const typeCounts = summarizeDigestTypes(rows);
   // Old/malformed frames may lack event_id; fall back to the list position so
   // React keys stay unique and stable within a render.
   const keyFor = (e: DigestEnvelope, i: number) =>
     typeof e.event_id === "number" ? `e-${e.event_id}` : `i-${i}`;
 
+  const header = (
+    <>
+      <Zap className="size-3.5 shrink-0 text-state-review" />
+      <span className="shrink-0 font-semibold text-foreground">
+        Woken by {rows.length} event{rows.length === 1 ? "" : "s"}
+      </span>
+      {!open && (
+        <span className="flex min-w-0 flex-wrap items-center gap-1 overflow-hidden">
+          {typeCounts.map(([type, n]) => (
+            <span
+              key={type}
+              className="inline-flex items-center gap-1 rounded bg-muted/50 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+            >
+              {type}
+              {n > 1 && <span className="tabular-nums text-muted-foreground/70">×{n}</span>}
+            </span>
+          ))}
+        </span>
+      )}
+      <span className="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground/80">
+        {formatDateTime(when)}
+      </span>
+    </>
+  );
+
   return (
     <div className="mx-4 my-2 rounded-md border border-state-review/30 bg-card/40 text-[11px]">
-      <div className="flex items-center gap-2 border-b border-border/60 px-3 py-1.5 text-muted-foreground">
-        <Zap className="size-3.5 text-state-review" />
-        <span className="font-semibold text-foreground">
-          Woken by {rows.length} event{rows.length === 1 ? "" : "s"}
-        </span>
-        <span className="ml-auto text-[10px] tabular-nums text-muted-foreground/80">
-          {formatDateTime(when)}
-        </span>
-      </div>
-      {owner.length > 0 && (
+      {foldable ? (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-muted-foreground hover:bg-muted/30 ${
+            open ? "border-b border-border/60" : ""
+          }`}
+        >
+          {open ? (
+            <ChevronDown className="size-3 shrink-0 text-muted-foreground/70" />
+          ) : (
+            <ChevronRight className="size-3 shrink-0 text-muted-foreground/70" />
+          )}
+          {header}
+        </button>
+      ) : (
+        <div className="flex items-center gap-2 border-b border-border/60 px-3 py-1.5 text-muted-foreground">
+          {header}
+        </div>
+      )}
+      {open && owner.length > 0 && (
         <div className="divide-y divide-border/40">
           {owner.map((e, i) => (
             <EnvelopeRow key={keyFor(e, i)} envelope={e} />
           ))}
         </div>
       )}
-      {supervisor.length > 0 && (
+      {open && supervisor.length > 0 && (
         <div>
           <div className="flex items-center gap-1.5 border-t border-border/60 bg-muted/30 px-3 py-1 text-[10px] uppercase tracking-wider text-muted-foreground">
             <Eye className="size-3" />
