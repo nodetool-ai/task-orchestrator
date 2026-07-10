@@ -55,7 +55,7 @@ import { assistantText, toolResults, type SdkContentBlock } from "./sdk-message"
 import type { AgentSessionFull, RepositoryRow } from "./types";
 // The run status vocabulary + state machine live in lib/run-state.ts. Pull the
 // pieces runs.ts needs directly from there (types.ts only re-exports a subset).
-import type { SessionStatus, TurnEndDecisionInput } from "./run-state";
+import type { ResultReport, SessionStatus, TurnEndDecisionInput } from "./run-state";
 import {
   isTerminalStatus,
   LEASE_STATUSES,
@@ -455,6 +455,47 @@ function treeLimitEnv(key: string, dflt: number): number {
 // guard: a self-referential/cyclic parent_run_id graph (shouldn't happen, but
 // nothing enforces it at the DB level) must not hang a create()/dispatchRun call.
 const MAX_PARENT_WALK = 64;
+
+// Hard ceiling on the "keep going until there's a PR" continuation loop in
+// append(). An implement-worktree turn that ends without a PR (and without
+// report_result/raise) re-lands 'running', and the loop re-prompts the agent to
+// continue. The configured budgets bound this only partially: budgetMaxSeconds/
+// budgetMaxUsd catch it only when set, and budgetMaxTurns is counted per
+// runOneTurn — NOT cumulatively across continuations — so an agent that keeps
+// ending turns quickly without ever opening a PR would loop forever. Cap the
+// number of consecutive no-PR continuations; on exhaustion, land 'failed' with a
+// structured result instead of spinning. Tunable via env; floored at 1 so the
+// loop always makes at least one continuation attempt before giving up.
+export const MAX_PR_CONTINUATIONS = Math.max(
+  1,
+  Math.floor(Number(process.env.TASK_ORCH_MAX_PR_CONTINUATIONS ?? 25)) || 25
+);
+
+/**
+ * The structured failure a run lands when the no-PR continuation loop hits its
+ * ceiling. Pure (timestamp injected) so the payload is unit-testable without
+ * driving the whole append() generator. Mirrors a report_result({ status:
+ * "failed" }) so the stop is observable and the run stays resumable.
+ */
+export function prContinuationFailureResult(
+  count: number,
+  max: number,
+  reportedAt: string
+): ResultReport {
+  return {
+    kind: "result",
+    status: "failed",
+    summary:
+      `Stopped after ${count} turns without producing a PR ` +
+      `(TASK_ORCH_MAX_PR_CONTINUATIONS=${max}). The agent kept ending turns without ` +
+      "opening a pull request and without calling report_result/raise, so the run was " +
+      "failed to avoid an infinite loop.",
+    data: null,
+    pr_url: null,
+    needs: null,
+    reported_at: reportedAt,
+  };
+}
 
 /** A run's own parent_run_id, or null if the run has none — or no longer exists
  *  (parent_run_id carries no FK, so an ancestor can be deleted out from under
@@ -1182,6 +1223,10 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     let nextStatus: SessionStatus = "idle";
     let turnEnd: Awaited<ReturnType<typeof readTurnEndState>> | null = null;
     let outcomeUpdate = run.outcome;
+    // How many times this append() has re-prompted the agent to keep going
+    // because an implement-worktree turn ended without a PR. Bounded by
+    // MAX_PR_CONTINUATIONS so the loop can't spin forever (see the guard below).
+    let prContinuations = 0;
 
     while (true) {
       // Fresh turn = fresh tool intent. Without this, a prior report_result()
@@ -1281,6 +1326,31 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
           : run.outcome;
 
       if (isImplementWorktree(run) && nextStatus === "running") {
+        prContinuations += 1;
+        // Safety stop: the agent has ended this many turns without ever opening
+        // a PR (and without report_result/raise). Rather than re-prompt forever,
+        // land 'failed' with a structured result so the run is observable and
+        // resumable like any other failure instead of spinning invisibly.
+        if (prContinuations >= MAX_PR_CONTINUATIONS) {
+          await (await runTransport()).patchRun(run.id, {
+            result: prContinuationFailureResult(
+              prContinuations,
+              MAX_PR_CONTINUATIONS,
+              new Date().toISOString()
+            ),
+          });
+          await persistMessage(run.id, "system", [
+            {
+              type: "text",
+              text:
+                `Reached the ${MAX_PR_CONTINUATIONS}-turn limit for producing a PR without ` +
+                "success; landing this run as failed to avoid an infinite loop. Resume the run " +
+                "to keep working, or raise TASK_ORCH_MAX_PR_CONTINUATIONS.",
+            },
+          ]);
+          nextStatus = "failed";
+          break;
+        }
         await persistMessage(run.id, "system", [
           {
             type: "text",
