@@ -1,9 +1,10 @@
-// Mergeability probe for the task page's `Resolve merge` button. Shells
-// `gh pr view` to learn whether a PR currently conflicts with its base, and
-// what that base branch is. Kept tiny and pure-at-the-core so the parsing is
-// unit-testable without spawning gh.
+// Mergeability probe for the task page's `Resolve merge` button. Fetches PR
+// mergeability via the in-process Octokit client to learn whether a PR
+// currently conflicts with its base, and what that base branch is. Kept
+// tiny and pure-at-the-core so the parsing is unit-testable without any I/O.
 
-import { spawn } from "node:child_process";
+import { parsePrUrl } from "./gh-url";
+import { getOctokit } from "./github-client";
 
 export type Mergeable = "CONFLICTING" | "MERGEABLE" | "UNKNOWN";
 
@@ -15,9 +16,10 @@ export interface Mergeability {
 const UNKNOWN: Mergeability = { mergeable: "UNKNOWN", baseRef: null };
 
 /**
- * Parse `gh pr view --json mergeable,baseRefName` output. Any shape we don't
+ * Parse a `{ mergeable, baseRefName }` JSON blob (the shape the old
+ * `gh pr view --json mergeable,baseRefName` emitted). Any shape we don't
  * recognise collapses to UNKNOWN so the button fails closed (hidden) rather
- * than showing a bogus merge prompt.
+ * than showing a bogus merge prompt. Kept as the unit-testable core.
  */
 export function parseMergeability(raw: string): Mergeability {
   let obj: unknown;
@@ -38,25 +40,33 @@ export function parseMergeability(raw: string): Mergeability {
   return { mergeable, baseRef };
 }
 
-/** Run `gh pr view <url>` and return its mergeability; UNKNOWN on any failure. */
+/**
+ * Map REST `pulls.get`'s tri-state `mergeable` boolean to the gh enum string
+ * that {@link parseMergeability} understands, so the pure parser stays the
+ * single source of truth for the mapping.
+ */
+function ghMergeableString(mergeable: boolean | null | undefined): string {
+  if (mergeable === true) return "MERGEABLE";
+  if (mergeable === false) return "CONFLICTING";
+  return "UNKNOWN";
+}
+
+/** Fetch a PR's mergeability via Octokit; UNKNOWN on any failure. */
 export async function prMergeability(prUrl: string): Promise<Mergeability> {
+  const parsed = parsePrUrl(prUrl);
+  if (!parsed) return UNKNOWN;
   try {
-    const raw = await new Promise<string>((res, rej) => {
-      const child = spawn(
-        "gh",
-        ["pr", "view", prUrl, "--json", "mergeable,baseRefName"],
-        { env: process.env }
-      );
-      let out = "";
-      let err = "";
-      child.stdout.on("data", (d) => (out += d.toString()));
-      child.stderr.on("data", (d) => (err += d.toString()));
-      child.on("error", rej);
-      child.on("close", (code) =>
-        code === 0 ? res(out) : rej(new Error(err.trim() || `gh exited ${code}`))
-      );
+    const { data: pr } = await getOctokit().pulls.get({
+      owner: parsed.owner,
+      repo: parsed.repo,
+      pull_number: parsed.number,
     });
-    return parseMergeability(raw);
+    return parseMergeability(
+      JSON.stringify({
+        mergeable: ghMergeableString(pr.mergeable),
+        baseRefName: (pr.base as { ref?: string } | null)?.ref ?? null,
+      })
+    );
   } catch {
     return UNKNOWN;
   }

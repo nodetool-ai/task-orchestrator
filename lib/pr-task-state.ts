@@ -10,13 +10,14 @@
 // those transitions, funnelled through `applyTaskStateFromPr` so both paths
 // stay consistent.
 
-import { spawn } from "node:child_process";
 import { and, desc, eq, isNotNull, notInArray } from "drizzle-orm";
 
 import { db } from "@/db";
 import { agentSessions, tasks } from "@/db/schema";
 import * as repo from "./repo";
 import { maybeTriggerAutofix, type AutofixCandidate } from "./ci-autofix";
+import { parsePrUrl } from "./gh-url";
+import { getOctokit, fetchChecksRollupForRef } from "./github-client";
 import { TASK_TRANSITIONS, type TaskState } from "./types";
 
 // ──────────────────────────────────────────────────────────
@@ -54,9 +55,9 @@ export function prToTaskState(s: PrGithubState): TaskState {
 
 /** A single entry of `gh pr view --json statusCheckRollup`. */
 interface RollupCheck {
-  status?: string; // check-run status (queued|in_progress|completed)
-  conclusion?: string; // check-run conclusion (success|failure|neutral|…)
-  state?: string; // legacy commit-status state (SUCCESS|FAILURE|PENDING|…)
+  status?: string | null; // check-run status (queued|in_progress|completed)
+  conclusion?: string | null; // check-run conclusion (success|failure|neutral|…)
+  state?: string | null; // legacy commit-status state (SUCCESS|FAILURE|PENDING|…)
 }
 
 /**
@@ -108,54 +109,44 @@ export function rollupToCiConclusion(
   return "success";
 }
 
-interface PrViewJson {
-  state?: string;
-  mergedAt?: string | null;
-  statusCheckRollup?: RollupCheck[];
-}
-
 /**
- * Fetch a PR's real GitHub state via `gh pr view <url> --json …`, mapped to a
- * {@link PrGithubState}. Returns null on any failure (spawn error, non-zero
- * exit, unparsable output) so callers can skip that PR without aborting.
+ * Fetch a PR's real GitHub state via the in-process Octokit client, mapped to a
+ * {@link PrGithubState}. Returns null on any failure (unparsable URL, API error)
+ * so callers can skip that PR without aborting.
  *
- * Uses the same `gh` spawn pattern as lib/extensions/gh-pr.ts (`gh_pr__pr_view`
- * requests the same `state,mergedAt,statusCheckRollup` fields).
+ * Mirrors what `gh_pr__pr_view` reads: PR state/merge, plus the combined
+ * check-runs + commit-statuses rollup for the PR head, collapsed via
+ * {@link rollupToCiConclusion}.
  */
-export function fetchPrGithubState(prUrl: string): Promise<PrGithubState | null> {
-  return new Promise((resolveP) => {
-    const child = spawn(
-      "gh",
-      ["pr", "view", prUrl, "--json", "state,mergedAt,statusCheckRollup"],
-      { env: process.env }
-    );
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d) => (stdout += d.toString()));
-    child.stderr.on("data", (d) => (stderr += d.toString()));
-    child.on("error", () => resolveP(null));
-    child.on("close", (code) => {
-      if (code !== 0) {
-        if (stderr) console.warn("gh pr view failed:", stderr.trim());
-        resolveP(null);
-        return;
-      }
-      try {
-        const parsed = JSON.parse(stdout) as PrViewJson;
-        const state = (parsed.state ?? "").toUpperCase();
-        const checks = Array.isArray(parsed.statusCheckRollup)
-          ? parsed.statusCheckRollup
-          : [];
-        resolveP({
-          merged: state === "MERGED",
-          closed: state === "CLOSED",
-          ciConclusion: rollupToCiConclusion(checks),
-        });
-      } catch {
-        resolveP(null);
-      }
+export async function fetchPrGithubState(prUrl: string): Promise<PrGithubState | null> {
+  const parsed = parsePrUrl(prUrl);
+  if (!parsed) return null;
+  const { owner, repo: repoName, number } = parsed;
+  try {
+    const { data: pr } = await getOctokit().pulls.get({
+      owner,
+      repo: repoName,
+      pull_number: number,
     });
-  });
+    const state = String(pr.state ?? "").toUpperCase();
+    const merged = pr.merged === true || pr.merged_at != null;
+    const closed = state === "CLOSED" && !merged;
+    const headSha = (pr.head as { sha?: string } | null)?.sha;
+    const checks: RollupCheck[] = headSha
+      ? await fetchChecksRollupForRef(owner, repoName, headSha)
+      : [];
+    return {
+      merged,
+      closed,
+      ciConclusion: rollupToCiConclusion(checks),
+    };
+  } catch (err) {
+    console.warn(
+      "fetchPrGithubState failed:",
+      err instanceof Error ? err.message : err
+    );
+    return null;
+  }
 }
 
 // ──────────────────────────────────────────────────────────

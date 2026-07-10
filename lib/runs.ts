@@ -51,6 +51,7 @@ import {
   parseReviewVerdict,
 } from "./run-templates";
 import { parsePrUrl, ownerRepoFromRemote } from "./gh-url";
+import { getOctokit } from "./github-client";
 import { assistantText, toolResults, type SdkContentBlock } from "./sdk-message";
 import type { AgentSessionFull, RepositoryRow } from "./types";
 // The run status vocabulary + state machine live in lib/run-state.ts. Pull the
@@ -3152,25 +3153,54 @@ async function openPr({ task, branch, baseBranch, worktreePath, summary }: OpenP
   const title = `[${task.id}] ${task.title}`;
   const body = buildPrBody(task, summary);
   try {
-    const out = await sh(
-      ["gh", "pr", "create", "--title", title, "--body", body, "--base", baseBranch, "--head", branch],
-      worktreePath
-    );
-    const m = out.match(/https?:\/\/\S+/);
-    return m ? m[0] : out.trim() || null;
+    // The gh CLI used to infer owner/repo from the worktree's origin remote;
+    // do the same, then open the PR in-process via Octokit.
+    const remoteUrl = (await sh(["git", "remote", "get-url", "origin"], worktreePath)).trim();
+    const or = ownerRepoFromRemote(remoteUrl);
+    if (!or) {
+      console.warn(`gh pr create failed: could not parse owner/repo from remote '${remoteUrl}'`);
+      return null;
+    }
+    const { data } = await getOctokit().pulls.create({
+      owner: or.owner,
+      repo: or.repo,
+      title,
+      body,
+      base: baseBranch,
+      head: branch,
+    });
+    return data.html_url ?? null;
   } catch (err) {
     console.warn(`gh pr create failed: ${describe(err)}`);
     return null;
   }
 }
 
-async function armAutoMerge(prUrl: string, worktreePath: string): Promise<string | null> {
+async function armAutoMerge(prUrl: string, _worktreePath: string): Promise<string | null> {
   try {
-    const out = await sh(
-      ["gh", "pr", "merge", prUrl, "--auto", "--squash", "--delete-branch"],
-      worktreePath
+    const parsed = parsePrUrl(prUrl);
+    if (!parsed) {
+      console.warn(`gh pr merge --auto failed: could not parse PR url '${prUrl}'`);
+      return null;
+    }
+    // Auto-merge is a GraphQL-only mutation (no REST equivalent). Arm it with
+    // the squash method, mirroring `gh pr merge --auto --squash`. Head-branch
+    // deletion after merge follows the repo's auto-merge setting.
+    const octokit = getOctokit();
+    const { data: pr } = await octokit.pulls.get({
+      owner: parsed.owner,
+      repo: parsed.repo,
+      pull_number: parsed.number,
+    });
+    await octokit.graphql(
+      `mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
+        enablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId, mergeMethod: $mergeMethod }) {
+          clientMutationId
+        }
+      }`,
+      { pullRequestId: pr.node_id, mergeMethod: "SQUASH" }
     );
-    return out.trim() || "auto-merge armed";
+    return "auto-merge armed";
   } catch (err) {
     console.warn(`gh pr merge --auto failed: ${describe(err)}`);
     return null;
