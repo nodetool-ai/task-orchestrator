@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, MessagesSquare } from "lucide-react";
+import { ArrowLeft, MessagesSquare, PlayCircle } from "lucide-react";
 import { PlanRepositories } from "@/components/plan-repositories";
 import { DeleteButton } from "@/components/delete-button";
 import { ExecutePlanButton } from "@/components/execute-plan-button";
@@ -33,7 +33,13 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
   const { done, total, pct } = await repo.planProgress(plan.id);
   const allRepositories = await repo.listRepositories();
   const personas = await repo.listPersonas();
-  const planChats = (await listRuns({ planId: plan.id })).slice(0, 8);
+  // Runs scoped to this plan split into two kinds: plan-executor runs
+  // (goal=<execute>, the lightweight orchestration loop) and ordinary chats.
+  // They render as separate sections so an executor run is reachable as what
+  // it is rather than masquerading as a chat.
+  const planRuns = await listRuns({ planId: plan.id });
+  const executorRuns = planRuns.filter((r) => r.goal === "<execute>").slice(0, 8);
+  const planChats = planRuns.filter((r) => r.goal !== "<execute>").slice(0, 8);
   const chatPromptPrefix = buildPlanChatPromptPrefix(plan, tasks);
 
   const groupOrder: TaskState[] = [...TASK_BOARD_STATES, "merged", "cancelled"];
@@ -145,6 +151,32 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
           personas={personas}
         />
       </PageSection>
+
+      {executorRuns.length > 0 && (
+        <PageSection className="mt-8" title="Plan executor runs">
+          <ListPanel>
+            {executorRuns.map((r) => (
+              <Link
+                key={r.id}
+                href={`/runs/${r.id}`}
+                className="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/40 transition-colors"
+              >
+                <PlayCircle className="size-3.5 text-muted-foreground shrink-0" />
+                <span className="font-mono text-xs text-muted-foreground tabular-nums shrink-0">
+                  #{r.id}
+                </span>
+                <SessionStatusPill status={r.status} />
+                <span className="text-sm flex-1 truncate text-foreground/90">
+                  {r.title ?? `Execute: ${plan.title}`}
+                </span>
+                <span className="text-[11px] text-muted-foreground tabular-nums shrink-0">
+                  {relativeDate(r.startedAt)}
+                </span>
+              </Link>
+            ))}
+          </ListPanel>
+        </PageSection>
+      )}
 
       {planChats.length > 0 && (
         <PageSection className="mt-8" title="Recent chats on this plan">
