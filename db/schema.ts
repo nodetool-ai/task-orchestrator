@@ -101,6 +101,10 @@ export const tasks = pgTable(
     // heuristic in lib/repo.ts, which remains the fallback for tasks whose
     // implementor hasn't called the tool yet.
     prUrl: text("pr_url"),
+    // The task's canonical git branch. Reserved when the first implement run
+    // is created and reused by every later run on the task, so all agent work
+    // on a task lands on ONE branch (and therefore one PR).
+    branch: text("branch"),
     createdAt: ts("created_at").notNull().defaultNow(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
   },

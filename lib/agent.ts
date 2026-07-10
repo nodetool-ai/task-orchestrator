@@ -194,88 +194,66 @@ export async function startSession(input: StartSessionInput): Promise<AgentSessi
   const task = await repo.getTask(input.taskId);
   if (!task) throw new repo.RepoError(`Task ${input.taskId} not found`, 404);
 
-  // M17c: listActiveSessions(taskId) followed eventually by runs.create() used
-  // to be a plain check-then-insert with several awaits in between (resumeOf
-  // validation, runs.create's own internal queries) — two concurrent
-  // start_session calls for the same task could both observe zero active
-  // sessions and both go on to create a run, leaving two competing
-  // worktrees/PRs implementing the same task.
-  //
-  // runs.create is owned by lib/runs.ts (out of scope for this fix) and
-  // inserts via the module-level `db`, not a transaction we control here, so
-  // we can't take a row lock on the run it's about to insert. Instead we take
-  // a Postgres *transaction-scoped advisory lock* keyed on the task id around
-  // the whole check-then-create critical section: every racer must acquire
-  // this lock before it (re-)checks for an active session. As long as both
-  // racers go through this same acquire-then-check path, the lock serializes
-  // them — the loser blocks until the winner's transaction ends, then
-  // re-checks and finds the winner's session already active. The lock is
-  // released automatically when the transaction ends, whether by commit or
-  // by a thrown RepoError below (transaction rollback), so an error here
-  // never leaves the task's session slot stuck locked.
-  return await db.transaction(async (tx) => {
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${input.taskId}))`);
-
-    const active = await listActiveSessions(input.taskId);
-    if (active.length > 0) {
+  // One active agent per task is enforced inside runs.create() itself: the
+  // insert runs in a transaction holding a per-task advisory lock and 409s
+  // when the task already has an active worktree session. It used to be
+  // guarded HERE (M17c) with the same lock around a check-then-create; that
+  // moved into create() so every creation path (REST, spawn tool, attached-run
+  // endpoint, auto-launch) is covered by one lock on one connection. Do NOT
+  // re-wrap this call in a transaction taking that lock — create()'s inner
+  // transaction runs on a different pooled connection and would deadlock.
+  let backend = input.backend ?? null;
+  if (input.resumeOf) {
+    const prior = await runs.get(input.resumeOf);
+    if (!prior) throw new repo.RepoError(`Prior session #${input.resumeOf} not found`, 404);
+    if (prior.taskId !== input.taskId) {
+      throw new repo.RepoError(`Session #${input.resumeOf} belongs to a different task`, 400);
+    }
+    if (!prior.sdkSessionId) {
       throw new repo.RepoError(
-        `Task ${input.taskId} already has an active session (#${active[0].id})`,
-        409
+        `Session #${input.resumeOf} has no SDK session id — nothing to resume`,
+        400
       );
     }
-    let backend = input.backend ?? null;
-    if (input.resumeOf) {
-      const prior = await runs.get(input.resumeOf);
-      if (!prior) throw new repo.RepoError(`Prior session #${input.resumeOf} not found`, 404);
-      if (prior.taskId !== input.taskId) {
-        throw new repo.RepoError(`Session #${input.resumeOf} belongs to a different task`, 400);
-      }
-      if (!prior.sdkSessionId) {
-        throw new repo.RepoError(
-          `Session #${input.resumeOf} has no SDK session id — nothing to resume`,
-          400
-        );
-      }
-      // A resume stays on the prior session's backend unless overridden: its
-      // resume token is backend-tagged, so a different backend starts fresh.
-      backend = backend ?? prior.backend;
-    }
+    // A resume stays on the prior session's backend unless overridden: its
+    // resume token is backend-tagged, so a different backend starts fresh.
+    backend = backend ?? prior.backend;
+  }
 
-    const persona = await repo.getPersona("implementor");
-    // Mirror runs.create()'s model resolution: an explicit per-call model wins,
-    // otherwise fall back to the implementor persona's modelProvider/modelId
-    // (as selected in Settings → Personas), then the deployment default.
-    // Pre-filling with DEFAULT_MODEL here would shadow runs.create()'s own
-    // persona fallback (it only fires when input.model is null/undefined),
-    // so executor-spawned children used to land on TASK_ORCH_AGENT_MODEL /
-    // "claude-sonnet-4-6" regardless of the persona model picked in settings.
-    const personaModel =
-      persona && persona.modelProvider && persona.modelId
-        ? `${persona.modelProvider}/${persona.modelId}`
-        : null;
-    const created = await runs.create({
-      goal: "<implement>",
-      cwdStrategy: "worktree",
-      // gh_pr/gh_ci let the agent inspect its own PR and fetch CI results
-      // (e.g. when reacting to webhook-driven CI failures).
-      toolsProfile: "orchestrator,repo_write,gh_pr,gh_ci",
-      taskId: input.taskId,
-      repoId: task.repoId ?? null,
-      model: input.model ?? personaModel ?? DEFAULT_MODEL,
-      backend,
-      thinkingLevel: input.thinkingLevel ?? null,
-      baseBranch: input.baseBranch ?? "main",
-      parentRunId: input.resumeOf ?? input.parentRunId ?? null,
-      userId: input.userId ?? null,
-      personaId: "implementor",
-      budget: {
-        maxTurns: persona?.budgetMaxTurns ?? undefined,
-        maxSeconds: persona?.budgetMaxSeconds ?? undefined,
-      },
-    });
-
-    return runs.toAgentSessionFull(created);
+  const persona = await repo.getPersona("implementor");
+  // Mirror runs.create()'s model resolution: an explicit per-call model wins,
+  // otherwise fall back to the implementor persona's modelProvider/modelId
+  // (as selected in Settings → Personas), then the deployment default.
+  // Pre-filling with DEFAULT_MODEL here would shadow runs.create()'s own
+  // persona fallback (it only fires when input.model is null/undefined),
+  // so executor-spawned children used to land on TASK_ORCH_AGENT_MODEL /
+  // "claude-sonnet-4-6" regardless of the persona model picked in settings.
+  const personaModel =
+    persona && persona.modelProvider && persona.modelId
+      ? `${persona.modelProvider}/${persona.modelId}`
+      : null;
+  const created = await runs.create({
+    goal: "<implement>",
+    cwdStrategy: "worktree",
+    // gh_pr/gh_ci let the agent inspect its own PR and fetch CI results
+    // (e.g. when reacting to webhook-driven CI failures).
+    toolsProfile: "orchestrator,repo_write,gh_pr,gh_ci",
+    taskId: input.taskId,
+    repoId: task.repoId ?? null,
+    model: input.model ?? personaModel ?? DEFAULT_MODEL,
+    backend,
+    thinkingLevel: input.thinkingLevel ?? null,
+    baseBranch: input.baseBranch ?? "main",
+    parentRunId: input.resumeOf ?? input.parentRunId ?? null,
+    userId: input.userId ?? null,
+    personaId: "implementor",
+    budget: {
+      maxTurns: persona?.budgetMaxTurns ?? undefined,
+      maxSeconds: persona?.budgetMaxSeconds ?? undefined,
+    },
   });
+
+  return runs.toAgentSessionFull(created);
 }
 
 export async function listSessions(taskId?: string): Promise<AgentSessionFull[]> {

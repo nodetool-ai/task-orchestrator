@@ -26,6 +26,9 @@ tasks                    one row per task
   body        TEXT  default ''  free-form markdown
   estimate    TEXT
   tags        TEXT  default '[]'  JSON array
+  branch      TEXT             canonical git branch (claude/<taskid>); reserved
+                               when the first implement run is created and
+                               shared by every later run on the task
   created_at, updated_at
 
 task_dependencies        many-to-many
@@ -67,7 +70,7 @@ agent_sessions           one row per pi.dev SDK run on a task
   planning_stage  TEXT     gated `<plan>` flow stage (NULL = ordinary run): gathering → spec_review → building_plan → plan_review → committing → done
   status          TEXT     see session status machine
   model           TEXT     e.g. claude-sonnet-4-5
-  branch          TEXT     e.g. claude/agent-42
+  branch          TEXT     the task's canonical branch (tasks.branch), e.g. claude/t-20260511-0001; taskless chat worktrees use claude/chat-<run>
   worktree_path   TEXT     absolute path to the git worktree
   pr_url          TEXT     filled in after gh pr create
   error           TEXT     populated on failure

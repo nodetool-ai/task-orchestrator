@@ -120,6 +120,9 @@ export interface TaskFull {
    *  set_task_pr tool (persisted on tasks.pr_url); until then, falls back to
    *  the most recent agent run that opened one. Null if neither exists. */
   prUrl: string | null;
+  /** The task's canonical git branch. Reserved when the first implement run
+   *  is created and shared by every later run on the task. Null until then. */
+  branch: string | null;
   createdAt: Date;
   updatedAt: Date;
   dependencies: string[];
