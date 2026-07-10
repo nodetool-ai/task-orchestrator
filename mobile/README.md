@@ -13,9 +13,9 @@ floor") on a phone.
 | **Review** | PRs waiting on you (tasks in `review`), swipe to approve / request changes | `GET /api/tasks`, `POST /api/tasks/:id/transition` |
 | **Queue** | Todo tasks ready to spawn, filtered by plan | `GET /api/tasks?state=todo` |
 | **Plans** | Active + shipped plans with progress | `GET /api/plans`, `GET /api/plans/:id` |
-| **Run detail** (`/run/:id`) | Spend, acceptance criteria, live event stream, contextual actions | `GET /api/runs/:id`, `PATCH /api/runs/:id`, `POST /api/sessions/:id/resume` |
+| **Run detail** (`/run/:id`) | Spend, live event stream, and the intervention surface: send instructions to the agent, tick acceptance criteria on/off, approve planning-spec / plan gates, stop / resume / close | `GET /api/runs/:id`, `PATCH /api/runs/:id`, `POST /api/runs/:id/messages`, `POST /api/runs/:id/planning`, `PATCH /api/tasks/:id/criteria/:cid`, `POST /api/sessions/:id/resume` |
 | **Plan detail** (`/plan/:id`) | Goal/approach, active runs, queued + shipped tasks | `GET /api/plans/:id` |
-| **Spawn** (center tab button) | Pick a task + persona + budget and launch an agent | `GET /api/personas`, `POST /api/runs` |
+| **Spawn** (center tab button) | Pick a task, persona, agent engine (backend) + budget and launch an agent | `GET /api/personas`, `GET /api/providers`, `POST /api/runs` |
 
 Pull-to-refresh and an 8s background poll keep everything live. Search,
 spawn, resume and settings are bottom sheets.

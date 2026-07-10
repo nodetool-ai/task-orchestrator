@@ -2,9 +2,11 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import type {
   AgentSession,
+  BackendId,
   PlanDetail,
   PlanFull,
   Persona,
+  ProvidersResponse,
   RunDetail,
   TaskFull,
 } from "./types";
@@ -17,6 +19,10 @@ import type {
 const BASE_KEY = "pi.baseUrl";
 let baseUrl = "";
 
+// The provider/backend catalog is stable for a given server, so cache it once
+// per session — the spawn and resume sheets both read it.
+let providersCache: ProvidersResponse | null = null;
+
 export async function loadBaseUrl(): Promise<string> {
   baseUrl = (await AsyncStorage.getItem(BASE_KEY)) || "";
   return baseUrl;
@@ -28,6 +34,7 @@ export function getBaseUrl(): string {
 
 export async function setBaseUrl(url: string): Promise<void> {
   baseUrl = normalizeBase(url);
+  providersCache = null; // catalog is per-server
   await AsyncStorage.setItem(BASE_KEY, baseUrl);
 }
 
@@ -179,6 +186,12 @@ export const api = {
   plan: (id: string) => request<PlanDetail>(`/api/plans/${id}`),
   personas: () => request<{ personas: Persona[] }>("/api/personas").then((d) => d.personas),
   run: (id: number) => request<RunDetail>(`/api/runs/${id}`),
+  providers: async (): Promise<ProvidersResponse> => {
+    if (providersCache) return providersCache;
+    const data = await request<ProvidersResponse>("/api/providers");
+    providersCache = data;
+    return data;
+  },
 
   // mutations -------------------------------------------------------------
   cancelRun: (id: number) =>
@@ -187,8 +200,60 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "cancel" }),
     }),
-  resumeSession: (id: number) =>
-    request<unknown>(`/api/sessions/${id}/resume`, { method: "POST" }),
+  closeRun: (id: number) =>
+    request<unknown>(`/api/runs/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "close" }),
+    }),
+  resumeSession: (id: number, opts?: { backend?: BackendId | null; model?: string | null }) => {
+    const body: Record<string, unknown> = {};
+    if (opts?.backend) body.backend = opts.backend;
+    if (opts?.model) body.model = opts.model;
+    const hasBody = Object.keys(body).length > 0;
+    return request<unknown>(`/api/sessions/${id}/resume`, {
+      method: "POST",
+      ...(hasBody
+        ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+        : {}),
+    });
+  },
+  // Toggle (or edit) a task's acceptance criterion. Returns the updated task.
+  updateCriterion: (taskId: string, cid: number, patch: { done?: boolean; text?: string }) =>
+    request<TaskFull>(`/api/tasks/${taskId}/criteria/${cid}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }),
+  // Advance a planning run past a review gate (spec_review → building_plan,
+  // plan_review → committing). The server injects the "approved" turn.
+  planningAction: (id: number, action: "approve_spec" | "approve_plan") =>
+    request<unknown>(`/api/runs/${id}/planning`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    }),
+  // Send a message / instructions to a run and let it take a turn. The endpoint
+  // streams the reply back as SSE and only closes when the turn finishes; we
+  // await the POST (surfacing an immediate error) but drain the stream in the
+  // background so the connection stays open — dropping it aborts the turn. The
+  // reply itself surfaces through the run-detail poll, not this call.
+  sendRunMessage: async (id: number, text: string): Promise<void> => {
+    if (!baseUrl) throw new ApiError("No server configured", 0);
+    const res = await fetch(`${baseUrl}/api/runs/${id}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify({ text }),
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      throw new ApiError(t || `Request failed (${res.status})`, res.status);
+    }
+    void res.text().catch(() => {});
+  },
   transitionTask: (id: string, state: string, extra?: { assignee?: string; note?: string }) =>
     request<unknown>(`/api/tasks/${id}/transition`, {
       method: "POST",
@@ -200,6 +265,7 @@ export const api = {
     planId?: string | null;
     personaId?: string;
     model?: string | null;
+    backend?: BackendId | null;
     initialPrompt?: string;
     title?: string | null;
     budgetUsd?: number;
@@ -212,6 +278,7 @@ export const api = {
         planId: input.planId ?? undefined,
         personaId: input.personaId,
         model: input.model ?? undefined,
+        backend: input.backend ?? undefined,
         initialPrompt: input.initialPrompt,
         title: input.title ?? undefined,
         goal: "<implement>",

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { ScrollView, Text, View } from "react-native";
+import { ScrollView, Text, TextInput, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 
 import { DetailHeader, RoundButton } from "@/components/shell";
@@ -8,6 +8,7 @@ import { Icon } from "@/components/Icon";
 import { StateIcon } from "@/components/StateIcon";
 import {
   Elapsed,
+  Field,
   Mono,
   MonoTag,
   PersonaChip,
@@ -41,6 +42,14 @@ function uiState(run: RunDetail, taskState?: string): RunState {
   return "todo";
 }
 
+// The two planning-agent gates that wait on a human. Maps a review stage to the
+// approval action the server expects (POST /api/runs/:id/planning).
+function planningApproval(run: RunDetail): "approve_spec" | "approve_plan" | null {
+  if (run.planningStage === "spec_review") return "approve_spec";
+  if (run.planningStage === "plan_review") return "approve_plan";
+  return null;
+}
+
 export default function RunDetailScreen() {
   const { c } = useTheme();
   const router = useRouter();
@@ -52,6 +61,11 @@ export default function RunDetailScreen() {
   const [run, setRun] = useState<RunDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [ctrlOpen, setCtrlOpen] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [sending, setSending] = useState(false);
+  // Optimistic overrides for criterion checkboxes, cleared once a refresh
+  // brings the server's truth back.
+  const [critOverride, setCritOverride] = useState<Record<number, boolean>>({});
 
   const load = useCallback(async () => {
     try {
@@ -80,6 +94,30 @@ export default function RunDetailScreen() {
     return pid ? plans.find((p) => p.id === pid)?.title || pid : "";
   }, [task, run, plans]);
 
+  const toggleCriterion = useCallback(
+    async (cid: number, next: boolean) => {
+      if (!run?.taskId) return;
+      setCritOverride((m) => ({ ...m, [cid]: next }));
+      try {
+        await api.updateCriterion(run.taskId, cid, { done: next });
+        await refresh();
+        setCritOverride((m) => {
+          const n = { ...m };
+          delete n[cid];
+          return n;
+        });
+      } catch (e) {
+        setCritOverride((m) => {
+          const n = { ...m };
+          delete n[cid];
+          return n;
+        });
+        toast(e instanceof Error ? e.message : "Could not update criterion");
+      }
+    },
+    [run?.taskId, refresh, toast]
+  );
+
   if (!run) {
     return (
       <View style={{ flex: 1, backgroundColor: c.bg }}>
@@ -93,11 +131,15 @@ export default function RunDetailScreen() {
 
   const st = uiState(run, task?.state);
   const live = st === "in_progress";
+  const approval = planningApproval(run);
   const startedMs = new Date(run.startedAt).getTime();
   const budget = run.budgetMaxUsd ?? 25;
   const cost = run.totalCostUsd ?? 0;
   const overBudget = budget > 0 && cost / budget > 0.85;
-  const criteria = task?.criteria ?? [];
+  const criteria = (task?.criteria ?? []).map((cr) => ({
+    ...cr,
+    done: critOverride[cr.id] ?? cr.done,
+  }));
   const done = criteria.filter((x) => x.done).length;
   const prNum = prNumber(run.prUrl);
   const spark = fauxSparkline(run.id + Math.round(cost * 10));
@@ -110,6 +152,16 @@ export default function RunDetailScreen() {
       refresh();
     } catch (e) {
       toast(e instanceof Error ? e.message : "Stop failed");
+    }
+  };
+  const closeRun = async () => {
+    try {
+      await api.closeRun(run.id);
+      toast("Closed run");
+      load();
+      refresh();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Close failed");
     }
   };
   const resume = async () => {
@@ -140,6 +192,34 @@ export default function RunDetailScreen() {
       refresh();
     } catch (e) {
       toast(e instanceof Error ? e.message : "Failed");
+    }
+  };
+  const approvePlanning = async () => {
+    if (!approval) return;
+    try {
+      await api.planningAction(run.id, approval);
+      toast(approval === "approve_spec" ? "Approved spec" : "Approved plan");
+      load();
+      refresh();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Approval failed");
+    }
+  };
+  const sendInstruct = async () => {
+    const text = msg.trim();
+    if (!text || sending) return;
+    setSending(true);
+    try {
+      await api.sendRunMessage(run.id, text);
+      setMsg("");
+      setCtrlOpen(false);
+      toast("Sent to agent");
+      // Give the turn a moment to register, then poll it in.
+      setTimeout(load, 800);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Send failed");
+    } finally {
+      setSending(false);
     }
   };
 
@@ -179,6 +259,7 @@ export default function RunDetailScreen() {
           done={done}
           prNum={prNum}
           spark={spark}
+          onToggleCriterion={run.taskId ? toggleCriterion : undefined}
         />
       </View>
 
@@ -197,60 +278,125 @@ export default function RunDetailScreen() {
       >
         {live ? (
           <>
-            <BarBtn icon="pause" label="Pause" onPress={() => toast("Pause isn't available yet")} />
             <BarBtn icon="stop" label="Stop" onPress={stop} />
-            <BarBtn icon="spark" label="Instruct" primary onPress={() => setCtrlOpen(true)} />
+            <BarBtn icon="more" label="Controls" onPress={() => setCtrlOpen(true)} />
+          </>
+        ) : approval ? (
+          <>
+            <BarBtn icon="edit" label="Request changes" onPress={() => setCtrlOpen(true)} />
+            <BarBtn
+              icon="check"
+              label={approval === "approve_spec" ? "Approve spec" : "Approve plan"}
+              primary
+              onPress={approvePlanning}
+            />
           </>
         ) : st === "review" ? (
           <>
             <BarBtn icon="edit" label="Changes" onPress={changes} />
             <BarBtn icon="check" label="Approve & merge" primary onPress={approve} />
           </>
+        ) : st === "done" ? (
+          <BarBtn icon="spark" label="Instruct" primary onPress={() => setCtrlOpen(true)} />
         ) : (
           <>
-            <BarBtn icon="user" label="Reassign" onPress={() => toast("Reassign isn't available yet")} />
+            <BarBtn icon="spark" label="Instruct" onPress={() => setCtrlOpen(true)} />
             <BarBtn icon="play" label="Resume" primary onPress={resume} />
           </>
         )}
       </View>
 
-      <BottomSheet open={ctrlOpen} onClose={() => setCtrlOpen(false)} title="Controls" subtitle={shortRunId(run.id, startedMs)} maxHeightPct={0.6}>
-        <View style={{ gap: 8 }}>
-          {(live
-            ? [
-                { icon: "stop" as const, label: "Stop run", run: stop },
-                { icon: "spark" as const, label: "Send instructions", run: () => toast("Instruct isn't available yet") },
-              ]
-            : [
-                { icon: "play" as const, label: "Resume run", run: resume },
-                { icon: "user" as const, label: "Reassign persona", run: () => toast("Reassign isn't available yet") },
-              ]
-          ).map((a, i) => (
-            <Press
-              key={a.label}
-              onPress={() => {
-                setCtrlOpen(false);
-                a.run();
-              }}
+      <BottomSheet
+        open={ctrlOpen}
+        onClose={() => setCtrlOpen(false)}
+        title="Controls"
+        subtitle={shortRunId(run.id, startedMs)}
+        maxHeightPct={0.75}
+      >
+        <View style={{ gap: 14 }}>
+          {live ? (
+            <View
               style={{
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 11,
-                padding: 14,
+                padding: 13,
                 borderRadius: 12,
-                backgroundColor: i === 0 ? c.fg : c.raised,
+                backgroundColor: c.raised,
+                borderWidth: 1,
+                borderColor: c.hairline,
               }}
             >
-              <Icon name={a.icon} size={16} color={i === 0 ? c.bg : c.fg} />
-              <Text style={{ fontSize: 14, fontWeight: i === 0 ? "600" : "500", color: i === 0 ? c.bg : c.fg }}>
-                {a.label}
+              <Text style={{ fontSize: 12.5, color: c.muted, lineHeight: 18 }}>
+                The agent is working. Stop the run to send it new instructions.
               </Text>
-            </Press>
-          ))}
+            </View>
+          ) : (
+            <Field label={approval ? "Request changes" : "Send instructions"}>
+              <TextInput
+                value={msg}
+                onChangeText={setMsg}
+                multiline
+                placeholder={
+                  approval
+                    ? "What should change before you approve?"
+                    : "Message the agent — it takes a turn with your instructions."
+                }
+                placeholderTextColor={c.muted2}
+                style={{
+                  minHeight: 88,
+                  textAlignVertical: "top",
+                  backgroundColor: c.raised,
+                  borderWidth: 1,
+                  borderColor: c.hairline,
+                  borderRadius: 11,
+                  padding: 12,
+                  color: c.fg,
+                  fontSize: 13.5,
+                  lineHeight: 19,
+                }}
+              />
+              <Press
+                onPress={sendInstruct}
+                disabled={sending || !msg.trim()}
+                style={{
+                  marginTop: 10,
+                  minHeight: 46,
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 7,
+                  borderRadius: 12,
+                  backgroundColor: c.fg,
+                  opacity: sending || !msg.trim() ? 0.5 : 1,
+                }}
+              >
+                <Icon name="spark" size={14} color={c.bg} />
+                <Text style={{ color: c.bg, fontSize: 14, fontWeight: "600" }}>
+                  {sending ? "Sending…" : "Send"}
+                </Text>
+              </Press>
+            </Field>
+          )}
+
+          <View style={{ gap: 8 }}>
+            {live ? (
+              <SheetBtn icon="stop" label="Stop run" onPress={() => runAndClose(stop)} />
+            ) : (
+              <>
+                {st !== "review" && !approval ? (
+                  <SheetBtn icon="play" label="Resume run" onPress={() => runAndClose(resume)} />
+                ) : null}
+                <SheetBtn icon="x" label="Close run" onPress={() => runAndClose(closeRun)} />
+              </>
+            )}
+          </View>
         </View>
       </BottomSheet>
     </View>
   );
+
+  function runAndClose(fn: () => void | Promise<void>) {
+    setCtrlOpen(false);
+    void fn();
+  }
 }
 
 function BarBtn({
@@ -287,6 +433,34 @@ function BarBtn({
   );
 }
 
+function SheetBtn({
+  icon,
+  label,
+  onPress,
+}: {
+  icon: Parameters<typeof Icon>[0]["name"];
+  label: string;
+  onPress: () => void;
+}) {
+  const { c } = useTheme();
+  return (
+    <Press
+      onPress={onPress}
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 11,
+        padding: 14,
+        borderRadius: 12,
+        backgroundColor: c.raised,
+      }}
+    >
+      <Icon name={icon} size={16} color={c.fg} />
+      <Text style={{ fontSize: 14, fontWeight: "500", color: c.fg }}>{label}</Text>
+    </Press>
+  );
+}
+
 function RunBody({
   run,
   live,
@@ -298,6 +472,7 @@ function RunBody({
   done,
   prNum,
   spark,
+  onToggleCriterion,
 }: {
   run: RunDetail;
   live: boolean;
@@ -309,6 +484,7 @@ function RunBody({
   done: number;
   prNum: number | null;
   spark: number[];
+  onToggleCriterion?: (cid: number, next: boolean) => void;
 }) {
   const { c } = useTheme();
   return (
@@ -373,25 +549,34 @@ function RunBody({
         <>
           <View style={{ height: 12 }} />
           <Tile label={`Acceptance criteria · ${done}/${criteria.length}`}>
-            <View style={{ gap: 9 }}>
-              {criteria.map((cr) => (
-                <View key={cr.id} style={{ flexDirection: "row", alignItems: "flex-start", gap: 9 }}>
-                  <View style={{ marginTop: 1 }}>
-                    <StateIcon state={cr.done ? "done" : "todo"} size={13} />
+            <View style={{ gap: 3 }}>
+              {criteria.map((cr) => {
+                const row = (
+                  <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 9, paddingVertical: 6 }}>
+                    <View style={{ marginTop: 1 }}>
+                      <StateIcon state={cr.done ? "done" : "todo"} size={13} />
+                    </View>
+                    <Text
+                      style={{
+                        flex: 1,
+                        fontSize: 12.5,
+                        lineHeight: 18,
+                        color: cr.done ? c.muted : c.fg,
+                        textDecorationLine: cr.done ? "line-through" : "none",
+                      }}
+                    >
+                      {cr.text}
+                    </Text>
                   </View>
-                  <Text
-                    style={{
-                      flex: 1,
-                      fontSize: 12.5,
-                      lineHeight: 18,
-                      color: cr.done ? c.muted : c.fg,
-                      textDecorationLine: cr.done ? "line-through" : "none",
-                    }}
-                  >
-                    {cr.text}
-                  </Text>
-                </View>
-              ))}
+                );
+                return onToggleCriterion ? (
+                  <Press key={cr.id} onPress={() => onToggleCriterion(cr.id, !cr.done)}>
+                    {row}
+                  </Press>
+                ) : (
+                  <View key={cr.id}>{row}</View>
+                );
+              })}
             </View>
           </Tile>
         </>

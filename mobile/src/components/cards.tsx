@@ -46,12 +46,10 @@ function activityFor(run: FloorRunVM): string[] {
 export function RunCard({
   run,
   onOpen,
-  onPause,
   onStop,
 }: {
   run: FloorRunVM;
   onOpen: () => void;
-  onPause: () => void;
   onStop: () => void;
 }) {
   const { c } = useTheme();
@@ -60,7 +58,6 @@ export function RunCard({
     <SwipeRow
       onTap={onOpen}
       actions={[
-        { label: "Pause", icon: "pause", onPress: onPause, bg: c.raised, color: c.fg },
         { label: "Stop", icon: "stop", onPress: onStop, bg: toAlpha(c.sBlocked, 0.22), color: c.sBlocked },
       ]}
     >

@@ -2,12 +2,13 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Text, TextInput, View } from "react-native";
 
 import { BottomSheet } from "../BottomSheet";
+import { EnginePicker } from "../EnginePicker";
 import { Icon, type IconName } from "../Icon";
 import { StateIcon } from "../StateIcon";
 import { Field, Mono, Press } from "../primitives";
 import { useTheme, mono } from "@/theme";
 import { api } from "@/lib/api";
-import type { Persona } from "@/lib/types";
+import type { BackendId, Persona } from "@/lib/types";
 import type { QueueVM } from "@/lib/model";
 
 const ROLE_ICON: Record<string, IconName> = {
@@ -39,7 +40,7 @@ export function SpawnSheet({
   const [picked, setPicked] = useState<QueueVM | null>(task);
   const [personaId, setPersonaId] = useState<string>("");
   const [budget, setBudget] = useState("25");
-  const [autoPR, setAutoPR] = useState(true);
+  const [backend, setBackend] = useState<BackendId | null>(null);
   const [taskPick, setTaskPick] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
@@ -76,6 +77,7 @@ export function SpawnSheet({
         taskId: picked.id,
         planId: picked.planId,
         personaId: personaId || undefined,
+        backend,
         initialPrompt: prompt,
         budgetUsd: Number(budget) || undefined,
       });
@@ -216,62 +218,30 @@ export function SpawnSheet({
           />
         </Field>
 
-        <View style={{ flexDirection: "row", gap: 14 }}>
-          <Field label="Budget cap" style={{ flex: 1 }}>
-            <View
-              style={{
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 4,
-                padding: 12,
-                backgroundColor: c.raised,
-                borderWidth: 1,
-                borderColor: c.hairline,
-                borderRadius: 11,
-              }}
-            >
-              <Mono style={{ fontSize: 14, color: c.muted2 }}>$</Mono>
-              <TextInput
-                value={budget}
-                onChangeText={setBudget}
-                keyboardType="number-pad"
-                style={{ flex: 1, color: c.fg, fontFamily: mono, fontSize: 14, padding: 0 }}
-              />
-            </View>
-          </Field>
-          <Field label="On completion" style={{ flex: 1 }}>
-            <Press
-              onPress={() => setAutoPR((v) => !v)}
-              style={{
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 9,
-                padding: 12,
-                backgroundColor: c.raised,
-                borderWidth: 1,
-                borderColor: c.hairline,
-                borderRadius: 11,
-                minHeight: 44,
-              }}
-            >
-              <View
-                style={{
-                  width: 18,
-                  height: 18,
-                  borderRadius: 5,
-                  borderWidth: 1,
-                  borderColor: c.hairlineStrong,
-                  backgroundColor: autoPR ? c.fg : "transparent",
-                  alignItems: "center",
-                  justifyContent: "center",
-                }}
-              >
-                {autoPR ? <Icon name="check" size={12} stroke={3} color={c.bg} /> : null}
-              </View>
-              <Text style={{ fontSize: 12.5, color: c.fg }}>Open PR</Text>
-            </Press>
-          </Field>
-        </View>
+        <Field label="Budget cap">
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 4,
+              padding: 12,
+              backgroundColor: c.raised,
+              borderWidth: 1,
+              borderColor: c.hairline,
+              borderRadius: 11,
+            }}
+          >
+            <Mono style={{ fontSize: 14, color: c.muted2 }}>$</Mono>
+            <TextInput
+              value={budget}
+              onChangeText={setBudget}
+              keyboardType="number-pad"
+              style={{ flex: 1, color: c.fg, fontFamily: mono, fontSize: 14, padding: 0 }}
+            />
+          </View>
+        </Field>
+
+        <EnginePicker value={backend} onChange={setBackend} active={open} />
 
         <Press
           onPress={spawn}

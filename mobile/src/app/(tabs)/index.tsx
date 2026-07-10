@@ -123,7 +123,6 @@ export default function FloorScreen() {
             key={r.runId}
             run={r}
             onOpen={() => router.push(`/run/${r.runId}`)}
-            onPause={() => toast(`Pause isn't available from mobile yet`)}
             onStop={() => stop(r.runId, r.shortId)}
           />
         ))
