@@ -13,7 +13,7 @@ import { useTheme } from "@/theme";
 export default function QueueScreen() {
   const { c } = useTheme();
   const { sessions, tasks, plans } = useData();
-  const { openSpawn } = useSheets();
+  const { openSpawn, openTask } = useSheets();
   const [filter, setFilter] = useState<string>("all");
 
   const floor = useMemo(() => buildFloor(sessions, tasks, plans), [sessions, tasks, plans]);
@@ -59,7 +59,7 @@ export default function QueueScreen() {
     >
       <View style={{ paddingHorizontal: 16, gap: 8 }}>
         {rows.length ? (
-          rows.map((t) => <QueueCard key={t.id} item={t} onSpawn={() => openSpawn(t)} />)
+          rows.map((t) => <QueueCard key={t.id} item={t} onSpawn={() => openSpawn(t)} onOpen={() => openTask(t.id)} />)
         ) : (
           <EmptyNote>Queue is empty. Nothing to spawn.</EmptyNote>
         )}

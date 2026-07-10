@@ -48,8 +48,8 @@ export default function FloorScreen() {
   };
   const approve = async (taskId: string, prNum: number | null) => {
     try {
-      await api.transitionTask(taskId, "done");
-      toast(prNum ? `Approved #${prNum}` : "Marked done");
+      await api.transitionTask(taskId, "merged");
+      toast(prNum ? `Merged #${prNum}` : "Marked merged");
       refresh();
     } catch (e) {
       toast(e instanceof Error ? e.message : "Could not approve");
@@ -57,7 +57,7 @@ export default function FloorScreen() {
   };
   const changes = async (taskId: string) => {
     try {
-      await api.transitionTask(taskId, "in_progress", { assignee: "claude-agent" });
+      await api.transitionTask(taskId, "blocked", { assignee: "claude-agent" });
       toast("Requested changes");
       refresh();
     } catch (e) {
@@ -123,7 +123,6 @@ export default function FloorScreen() {
             key={r.runId}
             run={r}
             onOpen={() => router.push(`/run/${r.runId}`)}
-            onPause={() => toast(`Pause isn't available from mobile yet`)}
             onStop={() => stop(r.runId, r.shortId)}
           />
         ))
@@ -140,7 +139,7 @@ export default function FloorScreen() {
           <ReviewCard
             key={r.taskId}
             item={r}
-            onOpen={() => (r.runId ? router.push(`/run/${r.runId}`) : toast(r.taskId))}
+            onOpen={() => router.push(r.runId ? `/run/${r.runId}` : `/task/${r.taskId}`)}
             onApprove={() => approve(r.taskId, r.prNum)}
             onChanges={() => changes(r.taskId)}
           />

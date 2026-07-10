@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Text, TextInput, View } from "react-native";
 
 import { BottomSheet } from "../BottomSheet";
-import { Icon, type IconName } from "../Icon";
+import { AgentPicker, type AgentConfig } from "../AgentPicker";
+import { Icon } from "../Icon";
 import { StateIcon } from "../StateIcon";
 import { Field, Mono, Press } from "../primitives";
 import { useTheme, mono } from "@/theme";
@@ -10,12 +11,11 @@ import { api } from "@/lib/api";
 import type { Persona } from "@/lib/types";
 import type { QueueVM } from "@/lib/model";
 
-const ROLE_ICON: Record<string, IconName> = {
-  planner: "plans",
-  designer: "edit",
-  implementor: "code",
-  reviewer: "check",
-  qa: "check",
+const DEFAULT_AGENT: AgentConfig = {
+  personaId: "",
+  backend: null,
+  model: null,
+  thinkingLevel: null,
 };
 
 export function SpawnSheet({
@@ -37,9 +37,8 @@ export function SpawnSheet({
 }) {
   const { c } = useTheme();
   const [picked, setPicked] = useState<QueueVM | null>(task);
-  const [personaId, setPersonaId] = useState<string>("");
+  const [agent, setAgent] = useState<AgentConfig>(DEFAULT_AGENT);
   const [budget, setBudget] = useState("25");
-  const [autoPR, setAutoPR] = useState(true);
   const [taskPick, setTaskPick] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
@@ -60,13 +59,13 @@ export function SpawnSheet({
   }, [picked]);
 
   useEffect(() => {
-    if (!personaId && personas.length) {
+    if (!agent.personaId && personas.length) {
       const impl = personas.find((p) => p.id === "implementor") || personas[0];
-      setPersonaId(impl.id);
+      setAgent((a) => ({ ...a, personaId: impl.id }));
     }
-  }, [personas, personaId]);
+  }, [personas, agent.personaId]);
 
-  const persona = useMemo(() => personas.find((p) => p.id === personaId), [personas, personaId]);
+  const persona = useMemo(() => personas.find((p) => p.id === agent.personaId), [personas, agent.personaId]);
 
   const spawn = async () => {
     if (!picked || busy) return;
@@ -75,12 +74,15 @@ export function SpawnSheet({
       await api.spawnRun({
         taskId: picked.id,
         planId: picked.planId,
-        personaId: personaId || undefined,
+        personaId: agent.personaId || undefined,
+        backend: agent.backend,
+        model: agent.model,
+        thinkingLevel: agent.thinkingLevel,
         initialPrompt: prompt,
         budgetUsd: Number(budget) || undefined,
       });
       onClose();
-      onToast(`Spawned ${persona?.name || personaId} on ${picked.id}`);
+      onToast(`Spawned ${persona?.name || agent.personaId} on ${picked.id}`);
       onRefresh();
     } catch (e) {
       onToast(e instanceof Error ? e.message : "Spawn failed");
@@ -152,48 +154,7 @@ export function SpawnSheet({
           ) : null}
         </Field>
 
-        <Field label="Persona">
-          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 7 }}>
-            {personas.map((p) => {
-              const active = p.id === personaId;
-              return (
-                <Press
-                  key={p.id}
-                  onPress={() => setPersonaId(p.id)}
-                  style={{
-                    width: "48%",
-                    gap: 6,
-                    padding: 11,
-                    borderRadius: 11,
-                    backgroundColor: active ? c.raised : c.surface,
-                    borderWidth: 1,
-                    borderColor: active ? c.hairlineStrong : c.hairline,
-                  }}
-                >
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 7 }}>
-                    <View
-                      style={{
-                        width: 18,
-                        height: 18,
-                        borderRadius: 5,
-                        backgroundColor: active ? c.raised2 : c.raised,
-                        borderWidth: 1,
-                        borderColor: c.hairline,
-                        alignItems: "center",
-                        justifyContent: "center",
-                      }}
-                    >
-                      <Icon name={ROLE_ICON[p.id] || "user"} size={11} color={active ? c.fg : c.muted} />
-                    </View>
-                    <Text numberOfLines={1} style={{ flex: 1, fontSize: 13, fontWeight: "600", color: active ? c.fg : c.muted }}>
-                      {p.name}
-                    </Text>
-                  </View>
-                </Press>
-              );
-            })}
-          </View>
-        </Field>
+        <AgentPicker personas={personas} value={agent} onChange={setAgent} active={open} />
 
         <Field label="Initial prompt">
           <TextInput
@@ -216,62 +177,28 @@ export function SpawnSheet({
           />
         </Field>
 
-        <View style={{ flexDirection: "row", gap: 14 }}>
-          <Field label="Budget cap" style={{ flex: 1 }}>
-            <View
-              style={{
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 4,
-                padding: 12,
-                backgroundColor: c.raised,
-                borderWidth: 1,
-                borderColor: c.hairline,
-                borderRadius: 11,
-              }}
-            >
-              <Mono style={{ fontSize: 14, color: c.muted2 }}>$</Mono>
-              <TextInput
-                value={budget}
-                onChangeText={setBudget}
-                keyboardType="number-pad"
-                style={{ flex: 1, color: c.fg, fontFamily: mono, fontSize: 14, padding: 0 }}
-              />
-            </View>
-          </Field>
-          <Field label="On completion" style={{ flex: 1 }}>
-            <Press
-              onPress={() => setAutoPR((v) => !v)}
-              style={{
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 9,
-                padding: 12,
-                backgroundColor: c.raised,
-                borderWidth: 1,
-                borderColor: c.hairline,
-                borderRadius: 11,
-                minHeight: 44,
-              }}
-            >
-              <View
-                style={{
-                  width: 18,
-                  height: 18,
-                  borderRadius: 5,
-                  borderWidth: 1,
-                  borderColor: c.hairlineStrong,
-                  backgroundColor: autoPR ? c.fg : "transparent",
-                  alignItems: "center",
-                  justifyContent: "center",
-                }}
-              >
-                {autoPR ? <Icon name="check" size={12} stroke={3} color={c.bg} /> : null}
-              </View>
-              <Text style={{ fontSize: 12.5, color: c.fg }}>Open PR</Text>
-            </Press>
-          </Field>
-        </View>
+        <Field label="Budget cap">
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 4,
+              padding: 12,
+              backgroundColor: c.raised,
+              borderWidth: 1,
+              borderColor: c.hairline,
+              borderRadius: 11,
+            }}
+          >
+            <Mono style={{ fontSize: 14, color: c.muted2 }}>$</Mono>
+            <TextInput
+              value={budget}
+              onChangeText={setBudget}
+              keyboardType="number-pad"
+              style={{ flex: 1, color: c.fg, fontFamily: mono, fontSize: 14, padding: 0 }}
+            />
+          </View>
+        </Field>
 
         <Press
           onPress={spawn}

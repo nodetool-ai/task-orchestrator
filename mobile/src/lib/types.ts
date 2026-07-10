@@ -14,15 +14,41 @@ export type SessionStatus =
   | "budget_exhausted"
   | "closed";
 
+// Mirrors the server's TASK_STATES (lib/types.ts). PR-backed tasks flow through
+// testing/failing/passing/merged as CI reports in — see lib/task-state.ts.
 export type TaskState =
   | "todo"
   | "in_progress"
-  | "review"
+  | "testing"
+  | "failing"
+  | "passing"
+  | "merged"
   | "blocked"
-  | "done"
   | "cancelled";
 
 export type PlanState = "draft" | "proposed" | "accepted" | "done" | "cancelled";
+
+// Agent execution backend (a.k.a. "engine"). Matches the server's
+// lib/agent-backend BACKEND_IDS. Runs may pick one at spawn/resume time.
+export type BackendId = "pi" | "claude";
+
+// /api/providers → catalog of backends + their providers, plus the
+// deployment default a run with no explicit pick executes on.
+export interface ProvidersResponse {
+  providers: unknown[];
+  backends: { id: BackendId; providers: unknown[] }[];
+  defaultBackend: BackendId;
+}
+
+// Planning-agent lifecycle stages. `spec_review` / `plan_review` are the two
+// gates that wait on a human before the run proceeds.
+export type PlanningStage =
+  | "gathering"
+  | "spec_review"
+  | "building_plan"
+  | "plan_review"
+  | "committing"
+  | "done";
 
 export interface Criterion {
   id: number;
@@ -140,6 +166,7 @@ export interface RunDetail {
   budgetMaxUsd: number | null;
   title: string | null;
   personaId: string | null;
+  planningStage: PlanningStage | null;
   startedAt: string;
   completedAt: string | null;
   messages: MessageRow[];

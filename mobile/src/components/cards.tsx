@@ -46,12 +46,10 @@ function activityFor(run: FloorRunVM): string[] {
 export function RunCard({
   run,
   onOpen,
-  onPause,
   onStop,
 }: {
   run: FloorRunVM;
   onOpen: () => void;
-  onPause: () => void;
   onStop: () => void;
 }) {
   const { c } = useTheme();
@@ -60,7 +58,6 @@ export function RunCard({
     <SwipeRow
       onTap={onOpen}
       actions={[
-        { label: "Pause", icon: "pause", onPress: onPause, bg: c.raised, color: c.fg },
         { label: "Stop", icon: "stop", onPress: onStop, bg: toAlpha(c.sBlocked, 0.22), color: c.sBlocked },
       ]}
     >
@@ -222,10 +219,14 @@ export function ShippedItem({ item }: { item: ShippedVM }) {
   );
 }
 
-export function QueueCard({ item, onSpawn }: { item: QueueVM; onSpawn: () => void }) {
+export function QueueCard({ item, onSpawn, onOpen }: { item: QueueVM; onSpawn: () => void; onOpen?: () => void }) {
   const { c } = useTheme();
+  const Wrap = onOpen ? Press : View;
   return (
-    <View style={{ padding: 14, backgroundColor: c.surface, borderWidth: 1, borderColor: c.hairline, borderRadius: 15 }}>
+    <Wrap
+      {...(onOpen ? { onPress: onOpen } : {})}
+      style={{ padding: 14, backgroundColor: c.surface, borderWidth: 1, borderColor: c.hairline, borderRadius: 15 }}
+    >
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <StateIcon state="todo" size={13} />
         <MonoTag>{item.id}</MonoTag>
@@ -261,7 +262,7 @@ export function QueueCard({ item, onSpawn }: { item: QueueVM; onSpawn: () => voi
           <Text style={{ color: c.bg, fontSize: 12.5, fontWeight: "600" }}>Run</Text>
         </Press>
       </View>
-    </View>
+    </Wrap>
   );
 }
 

@@ -14,6 +14,7 @@ interface SheetsCtx {
   openResume: (run: FloorRunVM) => void;
   openSearch: () => void;
   openSettings: () => void;
+  openTask: (id: string) => void;
 }
 
 const Ctx = createContext<SheetsCtx>({
@@ -21,6 +22,7 @@ const Ctx = createContext<SheetsCtx>({
   openResume: () => {},
   openSearch: () => {},
   openSettings: () => {},
+  openTask: () => {},
 });
 
 export function SheetsProvider({ children }: { children: React.ReactNode }) {
@@ -42,8 +44,9 @@ export function SheetsProvider({ children }: { children: React.ReactNode }) {
       openResume: (run) => setResume(run),
       openSearch: () => setSearch(true),
       openSettings: () => setSettings(true),
+      openTask: (id) => router.push(`/task/${id}`),
     }),
-    []
+    [router]
   );
 
   return (
@@ -66,6 +69,7 @@ export function SheetsProvider({ children }: { children: React.ReactNode }) {
         plans={planCards}
         onOpenRun={(id) => router.push(`/run/${id}`)}
         onOpenPlan={(id) => router.push(`/plan/${id}`)}
+        onOpenTask={(id) => router.push(`/task/${id}`)}
       />
       <SettingsSheet open={settings} onClose={() => setSettings(false)} />
     </Ctx.Provider>
