@@ -28,6 +28,31 @@ async function strandedChatRun(status: string) {
   return run;
 }
 
+describe("setStatus lease stamping", () => {
+  it("stamps heartbeatAt in the same write when entering a lease status", async () => {
+    // Regression: an in-process turn (lightweight chat / plan executor) opens
+    // its lease via setStatus('running'), not a dispatch claim. Before the
+    // stamp, a fresh run sat at running with heartbeat_at NULL until the
+    // heartbeat interval's first beat — a window where reconcileOrphanedRuns
+    // failed the live turn as "Worker heartbeat lost … (no heartbeat recorded;
+    // scope none)".
+    const run = await create({ goal: "<chat>", defer: true });
+    expect((await get(run.id))!.heartbeatAt).toBeNull();
+
+    await dbTransport.setStatus(run.id, "running");
+
+    const row = (await get(run.id))!;
+    expect(row.heartbeatAt).not.toBeNull();
+    expect(Date.now() - row.heartbeatAt!.getTime()).toBeLessThan(60_000);
+  });
+
+  it("leaves heartbeatAt untouched for non-lease transitions", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    await dbTransport.setStatus(run.id, "idle");
+    expect((await get(run.id))!.heartbeatAt).toBeNull();
+  });
+});
+
 describe("releaseClaim re-dispatch gate", () => {
   it("chat exit does NOT resurrect a failed run over a stranded message", async () => {
     const run = await strandedChatRun("failed");

@@ -4185,9 +4185,23 @@ export async function reconcileOrphanedRuns(): Promise<number> {
       hasBranch: !!row.branch,
       worktreeOnDisk: !!row.worktreePath && existsSync(row.worktreePath),
     });
+    // A lightweight (runtime='server') plan executor is resumable too, just not
+    // via the worktree predicate above: its whole conversational state lives in
+    // Postgres (agent_messages + inbox), and dispatchRun routes a server-placement
+    // row to resumeServerRun, which replays that context in-process. Failing it
+    // with "Worker heartbeat lost" after a web deploy/restart killed its turn
+    // mid-flight abandons a plan that can simply pick itself back up. Chat runs
+    // deliberately stay out of this (their policy is already 'idle': the next
+    // user message resumes them; an unattended auto-resume would burn a turn).
+    const serverResumable =
+      row.runtime === "server" && row.goal === "<execute>" && !!row.planId;
     // The sweep has no OOM signal (it only sees a stale heartbeat), so oom=false:
     // a resumable orphan always re-dispatches here, exactly as before R8.
-    const policy = decideDeadRunPolicy({ goal: row.goal, resumable, oom: false });
+    const policy = decideDeadRunPolicy({
+      goal: row.goal,
+      resumable: resumable || serverResumable,
+      oom: false,
+    });
     if (policy === "redispatch") {
       await db.update(agentSessions)
         .set({ workerScope: null })
