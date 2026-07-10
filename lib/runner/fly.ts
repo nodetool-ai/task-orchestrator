@@ -8,7 +8,7 @@ import { agentEvents, agentSessions, runnerInstances } from "@/db/schema";
 import { agentCredentialEnv } from "../agent-backend/provider-env";
 import { config } from "../config";
 import { isTerminalStatus, type SessionStatus } from "../types";
-import { isWorkerClaimLive, nextLifecycleAction } from "./lifecycle";
+import { isWakeIntentFresh, isWorkerClaimLive, nextLifecycleAction } from "./lifecycle";
 import { nestedDispatchMode } from "./provider";
 import { recordRunnerEvent, timeRunnerPhase } from "./telemetry";
 import { workerDispatchEnv } from "../worker/token";
@@ -97,17 +97,21 @@ function isActiveRunStatus(status: string | null): boolean {
  * Whether a run row — freshly re-read immediately before executing a queued
  * suspend/stop — is STILL eligible for that action. False when the run has
  * become active since the sweep took its decision snapshot: either its status
- * is now an active lease status (a plan-executor's turn started running) or
- * its worker claim is live again (a chat worker woke to a new message and
- * renewed its heartbeat). Exported as a pure predicate so it's directly unit
- * testable without racing real timing against a live sweep.
+ * is now an active lease status (a plan-executor's turn started running), its
+ * worker claim is live again (a chat worker woke to a new message and renewed
+ * its heartbeat), or a wake intent was recorded since the snapshot (resume()
+ * just told Fly to start this machine — the booting worker has no heartbeat
+ * yet, so only the intent protects it; run-139 incident). Exported as a pure
+ * predicate so it's directly unit testable without racing real timing against
+ * a live sweep.
  */
 export function isEligibleForLifecycleAction(row: {
   status: string | null;
   workerScope: string | null;
   heartbeatAt: Date | null;
+  wakeRequestedAt?: Date | null;
 }): boolean {
-  return !isActiveRunStatus(row.status) && !isWorkerClaimLive(row);
+  return !isActiveRunStatus(row.status) && !isWorkerClaimLive(row) && !isWakeIntentFresh(row);
 }
 
 /**
@@ -487,19 +491,51 @@ export class FlyRunnerProvider implements RunnerProvider {
         // live handle. Returning it here would hand the sweep a corpse it
         // re-death-detects and re-dispatches into forever.
         if (state === "suspended" || state === "stopped") {
-          await timeRunnerPhase(
-            "fly_machine_start",
-            () => this.flyClient.startMachine(machine.id),
-            { provider: "fly", fields: { runId, machineId: machine.id, state } }
-          );
-          await this.updateInstance(runId, {
-            machineId: machine.id,
-            state: "starting",
-            lastStartedAt: now,
-            region: machine.region || region,
-          });
-          await emitRunnerEvent(runId, "runner_resumed", { machineId: machine.id, state });
-          return { runId, handle: machine.id, provider: "fly" };
+          // Record the wake intent BEFORE the Fly call: from the instant the
+          // machine reports "started" until the booting worker writes its first
+          // heartbeat there is NO live claim on the run, and a lifecycle sweep
+          // tick landing in that window sees a running machine with a parked/
+          // idle run and suspends it mid-boot (incident: run 139, suspended
+          // 64ms after its wake, then failed by the reaper for the heartbeat it
+          // never wrote). The intent is cleared by the worker's first heartbeat
+          // (see the db transport) or ages out past the wake grace window.
+          await this.updateInstance(runId, { wakeRequestedAt: now });
+          let started = true;
+          try {
+            await timeRunnerPhase(
+              "fly_machine_start",
+              () => this.startMachineWithRetry(machine.id, runId),
+              { provider: "fly", fields: { runId, machineId: machine.id, state } }
+            );
+          } catch (err) {
+            // Unrecoverable wake (e.g. repeated 409 "machine exited abruptly"):
+            // the machine is a corpse, but the VOLUME — the run's warm checkout,
+            // unpushed work, and SDK transcript — is intact. Destroy the corpse
+            // and fall through to the cold-recover path below, which creates a
+            // fresh machine on the same volume, instead of surfacing the error
+            // as a spawn failure that fails the run outright (incident: run 135
+            // died on a single un-retried 409).
+            started = false;
+            console.error(
+              `[FlyRunnerProvider] startMachine ${machine.id} failed after retries; cold-recovering:`,
+              err
+            );
+            await emitRunnerEvent(runId, "runner_wake_failed", {
+              machineId: machine.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+            await this.flyClient.destroyMachine(machine.id, { force: true }).catch(() => {});
+          }
+          if (started) {
+            await this.updateInstance(runId, {
+              machineId: machine.id,
+              state: "starting",
+              lastStartedAt: now,
+              region: machine.region || region,
+            });
+            await emitRunnerEvent(runId, "runner_resumed", { machineId: machine.id, state });
+            return { runId, handle: machine.id, provider: "fly" };
+          }
         } else if (state !== "gone") {
           await this.updateInstance(runId, {
             machineId: machine.id,
@@ -515,6 +551,9 @@ export class FlyRunnerProvider implements RunnerProvider {
     try {
       const volumeId = instance.volumeId;
       if (!volumeId) return null;
+      // Same boot window as the warm start above: the fresh machine runs before
+      // its worker heartbeats, so the wake intent must already be on the row.
+      await this.updateInstance(runId, { wakeRequestedAt: now });
       const machine = await timeRunnerPhase(
         "fly_machine_cold_recover_create",
         () =>
@@ -549,6 +588,36 @@ export class FlyRunnerProvider implements RunnerProvider {
       // session instead of dangling.
       await clearSdkSession(runId);
       return null;
+    }
+  }
+
+  /**
+   * startMachine with a bounded retry on Fly 409s. Fly answers 409 (e.g.
+   * "machine exited abruptly", or a state-transition conflict) for a machine
+   * that transiently can't accept a start; run 135 saw ONE such 409 propagate
+   * straight to failSpawn and fail the run. Two retries with short backoff
+   * cover the transient case; a machine still 409ing after that is handed back
+   * to the caller, which cold-recovers a fresh machine on the same volume.
+   * Non-409 errors are never retried — they indicate a different failure the
+   * caller's fallback should see immediately.
+   */
+  private async startMachineWithRetry(machineId: string, runId: number): Promise<void> {
+    const backoffMs = [500, 1500];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.flyClient.startMachine(machineId);
+        return;
+      } catch (err) {
+        if (!(err instanceof FlyApiError && err.status === 409) || attempt >= backoffMs.length) {
+          throw err;
+        }
+        await emitRunnerEvent(runId, "runner_wake_retry", {
+          machineId,
+          attempt: attempt + 1,
+          error: err.message,
+        });
+        await new Promise((r) => setTimeout(r, backoffMs[attempt]));
+      }
     }
   }
 
@@ -591,6 +660,7 @@ export class FlyRunnerProvider implements RunnerProvider {
         createdAt: runnerInstances.createdAt,
         lastStartedAt: runnerInstances.lastStartedAt,
         lastSuspendedAt: runnerInstances.lastSuspendedAt,
+        wakeRequestedAt: runnerInstances.wakeRequestedAt,
         archivedUri: runnerInstances.archivedUri,
         runStatus: agentSessions.status,
         runGoal: agentSessions.goal,
@@ -709,6 +779,7 @@ export class FlyRunnerProvider implements RunnerProvider {
       createdAt: Date;
       lastStartedAt: Date | null;
       lastSuspendedAt: Date | null;
+      wakeRequestedAt: Date | null;
       archivedUri: string | null;
       workerScope: string | null;
       heartbeatAt: Date | null;
@@ -727,6 +798,9 @@ export class FlyRunnerProvider implements RunnerProvider {
       idleMs,
       workerScope: row.workerScope,
       heartbeatAt: row.heartbeatAt,
+      // A fresh wake intent (resume() just told Fly to start this machine, the
+      // worker hasn't heartbeated yet) is honored like a live claim.
+      wakeRequestedAt: row.wakeRequestedAt,
       // Lets the policy exempt conversational terminal runs (a plan executor
       // between operator messages) from the short terminal retention window.
       goal: row.runGoal,
@@ -746,8 +820,13 @@ export class FlyRunnerProvider implements RunnerProvider {
           status: agentSessions.status,
           workerScope: agentSessions.workerScope,
           heartbeatAt: agentSessions.heartbeatAt,
+          // Re-read the wake intent alongside the claim: resume() stamps it in
+          // exactly this snapshot-to-execution window (that IS the run-139
+          // race), so the snapshot's value is the one we must not trust here.
+          wakeRequestedAt: runnerInstances.wakeRequestedAt,
         })
         .from(agentSessions)
+        .leftJoin(runnerInstances, eq(runnerInstances.runId, agentSessions.id))
         .where(eq(agentSessions.id, row.runId));
       if (fresh && !isEligibleForLifecycleAction(fresh)) return;
     }

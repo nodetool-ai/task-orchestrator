@@ -15,7 +15,7 @@
 
 import { and, count, eq, gt, notInArray, sql } from "drizzle-orm";
 import { db } from "../../db";
-import { agentEvents, agentMessages, agentSessions, resourceLocks } from "../../db/schema";
+import { agentEvents, agentMessages, agentSessions, resourceLocks, runnerInstances } from "../../db/schema";
 import * as repo from "../repo";
 import { markControlInjected } from "../inbox";
 import { subscribeRunInput } from "../run-stream-listener";
@@ -204,6 +204,15 @@ export const dbTransport: RunTransport = {
       .set({ heartbeatAt: new Date() })
       .where(eq(agentSessions.id, runId))
       .returning({ c: agentSessions.cancelRequested });
+    // The worker is alive: the wake intent that protected its machine through
+    // boot (runner_instances.wake_requested_at, honored by the lifecycle sweep
+    // like a live claim) is superseded by this heartbeat — clear it so the
+    // sweep's cost policy is governed by the claim alone again. Guarded on
+    // IS NOT NULL so the steady-state heartbeat path stays a single write.
+    await db
+      .update(runnerInstances)
+      .set({ wakeRequestedAt: null })
+      .where(and(eq(runnerInstances.runId, runId), sql`${runnerInstances.wakeRequestedAt} IS NOT NULL`));
     return { cancelRequested: rows[0]?.c === 1 };
   },
 

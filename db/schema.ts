@@ -330,6 +330,15 @@ export const runnerInstances = pgTable("runner_instances", {
   createdAt: ts("created_at").notNull().defaultNow(),
   lastStartedAt: ts("last_started_at"),
   lastSuspendedAt: ts("last_suspended_at"),
+  // Wake-intent lease: stamped immediately BEFORE the Fly start/create call that
+  // wakes this runner, cleared by the worker's first heartbeat (or superseded by
+  // age — TASK_ORCH_RUNNER_WAKE_GRACE_MS). Bridges the window between "machine
+  // told to start" and "worker writes its first heartbeat", during which the
+  // lifecycle sweep would otherwise see a running machine with no live claim and
+  // suspend it out from under the boot (incident: run 139 was suspended 64ms
+  // after its wake; the reaper then failed it for the heartbeat it never got to
+  // write).
+  wakeRequestedAt: ts("wake_requested_at"),
   archivedUri: text("archived_uri"),
 });
 

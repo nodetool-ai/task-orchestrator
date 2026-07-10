@@ -68,6 +68,68 @@ describe("nextLifecycleAction", () => {
     });
   });
 
+  // Wake-intent lease (run-139 incident): resume() stamps wake_requested_at just
+  // before telling Fly to start a machine; the booting worker has no heartbeat
+  // yet, so without this the sweep sees "running machine, parked run, no live
+  // claim" and suspends it mid-boot — the reaper then fails the run for the
+  // heartbeat it never got to write. A fresh intent must be honored exactly like
+  // a live worker claim; a stale one (worker never came up) must expire so the
+  // cost policy resumes.
+  describe("wake intent grace", () => {
+    it("spares a parked run whose machine has a fresh wake intent (the run-139 race)", () => {
+      const action = nextLifecycleAction({
+        runStatus: "parked",
+        runnerState: "running",
+        idleMs: 2 * H,
+        wakeRequestedAt: new Date(),
+      });
+      expect(action.kind).toBe("none");
+    });
+
+    it("spares an idle run with a fresh wake intent even with no claim", () => {
+      const action = nextLifecycleAction({
+        runStatus: "idle",
+        runnerState: "running",
+        idleMs: 2 * H,
+        wakeRequestedAt: new Date(Date.now() - 30_000),
+      });
+      expect(action.kind).toBe("none");
+    });
+
+    it("resumes normal behavior once the intent has aged past the grace window", () => {
+      // Default TASK_ORCH_RUNNER_WAKE_GRACE_MS is 120s; a 3-minute-old intent
+      // means the worker never came up — do not shield the machine forever.
+      const action = nextLifecycleAction({
+        runStatus: "idle",
+        runnerState: "running",
+        idleMs: 2 * H,
+        wakeRequestedAt: new Date(Date.now() - 3 * 60_000),
+      });
+      expect(action.kind).toBe("suspend");
+    });
+
+    it("honors the TASK_ORCH_RUNNER_WAKE_GRACE_MS override", () => {
+      vi.stubEnv("TASK_ORCH_RUNNER_WAKE_GRACE_MS", String(10 * 60_000));
+      const action = nextLifecycleAction({
+        runStatus: "idle",
+        runnerState: "running",
+        idleMs: 2 * H,
+        wakeRequestedAt: new Date(Date.now() - 3 * 60_000),
+      });
+      expect(action.kind).toBe("none");
+    });
+
+    it("treats a null/omitted intent as no intent (back-compat)", () => {
+      const withNull = nextLifecycleAction({
+        runStatus: "idle",
+        runnerState: "running",
+        idleMs: 2 * H,
+        wakeRequestedAt: null,
+      });
+      expect(withNull.kind).toBe("suspend");
+    });
+  });
+
   // A terminal run (completed/failed/cancelled/closed/budget_exhausted) never
   // resumes on its own, but dispatchRun DOES re-claim completed/failed/
   // budget_exhausted for a follow-up turn or an operator restart — and that
