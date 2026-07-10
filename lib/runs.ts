@@ -69,7 +69,7 @@ import {
   decideTurnEndStatus,
   resultPrUrl,
 } from "./run-state";
-import { config, runnerProviderKind } from "./config";
+import { config, lightweightIsolation, runnerProviderKind } from "./config";
 import {
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_STALE_MS,
@@ -136,6 +136,7 @@ runDispatch.__setRunsApi({
   failRun: setError,
   failPendingRun,
   countInFlightWorkers,
+  countInFlightLightweightChildren,
   listPendingRunIds,
   reconcileOrphanedRuns,
   listLeasedRuns,
@@ -812,17 +813,26 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   // root (no worktree of its own); children make their own worktrees.
   if (!input.defer && goal === "<execute>" && input.planId) {
     void (async () => {
-      const { detachedRunsEnabled } = await import("./run-dispatch");
+      const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
       // FIX 7 (M20): launchDetached persists a custom initialPrompt as the first
       // user message so driveDispatchedRun's <execute> branch can read it back and
       // pass it to runExecute as operator instructions.
       if (detachedRunsEnabled() && !isLightweightPiExecutorRun(run)) {
         await launchDetached(run.id, input.initialPrompt, input.parentRunId ?? null);
+      } else if (isLightweightPiExecutorRun(run) && lightweightIsolation() === "child") {
+        // Lightweight executor under 'child' isolation: persist any custom
+        // initialPrompt (so the child's <execute> branch reads it back as operator
+        // instructions, exactly like the detached path) and dispatch — dispatchRun
+        // claims the row and spawns the memory-capped child. No in-process turn.
+        if (input.initialPrompt) {
+          await persistMessage(run.id, "user", [{ type: "text", text: input.initialPrompt }]);
+        }
+        await dispatchRun(run.id);
       } else {
-        // In-process lightweight executor: take the server-turn claim (R2) so a
-        // duplicate wake (an inbox emit racing this create-time turn) can't drive
-        // a second coordinator turn concurrently. withServerClaim no-ops the
-        // drive if the claim is already held.
+        // In-process lightweight executor ('inprocess' isolation): take the
+        // server-turn claim (R2) so a duplicate wake (an inbox emit racing this
+        // create-time turn) can't drive a second coordinator turn concurrently.
+        // withServerClaim no-ops the drive if the claim is already held.
         await withServerClaim(run.id, () =>
           runExecute(run.id, input.planId!, input.initialPrompt ?? null)
         );
@@ -2959,18 +2969,25 @@ export async function* sendMessageToRun(opts: {
     return;
   }
   // Chat runs are latency-sensitive and do not need the implementation runner's
-  // branch/container/PR lifecycle. Keep them in this web process by default so
-  // they can use the same backend + orchestrator tools without paying worker
-  // startup cost. Set TASK_ORCH_LIGHTWEIGHT_CHATS=0 to restore worker-backed
-  // chat sessions in deployments that require that isolation boundary.
-  if (isLightweightPiChatRun(run)) {
+  // branch/container/PR lifecycle. Two lightweight modes (TASK_ORCH_LIGHTWEIGHT_
+  // ISOLATION):
+  //  - 'inprocess': run the turn IN this web process (append) — lowest latency,
+  //    but a runaway turn shares the control-plane heap/event loop.
+  //  - 'child' (default): persist the message, ensure a memory-capped local Node
+  //    child is running (notify-if-live else dispatch), and RELAY the reply from
+  //    the durable run_stream tail — the same worker-backed shape used for remote
+  //    runners, minus the container. Off the control-plane event loop, DB-capped.
+  const lightweightChat = isLightweightPiChatRun(run);
+  if (lightweightChat && lightweightIsolation() === "inprocess") {
     yield* append({ runId, role, text, author, abort });
     return;
   }
-  // Remote runner deployments (Docker worker image or Fly Machines provider)
-  // force turns through workers. Plain dev/test with no remote runner keeps the
-  // old in-process streaming path.
-  if (!runDispatch.remoteRunnerEnabled()) {
+  // Non-lightweight runs: remote runner deployments (Docker worker image or Fly
+  // Machines provider) force turns through workers; plain dev/test with no remote
+  // runner keeps the old in-process streaming path. A lightweight chat under
+  // 'child' isolation always takes the worker-backed path below (its "worker" is
+  // the local memory-capped child), independent of the remote-runner setting.
+  if (!lightweightChat && !runDispatch.remoteRunnerEnabled()) {
     yield* append({ runId, role, text, author, abort });
     return;
   }
@@ -4414,6 +4431,30 @@ export async function countInFlightWorkers(): Promise<number> {
     .where(
       and(
         eq(agentSessions.runtime, "worker"),
+        isNotNull(agentSessions.workerScope),
+        gt(agentSessions.heartbeatAt, new Date(Date.now() - HEARTBEAT_STALE_MS))
+      )
+    );
+  return rows.length;
+}
+
+/**
+ * Count live lightweight children: runtime='server' rows holding a claim with a
+ * fresh heartbeat. Each represents an active lightweight execution (a spawned
+ * memory-capped child under 'child' isolation, or an in-process server turn under
+ * 'inprocess'). dispatchRun uses this to bound the lightweight tier's concurrency
+ * (TASK_ORCH_LIGHTWEIGHT_MAX_CHILDREN) so a burst of chats can't fork-bomb the
+ * host — over-cap dispatches park at 'pending' and drain through the pump. A dead
+ * child's stale claim (expired heartbeat) is excluded, so a crashed child frees
+ * its slot the moment the reaper would reclaim it.
+ */
+export async function countInFlightLightweightChildren(): Promise<number> {
+  const rows = await db
+    .select({ id: agentSessions.id })
+    .from(agentSessions)
+    .where(
+      and(
+        eq(agentSessions.runtime, "server"),
         isNotNull(agentSessions.workerScope),
         gt(agentSessions.heartbeatAt, new Date(Date.now() - HEARTBEAT_STALE_MS))
       )
