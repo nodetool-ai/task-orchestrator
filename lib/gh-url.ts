@@ -57,6 +57,17 @@ export function ownerRepoFromRemote(
   return null;
 }
 
+/**
+ * GitHub web URL for a branch (`…/tree/<branch>`), from the repo's git remote.
+ * Null when the remote is missing or isn't a recognisable GitHub URL — callers
+ * fall back to plain-text display.
+ */
+export function branchUrlFromRemote(remote: string | null, branch: string): string | null {
+  const parsed = ownerRepoFromRemote(remote);
+  if (!parsed) return null;
+  return `https://github.com/${parsed.owner}/${parsed.repo}/tree/${encodeURIComponent(branch)}`;
+}
+
 export interface UrlValidation {
   parsed: ParsedPrUrl;
   matched: { id: string; name: string };

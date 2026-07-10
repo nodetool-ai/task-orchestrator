@@ -1,7 +1,8 @@
 // Worktree garbage collection.
 //
-// Idle runs accumulate worktrees on disk: each implement-style run carves a
-// fresh worktree under .worktrees/<id> and we keep it around after the run
+// Idle runs accumulate worktrees on disk: worktree runs check out under
+// .worktrees/<taskid> (task runs share one checkout per task; taskless chat
+// runs use .worktrees/<runid>) and we keep the directory around after the run
 // lands at `idle` so resuming is instant (no clone, no checkout). For runs
 // whose work has been merged (or the branch otherwise reset), the worktree
 // is dead weight — this module sweeps those out.

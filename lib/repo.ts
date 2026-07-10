@@ -194,6 +194,7 @@ function hydrateTask(
     tags: safeJsonArray(row.tags),
     repoId: row.repoId,
     prUrl: row.prUrl ?? inferredPrUrl ?? null,
+    branch: row.branch ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     dependencies: deps,

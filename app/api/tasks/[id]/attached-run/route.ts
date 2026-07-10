@@ -41,22 +41,34 @@ export async function POST(
     const session = await auth();
     const uid = session?.user?.id ? Number(session.user.id) : null;
 
-    const run = await runs.create({
-      goal: "<implement>",
-      toolsProfile: "orchestrator,repo_write,gh_pr,gh_ci",
-      cwdStrategy: "worktree",
-      taskId: id,
-      personaId: personaId ?? "implementor",
-      model: model ?? undefined,
-      backend: backend ?? undefined,
-      thinkingLevel: thinkingLevel ?? undefined,
-      userId: uid,
-      budget: { maxUsd: IMPLEMENT_DEFAULT_BUDGET_USD },
-      // Agent button seeds the implement prompt and kicks the first turn; the
-      // chat box defers so the user's own message becomes turn 1.
-      initialPrompt: seed ? await buildImplementPrompt(task) : undefined,
-      defer: !seed,
-    });
+    let run;
+    try {
+      run = await runs.create({
+        goal: "<implement>",
+        toolsProfile: "orchestrator,repo_write,gh_pr,gh_ci",
+        cwdStrategy: "worktree",
+        taskId: id,
+        personaId: personaId ?? "implementor",
+        model: model ?? undefined,
+        backend: backend ?? undefined,
+        thinkingLevel: thinkingLevel ?? undefined,
+        userId: uid,
+        budget: { maxUsd: IMPLEMENT_DEFAULT_BUDGET_USD },
+        // Agent button seeds the implement prompt and kicks the first turn; the
+        // chat box defers so the user's own message becomes turn 1.
+        initialPrompt: seed ? await buildImplementPrompt(task) : undefined,
+        defer: !seed,
+      });
+    } catch (e) {
+      // Lost the one-active-run-per-task admission race (or an active run
+      // exists that isn't the attached one). Surface the run that's already
+      // working the task instead of erroring the button.
+      if (e instanceof repo.RepoError && e.status === 409) {
+        const raced = await repo.resolveAttachedRun(id);
+        if (raced) return NextResponse.json({ runId: raced.id, created: false });
+      }
+      throw e;
+    }
     return NextResponse.json({ runId: run.id, created: true }, { status: 201 });
   } catch (e) {
     return errorResponse(e);

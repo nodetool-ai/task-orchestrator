@@ -25,6 +25,8 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { ListPanel } from "@/components/ui/list-panel";
 import { PageSection } from "@/components/ui/page-section";
 import { PrLink } from "@/components/pr-link";
+import { branchUrlFromRemote } from "@/lib/gh-url";
+import { GitBranch } from "lucide-react";
 
 export const dynamic = "force-dynamic";
 
@@ -51,6 +53,10 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   // The task's latest PR (denormalised onto TaskFull from its most recent run).
   const latestPr = task.prUrl;
   const repository = task.repoId ? await repo.getRepository(task.repoId) : null;
+  // The task's canonical branch (every agent run works this one branch),
+  // falling back to the attached run's branch for pre-migration tasks.
+  const taskBranch = task.branch ?? attachedRun?.branch ?? null;
+  const branchUrl = taskBranch ? branchUrlFromRemote(repository?.remote ?? null, taskBranch) : null;
   const planRepoOptions = plan?.repos ?? [];
   const chatPromptPrefix = buildChatPromptPrefix(task, latestPr);
   const personas = await repo.listPersonas();
@@ -124,6 +130,26 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
             </div>
           </Meta>
         ) : null}
+        {taskBranch && (
+          <Meta label="Branch" className="col-span-2 md:col-span-4">
+            {branchUrl ? (
+              <a
+                href={branchUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 font-mono text-[11px] text-foreground hover:underline decoration-dotted"
+              >
+                <GitBranch className="size-3 shrink-0 text-muted-foreground" />
+                <span className="truncate">{taskBranch}</span>
+              </a>
+            ) : (
+              <code className="inline-flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
+                <GitBranch className="size-3 shrink-0" />
+                <span className="truncate">{taskBranch}</span>
+              </code>
+            )}
+          </Meta>
+        )}
         {latestPr && (
           <Meta label="Pull request" className="col-span-2 md:col-span-4">
             <PrLink url={latestPr} variant="badge" external />
