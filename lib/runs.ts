@@ -1510,12 +1510,21 @@ export async function close(id: number): Promise<RunRow> {
  * Resume a completed/idle worktree run for an unattended follow-up turn —
  * e.g. the GitHub webhook handler reacting to a CI failure on the run's PR.
  *
- * Re-materializes the worktree on the run's branch, runs one agent turn with
- * the given prompt, then pushes the branch (to update the PR and re-trigger
- * CI) and returns the run to `completed`. A fresh SDK session is started
- * rather than resuming `sdkSessionId`, because the original session files live
- * inside the (since-cleaned-up) worktree; the prompt + the checked-out code +
- * the gh tools give the agent everything it needs.
+ * DISPATCHES, does not execute: on a remote-runner deployment the prompt is
+ * persisted and the run handed to dispatchRun (a worker Machine/container runs
+ * the turn, pushes the branch, and lands the terminal status). The control
+ * plane must never run the turn itself — it has no SESSION_ROOT/REPO_CACHE_DIR
+ * and its image ships without git, so prepareCwd's host/dev branch fails
+ * instantly (runs 133/137/140/144: "not a git repository" / spawn git ENOENT,
+ * with the autofix poller re-failing already-completed runs every 2 minutes).
+ *
+ * Host/dev mode (no remote runner) keeps the original in-process turn:
+ * re-materialize the worktree on the run's branch, run one agent turn with the
+ * given prompt, push the branch (to update the PR and re-trigger CI), and
+ * return the run to `completed`. A fresh SDK session is started rather than
+ * resuming `sdkSessionId`, because the original session files live inside the
+ * (since-cleaned-up) worktree; the prompt + the checked-out code + the gh
+ * tools give the agent everything it needs.
  *
  * No-ops (resolves quietly) when the run is missing, already in flight, or has
  * no worktree branch to push to.
@@ -1535,6 +1544,32 @@ export async function followUp(
   // owns it — mirrored below on a fresh read after the lock is acquired.
   if (isLeaseLive(run) || isWorkerLive(run)) return;
   if (run.cwdStrategy !== "worktree" || !run.branch || !run.worktreePath) return;
+
+  // Remote-runner deployments (Fly Machines / Docker worker image): route the
+  // turn through dispatchRun, the same front door every other remote turn uses
+  // (placement, admission, the atomic worker claim — mirroring
+  // sendMessageToRun's remoteRunnerEnabled() split). The prompt is persisted as
+  // a USER message deliberately: the dispatched worker rebuilds its prompt from
+  // the unanswered user backlog (dispatchTurnPrompt), which replays only
+  // user-role rows — a system row would be silently dropped and the worker
+  // would run a bare "resume" turn instead of the CI-fix instructions.
+  if (runDispatch.remoteRunnerEnabled()) {
+    if (opts.addProfiles?.length) {
+      // The dispatched worker mounts tools from the run ROW, not from per-call
+      // options — persist the merge so the gh_pr/gh_ci tools the autofix turn
+      // needs actually exist in the worker (and stay for later attempts).
+      await db
+        .update(agentSessions)
+        .set({ toolsProfile: mergeProfiles(run.toolsProfile, opts.addProfiles) })
+        .where(eq(agentSessions.id, runId));
+    }
+    await persistMessage(runId, "user", [{ type: "text", text: prompt }]);
+    // dispatchRun is idempotent against races: a claim that landed since the
+    // liveness checks above makes it return "already-claimed", and that turn
+    // drains the freshly persisted message.
+    await runDispatch.dispatchRun(runId);
+    return;
+  }
 
   const lock = getLock(runId);
   while (lock.busy) {
