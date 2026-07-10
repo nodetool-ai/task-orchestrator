@@ -34,6 +34,7 @@ import { SystemEventRow } from "@/components/runs/system-event-row";
 import { EventDigestCard, type DigestEnvelope } from "@/components/runs/event-digest-card";
 import { InboxPanel } from "@/components/runs/inbox-panel";
 import { PlanningReviewCard } from "@/components/runs/planning-review-card";
+import { StartupIndicator } from "@/components/runs/startup-indicator";
 import { useConfirm } from "@/components/ui/dialog-provider";
 import { WorkerLogPanel } from "@/components/runs/worker-log-panel";
 import { takePendingMessage } from "@/lib/pending-first-message";
@@ -142,6 +143,11 @@ export function RunView({
   );
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  // True from the moment a turn is sent until the agent produces its first
+  // visible output. While it holds we show the startup/boot indicator instead
+  // of bare typing dots, so the wait for a light chat to warm up — or an agent
+  // container to boot — is legible rather than a silent pause.
+  const [awaitingFirstToken, setAwaitingFirstToken] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [showWorkerLog, setShowWorkerLog] = useState(false);
   const [showInbox, setShowInbox] = useState(false);
@@ -321,6 +327,9 @@ export function RunView({
   // (the sender receives both streams during a live turn) renders once.
   function appendPersistedRow(row: MessageRow) {
     const ui = toUiMessage(row);
+    // The agent has started responding — drop the startup/boot indicator in
+    // favour of the streamed content (and plain thinking dots between chunks).
+    if (ui.role === "agent" || ui.role === "tool") setAwaitingFirstToken(false);
     setMessages((prev) => {
       if (prev.some((m) => m.id === ui.id)) return prev; // already have the real row
       // A just-persisted USER message is also the one we optimistically rendered
@@ -354,6 +363,7 @@ export function RunView({
     if (m.type === "assistant" && m.message?.content) {
       const blocks = m.message.content;
       if (blocks.length === 0) return;
+      setAwaitingFirstToken(false);
       setMessages((prev) => [
         ...prev,
         { id: nextTmpId(), role: "agent", content: blocks, createdAt: new Date() },
@@ -361,6 +371,7 @@ export function RunView({
     } else if (m.type === "user" && m.message?.content) {
       const toolResults = m.message.content.filter((b) => b.type === "tool_result");
       if (toolResults.length === 0) return;
+      setAwaitingFirstToken(false);
       setMessages((prev) => [
         ...prev,
         { id: nextTmpId(), role: "tool", content: toolResults, createdAt: new Date() },
@@ -391,6 +402,7 @@ export function RunView({
     if (!text || sending || composerDisabled) return;
     setInput("");
     setSending(true);
+    setAwaitingFirstToken(true);
     setErrorMsg(null);
 
     // Optimistic user message — keyed by a temp negative id so the next
@@ -452,6 +464,7 @@ export function RunView({
       }
     } finally {
       setSending(false);
+      setAwaitingFirstToken(false);
       abortRef.current = null;
       router.refresh();
     }
@@ -786,7 +799,20 @@ export function RunView({
                 />
               )
             )}
-            {sending && <ThinkingIndicator />}
+            {sending &&
+              (awaitingFirstToken ? (
+                <StartupIndicator
+                  runtime={run.runtime}
+                  status={status}
+                  onShowLog={
+                    run.runtime === "worker"
+                      ? () => setShowWorkerLog(true)
+                      : undefined
+                  }
+                />
+              ) : (
+                <ThinkingIndicator />
+              ))}
             {errorMsg && (
               <pre className="mx-4 my-2 rounded-md border border-state-blocked/40 bg-state-blocked/10 px-3 py-2 text-[11px] leading-5 font-mono whitespace-pre-wrap text-state-blocked overflow-x-auto">
                 {errorMsg}
