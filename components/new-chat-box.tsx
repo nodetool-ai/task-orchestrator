@@ -119,7 +119,7 @@ export function NewChatBox({ defaultModel, repositories }: Props) {
           disabled={pending}
           className="w-full px-3 pb-1 pt-3"
         />
-        <div className="flex items-center gap-2 border-t border-border/60 px-3 py-2">
+        <div className="flex flex-wrap items-center gap-2 border-t border-border/60 px-3 py-2">
           <ModelPicker
             value={model}
             options={modelOptions}
