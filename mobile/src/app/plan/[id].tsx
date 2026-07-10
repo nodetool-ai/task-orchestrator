@@ -23,7 +23,7 @@ export default function PlanDetailScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
   const { sessions } = useData();
-  const { openSpawn } = useSheets();
+  const { openSpawn, openTask } = useSheets();
 
   const [plan, setPlan] = useState<PlanDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -49,7 +49,7 @@ export default function PlanDetailScreen() {
     [sessions, taskIds]
   );
   const queued = tasks.filter((t) => t.state === "todo");
-  const shipped = tasks.filter((t) => t.state === "done");
+  const shipped = tasks.filter((t) => t.state === "merged");
 
   if (!plan) {
     return (
@@ -138,7 +138,7 @@ export default function PlanDetailScreen() {
             <SectionHead glyph={<StateIcon state="todo" size={13} />} title="Queued tasks" count={queued.length} />
             <View style={{ gap: 8 }}>
               {queued.map((t) => (
-                <QueuedRow key={t.id} task={t} planTitle={plan.title} onRun={openSpawn} />
+                <QueuedRow key={t.id} task={t} planTitle={plan.title} onRun={openSpawn} onOpen={() => openTask(t.id)} />
               ))}
             </View>
           </>
@@ -150,8 +150,9 @@ export default function PlanDetailScreen() {
             <SectionHead glyph={<StateIcon state="done" size={13} />} title="Shipped" count={shipped.length} />
             <View style={{ gap: 8 }}>
               {shipped.map((t) => (
-                <View
+                <Press
                   key={t.id}
+                  onPress={() => openTask(t.id)}
                   style={{
                     flexDirection: "row",
                     alignItems: "center",
@@ -168,7 +169,7 @@ export default function PlanDetailScreen() {
                     {t.title}
                   </Text>
                   <MonoTag dim>{t.id}</MonoTag>
-                </View>
+                </Press>
               ))}
             </View>
           </>
@@ -182,6 +183,7 @@ function QueuedRow({
   task,
   planTitle,
   onRun,
+  onOpen,
 }: {
   task: TaskFull;
   planTitle: string;
@@ -194,10 +196,12 @@ function QueuedRow({
     tags: string[];
     assignee: string | null;
   }) => void;
+  onOpen: () => void;
 }) {
   const { c } = useTheme();
   return (
-    <View
+    <Press
+      onPress={onOpen}
       style={{
         flexDirection: "row",
         alignItems: "center",
@@ -243,6 +247,6 @@ function QueuedRow({
         <Icon name="spark" size={12} color={c.fg} />
         <Text style={{ color: c.fg, fontSize: 12, fontWeight: "600" }}>Run</Text>
       </Press>
-    </View>
+    </Press>
   );
 }

@@ -20,24 +20,27 @@ import {
   Tile,
 } from "@/components/primitives";
 import { Loading } from "@/components/Loading";
+import { Transcript } from "@/components/Transcript";
 import { useData } from "@/data/DataProvider";
 import { useToast } from "@/components/Toast";
 import { api } from "@/lib/api";
-import type { RunDetail, MessageRow } from "@/lib/types";
+import type { RunDetail, TaskState } from "@/lib/types";
+import { isReviewState } from "@/lib/task-state";
 import { fmtTok, money, prNumber, shortRunId, fauxSparkline } from "@/lib/format";
-import { useTheme, mono, type RunState } from "@/theme";
+import { useTheme, type RunState } from "@/theme";
 
 const ACTIVE = new Set(["pending", "preparing", "running", "pushing"]);
 const BLOCKED = new Set(["failed", "budget_exhausted"]);
 
-// Derive the UI state from the run status, preferring the task's board state
-// when known: once a PR is opened the session is `completed` while the task
-// sits in `review`, so the task is the source of truth for the action bar.
-function uiState(run: RunDetail, taskState?: string): RunState {
+// Derive the UI glyph state from the run status, preferring the task's board
+// state when known: once a PR is opened the session is `completed` while the
+// task sits in a review state (testing/failing/passing), so the task is the
+// source of truth for the action bar.
+function uiState(run: RunDetail, taskState?: TaskState): RunState {
   if (ACTIVE.has(run.status)) return "in_progress";
-  if (taskState === "review" || run.status === "opening_pr") return "review";
+  if ((taskState && isReviewState(taskState)) || run.status === "opening_pr") return "review";
   if (taskState === "blocked" || BLOCKED.has(run.status)) return "blocked";
-  if (taskState === "done" || run.status === "completed") return "done";
+  if (taskState === "merged" || run.status === "completed") return "done";
   if (run.prUrl) return "review";
   return "todo";
 }
@@ -177,8 +180,8 @@ export default function RunDetailScreen() {
   const approve = async () => {
     if (!run.taskId) return;
     try {
-      await api.transitionTask(run.taskId, "done");
-      toast(prNum ? `Approved #${prNum}` : "Marked done");
+      await api.transitionTask(run.taskId, "merged");
+      toast(prNum ? `Merged #${prNum}` : "Marked merged");
       refresh();
     } catch (e) {
       toast(e instanceof Error ? e.message : "Could not approve");
@@ -187,7 +190,7 @@ export default function RunDetailScreen() {
   const changes = async () => {
     if (!run.taskId) return;
     try {
-      await api.transitionTask(run.taskId, "in_progress", { assignee: "claude-agent" });
+      await api.transitionTask(run.taskId, "blocked", { assignee: "claude-agent" });
       toast("Requested changes");
       refresh();
     } catch (e) {
@@ -582,78 +585,12 @@ function RunBody({
         </>
       ) : null}
 
-      {/* event stream */}
+      {/* transcript / chat */}
       <View style={{ height: 18 }} />
-      <SectionHead title="Event stream" />
-      <EventStream messages={run.messages} />
+      <SectionHead title="Transcript" />
+      <View style={{ height: 4 }} />
+      <Transcript messages={run.messages} emptyLabel="No activity yet." />
     </ScrollView>
   );
 }
 
-function extractText(content: unknown[]): string {
-  if (!Array.isArray(content)) return "";
-  const parts: string[] = [];
-  for (const block of content) {
-    if (typeof block === "string") parts.push(block);
-    else if (block && typeof block === "object") {
-      const b = block as Record<string, unknown>;
-      if (b.type === "text" && typeof b.text === "string") parts.push(b.text);
-      else if (b.type === "tool_use" && typeof b.name === "string") parts.push(`→ tool: ${b.name}`);
-      else if (b.type === "tool_result") parts.push("← tool result");
-      else if (typeof b.text === "string") parts.push(b.text);
-    }
-  }
-  return parts.join(" ").trim();
-}
-
-const ROLE_META: Record<MessageRow["role"], { label: string; key: "muted" | "fg" | "progress" | "done" }> = {
-  system: { label: "sys", key: "muted" },
-  agent: { label: "claude", key: "fg" },
-  tool: { label: "tool", key: "progress" },
-  user: { label: "you", key: "done" },
-};
-
-function EventStream({ messages }: { messages: MessageRow[] }) {
-  const { c } = useTheme();
-  const colorFor = (k: string) =>
-    k === "fg" ? c.fg : k === "progress" ? c.sProgress : k === "done" ? c.sDone : c.muted2;
-  const sorted = [...messages].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  if (sorted.length === 0) {
-    return <Text style={{ color: c.muted2, fontSize: 12, paddingVertical: 8 }}>No events yet.</Text>;
-  }
-  return (
-    <View>
-      {sorted.map((m) => {
-        const meta = ROLE_META[m.role] || ROLE_META.system;
-        const col = colorFor(meta.key);
-        const body = extractText(m.content) || "(no content)";
-        const t = new Date(m.createdAt);
-        const tstr = `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}:${String(t.getSeconds()).padStart(2, "0")}`;
-        return (
-          <View
-            key={m.id}
-            style={{ flexDirection: "row", gap: 9, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: c.hairline }}
-          >
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 5, paddingTop: 1 }}>
-              <View style={{ width: 6, height: 6, borderRadius: 2, backgroundColor: col }} />
-              <Mono style={{ fontSize: 10, color: col, width: 46 }}>{meta.label}</Mono>
-            </View>
-            <View style={{ flex: 1, minWidth: 0 }}>
-              <Text
-                style={{
-                  fontSize: 12,
-                  lineHeight: 18,
-                  color: m.role === "agent" ? c.fg : c.muted,
-                  fontFamily: m.role === "agent" ? undefined : mono,
-                }}
-              >
-                {body}
-              </Text>
-              <Mono style={{ fontSize: 9.5, color: c.muted2 }}>{tstr}</Mono>
-            </View>
-          </View>
-        );
-      })}
-    </View>
-  );
-}

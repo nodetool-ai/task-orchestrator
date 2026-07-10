@@ -14,12 +14,16 @@ export type SessionStatus =
   | "budget_exhausted"
   | "closed";
 
+// Mirrors the server's TASK_STATES (lib/types.ts). PR-backed tasks flow through
+// testing/failing/passing/merged as CI reports in — see lib/task-state.ts.
 export type TaskState =
   | "todo"
   | "in_progress"
-  | "review"
+  | "testing"
+  | "failing"
+  | "passing"
+  | "merged"
   | "blocked"
-  | "done"
   | "cancelled";
 
 export type PlanState = "draft" | "proposed" | "accepted" | "done" | "cancelled";

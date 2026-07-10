@@ -225,6 +225,42 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch),
     }),
+  addCriterion: (taskId: string, text: string) =>
+    request<TaskFull>(`/api/tasks/${taskId}/criteria`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    }),
+  addNote: (taskId: string, body: string, author: string) =>
+    request<TaskFull>(`/api/tasks/${taskId}/notes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body, author }),
+    }),
+  patchTask: (taskId: string, patch: { repoId?: string | null }) =>
+    request<TaskFull>(`/api/tasks/${taskId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }),
+  // Open-or-create the task's single canonical agent run. `seed:true` kicks off
+  // the implement turn; `seed:false` defers (the first chat message is turn 1).
+  // The chosen persona/model/backend/thinking are honored only on creation.
+  attachedRun: (
+    taskId: string,
+    body: {
+      seed?: boolean;
+      personaId?: string;
+      model?: string | null;
+      backend?: BackendId | null;
+      thinkingLevel?: string | null;
+    }
+  ) =>
+    request<{ runId: number; created: boolean }>(`/api/tasks/${taskId}/attached-run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   // Advance a planning run past a review gate (spec_review → building_plan,
   // plan_review → committing). The server injects the "approved" turn.
   planningAction: (id: number, action: "approve_spec" | "approve_plan") =>
@@ -266,6 +302,7 @@ export const api = {
     personaId?: string;
     model?: string | null;
     backend?: BackendId | null;
+    thinkingLevel?: string | null;
     initialPrompt?: string;
     title?: string | null;
     budgetUsd?: number;
@@ -279,6 +316,7 @@ export const api = {
         personaId: input.personaId,
         model: input.model ?? undefined,
         backend: input.backend ?? undefined,
+        thinkingLevel: input.thinkingLevel ?? undefined,
         initialPrompt: input.initialPrompt,
         title: input.title ?? undefined,
         goal: "<implement>",

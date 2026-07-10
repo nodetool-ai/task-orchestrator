@@ -50,6 +50,7 @@ function Root() {
           <Stack.Screen name="login" options={{ animation: "fade" }} />
           <Stack.Screen name="run/[id]" />
           <Stack.Screen name="plan/[id]" />
+          <Stack.Screen name="task/[id]" />
         </Stack>
       </SheetsProvider>
       {status === "loading" ? (

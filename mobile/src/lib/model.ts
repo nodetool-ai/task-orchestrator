@@ -4,6 +4,7 @@
 
 import type { AgentSession, PlanFull, SessionStatus, TaskFull } from "./types";
 import { fauxSparkline, prNumber, shortRunId } from "./format";
+import { isReviewState } from "./task-state";
 
 const ACTIVE = new Set<SessionStatus>(["pending", "preparing", "running", "pushing"]);
 const REVIEW = new Set<SessionStatus>(["opening_pr"]);
@@ -172,7 +173,7 @@ export function buildFloor(
     .map((s) => toFloorRun(s, "blocked", idx));
 
   const review: ReviewVM[] = tasks
-    .filter((t) => t.state === "review")
+    .filter((t) => isReviewState(t.state))
     .map((t) => {
       const s = latestByTask.get(t.id) || null;
       return {
@@ -238,7 +239,7 @@ export function buildPlanCards(plans: PlanFull[], tasks: TaskFull[]): PlanCardVM
     if (t.state === "cancelled") continue;
     const c = counts.get(t.planId) || { done: 0, total: 0 };
     c.total += 1;
-    if (t.state === "done") c.done += 1;
+    if (t.state === "merged") c.done += 1;
     counts.set(t.planId, c);
   }
   return plans.map((p) => {

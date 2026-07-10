@@ -25,6 +25,7 @@ export function SearchSheet({
   plans,
   onOpenRun,
   onOpenPlan,
+  onOpenTask,
 }: {
   open: boolean;
   onClose: () => void;
@@ -32,6 +33,7 @@ export function SearchSheet({
   plans: PlanCardVM[];
   onOpenRun: (id: number) => void;
   onOpenPlan: (id: string) => void;
+  onOpenTask: (id: string) => void;
 }) {
   const { c } = useTheme();
   const [q, setQ] = useState("");
@@ -66,7 +68,7 @@ export function SearchSheet({
         title: t.title,
         sub: t.planTitle,
         state: "todo" as RunState,
-        go: () => onClose(),
+        go: () => onOpenTask(t.id),
       })),
       ...plans.map((p) => ({
         kind: "Plan" as const,
@@ -80,7 +82,7 @@ export function SearchSheet({
     if (!q.trim()) return all;
     const ql = q.toLowerCase();
     return all.filter((i) => (i.id + i.title + i.sub + i.kind).toLowerCase().includes(ql));
-  }, [q, floor, plans, onOpenRun, onOpenPlan, onClose]);
+  }, [q, floor, plans, onOpenRun, onOpenPlan, onOpenTask, onClose]);
 
   return (
     <BottomSheet open={open} onClose={onClose} maxHeightPct={0.92}>
