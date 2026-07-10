@@ -79,15 +79,18 @@ export const TERMINAL_CHILD_TYPES = new Set<string>([
 export const BURST_EVENT_TYPES = new Set<string>(["gh.ci.completed", "gh.pr.pushed"]);
 
 /** Quiet window for the debounced wake: a parked run with only burst-class
- *  pending events is woken once no new one has arrived for this long. */
+ *  pending events is woken once no new one has arrived for this long. Kept
+ *  short — just enough to swallow the near-simultaneous fan-out of one push
+ *  (check_run/check_suite/workflow_run land within seconds of each other)
+ *  without making the run feel laggy. */
 export function eventWakeQuietMs(): number {
-  return intEnv("TASK_ORCH_EVENT_WAKE_QUIET_MS", 90_000);
+  return intEnv("TASK_ORCH_EVENT_WAKE_QUIET_MS", 30_000);
 }
 
 /** Hard ceiling on the debounce: a burst event pending at least this long
  *  wakes the run even while new deliveries keep streaming in. */
 export function eventWakeMaxDelayMs(): number {
-  return intEnv("TASK_ORCH_EVENT_WAKE_MAX_DELAY_MS", 5 * 60_000);
+  return intEnv("TASK_ORCH_EVENT_WAKE_MAX_DELAY_MS", 2 * 60_000);
 }
 
 /**

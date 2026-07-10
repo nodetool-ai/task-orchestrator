@@ -217,20 +217,20 @@ describe("parkedRunsWithPendingEvents debounce windows", () => {
     const run = await insertRun({ status: "parked" });
     await emitCi(run, "d1", "lint");
 
-    // Evaluate the sweep as if 2 minutes passed with no new deliveries
-    // (default quiet window is 90s).
-    const later = new Date(Date.now() + 2 * 60_000);
+    // Evaluate the sweep as if a minute passed with no new deliveries
+    // (default quiet window is 30s).
+    const later = new Date(Date.now() + 60_000);
     expect(await parkedRunsWithPendingEvents(50, later)).toContain(run);
   });
 
   it("a continuous stream still wakes after the hard ceiling", async () => {
     const run = await insertRun({ status: "parked" });
     await emitCi(run, "d1", "lint");
-    // Backdate the first delivery past the 5min ceiling, then land a fresh one
+    // Backdate the first delivery past the 2min ceiling, then land a fresh one
     // (different check so it doesn't coalesce it away) to keep the burst "hot".
     await db
       .update(inboxEvents)
-      .set({ createdAt: new Date(Date.now() - 6 * 60_000) })
+      .set({ createdAt: new Date(Date.now() - 3 * 60_000) })
       .where(eq(inboxEvents.targetRunId, run));
     await emitCi(run, "d2", "tests");
 

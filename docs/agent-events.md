@@ -543,8 +543,8 @@ therefore get two defenses:
 - **Debounced wake:** burst types never dispatch at emit time. The pump wake
   sweep (§6.2 half 3) is their only wake path, and it holds a parked run whose
   pending notify events are ALL burst-class until the newest is at least
-  `TASK_ORCH_EVENT_WAKE_QUIET_MS` old (default 90s — the storm settled), or
-  the oldest has waited `TASK_ORCH_EVENT_WAKE_MAX_DELAY_MS` (default 5min —
+  `TASK_ORCH_EVENT_WAKE_QUIET_MS` old (default 30s — the storm settled), or
+  the oldest has waited `TASK_ORCH_EVENT_WAKE_MAX_DELAY_MS` (default 2min —
   a continuous stream must not starve the run). Any pending non-burst notify
   event still wakes immediately. Setting the quiet window to 0 disables the
   debounce entirely.
