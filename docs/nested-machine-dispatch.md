@@ -276,6 +276,23 @@ TASK_ORCH_NESTED_DISPATCH = isolate | inline
   `isolate` → park `pending`; worker + `inline` → current behavior; server →
   current behavior (`dispatchRun` / in-process per `detachedRunsEnabled()`).
 
+> **Lightweight tier isolation (`TASK_ORCH_LIGHTWEIGHT_ISOLATION`).** A
+> `runtime='server'` run (lightweight pi `<chat>` / `<execute>`) no longer runs
+> its turns in the web-server process by default. Under the default
+> `child` isolation, `dispatchRun` claims the row and spawns a *memory-capped
+> local Node child* (`scripts/run-worker.ts`, `--max-old-space-size=
+> TASK_ORCH_LIGHTWEIGHT_MEMORY_MB`) that inherits the full env — including
+> `DATABASE_URL`, so it stays on the pi/postgres path (db transport,
+> heartbeats), unlike a credential-less HTTP worker. `sendMessageToRun`'s
+> lightweight-chat branch persists the message, ensures a child is running
+> (notify-if-live else dispatch), and relays the reply via `relayRunStream`.
+> The child is bounded by memory-aware admission (its heap cap + ~128MB
+> non-heap overhead reserved against the same host budget Docker workers draw
+> from) plus `TASK_ORCH_LIGHTWEIGHT_MAX_CHILDREN`; a dead/OOM child is recovered
+> by `reconcileOrphanedRuns` (executors re-dispatch, chats idle). Set
+> `TASK_ORCH_LIGHTWEIGHT_ISOLATION=inprocess` to restore the original
+> in-web-process behavior (`resumeServerRun` / in-process `append`).
+
 Rollback is `TASK_ORCH_NESTED_DISPATCH=inline` on the web app + restart — no
 schema or code revert. (Runs already parked `pending` at flip time are still
 dispatched by the pump; that path predates this design.)
