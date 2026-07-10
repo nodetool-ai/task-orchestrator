@@ -166,13 +166,13 @@ export function PlanChatBox({
   return (
     <div className={cn("space-y-2", className)}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <MessageCircle className="size-3.5" />
+        <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+          <MessageCircle className="size-3.5 shrink-0" />
           <span>
             Ask the agent to manage this plan. Each send opens a new chat run.
           </span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <PersonaPicker
             personas={personas}
             value={personaId}

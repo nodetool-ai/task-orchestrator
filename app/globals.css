@@ -74,6 +74,16 @@
   html { font-feature-settings: "rlig" 1, "calt" 1, "cv11" 1; -webkit-font-smoothing: antialiased; }
   body { @apply bg-background text-foreground; font-synthesis-weight: none; text-rendering: optimizeLegibility; }
 
+  /* The app shell must feel fixed on touch devices: no sideways panning when
+     an element overflows, and no rubber-band/pull-to-refresh drag of the whole
+     page. Inner scrollers (code blocks, tables, transcripts) keep their own
+     overflow-x: auto. */
+  html, body {
+    overflow-x: clip;
+    overscroll-behavior: none;
+  }
+  body { touch-action: manipulation; }
+
   /* Pi Factory tokens — surfaces, hairlines, state colors */
   :root {
     --pi-bg: hsl(240 6% 6%);

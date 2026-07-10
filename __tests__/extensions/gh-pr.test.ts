@@ -1,5 +1,3 @@
-import { EventEmitter } from "node:events";
-import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   filterDiffByFile,
@@ -10,8 +8,7 @@ import {
   validatePrUrl,
 } from "../../lib/extensions/gh-pr";
 import * as worker from "../../lib/worker";
-
-vi.mock("node:child_process", () => ({ spawn: vi.fn() }));
+import * as githubClient from "../../lib/github-client";
 
 describe("parsePrUrl", () => {
   it("parses an https github PR url", () => {
@@ -246,26 +243,23 @@ describe("gh_pr__pr_merge auto-merge (--auto)", () => {
     } as never);
   }
 
-  // Stubs the `gh` child process to succeed immediately and captures the
-  // argv it was spawned with, matching how lib/extensions/gh-pr.ts's
-  // internal `gh()` helper drives node:child_process.spawn.
-  function mockSpawnSuccess() {
-    let capturedArgs: string[] = [];
-    (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(
-      (_cmd: string, args: string[]) => {
-        capturedArgs = args;
-        const child: any = new EventEmitter();
-        child.stdout = new EventEmitter();
-        child.stderr = new EventEmitter();
-        child.kill = vi.fn();
-        queueMicrotask(() => {
-          child.stdout.emit("data", Buffer.from("merged"));
-          child.emit("close", 0);
-        });
-        return child;
-      }
-    );
-    return { getArgs: () => capturedArgs };
+  // Fake Octokit: records the pulls.merge / graphql (auto-merge) / deleteRef
+  // calls so the tests can assert the migrated in-process GitHub I/O instead
+  // of the old `gh` argv.
+  function mockOctokit() {
+    const graphql = vi.fn().mockResolvedValue({});
+    const merge = vi.fn().mockResolvedValue({ data: {} });
+    const deleteRef = vi.fn().mockResolvedValue({ data: {} });
+    const get = vi
+      .fn()
+      .mockResolvedValue({ data: { node_id: "PR_node_42", head: { ref: "feature-x" } } });
+    const fake = {
+      pulls: { merge, get },
+      git: { deleteRef },
+      graphql,
+    };
+    vi.spyOn(githubClient, "getOctokit").mockReturnValue(fake as never);
+    return { graphql, merge, deleteRef, get };
   }
 
   afterEach(() => {
@@ -273,9 +267,9 @@ describe("gh_pr__pr_merge auto-merge (--auto)", () => {
     vi.clearAllMocks();
   });
 
-  it("auto:true arms GitHub auto-merge: --auto precedes the method flag, and it's echoed in the result", async () => {
+  it("auto:true arms GitHub auto-merge via the enablePullRequestAutoMerge mutation, echoed in the result", async () => {
     setupTransport();
-    const capture = mockSpawnSuccess();
+    const oc = mockOctokit();
     const { calls, pi } = makeStub();
     ghPrExtension({ cwd: "/tmp", runId: 1 })(pi);
     const merge = calls.find((c) => c.name === "gh_pr__pr_merge")!;
@@ -288,21 +282,20 @@ describe("gh_pr__pr_merge auto-merge (--auto)", () => {
     });
 
     expect(res.isError).toBeFalsy();
-    expect(capture.getArgs()).toEqual([
-      "pr",
-      "merge",
-      prUrl,
-      "--auto",
-      "--squash",
-      "--delete-branch",
-    ]);
+    // Auto-merge armed via GraphQL; the immediate REST merge is never called.
+    expect(oc.merge).not.toHaveBeenCalled();
+    expect(oc.graphql).toHaveBeenCalledTimes(1);
+    expect(oc.graphql.mock.calls[0][1]).toMatchObject({
+      pullRequestId: "PR_node_42",
+      mergeMethod: "SQUASH",
+    });
     const body = JSON.parse(res.content[0].text);
     expect(body.auto).toBe(true);
   });
 
-  it("omitting auto preserves today's immediate-merge argv (no --auto)", async () => {
+  it("omitting auto performs an immediate REST merge (no auto-merge mutation)", async () => {
     setupTransport();
-    const capture = mockSpawnSuccess();
+    const oc = mockOctokit();
     const { calls, pi } = makeStub();
     ghPrExtension({ cwd: "/tmp", runId: 1 })(pi);
     const merge = calls.find((c) => c.name === "gh_pr__pr_merge")!;
@@ -310,11 +303,91 @@ describe("gh_pr__pr_merge auto-merge (--auto)", () => {
     const res = await merge.def.execute("id", { url: prUrl, method: "merge" });
 
     expect(res.isError).toBeFalsy();
-    const args = capture.getArgs();
-    expect(args).not.toContain("--auto");
-    expect(args).toEqual(["pr", "merge", prUrl, "--merge"]);
+    expect(oc.graphql).not.toHaveBeenCalled();
+    expect(oc.merge).toHaveBeenCalledTimes(1);
+    expect(oc.merge.mock.calls[0][0]).toMatchObject({
+      owner: "nodetool-ai",
+      repo: "nodetool",
+      pull_number: 42,
+      merge_method: "merge",
+    });
     const body = JSON.parse(res.content[0].text);
     expect(body.auto).toBe(false);
+  });
+});
+
+describe("gh_pr__pr_diff (REST diff media type)", () => {
+  function makeStub() {
+    const calls: Array<{ name: string; def: any }> = [];
+    const pi: any = {
+      registerTool: (def: any) => { calls.push({ name: def.name, def }); },
+      on: () => {},
+    };
+    return { calls, pi };
+  }
+
+  const prUrl = "https://github.com/nodetool-ai/nodetool/pull/42";
+  const sampleDiff = [
+    "diff --git a/foo.ts b/foo.ts",
+    "--- a/foo.ts",
+    "+++ b/foo.ts",
+    "@@ -1,1 +1,2 @@",
+    " hello",
+    "+world",
+  ].join("\n");
+
+  function setupTransport() {
+    const remotes = [
+      { id: "R-known", name: "Known", remote: "git@github.com:nodetool-ai/nodetool.git" },
+    ];
+    vi.spyOn(worker, "runTransport").mockResolvedValue({
+      listRepoRemotes: vi.fn().mockResolvedValue(remotes),
+      acquirePrLock: vi.fn().mockResolvedValue({ ok: true }),
+    } as never);
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
+  it("requests the `diff` media type and returns the raw unified diff", async () => {
+    setupTransport();
+    const get = vi.fn().mockResolvedValue({ data: sampleDiff });
+    vi.spyOn(githubClient, "getOctokit").mockReturnValue({ pulls: { get } } as never);
+
+    const { calls, pi } = makeStub();
+    ghPrExtension({ cwd: "/tmp", runId: 1 })(pi);
+    const diff = calls.find((c) => c.name === "gh_pr__pr_diff")!;
+
+    const res = await diff.def.execute("id", { url: prUrl });
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toBe(sampleDiff);
+
+    // The transport (pulls.get) was asked for the diff media type.
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(get.mock.calls[0][0]).toMatchObject({
+      owner: "nodetool-ai",
+      repo: "nodetool",
+      pull_number: 42,
+      mediaType: { format: "diff" },
+    });
+  });
+
+  it("filters the diff to a single file when `file` is given", async () => {
+    setupTransport();
+    const twoFile = sampleDiff + "\ndiff --git a/bar.ts b/bar.ts\n--- a/bar.ts\n+++ b/bar.ts\n@@ -1 +1 @@\n-x\n+y";
+    const get = vi.fn().mockResolvedValue({ data: twoFile });
+    vi.spyOn(githubClient, "getOctokit").mockReturnValue({ pulls: { get } } as never);
+
+    const { calls, pi } = makeStub();
+    ghPrExtension({ cwd: "/tmp", runId: 1 })(pi);
+    const diff = calls.find((c) => c.name === "gh_pr__pr_diff")!;
+
+    const res = await diff.def.execute("id", { url: prUrl, file: "foo.ts" });
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toContain("a/foo.ts");
+    expect(res.content[0].text).not.toContain("a/bar.ts");
   });
 });
 

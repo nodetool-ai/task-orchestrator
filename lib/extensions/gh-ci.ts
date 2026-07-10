@@ -1,59 +1,15 @@
 // lib/extensions/gh-ci.ts
 //
 // gh_ci extension: pi-side replacement for lib/gh-ci-mcp.ts. Tools are
-// flat-namespaced as gh_ci__<name>. Helpers come over verbatim.
+// flat-namespaced as gh_ci__<name>. GitHub Actions I/O runs in-process through
+// the orchestrator's Octokit client (lib/github-client.ts) rather than shelling
+// out to the `gh` CLI.
 
-import { spawn } from "node:child_process";
 import { Type } from "typebox";
 import { validatePrUrl, type ParsedPrUrl } from "../gh-url";
 import { runTransport } from "@/lib/worker";
+import { getOctokit, describeGithubError } from "../github-client";
 import type { ExtensionFactory } from "./types";
-
-interface GhResult {
-  code: number;
-  stdout: string;
-  stderr: string;
-}
-
-// Timeout for gh subprocess calls (seconds). Prevents indefinite hangs on network issues.
-const GH_TIMEOUT_SECONDS = 120;
-
-function gh(args: string[], cwd: string | undefined): Promise<GhResult> {
-  return new Promise((resolveP) => {
-    const child = spawn("gh", args, { env: process.env, cwd });
-    let stdout = "";
-    let stderr = "";
-    let resolved = false;
-
-    const settle = (result: GhResult) => {
-      if (!resolved) {
-        resolved = true;
-        resolveP(result);
-      }
-    };
-
-    // Set a timeout to kill the process if it hangs.
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      settle({
-        code: -1,
-        stdout,
-        stderr: stderr + `\ngh ${args[0]} timed out after ${GH_TIMEOUT_SECONDS}s`,
-      });
-    }, GH_TIMEOUT_SECONDS * 1000);
-
-    child.stdout.on("data", (d) => (stdout += d.toString()));
-    child.stderr.on("data", (d) => (stderr += d.toString()));
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      settle({ code: -1, stdout, stderr: stderr + String(err) });
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      settle({ code: code ?? -1, stdout, stderr });
-    });
-  });
-}
 
 const ok = (text: string) =>
   ({ content: [{ type: "text" as const, text }], details: undefined });
@@ -126,15 +82,16 @@ export function trimLog(
 // ──────────────────────────────────────────────────────────
 
 export interface GhCiExtensionOptions {
-  /** cwd for the `gh` subprocess. Defaults to undefined (inherits process cwd). */
+  /** Retained for API compatibility; GitHub I/O no longer uses a subprocess cwd. */
   cwd?: string;
 }
 
-export const ghCiExtension =
-  (opts: GhCiExtensionOptions = {}): ExtensionFactory =>
-  (reg) => {
-    const cwd = opts.cwd;
+/** Failure-ish conclusions that make a job "failed" for --log-failed semantics. */
+const FAILED_CONCLUSIONS = new Set(["failure", "timed_out", "cancelled", "startup_failure", "action_required"]);
 
+export const ghCiExtension =
+  (_opts: GhCiExtensionOptions = {}): ExtensionFactory =>
+  (reg) => {
     async function gate(url: string): Promise<
       | { ok: true; parsed: ParsedPrUrl; matched: { id: string; name: string } }
       | { ok: false; result: ReturnType<typeof errResult> }
@@ -158,25 +115,16 @@ export const ghCiExtension =
       execute: async (_id, { url, limit }) => {
         const g = await gate(url);
         if (!g.ok) return g.result;
+        const { owner, repo, number } = g.parsed;
 
-        // 1. Resolve the head ref via gh pr view.
-        const prView = await gh(
-          ["pr", "view", g.parsed.canonical, "--json", "headRefName"],
-          cwd
-        );
-        if (prView.code !== 0) {
-          return errResult(
-            prView.stderr.trim() || `gh pr view failed (exit ${prView.code})`
-          );
-        }
+        const octokit = getOctokit();
+        // 1. Resolve the head ref.
         let headRef: string | null = null;
         try {
-          const parsed = JSON.parse(prView.stdout) as { headRefName?: string };
-          headRef = parsed.headRefName ?? null;
-        } catch {
-          return errResult(
-            `gh pr view returned non-JSON: ${prView.stdout.slice(0, 200)}`
-          );
+          const { data: pr } = await octokit.pulls.get({ owner, repo, pull_number: number });
+          headRef = (pr.head as { ref?: string } | null)?.ref ?? null;
+        } catch (err) {
+          return errResult(describeGithubError(err) || "gh pr view failed");
         }
         if (!headRef) {
           return errResult(
@@ -184,45 +132,29 @@ export const ghCiExtension =
           );
         }
 
-        // 2. List runs on that branch. `gh run list` honours cwd's repo by
-        // default; pass --repo explicitly so it works regardless of cwd.
-        const runsArgs = [
-          "run",
-          "list",
-          "--repo",
-          `${g.parsed.owner}/${g.parsed.repo}`,
-          "--branch",
-          headRef,
-          "--limit",
-          String(limit ?? 20),
-          "--json",
-          "databaseId,name,status,conclusion,url,headSha,createdAt,workflowName,event",
-        ];
-        const runsResult = await gh(runsArgs, cwd);
-        if (runsResult.code !== 0) {
-          return errResult(
-            runsResult.stderr.trim() || `gh run list failed (exit ${runsResult.code})`
-          );
-        }
-        let raw: Array<Record<string, unknown>>;
+        // 2. List runs on that branch.
+        let rawRuns: Array<Record<string, unknown>>;
         try {
-          raw = JSON.parse(runsResult.stdout) as Array<Record<string, unknown>>;
-        } catch {
-          return errResult(
-            `gh run list returned non-JSON: ${runsResult.stdout.slice(0, 200)}`
-          );
+          const { data } = await octokit.actions.listWorkflowRunsForRepo({
+            owner,
+            repo,
+            branch: headRef,
+            per_page: limit ?? 20,
+          });
+          rawRuns = (data.workflow_runs ?? []) as Array<Record<string, unknown>>;
+        } catch (err) {
+          return errResult(describeGithubError(err) || "gh run list failed");
         }
-        // Normalise field naming (`databaseId` → `id`).
-        const runs = raw.map((r) => ({
-          id: r.databaseId ?? null,
+        const runs = rawRuns.slice(0, limit ?? 20).map((r) => ({
+          id: r.id ?? null,
           name: r.name ?? null,
-          workflow_name: r.workflowName ?? null,
+          workflow_name: r.name ?? null,
           status: r.status ?? null,
           conclusion: r.conclusion ?? null,
-          url: r.url ?? null,
-          head_sha: r.headSha ?? null,
+          url: r.html_url ?? null,
+          head_sha: r.head_sha ?? null,
           event: r.event ?? null,
-          created_at: r.createdAt ?? null,
+          created_at: r.created_at ?? null,
         }));
         return ok(
           JSON.stringify(
@@ -256,55 +188,76 @@ export const ghCiExtension =
         ),
       }),
       execute: async (_id, { url, run_id, job, mode }) => {
-        // Validate run_id is numeric to prevent gh flag injection.
+        // Validate run_id is numeric (kept from the CLI era to reject junk early).
         if (!/^\d+$/.test(String(run_id))) {
           return errResult(`run_id must be a numeric value, got: ${run_id}`);
         }
 
         const g = await gate(url);
         if (!g.ok) return g.result;
-
+        const { owner, repo } = g.parsed;
+        const runId = Number(run_id);
         const effectiveMode = mode ?? "failed";
-        const args = [
-          "run",
-          "view",
-          String(run_id),
-          "--repo",
-          `${g.parsed.owner}/${g.parsed.repo}`,
-        ];
-        if (effectiveMode === "failed") args.push("--log-failed");
-        else args.push("--log");
-        if (job && job.length > 0) args.push("--job", job);
+        const octokit = getOctokit();
 
-        const r = await gh(args, cwd);
-        // `gh run view --log-failed` exits 0 even when there are no failed
-        // steps yet (an in-progress or green run), returning an empty body.
-        // Detect that empty result regardless of exit code and fall back to
-        // the full --log so the agent sees something instead of a blank
-        // success — the previous code gated this fallback behind a non-zero
-        // exit, so the documented exit-0 case never reached it.
-        if (effectiveMode === "failed" && !r.stdout.trim()) {
-          const fallbackArgs = [
-            "run",
-            "view",
-            String(run_id),
-            "--repo",
-            `${g.parsed.owner}/${g.parsed.repo}`,
-            "--log",
-          ];
-          if (job && job.length > 0) fallbackArgs.push("--job", job);
-          const fb = await gh(fallbackArgs, cwd);
-          if (fb.code !== 0) {
-            return errResult(
-              fb.stderr.trim() || `gh run view failed (exit ${fb.code})`
-            );
+        // List the run's jobs; filter to a specific job when requested (by id or name).
+        let jobs: Array<Record<string, unknown>>;
+        try {
+          jobs = (await octokit.paginate(octokit.actions.listJobsForWorkflowRun, {
+            owner,
+            repo,
+            run_id: runId,
+            per_page: 100,
+          })) as Array<Record<string, unknown>>;
+        } catch (err) {
+          return errResult(describeGithubError(err) || "gh run view failed");
+        }
+        if (job && job.length > 0) {
+          jobs = jobs.filter(
+            (j) => String(j.id) === job || String(j.name) === job
+          );
+        }
+
+        async function collectLogs(selected: Array<Record<string, unknown>>): Promise<string> {
+          const chunks: string[] = [];
+          for (const j of selected) {
+            try {
+              const res = await octokit.actions.downloadJobLogsForWorkflowRun({
+                owner,
+                repo,
+                job_id: Number(j.id),
+              });
+              const text =
+                typeof res.data === "string"
+                  ? res.data
+                  : Buffer.isBuffer(res.data)
+                    ? res.data.toString("utf8")
+                    : res.data instanceof ArrayBuffer
+                      ? Buffer.from(res.data).toString("utf8")
+                      : String(res.data ?? "");
+              chunks.push(`==> ${j.name} <==\n${text}`);
+            } catch {
+              // Best-effort per job — skip logs we can't fetch.
+            }
           }
-          return ok(trimLog(fb.stdout));
+          return chunks.join("\n");
         }
-        if (r.code !== 0) {
-          return errResult(r.stderr.trim() || `gh run view failed (exit ${r.code})`);
+
+        // Failed mode: only the failed jobs' logs. gh's --log-failed exits 0
+        // even when nothing failed (in-progress / green run) → fall back to the
+        // full log so the agent sees something instead of a blank success.
+        if (effectiveMode === "failed") {
+          const failedJobs = jobs.filter((j) =>
+            FAILED_CONCLUSIONS.has(String(j.conclusion ?? "").toLowerCase())
+          );
+          const failedLog = await collectLogs(failedJobs);
+          if (failedLog.trim()) return ok(trimLog(failedLog));
+          const fullLog = await collectLogs(jobs);
+          return ok(trimLog(fullLog));
         }
-        return ok(trimLog(r.stdout));
+
+        const fullLog = await collectLogs(jobs);
+        return ok(trimLog(fullLog));
       },
     });
 
@@ -312,7 +265,7 @@ export const ghCiExtension =
       name: "gh_ci__ci_rerun",
       label: "CI Rerun",
       description:
-        "Trigger a fresh workflow run. By default re-runs everything; set failed_only=true to re-run only failed jobs (`gh run rerun --failed`). Returns the new run's url (best-effort: looks it up via `gh run list` after triggering).",
+        "Trigger a fresh workflow run. By default re-runs everything; set failed_only=true to re-run only failed jobs (`gh run rerun --failed`). Returns the new run's url (best-effort: looks it up after triggering).",
       parameters: Type.Object({
         url: Type.String({ minLength: 1 }),
         run_id: Type.Union([
@@ -322,72 +275,41 @@ export const ghCiExtension =
         failed_only: Type.Optional(Type.Boolean()),
       }),
       execute: async (_id, { url, run_id, failed_only }) => {
-        // Validate run_id is numeric to prevent gh flag injection.
+        // Validate run_id is numeric.
         if (!/^\d+$/.test(String(run_id))) {
           return errResult(`run_id must be a numeric value, got: ${run_id}`);
         }
 
         const g = await gate(url);
         if (!g.ok) return g.result;
+        const { owner, repo } = g.parsed;
+        const runId = Number(run_id);
+        const octokit = getOctokit();
 
-        const repoFlag = ["--repo", `${g.parsed.owner}/${g.parsed.repo}`];
-        const rerunArgs = ["run", "rerun", String(run_id), ...repoFlag];
-        if (failed_only) rerunArgs.push("--failed");
-
-        const r = await gh(rerunArgs, cwd);
-        if (r.code !== 0) {
-          return errResult(r.stderr.trim() || `gh run rerun failed (exit ${r.code})`);
+        try {
+          if (failed_only) {
+            await octokit.actions.reRunWorkflowFailedJobs({ owner, repo, run_id: runId });
+          } else {
+            await octokit.actions.reRunWorkflow({ owner, repo, run_id: runId });
+          }
+        } catch (err) {
+          return errResult(describeGithubError(err) || "gh run rerun failed");
         }
 
-        // gh run rerun doesn't print the new run URL. Best-effort: pull
-        // the workflow name from the original run, then list the most
-        // recent run for that workflow on the PR's head ref.
+        // A re-run reuses the same run id (a new attempt), so the run's own url
+        // is the "new" run url. Best-effort — the rerun already succeeded.
         let newUrl: string | null = null;
         let workflowName: string | null = null;
         try {
-          const view = await gh(
-            [
-              "run",
-              "view",
-              String(run_id),
-              ...repoFlag,
-              "--json",
-              "workflowName,headBranch",
-            ],
-            cwd
-          );
-          if (view.code === 0) {
-            const parsed = JSON.parse(view.stdout) as {
-              workflowName?: string;
-              headBranch?: string;
-            };
-            workflowName = parsed.workflowName ?? null;
-            const branch = parsed.headBranch;
-            if (workflowName && branch) {
-              const list = await gh(
-                [
-                  "run",
-                  "list",
-                  ...repoFlag,
-                  "--workflow",
-                  workflowName,
-                  "--branch",
-                  branch,
-                  "--limit",
-                  "1",
-                  "--json",
-                  "url,databaseId,createdAt",
-                ],
-                cwd
-              );
-              if (list.code === 0) {
-                const arr = JSON.parse(list.stdout) as Array<{ url?: string }>;
-                if (arr.length > 0 && arr[0].url) newUrl = arr[0].url;
-              }
-            }
-          }
+          const { data: run } = await octokit.actions.getWorkflowRun({
+            owner,
+            repo,
+            run_id: runId,
+          });
+          newUrl = (run.html_url as string) ?? null;
+          workflowName = (run.name as string) ?? null;
         } catch {
-          // Best-effort — original rerun already succeeded.
+          // Best-effort.
         }
 
         return ok(
@@ -398,7 +320,7 @@ export const ghCiExtension =
               failed_only: !!failed_only,
               workflow_name: workflowName,
               new_run_url: newUrl,
-              stdout: r.stdout.trim(),
+              stdout: `Re-run triggered for run ${run_id}`,
             },
             null,
             2

@@ -31,13 +31,18 @@ describe("createChat cwd strategy", () => {
 });
 
 describe("worktreeBranchName", () => {
-  it("uses the task id for implement-style runs", () => {
+  it("uses the task's canonical branch (no run suffix) so every run shares it", () => {
     expect(worktreeBranchName({ id: 7, taskId: "T-20260628-0001" })).toBe(
-      "claude/t-20260628-0001-7"
+      "claude/t-20260628-0001"
+    );
+    // Deterministic across runs: a later run on the same task computes the
+    // same branch.
+    expect(worktreeBranchName({ id: 99, taskId: "T-20260628-0001" })).toBe(
+      "claude/t-20260628-0001"
     );
   });
 
-  it("falls back to a chat-scoped name when there is no task", () => {
+  it("falls back to a chat-scoped per-run name when there is no task", () => {
     expect(worktreeBranchName({ id: 42, taskId: null })).toBe("claude/chat-42");
   });
 });

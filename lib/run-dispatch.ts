@@ -16,6 +16,7 @@ import {
   detachedRunsEnabled as detachedRunsEnabledCfg,
   intEnv,
   floatEnv,
+  lightweightIsolation,
   runnerProviderKind,
 } from "./config";
 import { isWorkerLive } from "./run-liveness";
@@ -57,6 +58,9 @@ type RunsApi = {
   failPendingRun: (runId: number, error: string) => Promise<boolean>;
   /** Count runs holding a worker slot (worker_scope set + a lease status). */
   countInFlightWorkers: () => Promise<number>;
+  /** Count live lightweight children (runtime='server' + claim + fresh beat).
+   *  Bounds the lightweight tier's fork concurrency (TASK_ORCH_LIGHTWEIGHT_MAX_CHILDREN). */
+  countInFlightLightweightChildren: () => Promise<number>;
   /** Ids of runs parked in 'pending', oldest first (the dispatch queue). */
   listPendingRunIds: () => Promise<number[]>;
   /** Reap stale leases (OOM-killed / dead workers); re-dispatches resumable ones. */
@@ -235,6 +239,51 @@ export function admissionDecision(i: {
   return "admit";
 }
 
+// A lightweight child is a Node process, not a container: its V8 heap is capped
+// by --max-old-space-size (TASK_ORCH_LIGHTWEIGHT_MEMORY_MB) but it also uses
+// non-heap memory (C++/V8 metadata, buffers, the pi SDK's native bits). Reserve a
+// fixed allowance on top of the heap cap so the host budget accounting reflects a
+// child's REAL footprint, not just its JS heap. 128MB is a deliberately generous
+// round number (a typical idle Node RSS overhead is well under this).
+export const LIGHTWEIGHT_NONHEAP_OVERHEAD_MB = 128;
+
+/** Per-child host reservation: heap cap + non-heap overhead. 0 when the heap cap
+ *  is disabled (TASK_ORCH_LIGHTWEIGHT_MEMORY_MB=0 ⇒ unbounded ⇒ no memory gate,
+ *  only the count cap applies). */
+export function lightweightChildReserveMB(): number {
+  const heap = config.features.lightweightMemoryMb;
+  return heap > 0 ? heap + LIGHTWEIGHT_NONHEAP_OVERHEAD_MB : 0;
+}
+
+/**
+ * Pure admission decision for a lightweight child. Draws on the SAME host budget
+ * (memTotalMB − reserveMB) as the worker gate, charged with BOTH in-flight
+ * workers (each at its full cap) AND in-flight children (each at childReserveMB),
+ * so the two tiers can't jointly oversubscribe the host. Effective concurrency is
+ * therefore min(maxChildren, what still fits in the budget). A single child whose
+ * reservation exceeds the whole budget can never fit → never-fits (fatal misconfig).
+ */
+export function lightweightAdmissionDecision(i: {
+  childReserveMB: number;
+  workerCapMB: number;
+  reserveMB: number;
+  maxChildren: number;
+  inFlightChildren: number;
+  inFlightWorkers: number;
+  memTotalMB: number;
+  memAvailableMB: number | null;
+}): AdmitDecision {
+  if (i.maxChildren > 0 && i.inFlightChildren >= i.maxChildren) return "defer";
+  if (i.childReserveMB > 0) {
+    const budget = i.memTotalMB - i.reserveMB;
+    if (i.childReserveMB > budget) return "never-fits";
+    const used = i.inFlightWorkers * i.workerCapMB + i.inFlightChildren * i.childReserveMB;
+    if (budget - used < i.childReserveMB) return "defer";
+    if (i.memAvailableMB != null && i.memAvailableMB - i.reserveMB < i.childReserveMB) return "defer";
+  }
+  return "admit";
+}
+
 // hasLiveWorkerClaim was a third copy of the worker-liveness predicate; it now
 // lives in lib/run-liveness as isWorkerLive (R8). The stale window is that
 // module's single HEARTBEAT_STALE_MS.
@@ -276,6 +325,34 @@ async function admit(runId: number): Promise<AdmitDecision> {
   });
 }
 
+/** The lightweight-child gate runs whenever the child has a memory reservation
+ *  (heap cap set — the default) or a concurrency cap. Both are on by default, so
+ *  lightweight children are always bounded unless BOTH knobs are explicitly 0. */
+function lightweightGateActive(): boolean {
+  return lightweightChildReserveMB() > 0 || config.features.lightweightMaxChildren > 0;
+}
+
+/** Memory-aware admission for a lightweight child: reserve its heap cap + non-heap
+ *  overhead against the shared host budget already charged with live workers AND
+ *  other live children, then enforce the child count cap. Uses the same host-memory
+ *  detection as the worker gate (readHostMemory) — one source of truth. */
+async function lightweightAdmit(runId: number): Promise<AdmitDecision> {
+  void runId; // decision is host-global today (per-run sizing reserved for later)
+  const inFlightChildren = await runs().countInFlightLightweightChildren();
+  const inFlightWorkers = await runs().countInFlightWorkers();
+  const host = await readHostMemory();
+  return lightweightAdmissionDecision({
+    childReserveMB: lightweightChildReserveMB(),
+    workerCapMB: intEnv("TASK_ORCH_WORKER_MEMORY_MB", 0),
+    reserveMB: intEnv("TASK_ORCH_HOST_MEMORY_RESERVE_MB", 0),
+    maxChildren: config.features.lightweightMaxChildren,
+    inFlightChildren,
+    inFlightWorkers,
+    memTotalMB: host.memTotalMB,
+    memAvailableMB: host.memAvailableMB,
+  });
+}
+
 // The admission decision + the atomic claim must be serialized: two concurrent
 // dispatches must not both measure the same free memory and both admit. There is
 // exactly one server process, so an in-process promise chain fully serializes it.
@@ -294,7 +371,6 @@ export async function dispatchRun(
   runId: number,
   opts: { spawn?: SpawnFn; admit?: AdmitFn } = {}
 ): Promise<DispatchResult> {
-  const admitFn = opts.admit ?? admit;
   const provider = runnerProviderKindFromEnv();
   const dispatchStarted = process.hrtime.bigint();
   const finish = (result: DispatchResult): DispatchResult => {
@@ -307,19 +383,28 @@ export async function dispatchRun(
   };
 
   // Placement routing (R2): dispatchRun is the single front door. A run whose
-  // persisted placement is 'server' runs its turns IN-PROCESS on the web server
-  // (the lightweight loop needs DB access a worker doesn't have), so we must NOT
-  // provision a worker for it — hand it to the server resume path instead. This
-  // is the fix for the run-131 incident: the emit-time inbox wakes (lib/inbox)
-  // and the pump's parked-wake sweep both call dispatchRun, so they inherit this
-  // routing for free — no per-caller placement logic. The resume path takes its
-  // own server-turn claim (duplicate wakes short-circuit there), and drives the
-  // turn in the background so a caller awaiting dispatchRun (the pump loop) isn't
-  // blocked for the whole turn. A test-injected `opts.spawn` is deliberately
-  // ignored here: a server-placement run never spawns a provider.
+  // persisted placement is 'server' takes the lightweight tier (the loop needs DB
+  // access a credential-less HTTP worker doesn't have). This is the fix for the
+  // run-131 incident: the emit-time inbox wakes (lib/inbox) and the pump's
+  // parked-wake sweep both call dispatchRun, so they inherit this routing for free
+  // — no per-caller placement logic. Two isolation modes decide WHERE the turn
+  // runs (see the lightweightChild note below): the default 'child' claims + spawns
+  // a memory-capped local Node child through the machinery below (env inherited,
+  // db transport), while 'inprocess' hands the run to the in-process server resume
+  // path — which takes its own server-turn claim (duplicate wakes short-circuit
+  // there) and drives the turn in the background so a caller awaiting dispatchRun
+  // (the pump loop) isn't blocked for the whole turn. In the 'inprocess' branch a
+  // test-injected `opts.spawn` is deliberately ignored: it never spawns a provider.
   const placementRun = await runs().get(runId);
   if (!placementRun) return finish("not-found");
-  if (placementRun.runtime === "server") {
+  // Lightweight isolation (default 'child'): a 'server'-placement run's turns run
+  // in a memory-capped local Node child (spawnLightweightChild), reusing the
+  // worker claim + detached-spawn machinery below — the child inherits env
+  // (DATABASE_URL retained → db transport) and heartbeats like any worker, so the
+  // reaper/pump/death machinery keeps working. 'inprocess' preserves the original
+  // behavior: turns run IN the web-server process via the server-resume path.
+  const lightweightChild = placementRun.runtime === "server" && lightweightIsolation() === "child";
+  if (placementRun.runtime === "server" && !lightweightChild) {
     void runs().resumeServerRun(runId).catch((err) => {
       console.error(`Server resume failed for run ${runId}:`, err);
     });
@@ -353,8 +438,19 @@ export async function dispatchRun(
       }
     }
 
-    if (admissionEnabled()) {
-      let decision = await admitFn(runId);
+    // Admission gate. Two flavors that draw on the SAME host memory budget so
+    // heavy workers and lightweight children can't jointly oversubscribe the host:
+    //  - worker runs: the provider-gated memory/machine gate (admit()), active
+    //    only for a managed backend (Docker image / Fly).
+    //  - lightweight children: lightweightAdmit(), which reserves this child's
+    //    heap cap + a fixed non-heap overhead against (host − reserve) MINUS what
+    //    both in-flight workers AND other in-flight children already hold, and
+    //    also enforces the TASK_ORCH_LIGHTWEIGHT_MAX_CHILDREN count. Active
+    //    whenever the child has a memory reserve or a count cap (i.e. by default).
+    const gateActive = lightweightChild ? lightweightGateActive() : admissionEnabled();
+    if (gateActive) {
+      const chosenAdmit = opts.admit ?? (lightweightChild ? lightweightAdmit : admit);
+      let decision = await chosenAdmit(runId);
       // Deadlock breaker (M1): a plan-executor run occupies a worker slot for
       // its ENTIRE turn (countInFlightWorkers/flyAdmit count it the whole
       // time), and blocks in await_session waiting on the very children it
@@ -368,10 +464,10 @@ export async function dispatchRun(
       // over the cap — the parent's slot is blocked awaiting this very child,
       // so deferring it only deadlocks the tree. This applies to BOTH the
       // memory-based gate and flyAdmit's machine-count gate (whichever
-      // admitFn returned "defer"); it does NOT apply to "never-fits" (a
-      // single worker's cap exceeding the whole host budget is a fatal
-      // misconfig no parent claim can fix). The overshoot this permits is
-      // bounded by the run tree's own depth/spawn caps, not by this gate.
+      // admitFn returned "defer"), and to the lightweight child gate; it does
+      // NOT apply to "never-fits" (a single reservation exceeding the whole
+      // host budget is a fatal misconfig no parent claim can fix). The overshoot
+      // this permits is bounded by the run tree's own depth/spawn caps.
       if (decision === "defer" && run.parentRunId != null) {
         const parent = await runs().get(run.parentRunId);
         if (parent && isWorkerLive(parent)) decision = "admit";
@@ -379,7 +475,9 @@ export async function dispatchRun(
       if (decision === "never-fits") {
         await runs().failRun(
           runId,
-          "insufficient host memory: a single worker's memory cap exceeds the host budget (raise the host, lower TASK_ORCH_WORKER_MEMORY_MB, or lower TASK_ORCH_HOST_MEMORY_RESERVE_MB)."
+          lightweightChild
+            ? "insufficient host memory: a single lightweight child's memory reservation (TASK_ORCH_LIGHTWEIGHT_MEMORY_MB + non-heap overhead) exceeds the host budget (raise the host, lower TASK_ORCH_LIGHTWEIGHT_MEMORY_MB, or lower TASK_ORCH_HOST_MEMORY_RESERVE_MB)."
+            : "insufficient host memory: a single worker's memory cap exceeds the host budget (raise the host, lower TASK_ORCH_WORKER_MEMORY_MB, or lower TASK_ORCH_HOST_MEMORY_RESERVE_MB)."
         );
         return { kind: "spawn-failed" };
       }
@@ -466,6 +564,19 @@ export async function dispatchRun(
       );
       if (spawned == null) {
         return finish(await failSpawn(runId, outcome.scope, "run worker did not start (spawn returned no pid — worker image/runtime available?)"));
+      }
+      pid = spawned;
+    } else if (lightweightChild) {
+      // Lightweight tier: a memory-capped local Node child on the pi/postgres
+      // path (NOT a docker/fly container). Same detached-spawn machinery as the
+      // dev worker, minus the credential swap — DATABASE_URL is retained.
+      const spawned = await timeRunnerPhase(
+        "runner_spawn",
+        () => Promise.resolve(spawnLightweightChild(runId, outcome.scope)),
+        { provider, fields: { runId, scope: outcome.scope, lightweight: true } }
+      );
+      if (spawned == null) {
+        return finish(await failSpawn(runId, outcome.scope, "lightweight child did not start (spawn returned no pid — node/tsx runtime available?)"));
       }
       pid = spawned;
     } else {
@@ -736,31 +847,63 @@ export async function dockerSpawn(runId: number, scope: string): Promise<number 
   return 1; // sentinel: container started (not a host pid). cancel() uses the name.
 }
 
+// Shared core of both local-child spawn paths: a detached
+// `node [execArgv] tsx scripts/run-worker.ts <id>` on the host. The two callers
+// differ only in env + node flags — NOT in the launch mechanics — so they share
+// this one implementation (no duplicated spawn/tsx-resolution logic).
+function spawnLocalRunWorker(
+  runId: number,
+  opts: { env: NodeJS.ProcessEnv; execArgv?: string[] }
+): number | null {
+  const node = process.execPath;
+  const tsx =
+    process.env.TASK_ORCH_TSX_CLI || join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
+  if (!existsSync(tsx)) throw new Error(`tsx CLI not found at ${tsx} (set TASK_ORCH_TSX_CLI to override)`);
+  const child = nodeSpawn(
+    node,
+    [...(opts.execArgv ?? []), tsx, "scripts/run-worker.ts", String(runId)],
+    {
+      cwd: process.cwd(),
+      env: opts.env,
+      detached: true,
+      stdio: "ignore",
+    }
+  );
+  child.on("error", () => {});
+  child.unref();
+  return child.pid ?? null;
+}
+
 // Dev fallback: a detached `tsx scripts/run-worker.ts <id>` on the host,
 // speaking the worker HTTP protocol against this server (TASK_ORCH_WORKER_API_URL,
 // or NEXTAUTH_URL in dev) with a run-scoped token and NO database credentials —
 // the same contract as the container paths. No restart-survival, but dev
 // doesn't redeploy.
 function detachedSpawn(runId: number, _scope: string): number | null {
-  const node = process.execPath;
-  const tsx =
-    process.env.TASK_ORCH_TSX_CLI || join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
-  if (!existsSync(tsx)) throw new Error(`tsx CLI not found at ${tsx} (set TASK_ORCH_TSX_CLI to override)`);
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     TASK_ORCH_INSIDE_WORKER: "1",
     ...workerDispatchEnv(runId),
   };
   delete env.DATABASE_URL;
-  const child = nodeSpawn(node, [tsx, "scripts/run-worker.ts", String(runId)], {
-    cwd: process.cwd(),
-    env,
-    detached: true,
-    stdio: "ignore",
-  });
-  child.on("error", () => {});
-  child.unref();
-  return child.pid ?? null;
+  return spawnLocalRunWorker(runId, { env });
+}
+
+// Lightweight tier (runtime='server', isolation 'child'): a memory-capped local
+// Node child that runs the pi turn OFF the web-server event loop while staying on
+// the pi/postgres path. Unlike detachedSpawn it is NOT a worker — it inherits the
+// full env INCLUDING DATABASE_URL (so runTransport picks the db transport and the
+// child heartbeats + reaps exactly like an in-process server turn used to) and is
+// NOT marked TASK_ORCH_INSIDE_WORKER. The only hard resource bound is a V8 heap
+// cap (TASK_ORCH_LIGHTWEIGHT_MEMORY_MB) applied via --max-old-space-size, so a
+// runaway turn is OOM-killed inside the child instead of taking the control plane
+// down; that death is recovered by the reaper (reconcileOrphanedRuns), which
+// re-dispatches server-resumable executors and idles chats. Concurrency is bounded
+// by the admission cap in dispatchRun (TASK_ORCH_LIGHTWEIGHT_MAX_CHILDREN).
+export function spawnLightweightChild(runId: number, _scope: string): number | null {
+  const memMb = config.features.lightweightMemoryMb;
+  const execArgv = memMb > 0 ? [`--max-old-space-size=${memMb}`] : [];
+  return spawnLocalRunWorker(runId, { env: { ...process.env }, execArgv });
 }
 
 /** Best-effort hard stop of a run's worker container (cancel fallback). No-op if

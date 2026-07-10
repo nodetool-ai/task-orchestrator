@@ -1,10 +1,11 @@
 // lib/extensions/gh-pr.ts
 //
 // gh_pr extension: pi-side replacement for lib/gh-pr-mcp.ts. Tools are
-// flat-namespaced as gh_pr__<name>. Helpers come over verbatim from the
-// old file.
+// flat-namespaced as gh_pr__<name>. GitHub I/O runs in-process through the
+// orchestrator's memoized Octokit client (lib/github-client.ts) — it used to
+// shell out to the `gh` CLI; the tool contracts (names, schemas, and the
+// shape/wording of the returned text) are preserved.
 
-import { spawn } from "node:child_process";
 import { Type } from "typebox";
 import {
   ownerRepoFromRemote,
@@ -14,57 +15,16 @@ import {
   type UrlValidation,
 } from "../gh-url";
 import { runTransport } from "@/lib/worker";
+import {
+  getOctokit,
+  describeGithubError,
+  fetchChecksRollupForRef,
+} from "../github-client";
 import type { BackendRegistrar, ExtensionFactory } from "./types";
 
 // Re-export so consumers importing 'lib/extensions/gh-pr' get the URL helpers too.
 export { ownerRepoFromRemote, parsePrUrl, validatePrUrl };
 export type { ParsedPrUrl, UrlValidation };
-
-interface GhResult {
-  code: number;
-  stdout: string;
-  stderr: string;
-}
-
-// Timeout for gh subprocess calls (seconds). Prevents indefinite hangs on network issues.
-const GH_TIMEOUT_SECONDS = 120;
-
-function gh(args: string[], cwd: string | undefined): Promise<GhResult> {
-  return new Promise((resolveP, rejectP) => {
-    const child = spawn("gh", args, { env: process.env, cwd });
-    let stdout = "";
-    let stderr = "";
-    let resolved = false;
-
-    const settle = (result: GhResult) => {
-      if (!resolved) {
-        resolved = true;
-        resolveP(result);
-      }
-    };
-
-    // Set a timeout to kill the process if it hangs.
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      settle({
-        code: -1,
-        stdout,
-        stderr: stderr + `\ngh ${args[0]} timed out after ${GH_TIMEOUT_SECONDS}s`,
-      });
-    }, GH_TIMEOUT_SECONDS * 1000);
-
-    child.stdout.on("data", (d) => (stdout += d.toString()));
-    child.stderr.on("data", (d) => (stderr += d.toString()));
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      settle({ code: -1, stdout, stderr: stderr + String(err) });
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      settle({ code: code ?? -1, stdout, stderr });
-    });
-  });
-}
 
 const ok = (text: string) =>
   ({ content: [{ type: "text" as const, text }], details: undefined });
@@ -74,7 +34,7 @@ const errResult = (text: string) =>
 export interface GhPrExtensionOptions {
   cwd?: string;
   /** Registered repository remote. Lets lightweight chat use GitHub tools even
-   *  when there is no local checkout to run gh from. */
+   *  when there is no local checkout to run against. */
   remote?: string | null;
   /** Caller's run id, used by the resource-lock guard (docs/agent-events.md
    *  §5.2) on mutating tools (merge, approve). Required for ghPrExtension;
@@ -82,14 +42,20 @@ export interface GhPrExtensionOptions {
   runId?: number;
 }
 
-function repoFullName(remote: string | null | undefined): string | null {
-  if (!remote) return null;
-  const parsed = ownerRepoFromRemote(remote);
-  return parsed ? `${parsed.owner}/${parsed.repo}` : null;
+interface OwnerRepo {
+  owner: string;
+  repo: string;
 }
 
-function repoFlag(fullName: string | null): string[] {
-  return fullName ? ["--repo", fullName] : [];
+function ownerRepoFromFullName(remote: string | null | undefined): OwnerRepo | null {
+  if (!remote) return null;
+  const parsed = ownerRepoFromRemote(remote);
+  return parsed ? { owner: parsed.owner, repo: parsed.repo } : null;
+}
+
+function repoFullName(remote: string | null | undefined): string | null {
+  const or = ownerRepoFromFullName(remote);
+  return or ? `${or.owner}/${or.repo}` : null;
 }
 
 /**
@@ -100,7 +66,7 @@ function repoFlag(fullName: string | null): string[] {
  * and take/refresh the lease for the caller. One shared helper so both
  * pr_merge and the approving pr_review branch enforce the exact same rule.
  * The lease itself lives on the orchestrator (transport.acquirePrLock —
- * workers hold no database access); only the `gh` shell-outs run locally.
+ * workers hold no database access); only the GitHub I/O runs in-process.
  */
 async function checkAndAcquirePrLock(
   prUrl: string,
@@ -146,8 +112,35 @@ function makeGate(): Gate {
   };
 }
 
+// ──────────────────────────────────────────────────────────
+// REST → gh-shaped field mapping helpers
+// ──────────────────────────────────────────────────────────
+
+type RestPull = Record<string, unknown>;
+
+/** gh reports PR state uppercase, and surfaces MERGED separately from CLOSED. */
+function ghState(pr: RestPull): string {
+  if (pr.merged_at) return "MERGED";
+  return String(pr.state ?? "").toUpperCase();
+}
+
+/** gh's mergeable enum: MERGEABLE / CONFLICTING / UNKNOWN. REST gives a tri-state bool. */
+function ghMergeable(pr: RestPull): string {
+  const m = pr.mergeable;
+  if (m === true) return "MERGEABLE";
+  if (m === false) return "CONFLICTING";
+  return "UNKNOWN";
+}
+
+function ghAuthor(pr: RestPull): { login: string | null } | null {
+  const user = pr.user as { login?: string } | null | undefined;
+  return user ? { login: user.login ?? null } : null;
+}
+
+// ──────────────────────────────────────────────────────────
 // Read-only tools: fetch PR metadata/diff. Safe for a reviewer driven by
 // untrusted PR content — no mutation of GitHub state.
+// ──────────────────────────────────────────────────────────
 function registerReadTools(
   reg: BackendRegistrar,
   cwd: string | undefined,
@@ -155,6 +148,7 @@ function registerReadTools(
   opts: { repoFullName?: string | null } = {}
 ) {
   const fullName = opts.repoFullName ?? null;
+  const baseRepo = ownerRepoFromFullName(fullName);
 
   reg.registerTool({
     name: "gh_pr__pr_list",
@@ -171,27 +165,44 @@ function registerReadTools(
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
     }),
     execute: async (_id, { state, limit }) => {
-      if (!cwd && !fullName) {
+      if (!cwd && !baseRepo) {
         return errResult("PR listing needs either a local checkout or a registered GitHub remote.");
       }
-      const fields =
-        "number,title,state,url,author,headRefName,baseRefName,createdAt,updatedAt,isDraft";
-      const args = [
-        "pr",
-        "list",
-        ...repoFlag(fullName),
-        "--state",
-        state ?? "open",
-        "--limit",
-        String(Math.min(limit ?? 30, 100)),
-        "--json",
-        fields,
-      ];
-      const r = await gh(args, cwd);
-      if (r.code !== 0) {
-        return errResult(r.stderr.trim() || `gh pr list failed (exit ${r.code})`);
+      if (!baseRepo) {
+        return errResult("PR listing needs a registered GitHub remote.");
       }
-      return ok(r.stdout);
+      const want = state ?? "open";
+      // REST list has no "merged" state — merged PRs live under "closed" with a
+      // non-null merged_at. Fetch closed and filter when the caller wants merged.
+      const restState = want === "merged" ? "closed" : want;
+      const perPage = Math.min(limit ?? 30, 100);
+      try {
+        const { data } = await getOctokit().pulls.list({
+          owner: baseRepo.owner,
+          repo: baseRepo.repo,
+          state: restState as "open" | "closed" | "all",
+          per_page: perPage,
+          sort: "created",
+          direction: "desc",
+        });
+        let pulls = data as RestPull[];
+        if (want === "merged") pulls = pulls.filter((p) => p.merged_at != null);
+        const out = pulls.slice(0, perPage).map((p) => ({
+          number: p.number ?? null,
+          title: p.title ?? null,
+          state: ghState(p),
+          url: p.html_url ?? null,
+          author: ghAuthor(p),
+          headRefName: (p.head as RestPull | null)?.ref ?? null,
+          baseRefName: (p.base as RestPull | null)?.ref ?? null,
+          createdAt: p.created_at ?? null,
+          updatedAt: p.updated_at ?? null,
+          isDraft: p.draft ?? false,
+        }));
+        return ok(JSON.stringify(out));
+      } catch (err) {
+        return errResult(describeGithubError(err) || "gh pr list failed");
+      }
     },
   });
 
@@ -205,23 +216,20 @@ function registerReadTools(
       protected_only: Type.Optional(Type.Boolean()),
     }),
     execute: async (_id, { limit, protected_only }) => {
-      if (!fullName) {
+      if (!baseRepo) {
         return errResult("GitHub branch listing needs a registered GitHub remote.");
       }
-      const args = [
-        "api",
-        "--method",
-        "GET",
-        `repos/${fullName}/branches`,
-        "-F",
-        `per_page=${Math.min(limit ?? 50, 100)}`,
-      ];
-      if (protected_only === true) args.push("-F", "protected=true");
-      const r = await gh(args, cwd);
-      if (r.code !== 0) {
-        return errResult(r.stderr.trim() || `gh api branches failed (exit ${r.code})`);
+      try {
+        const { data } = await getOctokit().repos.listBranches({
+          owner: baseRepo.owner,
+          repo: baseRepo.repo,
+          per_page: Math.min(limit ?? 50, 100),
+          ...(protected_only === true ? { protected: true } : {}),
+        });
+        return ok(JSON.stringify(data));
+      } catch (err) {
+        return errResult(describeGithubError(err) || "gh api branches failed");
       }
-      return ok(r.stdout);
     },
   });
 
@@ -234,43 +242,57 @@ function registerReadTools(
     execute: async (_id, { url }) => {
       const g = await gate(url);
       if (!g.ok) return g.result;
-      const fields =
-        "state,mergeable,mergeStateStatus,title,body,url,number,headRefName,baseRefName,author,createdAt,updatedAt,mergedAt,files,statusCheckRollup,isDraft,additions,deletions,changedFiles";
-      const r = await gh(["pr", "view", g.parsed.canonical, "--json", fields], cwd);
-      if (r.code !== 0) {
-        return errResult(r.stderr.trim() || `gh pr view failed (exit ${r.code})`);
-      }
-      let raw: Record<string, unknown>;
+      const { owner, repo, number } = g.parsed;
       try {
-        raw = JSON.parse(r.stdout) as Record<string, unknown>;
-      } catch {
-        return errResult(`gh pr view returned non-JSON: ${r.stdout.slice(0, 200)}`);
+        const octokit = getOctokit();
+        const { data: pr } = await octokit.pulls.get({
+          owner,
+          repo,
+          pull_number: number,
+        });
+        const headSha = (pr.head as RestPull | null)?.sha as string | undefined;
+        const [files, checks] = await Promise.all([
+          octokit.paginate(octokit.pulls.listFiles, {
+            owner,
+            repo,
+            pull_number: number,
+            per_page: 100,
+          }),
+          headSha
+            ? fetchChecksRollupForRef(owner, repo, headSha)
+            : Promise.resolve([]),
+        ]);
+        const ciStatus = summarizeChecks(checks as unknown as Array<Record<string, unknown>>);
+        const payload = {
+          url: pr.html_url ?? g.parsed.canonical,
+          number: pr.number ?? g.parsed.number,
+          state: ghState(pr as RestPull),
+          mergeable: ghMergeable(pr as RestPull),
+          merge_state_status:
+            typeof pr.mergeable_state === "string"
+              ? pr.mergeable_state.toUpperCase()
+              : null,
+          ci_status: ciStatus,
+          title: pr.title ?? null,
+          body: pr.body ?? null,
+          head_ref: (pr.head as RestPull | null)?.ref ?? null,
+          base_ref: (pr.base as RestPull | null)?.ref ?? null,
+          author: ghAuthor(pr as RestPull),
+          is_draft: pr.draft ?? null,
+          additions: pr.additions ?? null,
+          deletions: pr.deletions ?? null,
+          changed_files: pr.changed_files ?? null,
+          files: (files as Array<Record<string, unknown>>).map((f) => ({
+            path: f.filename ?? null,
+            additions: f.additions ?? null,
+            deletions: f.deletions ?? null,
+          })),
+          repo: g.matched,
+        };
+        return ok(JSON.stringify(payload, null, 2));
+      } catch (err) {
+        return errResult(describeGithubError(err) || "gh pr view failed");
       }
-      // Roll up CI: collapse statusCheckRollup into a single summary string.
-      const checks = Array.isArray(raw.statusCheckRollup)
-        ? (raw.statusCheckRollup as Array<Record<string, unknown>>)
-        : [];
-      const ciStatus = summarizeChecks(checks);
-      const payload = {
-        url: raw.url ?? g.parsed.canonical,
-        number: raw.number ?? g.parsed.number,
-        state: raw.state ?? null,
-        mergeable: raw.mergeable ?? null,
-        merge_state_status: raw.mergeStateStatus ?? null,
-        ci_status: ciStatus,
-        title: raw.title ?? null,
-        body: raw.body ?? null,
-        head_ref: raw.headRefName ?? null,
-        base_ref: raw.baseRefName ?? null,
-        author: raw.author ?? null,
-        is_draft: raw.isDraft ?? null,
-        additions: raw.additions ?? null,
-        deletions: raw.deletions ?? null,
-        changed_files: raw.changedFiles ?? null,
-        files: Array.isArray(raw.files) ? raw.files : [],
-        repo: g.matched,
-      };
-      return ok(JSON.stringify(payload, null, 2));
     },
   });
 
@@ -286,12 +308,23 @@ function registerReadTools(
     execute: async (_id, { url, file }) => {
       const g = await gate(url);
       if (!g.ok) return g.result;
-      const r = await gh(["pr", "diff", g.parsed.canonical], cwd);
-      if (r.code !== 0) {
-        return errResult(r.stderr.trim() || `gh pr diff failed (exit ${r.code})`);
+      const { owner, repo, number } = g.parsed;
+      let diff: string;
+      try {
+        // REST returns the unified diff verbatim when asked for the `diff`
+        // media type (the response body is a string, not JSON).
+        const res = await getOctokit().pulls.get({
+          owner,
+          repo,
+          pull_number: number,
+          mediaType: { format: "diff" },
+        });
+        diff = res.data as unknown as string;
+      } catch (err) {
+        return errResult(describeGithubError(err) || "gh pr diff failed");
       }
-      if (!file) return ok(r.stdout);
-      const filtered = filterDiffByFile(r.stdout, file);
+      if (!file) return ok(diff);
+      const filtered = filterDiffByFile(diff, file);
       if (!filtered) {
         return errResult(`No diff hunks for file '${file}' in PR ${g.parsed.canonical}.`);
       }
@@ -311,45 +344,23 @@ function registerReadTools(
     execute: async (_id, { url, limit }) => {
       const g = await gate(url);
       if (!g.ok) return g.result;
-      const perPage = String(Math.min(limit ?? 50, 100));
-      const issueComments = await gh([
-        "api",
-        "--method",
-        "GET",
-        `repos/${g.parsed.owner}/${g.parsed.repo}/issues/${g.parsed.number}/comments`,
-        "-F",
-        `per_page=${perPage}`,
-      ], cwd);
-      if (issueComments.code !== 0) {
-        return errResult(issueComments.stderr.trim() || `gh api issue comments failed (exit ${issueComments.code})`);
+      const { owner, repo, number } = g.parsed;
+      const perPage = Math.min(limit ?? 50, 100);
+      try {
+        const octokit = getOctokit();
+        const [issueComments, reviewComments, reviews] = await Promise.all([
+          octokit.issues.listComments({ owner, repo, issue_number: number, per_page: perPage }),
+          octokit.pulls.listReviewComments({ owner, repo, pull_number: number, per_page: perPage }),
+          octokit.pulls.listReviews({ owner, repo, pull_number: number, per_page: perPage }),
+        ]);
+        return ok(JSON.stringify({
+          issue_comments: issueComments.data,
+          review_comments: reviewComments.data,
+          reviews: reviews.data,
+        }, null, 2));
+      } catch (err) {
+        return errResult(describeGithubError(err) || "gh api comments failed");
       }
-      const reviewComments = await gh([
-        "api",
-        "--method",
-        "GET",
-        `repos/${g.parsed.owner}/${g.parsed.repo}/pulls/${g.parsed.number}/comments`,
-        "-F",
-        `per_page=${perPage}`,
-      ], cwd);
-      if (reviewComments.code !== 0) {
-        return errResult(reviewComments.stderr.trim() || `gh api review comments failed (exit ${reviewComments.code})`);
-      }
-      const reviews = await gh([
-        "api",
-        "--method",
-        "GET",
-        `repos/${g.parsed.owner}/${g.parsed.repo}/pulls/${g.parsed.number}/reviews`,
-        "-F",
-        `per_page=${perPage}`,
-      ], cwd);
-      if (reviews.code !== 0) {
-        return errResult(reviews.stderr.trim() || `gh api reviews failed (exit ${reviews.code})`);
-      }
-      return ok(JSON.stringify({
-        issue_comments: tryParseJson(issueComments.stdout),
-        review_comments: tryParseJson(reviewComments.stdout),
-        reviews: tryParseJson(reviews.stdout),
-      }, null, 2));
     },
   });
 
@@ -364,12 +375,31 @@ function registerReadTools(
     execute: async (_id, { url }) => {
       const g = await gate(url);
       if (!g.ok) return g.result;
-      const fields = "name,state,startedAt,completedAt,link,description,bucket,workflow,event";
-      const r = await gh(["pr", "checks", g.parsed.canonical, "--json", fields], cwd);
-      if (r.code !== 0 && r.code !== 8) {
-        return errResult(r.stderr.trim() || `gh pr checks failed (exit ${r.code})`);
+      const { owner, repo, number } = g.parsed;
+      try {
+        const octokit = getOctokit();
+        const { data: pr } = await octokit.pulls.get({ owner, repo, pull_number: number });
+        const headSha = (pr.head as RestPull | null)?.sha as string | undefined;
+        const rollup = headSha ? await fetchChecksRollupForRef(owner, repo, headSha) : [];
+        // Shape each entry to the `gh pr checks --json` field names.
+        const out = rollup.map((c) => {
+          const stateRaw = c.conclusion ?? c.status ?? c.state ?? null;
+          return {
+            name: c.name,
+            state: stateRaw ? String(stateRaw).toUpperCase() : null,
+            startedAt: c.startedAt,
+            completedAt: c.completedAt,
+            link: c.link,
+            description: c.description,
+            bucket: bucketForCheck(c),
+            workflow: c.workflow,
+            event: c.event,
+          };
+        });
+        return ok(JSON.stringify(out));
+      } catch (err) {
+        return errResult(describeGithubError(err) || "gh pr checks failed");
       }
-      return ok(r.stdout);
     },
   });
 }
@@ -402,7 +432,7 @@ function registerReviewTool(
       const g = await gate(url);
       if (!g.ok) return g.result;
       // Defense in depth: even if a caller smuggles 'approve' past the schema,
-      // the read-only variant refuses to shell out an --approve.
+      // the read-only variant refuses to submit an approving review.
       if (verdict === "approve" && !opts.allowApprove) {
         return errResult("verdict='approve' is not permitted from this tool set.");
       }
@@ -413,14 +443,23 @@ function registerReviewTool(
       if ((verdict === "comment" || verdict === "request_changes") && !body?.trim()) {
         return errResult(`verdict='${verdict}' requires a non-empty body.`);
       }
-      const args = ["pr", "review", g.parsed.canonical];
-      if (verdict === "approve") args.push("--approve");
-      else if (verdict === "comment") args.push("--comment");
-      else args.push("--request-changes");
-      if (body && body.length > 0) args.push("--body", body);
-      const r = await gh(args, cwd);
-      if (r.code !== 0) {
-        return errResult(r.stderr.trim() || `gh pr review failed (exit ${r.code})`);
+      const event =
+        verdict === "approve"
+          ? "APPROVE"
+          : verdict === "comment"
+            ? "COMMENT"
+            : "REQUEST_CHANGES";
+      const { owner, repo, number } = g.parsed;
+      try {
+        await getOctokit().pulls.createReview({
+          owner,
+          repo,
+          pull_number: number,
+          event: event as "APPROVE" | "COMMENT" | "REQUEST_CHANGES",
+          ...(body && body.length > 0 ? { body } : {}),
+        });
+      } catch (err) {
+        return errResult(describeGithubError(err) || "gh pr review failed");
       }
       return ok(
         JSON.stringify(
@@ -428,7 +467,7 @@ function registerReviewTool(
             ok: true,
             verdict,
             pr: g.parsed.canonical,
-            stdout: r.stdout.trim(),
+            stdout: `Review (${verdict}) posted on ${g.parsed.canonical}`,
           },
           null,
           2
@@ -455,6 +494,7 @@ function registerCommentTool(reg: BackendRegistrar, cwd: string | undefined, gat
     execute: async (_id, { url, body, line, file }) => {
       const g = await gate(url);
       if (!g.ok) return g.result;
+      const { owner, repo, number } = g.parsed;
       const inline = line !== undefined && file !== undefined && file.length > 0;
       if ((line !== undefined) !== (file !== undefined && file.length > 0)) {
         return errResult(
@@ -462,65 +502,54 @@ function registerCommentTool(reg: BackendRegistrar, cwd: string | undefined, gat
         );
       }
       if (inline) {
-        // gh CLI doesn't support inline review comments directly. Fall
-        // back to the REST API via `gh api`. We need the head commit SHA
-        // first; fetch it via pr view.
-        const head = await gh(
-          ["pr", "view", g.parsed.canonical, "--json", "headRefOid"],
-          cwd
-        );
-        if (head.code !== 0) {
-          return errResult(
-            head.stderr.trim() || `gh pr view (for headRefOid) failed (exit ${head.code})`
-          );
-        }
+        const octokit = getOctokit();
+        // Inline review comments must be anchored to the PR's head commit.
         let commitId: string | null = null;
         try {
-          const parsed = JSON.parse(head.stdout) as { headRefOid?: string };
-          commitId = parsed.headRefOid ?? null;
-        } catch {
-          return errResult(`Could not parse headRefOid from gh pr view output.`);
+          const { data: pr } = await octokit.pulls.get({ owner, repo, pull_number: number });
+          commitId = ((pr.head as RestPull | null)?.sha as string) ?? null;
+        } catch (err) {
+          return errResult(describeGithubError(err) || "gh pr view (for headRefOid) failed");
         }
         if (!commitId) {
           return errResult(`PR ${g.parsed.canonical} has no headRefOid; can't inline-comment.`);
         }
-        const apiPath = `repos/${g.parsed.owner}/${g.parsed.repo}/pulls/${g.parsed.number}/comments`;
-        const args = [
-          "api",
-          "--method",
-          "POST",
-          apiPath,
-          "-f",
-          `body=${body}`,
-          "-f",
-          `commit_id=${commitId}`,
-          "-f",
-          `path=${file}`,
-          "-F",
-          `line=${line}`,
-          "-f",
-          "side=RIGHT",
-        ];
-        const r = await gh(args, cwd);
-        if (r.code !== 0) {
-          return errResult(r.stderr.trim() || `gh api (inline comment) failed (exit ${r.code})`);
+        try {
+          const { data } = await octokit.pulls.createReviewComment({
+            owner,
+            repo,
+            pull_number: number,
+            body,
+            commit_id: commitId,
+            path: file!,
+            line: line!,
+            side: "RIGHT",
+          });
+          return ok(
+            JSON.stringify(
+              { ok: true, kind: "inline", pr: g.parsed.canonical, file, line, response: data },
+              null,
+              2
+            )
+          );
+        } catch (err) {
+          return errResult(describeGithubError(err) || "gh api (inline comment) failed");
         }
-        return ok(
-          JSON.stringify(
-            { ok: true, kind: "inline", pr: g.parsed.canonical, file, line, response: tryParseJson(r.stdout) },
-            null,
-            2
-          )
-        );
       }
       // Top-level PR comment
-      const r = await gh(["pr", "comment", g.parsed.canonical, "--body", body], cwd);
-      if (r.code !== 0) {
-        return errResult(r.stderr.trim() || `gh pr comment failed (exit ${r.code})`);
+      try {
+        await getOctokit().issues.createComment({
+          owner,
+          repo,
+          issue_number: number,
+          body,
+        });
+      } catch (err) {
+        return errResult(describeGithubError(err) || "gh pr comment failed");
       }
       return ok(
         JSON.stringify(
-          { ok: true, kind: "top_level", pr: g.parsed.canonical, stdout: r.stdout.trim() },
+          { ok: true, kind: "top_level", pr: g.parsed.canonical, stdout: `Comment posted on ${g.parsed.canonical}` },
           null,
           2
         )
@@ -561,15 +590,37 @@ function registerMergeTool(
       if (!g.ok) return g.result;
       const lock = await checkAndAcquirePrLock(g.parsed.canonical, runId);
       if (!lock.ok) return lock.result;
-      const args = ["pr", "merge", g.parsed.canonical];
-      if (auto) args.push("--auto");
-      if (method === "merge") args.push("--merge");
-      else if (method === "squash") args.push("--squash");
-      else args.push("--rebase");
-      if (delete_branch) args.push("--delete-branch");
-      const r = await gh(args, cwd);
-      if (r.code !== 0) {
-        return errResult(r.stderr.trim() || `gh pr merge failed (exit ${r.code})`);
+      const { owner, repo, number } = g.parsed;
+      try {
+        if (auto) {
+          // Auto-merge is a GraphQL-only mutation (enablePullRequestAutoMerge);
+          // there is no REST equivalent.
+          await enableAutoMerge(owner, repo, number, method);
+        } else {
+          await getOctokit().pulls.merge({
+            owner,
+            repo,
+            pull_number: number,
+            merge_method: method,
+          });
+          if (delete_branch) {
+            const { data: pr } = await getOctokit().pulls.get({
+              owner,
+              repo,
+              pull_number: number,
+            });
+            const headRef = (pr.head as RestPull | null)?.ref as string | undefined;
+            if (headRef) {
+              await getOctokit()
+                .git.deleteRef({ owner, repo, ref: `heads/${headRef}` })
+                .catch(() => {
+                  /* best-effort branch delete, mirrors gh --delete-branch */
+                });
+            }
+          }
+        }
+      } catch (err) {
+        return errResult(describeGithubError(err) || "gh pr merge failed");
       }
       return ok(
         JSON.stringify(
@@ -579,7 +630,9 @@ function registerMergeTool(
             delete_branch: delete_branch === true,
             auto: auto === true,
             pr: g.parsed.canonical,
-            stdout: r.stdout.trim(),
+            stdout: auto
+              ? `Auto-merge armed for ${g.parsed.canonical}`
+              : `Merged ${g.parsed.canonical}`,
           },
           null,
           2
@@ -630,20 +683,69 @@ export const ghPrStrictReadOnlyExtension =
   };
 
 // ──────────────────────────────────────────────────────────
-// Helpers (verbatim from lib/gh-pr-mcp.ts)
+// Helpers
 // ──────────────────────────────────────────────────────────
 
-function tryParseJson(s: string): unknown {
-  try {
-    return JSON.parse(s);
-  } catch {
-    return s;
+/**
+ * Arm GitHub auto-merge on a PR via the GraphQL `enablePullRequestAutoMerge`
+ * mutation. Requires the PR's GraphQL node id (fetched via pulls.get). The
+ * merge method enum maps 1:1 to gh's --merge/--squash/--rebase.
+ */
+async function enableAutoMerge(
+  owner: string,
+  repo: string,
+  number: number,
+  method: "merge" | "squash" | "rebase"
+): Promise<void> {
+  const octokit = getOctokit();
+  const { data: pr } = await octokit.pulls.get({ owner, repo, pull_number: number });
+  const nodeId = pr.node_id;
+  const mergeMethod = method.toUpperCase(); // MERGE | SQUASH | REBASE
+  await octokit.graphql(
+    `mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
+      enablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId, mergeMethod: $mergeMethod }) {
+        clientMutationId
+      }
+    }`,
+    { pullRequestId: nodeId, mergeMethod }
+  );
+}
+
+// Map a rollup check entry to gh's `bucket` field (pass/fail/pending/skipping/cancel).
+function bucketForCheck(c: {
+  status: string | null;
+  conclusion: string | null;
+  state: string | null;
+}): string {
+  const status = c.status?.toUpperCase();
+  if (status && status !== "COMPLETED") return "pending";
+  const verdict = (c.conclusion ?? c.state ?? "").toUpperCase();
+  switch (verdict) {
+    case "SUCCESS":
+      return "pass";
+    case "FAILURE":
+    case "ERROR":
+    case "TIMED_OUT":
+    case "ACTION_REQUIRED":
+    case "STARTUP_FAILURE":
+      return "fail";
+    case "CANCELLED":
+    case "CANCELED":
+      return "cancel";
+    case "SKIPPED":
+    case "NEUTRAL":
+      return "skipping";
+    case "PENDING":
+    case "IN_PROGRESS":
+    case "QUEUED":
+      return "pending";
+    default:
+      return "skipping";
   }
 }
 
-// Collapse the `statusCheckRollup` array from `gh pr view --json` into a
-// single SUCCESS / FAILURE / PENDING / NEUTRAL summary, with a count
-// breakdown. Empty rollup → "NONE".
+// Collapse the check rollup into a single SUCCESS / FAILURE / PENDING /
+// NEUTRAL summary, with a count breakdown. Empty rollup → "NONE".
 function summarizeChecks(checks: Array<Record<string, unknown>>): {
   state: "SUCCESS" | "FAILURE" | "PENDING" | "NEUTRAL" | "NONE";
   total: number;

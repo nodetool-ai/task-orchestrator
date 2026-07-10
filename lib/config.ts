@@ -75,6 +75,23 @@ function strEnv(key: string, dflt?: string): string | undefined {
 
 export type RunnerProviderKind = "local" | "fly";
 export type NestedDispatchMode = "isolate" | "inline";
+export type LightweightIsolation = "child" | "inprocess";
+
+/**
+ * How the lightweight tier (pi `<chat>` / pi `<execute>`, i.e. placement
+ * `runtime='server'`) executes its model turns:
+ *  - "child" (default): a local Node child process (scripts/run-worker.ts) with
+ *    a bounded V8 heap (TASK_ORCH_LIGHTWEIGHT_MEMORY_MB) and inherited env
+ *    (DATABASE_URL retained → db transport). A runaway turn can neither exhaust
+ *    the control-plane heap nor block its event loop.
+ *  - "inprocess": today's behavior — turns run IN the web-server process
+ *    (resumeServerRun / in-process append). Kept as a rollback escape hatch and
+ *    so unit suites can drive turns in-process.
+ * Any value other than the two literals falls back to the default ("child").
+ */
+export function lightweightIsolation(): LightweightIsolation {
+  return process.env.TASK_ORCH_LIGHTWEIGHT_ISOLATION === "inprocess" ? "inprocess" : "child";
+}
 
 // ── Derived values (were duplicated across modules) ────────────────────────
 
@@ -286,6 +303,21 @@ export const config = Object.freeze({
     get lightweightExecutor(): boolean {
       return flag("TASK_ORCH_LIGHTWEIGHT_EXECUTOR", true);
     },
+    /** Where lightweight (runtime='server') turns run: a memory-capped local
+     *  Node child ("child", default) or the web-server process ("inprocess").
+     *  @see lightweightIsolation */
+    get lightweightIsolation(): LightweightIsolation {
+      return lightweightIsolation();
+    },
+    /** V8 --max-old-space-size (MB) applied to a lightweight child; 0 omits it. */
+    get lightweightMemoryMb(): number {
+      return intEnv("TASK_ORCH_LIGHTWEIGHT_MEMORY_MB", 512);
+    },
+    /** Max concurrent lightweight children; further dispatches defer to 'pending'
+     *  and are drained by the pump. 0 disables the cap. */
+    get lightweightMaxChildren(): number {
+      return intEnv("TASK_ORCH_LIGHTWEIGHT_MAX_CHILDREN", 8);
+    },
     get autoLaunch(): boolean {
       return truthy(process.env.TASK_ORCH_AUTO_LAUNCH);
     },
@@ -369,6 +401,7 @@ export function snapshot() {
       insideWorker: insideWorker(),
       detachedRunsEnabled: detachedRunsEnabled(),
       nestedDispatchMode: nestedDispatchMode(),
+      lightweightIsolation: lightweightIsolation(),
     }),
   });
 }

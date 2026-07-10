@@ -171,7 +171,18 @@ export const dbTransport: RunTransport = {
       await this.applyStatus(runId, status, { guard: "not-terminal" });
       return;
     }
-    await db.update(agentSessions).set({ status }).where(eq(agentSessions.id, runId));
+    // Entering a lease status must stamp the heartbeat IN THE SAME WRITE.
+    // In-process turns (append/runReview/runExecute) open their lease via this
+    // transition — not via a dispatch claim — and their heartbeat interval's
+    // first beat lands only after this write. In that window a fresh run's
+    // heartbeat_at is NULL (and a resumed idle chat's is hours old), and
+    // reconcileOrphanedRuns grants a lease-status row without a fresh beat NO
+    // grace: a pump tick (here or on another web instance) would fail the live
+    // turn as "Worker heartbeat lost … (no heartbeat recorded; scope none)".
+    const set = LEASE_STATUSES.includes(status)
+      ? { status, heartbeatAt: new Date() }
+      : { status };
+    await db.update(agentSessions).set(set).where(eq(agentSessions.id, runId));
     // Best-effort non-terminal event mirror (legacy /sessions UI): a lost
     // mirror is harmless — the next transition re-establishes state.
     try {

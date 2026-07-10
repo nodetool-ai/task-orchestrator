@@ -59,10 +59,14 @@ Then pick a different task.
 
 ## Delegating to a Claude Agent session
 
-Each session runs in an isolated git worktree on a fresh branch,
-opens a PR via `gh pr create` when finished, and transitions the
-task to `review` (or `blocked` on failure). Sessions run in
-parallel against different tasks.
+Each session runs in an isolated git worktree on the task's canonical
+branch (`claude/<taskid>`, pushed with upstream tracking at start and
+remembered on the task): every run on a task continues the same branch,
+and only one agent may work a task at a time. When the work is done the
+orchestrator pushes the branch — committing anything the agent left
+uncommitted — opens or updates the PR, and transitions the task to
+`review` (or `blocked` on failure). Sessions run in parallel against
+different tasks.
 
 ```bash
 npm run task -- agent T-20260511-0001                 # start + tail

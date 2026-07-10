@@ -196,7 +196,9 @@ export async function buildImplementPrompt(task: TaskFull): Promise<string> {
   lines.push("5. Finish exactly as described below.");
   lines.push("");
   lines.push("# Working environment");
-  lines.push("- You are in a separate checkout on a fresh branch. Make all changes here.");
+  lines.push(
+    "- You are in a separate checkout on the task's branch (shared by every run on this task — it may already carry earlier commits). Make all changes here."
+  );
   lines.push(
     "- In container/prewarmed runs, dependencies and Playwright browsers may be linked from the runner image. In host runs, `node_modules` and the Turbopack/Next.js build cache (`.next`) may be shared across checkouts. Do not remove `node_modules`, clear `.next`, or run package installs unless dependency files must change."
   );

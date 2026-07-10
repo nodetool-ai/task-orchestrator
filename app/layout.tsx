@@ -43,12 +43,12 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   return (
     <html lang="en" className={`${inter.variable} ${mono.variable} dark`} suppressHydrationWarning>
       <body
-        className="min-h-screen font-sans antialiased"
+        className="min-h-svh font-sans antialiased"
         style={{ background: "var(--pi-bg)", color: "var(--pi-fg)" }}
       >
         <DialogProvider>
           <TopNav email={email} />
-          <div style={{ display: "flex", alignItems: "stretch", minHeight: "calc(100vh - 48px)" }}>
+          <div style={{ display: "flex", alignItems: "stretch", minHeight: "calc(100svh - 48px)" }}>
             <LiveSidebar enabled={Boolean(email)} />
             <main style={{ flex: 1, minWidth: 0 }}>{children}</main>
           </div>

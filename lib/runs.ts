@@ -40,7 +40,7 @@ import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, notInArray, or,
 import { alias } from "drizzle-orm/pg-core";
 
 import { db } from "@/db";
-import { agentEvents, agentMessages, agentSessions, runTimers } from "@/db/schema";
+import { agentEvents, agentMessages, agentSessions, runTimers, tasks } from "@/db/schema";
 import { describe } from "@/lib/utils";
 import { parseProviderQualifiedModel } from "@/lib/model-id";
 import * as repo from "./repo";
@@ -51,11 +51,12 @@ import {
   parseReviewVerdict,
 } from "./run-templates";
 import { parsePrUrl, ownerRepoFromRemote } from "./gh-url";
+import { getOctokit } from "./github-client";
 import { assistantText, toolResults, type SdkContentBlock } from "./sdk-message";
 import type { AgentSessionFull, RepositoryRow } from "./types";
 // The run status vocabulary + state machine live in lib/run-state.ts. Pull the
 // pieces runs.ts needs directly from there (types.ts only re-exports a subset).
-import type { SessionStatus, TurnEndDecisionInput } from "./run-state";
+import type { ResultReport, SessionStatus, TurnEndDecisionInput } from "./run-state";
 import {
   isTerminalStatus,
   LEASE_STATUSES,
@@ -66,9 +67,10 @@ import {
   assertTransition,
   buildStatusEventValues,
   decideTurnEndStatus,
+  isFailedResult,
   resultPrUrl,
 } from "./run-state";
-import { config, runnerProviderKind } from "./config";
+import { config, lightweightIsolation, runnerProviderKind } from "./config";
 import {
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_STALE_MS,
@@ -135,6 +137,7 @@ runDispatch.__setRunsApi({
   failRun: setError,
   failPendingRun,
   countInFlightWorkers,
+  countInFlightLightweightChildren,
   listPendingRunIds,
   reconcileOrphanedRuns,
   listLeasedRuns,
@@ -456,6 +459,47 @@ function treeLimitEnv(key: string, dflt: number): number {
 // nothing enforces it at the DB level) must not hang a create()/dispatchRun call.
 const MAX_PARENT_WALK = 64;
 
+// Hard ceiling on the "keep going until there's a PR" continuation loop in
+// append(). An implement-worktree turn that ends without a PR (and without
+// report_result/raise) re-lands 'running', and the loop re-prompts the agent to
+// continue. The configured budgets bound this only partially: budgetMaxSeconds/
+// budgetMaxUsd catch it only when set, and budgetMaxTurns is counted per
+// runOneTurn — NOT cumulatively across continuations — so an agent that keeps
+// ending turns quickly without ever opening a PR would loop forever. Cap the
+// number of consecutive no-PR continuations; on exhaustion, land 'failed' with a
+// structured result instead of spinning. Tunable via env; floored at 1 so the
+// loop always makes at least one continuation attempt before giving up.
+export const MAX_PR_CONTINUATIONS = Math.max(
+  1,
+  Math.floor(Number(process.env.TASK_ORCH_MAX_PR_CONTINUATIONS ?? 25)) || 25
+);
+
+/**
+ * The structured failure a run lands when the no-PR continuation loop hits its
+ * ceiling. Pure (timestamp injected) so the payload is unit-testable without
+ * driving the whole append() generator. Mirrors a report_result({ status:
+ * "failed" }) so the stop is observable and the run stays resumable.
+ */
+export function prContinuationFailureResult(
+  count: number,
+  max: number,
+  reportedAt: string
+): ResultReport {
+  return {
+    kind: "result",
+    status: "failed",
+    summary:
+      `Stopped after ${count} turns without producing a PR ` +
+      `(TASK_ORCH_MAX_PR_CONTINUATIONS=${max}). The agent kept ending turns without ` +
+      "opening a pull request and without calling report_result/raise, so the run was " +
+      "failed to avoid an infinite loop.",
+    data: null,
+    pr_url: null,
+    needs: null,
+    reported_at: reportedAt,
+  };
+}
+
 /** A run's own parent_run_id, or null if the run has none — or no longer exists
  *  (parent_run_id carries no FK, so an ancestor can be deleted out from under
  *  its descendants). Shared by the parent-chain walks below. */
@@ -725,34 +769,68 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   // deployment default before selecting a context mode.
   const persistedBackend = resolveBackendId(backend);
 
-  const inserted = await db
-    .insert(agentSessions)
-    .values({
-      goal,
-      taskId: input.taskId ?? null,
-      planId: input.planId ?? null,
-      repoId,
-      parentRunId: input.parentRunId ?? null,
-      toolsProfile,
-      cwdStrategy,
-      // Placement is decided ONCE here (R1) from the run's final shape (goal +
-      // resolved backend) and persisted; dispatchRun honors this column rather
-      // than re-rolling placement per dispatch.
-      runtime: resolvePlacement({ goal, backend: persistedBackend }),
-      model: effectiveModel,
-      backend: persistedBackend,
-      thinkingLevel: input.thinkingLevel ?? null,
-      title: input.title ?? null,
-      userId: input.userId ?? null,
-      prUrl: input.prUrl ?? null,
-      personaId,
-      budgetMaxTurns: input.budget?.maxTurns ?? null,
-      budgetMaxUsd: input.budget?.maxUsd ?? null,
-      budgetMaxSeconds: input.budget?.maxSeconds ?? null,
-      status: initialStatus,
-      startedAt: new Date(),
-    })
-    .returning();
+  const insertValues = {
+    goal,
+    taskId: input.taskId ?? null,
+    planId: input.planId ?? null,
+    repoId,
+    parentRunId: input.parentRunId ?? null,
+    toolsProfile,
+    cwdStrategy,
+    // Placement is decided ONCE here (R1) from the run's final shape (goal +
+    // resolved backend) and persisted; dispatchRun honors this column rather
+    // than re-rolling placement per dispatch.
+    runtime: resolvePlacement({ goal, backend: persistedBackend }),
+    model: effectiveModel,
+    backend: persistedBackend,
+    thinkingLevel: input.thinkingLevel ?? null,
+    title: input.title ?? null,
+    userId: input.userId ?? null,
+    prUrl: input.prUrl ?? null,
+    personaId,
+    budgetMaxTurns: input.budget?.maxTurns ?? null,
+    budgetMaxUsd: input.budget?.maxUsd ?? null,
+    budgetMaxSeconds: input.budget?.maxSeconds ?? null,
+    status: initialStatus,
+    startedAt: new Date(),
+  };
+
+  // Implement-style task runs are admitted under a per-task advisory lock:
+  // ONE active agent per task, and ONE canonical branch per task. This is the
+  // single enforcement point — every creation path (REST /api/runs, the
+  // attached-run endpoint, agent.startSession, the spawn tool, auto-launch)
+  // funnels through here, so two agents can never work the same task (and
+  // therefore the same branch) concurrently. agent.startSession used to hold
+  // this same lock around its own check-then-create; that moved here so the
+  // lock and the insert commit atomically on one connection (an outer
+  // transaction taking the same lock on a second pooled connection would
+  // deadlock against this one).
+  const isTaskImplement = goal !== "<chat>" && cwdStrategy === "worktree" && !!input.taskId;
+  const inserted = isTaskImplement
+    ? await db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${input.taskId!}))`);
+        const active = await tx
+          .select({ id: agentSessions.id })
+          .from(agentSessions)
+          .where(
+            and(
+              eq(agentSessions.taskId, input.taskId!),
+              eq(agentSessions.cwdStrategy, "worktree"),
+              sql`${agentSessions.goal} != '<chat>'`,
+              notInArray(agentSessions.status, TERMINAL_STATUS_LIST)
+            )
+          )
+          .limit(1);
+        if (active.length > 0) {
+          throw new repo.RepoError(
+            `Task ${input.taskId} already has an active session (#${active[0].id})`,
+            409
+          );
+        }
+        await reserveTaskBranch(tx, input.taskId!);
+        return await tx.insert(agentSessions).values(insertValues).returning();
+      })
+    : await db.insert(agentSessions).values(insertValues).returning();
   const run = hydrateRun(inserted[0]);
 
   // A worktree run with a task is that task's attached session — point
@@ -811,17 +889,26 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   // root (no worktree of its own); children make their own worktrees.
   if (!input.defer && goal === "<execute>" && input.planId) {
     void (async () => {
-      const { detachedRunsEnabled } = await import("./run-dispatch");
+      const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
       // FIX 7 (M20): launchDetached persists a custom initialPrompt as the first
       // user message so driveDispatchedRun's <execute> branch can read it back and
       // pass it to runExecute as operator instructions.
       if (detachedRunsEnabled() && !isLightweightPiExecutorRun(run)) {
         await launchDetached(run.id, input.initialPrompt, input.parentRunId ?? null);
+      } else if (isLightweightPiExecutorRun(run) && lightweightIsolation() === "child") {
+        // Lightweight executor under 'child' isolation: persist any custom
+        // initialPrompt (so the child's <execute> branch reads it back as operator
+        // instructions, exactly like the detached path) and dispatch — dispatchRun
+        // claims the row and spawns the memory-capped child. No in-process turn.
+        if (input.initialPrompt) {
+          await persistMessage(run.id, "user", [{ type: "text", text: input.initialPrompt }]);
+        }
+        await dispatchRun(run.id);
       } else {
-        // In-process lightweight executor: take the server-turn claim (R2) so a
-        // duplicate wake (an inbox emit racing this create-time turn) can't drive
-        // a second coordinator turn concurrently. withServerClaim no-ops the
-        // drive if the claim is already held.
+        // In-process lightweight executor ('inprocess' isolation): take the
+        // server-turn claim (R2) so a duplicate wake (an inbox emit racing this
+        // create-time turn) can't drive a second coordinator turn concurrently.
+        // withServerClaim no-ops the drive if the claim is already held.
         await withServerClaim(run.id, () =>
           runExecute(run.id, input.planId!, input.initialPrompt ?? null)
         );
@@ -1182,6 +1269,10 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     let nextStatus: SessionStatus = "idle";
     let turnEnd: Awaited<ReturnType<typeof readTurnEndState>> | null = null;
     let outcomeUpdate = run.outcome;
+    // How many times this append() has re-prompted the agent to keep going
+    // because an implement-worktree turn ended without a PR. Bounded by
+    // MAX_PR_CONTINUATIONS so the loop can't spin forever (see the guard below).
+    let prContinuations = 0;
 
     while (true) {
       // Fresh turn = fresh tool intent. Without this, a prior report_result()
@@ -1281,19 +1372,87 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
           : run.outcome;
 
       if (isImplementWorktree(run) && nextStatus === "running") {
+        prContinuations += 1;
+        const capHit = prContinuations >= MAX_PR_CONTINUATIONS;
+        // The agent believes it finished (a non-failed report_result) but no PR
+        // exists — or the continuation budget is spent. Either way the model's
+        // part is over: SALVAGE mechanically. Commit whatever is left in the
+        // tree, push, and open the PR from what's on the branch, then re-decide
+        // the landing with the salvaged PR. A silent turn end (no result, cap
+        // not hit) skips salvage — the agent gets re-prompted below instead, so
+        // half-done work isn't prematurely wrapped into a PR.
+        const claimedDone = turnEnd.result != null && !isFailedResult(turnEnd.result);
+        if (claimedDone || capHit) {
+          try {
+            const salvaged = await gitSyncAfterTurn(run, cwd, result.summary, input.baseBranch, {
+              commitLeftovers: true,
+            });
+            if (salvaged) {
+              prUrlUpdate = salvaged;
+              observedPrUrl = salvaged;
+              await persistMessage(run.id, "system", [
+                {
+                  type: "text",
+                  text: `The worker pushed the branch and ensured a PR exists from the work left on it: ${salvaged}`,
+                },
+              ]);
+              nextStatus = decideTurnEndStatus({
+                goal: run.goal,
+                freshStatus: turnEnd.status,
+                parkReason: turnEnd.parkReason,
+                result: turnEnd.result,
+                budgetHit,
+                defaultStatus: "completed",
+                requiresPrUrl: true,
+                prUrl: observedPrUrl,
+              });
+              break;
+            }
+          } catch (err) {
+            await persistMessage(run.id, "system", [
+              { type: "text", text: `Salvage push/PR failed: ${describe(err)}` },
+            ]);
+          }
+        }
+        // Safety stop: the agent has ended this many turns without ever getting
+        // a PR onto the task (and salvage found nothing to ship). Rather than
+        // re-prompt forever, land 'failed' with a structured result so the run
+        // is observable and resumable like any other failure instead of
+        // spinning invisibly.
+        if (capHit) {
+          await (await runTransport()).patchRun(run.id, {
+            result: prContinuationFailureResult(
+              prContinuations,
+              MAX_PR_CONTINUATIONS,
+              new Date().toISOString()
+            ),
+          });
+          await persistMessage(run.id, "system", [
+            {
+              type: "text",
+              text:
+                `Reached the ${MAX_PR_CONTINUATIONS}-turn limit for producing a PR without ` +
+                "success; landing this run as failed to avoid an infinite loop. Resume the run " +
+                "to keep working, or raise TASK_ORCH_MAX_PR_CONTINUATIONS.",
+            },
+          ]);
+          nextStatus = "failed";
+          break;
+        }
         await persistMessage(run.id, "system", [
           {
             type: "text",
             text:
-              "The previous turn ended without producing a PR. Continue working in this same branch until a PR exists. " +
+              "The previous turn ended without a PR on the task. Continue working on this same branch. " +
               "If the task cannot be fulfilled, call raise({ code, message, recoverable, details }) or " +
               "report_result({ status: \"failed\", summary }).",
           },
         ]);
         promptForTurn =
           "Continue the same task. Do not stop after investigation or partial edits. " +
-          "Commit the work, push the branch, open a PR, call set_task_pr with the PR URL, arm auto-merge, " +
-          "then report_result({ status: \"success\", summary, pr_url }). " +
+          "Commit all intended changes with a clear message — the orchestrator then pushes the branch, " +
+          "opens or updates the PR, and records it on the task. When your work is committed, " +
+          "report_result({ status: \"success\", summary }). " +
           "If you cannot fulfill the task, call raise({ code, message, recoverable, details }) or " +
           "report_result({ status: \"failed\", summary }) and end.";
         run = (await get(run.id)) ?? run;
@@ -1798,13 +1957,57 @@ export function isImplementWorktree(run: { cwdStrategy: string; goal: string }):
 }
 
 /**
- * Branch name for a worktree run. Task-attached (implement) runs use the task id
- * so the branch reads as `claude/<task>-<run>`; taskless chat worktrees fall back
- * to `claude/chat-<run>`.
+ * The task's canonical branch name: `claude/<taskid>`. Deterministic, so every
+ * run on the task computes the same name even before the reservation on
+ * tasks.branch has landed. All agent work on a task accumulates here — one
+ * branch, one PR, across every run.
+ */
+export function taskBranchName(taskId: string): string {
+  return `claude/${taskId.toLowerCase()}`;
+}
+
+/**
+ * Branch name for a worktree run. Task-attached (implement) runs share the
+ * task's canonical branch (`claude/<taskid>`); only taskless chat worktrees
+ * get a private per-run branch (`claude/chat-<run>`).
  */
 export function worktreeBranchName(run: { id: number; taskId: string | null }): string {
-  const scope = run.taskId ? run.taskId.toLowerCase() : "chat";
-  return `claude/${scope}-${run.id}`;
+  if (run.taskId) return taskBranchName(run.taskId);
+  return `claude/chat-${run.id}`;
+}
+
+/**
+ * Reserve the task's canonical branch inside create()'s admission transaction.
+ * First reservation wins and sticks: prefer an already-set tasks.branch, then
+ * adopt the attached run's branch (legacy `claude/<task>-<run>` continuity, so
+ * pre-migration tasks keep their pushed branch + open PR), else mint
+ * `claude/<taskid>`.
+ */
+async function reserveTaskBranch(
+  tx: Pick<typeof db, "select" | "update">,
+  taskId: string
+): Promise<string | null> {
+  const row = (
+    await tx
+      .select({ branch: tasks.branch, attachedRunId: tasks.attachedRunId })
+      .from(tasks)
+      .where(eq(tasks.id, taskId))
+  )[0];
+  if (!row) return null; // missing task → the insert's FK surfaces the real error
+  if (row.branch) return row.branch;
+  let branch: string | null = null;
+  if (row.attachedRunId != null) {
+    const attached = (
+      await tx
+        .select({ branch: agentSessions.branch })
+        .from(agentSessions)
+        .where(eq(agentSessions.id, row.attachedRunId))
+    )[0];
+    branch = attached?.branch ?? null;
+  }
+  branch ??= taskBranchName(taskId);
+  await tx.update(tasks).set({ branch }).where(eq(tasks.id, taskId));
+  return branch;
 }
 
 /** The base branch a task's worktree branches from / merges in. */
@@ -1870,32 +2073,30 @@ async function containerCheckoutAt(
     () => sh(["git", "-C", work, "fetch", "--prune", "origin"], "/").catch(() => {}),
     { provider: runnerProviderLabel(), fields: { runId: run.id, repoId: run.repoId } }
   );
-  if (base) {
+  // Ensure semantics, existing-branch first: a task's branch is shared by every
+  // run on the task, so a previous run may already have pushed it. Prefer the
+  // branch's own remote state (`checkout -B <branch> origin/<branch>` — which
+  // also sets upstream tracking); only branch off `base` (or the repo default)
+  // when origin/<branch> doesn't exist yet. Resetting onto origin/<base> when
+  // the branch already exists would silently discard the earlier runs' commits.
+  try {
+    await timeRunnerPhase(
+      "git_fetch_branch",
+      () => sh(["git", "-C", work, "fetch", "origin", branch], "/"),
+      { provider: runnerProviderLabel(), fields: { runId: run.id, branch } }
+    );
     await timeRunnerPhase(
       "git_checkout",
-      () => sh(["git", "-C", work, "checkout", "-B", branch, `origin/${base}`], "/"),
-      { provider: runnerProviderLabel(), fields: { runId: run.id, branch, base } }
+      () => sh(["git", "-C", work, "checkout", "-B", branch, `origin/${branch}`], "/"),
+      { provider: runnerProviderLabel(), fields: { runId: run.id, branch } }
     );
-  } else {
-    try {
-      await timeRunnerPhase(
-        "git_fetch_branch",
-        () => sh(["git", "-C", work, "fetch", "origin", branch], "/"),
-        { provider: runnerProviderLabel(), fields: { runId: run.id, branch } }
-      );
-      await timeRunnerPhase(
-        "git_checkout",
-        () => sh(["git", "-C", work, "checkout", "-B", branch, `origin/${branch}`], "/"),
-        { provider: runnerProviderLabel(), fields: { runId: run.id, branch } }
-      );
-    } catch {
-      const def = await repoDefaultBranch(run);
-      await timeRunnerPhase(
-        "git_checkout",
-        () => sh(["git", "-C", work, "checkout", "-B", branch, `origin/${def}`], "/"),
-        { provider: runnerProviderLabel(), fields: { runId: run.id, branch, base: def, fallback: true } }
-      );
-    }
+  } catch {
+    const fallback = base ?? (await repoDefaultBranch(run));
+    await timeRunnerPhase(
+      "git_checkout",
+      () => sh(["git", "-C", work, "checkout", "-B", branch, `origin/${fallback}`], "/"),
+      { provider: runnerProviderLabel(), fields: { runId: run.id, branch, base: fallback, fallback: true } }
+    );
   }
   // Link the image-baked node_modules tree (full `npm ci` + Playwright) into this
   // checkout when it is the prewarmed repo, so the agent starts with deps ready
@@ -1979,8 +2180,15 @@ async function containerReviewCheckout(
 
 async function ensureWorktreeBranch(run: RunRow, baseBranch?: string): Promise<RunRow> {
   if (run.cwdStrategy !== "worktree" || run.branch) return run;
+  const transport = await runTransport();
+  const task = run.taskId ? await transport.getTask(run.taskId) : null;
+  // The task's canonical branch, reserved on tasks.branch at create() time so
+  // every run on the task works the SAME branch (legacy tasks may carry an
+  // adopted `claude/<task>-<run>` name there). The deterministic fallback
+  // covers runs created before the reservation existed; taskless chat
+  // worktrees keep a private per-run branch.
+  const branch = task?.branch ?? worktreeBranchName(run);
   const base = baseBranch?.trim() || (await repoDefaultBranch(run));
-  const branch = worktreeBranchName(run);
   let worktreePath: string;
   const sessionWork = sessionRepoPath();
   if (sessionWork) {
@@ -1994,23 +2202,13 @@ async function ensureWorktreeBranch(run: RunRow, baseBranch?: string): Promise<R
     // state lives on GitHub (the branch is pushed) + Postgres.
     worktreePath = await containerCheckout(run, branch, base);
   } else {
-    const root = await repoRoot(run);
-    const worktreeRoot = resolve(root, ".worktrees");
-    worktreePath = resolve(worktreeRoot, String(run.id));
-    await mkdir(worktreeRoot, { recursive: true });
-    await timeRunnerPhase(
-      "git_worktree_add",
-      () => sh(["git", "worktree", "add", "-b", branch, worktreePath, base], root),
-      { provider: runnerProviderLabel(), fields: { runId: run.id, branch, base } }
-    );
-    await timeRunnerPhase(
-      "worktree_artifact_link",
-      () => linkSharedWorktreeArtifacts(worktreePath, root),
-      { provider: runnerProviderLabel(), fields: { runId: run.id } }
-    );
+    worktreePath = await localWorktreeFor(run, branch, base);
   }
-  const transport = await runTransport();
-  const task = run.taskId ? await transport.getTask(run.taskId) : null;
+  // Publish the branch with upstream tracking the moment it exists, so the
+  // task page can link it on GitHub and a plain `git push` from the agent (or
+  // the salvage sync) targets the right ref without remembering `-u origin`.
+  // Best-effort: offline/credential failures must not block the first turn.
+  await publishBranch(worktreePath, branch);
   await transport.patchRun(run.id, {
     branch,
     worktreePath,
@@ -2033,18 +2231,136 @@ async function ensureWorktreeBranch(run: RunRow, baseBranch?: string): Promise<R
 }
 
 /**
+ * Local (host git-worktree) checkout for a worktree run. Task runs share ONE
+ * checkout per task (`.worktrees/<taskid>`): git only allows a branch to be
+ * checked out in one worktree, and the leftover files there are exactly the
+ * state the next run on the task should continue from. Handles every branch
+ * state: already checked out somewhere (reuse), exists locally (attach),
+ * exists on origin only (attach with tracking), or brand new (branch off base).
+ */
+async function localWorktreeFor(run: RunRow, branch: string, base: string): Promise<string> {
+  const root = await repoRoot(run);
+  // Already checked out (a previous run on this task, or a legacy per-run
+  // worktree that owns the adopted branch) → reuse that checkout.
+  const existing = await worktreePathForBranch(root, branch);
+  if (existing && existsSync(existing)) return existing;
+  const worktreeRoot = resolve(root, ".worktrees");
+  const worktreePath = resolve(
+    worktreeRoot,
+    run.taskId ? run.taskId.toLowerCase() : String(run.id)
+  );
+  await mkdir(worktreeRoot, { recursive: true });
+  // See the branch's remote state before deciding how to attach; a previous
+  // run may have pushed it even though no local ref survives.
+  await sh(["git", "fetch", "origin", branch], root).catch(() => {});
+  const hasRef = (ref: string) =>
+    sh(["git", "rev-parse", "--verify", "--quiet", ref], root).then(
+      () => true,
+      () => false
+    );
+  const args = (await hasRef(`refs/heads/${branch}`))
+    ? ["git", "worktree", "add", worktreePath, branch]
+    : (await hasRef(`refs/remotes/origin/${branch}`))
+      ? ["git", "worktree", "add", "-b", branch, worktreePath, `origin/${branch}`]
+      : ["git", "worktree", "add", "-b", branch, worktreePath, base];
+  await timeRunnerPhase("git_worktree_add", () => sh(args, root), {
+    provider: runnerProviderLabel(),
+    fields: { runId: run.id, branch, base },
+  });
+  await timeRunnerPhase(
+    "worktree_artifact_link",
+    () => linkSharedWorktreeArtifacts(worktreePath, root),
+    { provider: runnerProviderLabel(), fields: { runId: run.id } }
+  );
+  return worktreePath;
+}
+
+/** Where (if anywhere) `branch` is currently checked out, via
+ *  `git worktree list --porcelain`. Null when no worktree holds it. */
+async function worktreePathForBranch(root: string, branch: string): Promise<string | null> {
+  try {
+    const out = await sh(["git", "worktree", "list", "--porcelain"], root);
+    let current: string | null = null;
+    for (const line of out.split("\n")) {
+      if (line.startsWith("worktree ")) current = line.slice("worktree ".length).trim();
+      else if (line === `branch refs/heads/${branch}`) return current;
+    }
+  } catch {
+    // git too old for --porcelain / not a repo — fall through to a fresh add.
+  }
+  return null;
+}
+
+/**
+ * Publish `branch` to origin with upstream tracking (`git push -u`). When the
+ * push can't happen (offline, missing credentials), still record the tracking
+ * config so a later plain `git push` targets origin/<branch>. Best-effort by
+ * design — branch publication must never fail a turn.
+ */
+async function publishBranch(cwd: string, branch: string): Promise<void> {
+  try {
+    await timeRunnerPhase(
+      "git_publish_branch",
+      () => sh(["git", "push", "-u", "origin", branch], cwd),
+      { provider: runnerProviderLabel(), fields: { branch } }
+    );
+  } catch {
+    await sh(["git", "config", `branch.${branch}.remote`, "origin"], cwd).catch(() => {});
+    await sh(
+      ["git", "config", `branch.${branch}.merge`, `refs/heads/${branch}`],
+      cwd
+    ).catch(() => {});
+  }
+}
+
+/**
+ * Commit everything left in the working tree (`git add -A`), if anything is.
+ * The salvage half of "the worker can finish the PR from whatever is on the
+ * branch": an agent that stopped without committing still gets its work
+ * carried into the push + PR. Returns whether a commit was made.
+ */
+export async function commitLeftoverChanges(cwd: string, message: string): Promise<boolean> {
+  const dirty = (await sh(["git", "status", "--porcelain"], cwd)).trim();
+  if (!dirty) return false;
+  await sh(["git", "add", "-A"], cwd);
+  await sh(["git", "commit", "-m", message], cwd);
+  return true;
+}
+
+/**
  * After a worktree turn: if the branch gained commits ahead of its base, push
  * them. The first time (no PR yet) open one and move the task to review;
  * afterwards the push just updates the existing PR. Returns the (possibly new)
  * PR url. A no-op when the turn produced no commits (pure conversation).
+ *
+ * With `commitLeftovers` (the salvage pass), uncommitted files are committed
+ * first so work an agent left in the tree still reaches the branch and PR.
  */
 async function gitSyncAfterTurn(
   run: RunRow,
   cwd: string,
   summary: string | null,
-  baseBranch?: string
+  baseBranch?: string,
+  opts?: { commitLeftovers?: boolean }
 ): Promise<string | null> {
   if (!run.branch) return run.prUrl;
+  if (opts?.commitLeftovers) {
+    try {
+      const committed = await commitLeftoverChanges(
+        cwd,
+        `chore${run.taskId ? `(${run.taskId})` : ""}: commit remaining agent work from run #${run.id}`
+      );
+      if (committed) {
+        await persistMessage(run.id, "system", [
+          { type: "text", text: "Committed uncommitted changes left in the worktree." },
+        ]);
+      }
+    } catch (err) {
+      await persistMessage(run.id, "system", [
+        { type: "text", text: `Could not commit leftover changes: ${describe(err)}` },
+      ]);
+    }
+  }
   const base = baseBranch?.trim() || (await repoDefaultBranch(run));
   // Count the commits this branch added beyond its base. Prefer the
   // remote-tracking base (origin/<base>): it reflects the branch's real PR base
@@ -2993,18 +3309,25 @@ export async function* sendMessageToRun(opts: {
     return;
   }
   // Chat runs are latency-sensitive and do not need the implementation runner's
-  // branch/container/PR lifecycle. Keep them in this web process by default so
-  // they can use the same backend + orchestrator tools without paying worker
-  // startup cost. Set TASK_ORCH_LIGHTWEIGHT_CHATS=0 to restore worker-backed
-  // chat sessions in deployments that require that isolation boundary.
-  if (isLightweightPiChatRun(run)) {
+  // branch/container/PR lifecycle. Two lightweight modes (TASK_ORCH_LIGHTWEIGHT_
+  // ISOLATION):
+  //  - 'inprocess': run the turn IN this web process (append) — lowest latency,
+  //    but a runaway turn shares the control-plane heap/event loop.
+  //  - 'child' (default): persist the message, ensure a memory-capped local Node
+  //    child is running (notify-if-live else dispatch), and RELAY the reply from
+  //    the durable run_stream tail — the same worker-backed shape used for remote
+  //    runners, minus the container. Off the control-plane event loop, DB-capped.
+  const lightweightChat = isLightweightPiChatRun(run);
+  if (lightweightChat && lightweightIsolation() === "inprocess") {
     yield* append({ runId, role, text, author, abort });
     return;
   }
-  // Remote runner deployments (Docker worker image or Fly Machines provider)
-  // force turns through workers. Plain dev/test with no remote runner keeps the
-  // old in-process streaming path.
-  if (!runDispatch.remoteRunnerEnabled()) {
+  // Non-lightweight runs: remote runner deployments (Docker worker image or Fly
+  // Machines provider) force turns through workers; plain dev/test with no remote
+  // runner keeps the old in-process streaming path. A lightweight chat under
+  // 'child' isolation always takes the worker-backed path below (its "worker" is
+  // the local memory-capped child), independent of the remote-runner setting.
+  if (!lightweightChat && !runDispatch.remoteRunnerEnabled()) {
     yield* append({ runId, role, text, author, abort });
     return;
   }
@@ -3187,25 +3510,54 @@ async function openPr({ task, branch, baseBranch, worktreePath, summary }: OpenP
   const title = `[${task.id}] ${task.title}`;
   const body = buildPrBody(task, summary);
   try {
-    const out = await sh(
-      ["gh", "pr", "create", "--title", title, "--body", body, "--base", baseBranch, "--head", branch],
-      worktreePath
-    );
-    const m = out.match(/https?:\/\/\S+/);
-    return m ? m[0] : out.trim() || null;
+    // The gh CLI used to infer owner/repo from the worktree's origin remote;
+    // do the same, then open the PR in-process via Octokit.
+    const remoteUrl = (await sh(["git", "remote", "get-url", "origin"], worktreePath)).trim();
+    const or = ownerRepoFromRemote(remoteUrl);
+    if (!or) {
+      console.warn(`gh pr create failed: could not parse owner/repo from remote '${remoteUrl}'`);
+      return null;
+    }
+    const { data } = await getOctokit().pulls.create({
+      owner: or.owner,
+      repo: or.repo,
+      title,
+      body,
+      base: baseBranch,
+      head: branch,
+    });
+    return data.html_url ?? null;
   } catch (err) {
     console.warn(`gh pr create failed: ${describe(err)}`);
     return null;
   }
 }
 
-async function armAutoMerge(prUrl: string, worktreePath: string): Promise<string | null> {
+async function armAutoMerge(prUrl: string, _worktreePath: string): Promise<string | null> {
   try {
-    const out = await sh(
-      ["gh", "pr", "merge", prUrl, "--auto", "--squash", "--delete-branch"],
-      worktreePath
+    const parsed = parsePrUrl(prUrl);
+    if (!parsed) {
+      console.warn(`gh pr merge --auto failed: could not parse PR url '${prUrl}'`);
+      return null;
+    }
+    // Auto-merge is a GraphQL-only mutation (no REST equivalent). Arm it with
+    // the squash method, mirroring `gh pr merge --auto --squash`. Head-branch
+    // deletion after merge follows the repo's auto-merge setting.
+    const octokit = getOctokit();
+    const { data: pr } = await octokit.pulls.get({
+      owner: parsed.owner,
+      repo: parsed.repo,
+      pull_number: parsed.number,
+    });
+    await octokit.graphql(
+      `mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
+        enablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId, mergeMethod: $mergeMethod }) {
+          clientMutationId
+        }
+      }`,
+      { pullRequestId: pr.node_id, mergeMethod: "SQUASH" }
     );
-    return out.trim() || "auto-merge armed";
+    return "auto-merge armed";
   } catch (err) {
     console.warn(`gh pr merge --auto failed: ${describe(err)}`);
     return null;
@@ -4220,9 +4572,23 @@ export async function reconcileOrphanedRuns(): Promise<number> {
       hasBranch: !!row.branch,
       worktreeOnDisk: !!row.worktreePath && existsSync(row.worktreePath),
     });
+    // A lightweight (runtime='server') plan executor is resumable too, just not
+    // via the worktree predicate above: its whole conversational state lives in
+    // Postgres (agent_messages + inbox), and dispatchRun routes a server-placement
+    // row to resumeServerRun, which replays that context in-process. Failing it
+    // with "Worker heartbeat lost" after a web deploy/restart killed its turn
+    // mid-flight abandons a plan that can simply pick itself back up. Chat runs
+    // deliberately stay out of this (their policy is already 'idle': the next
+    // user message resumes them; an unattended auto-resume would burn a turn).
+    const serverResumable =
+      row.runtime === "server" && row.goal === "<execute>" && !!row.planId;
     // The sweep has no OOM signal (it only sees a stale heartbeat), so oom=false:
     // a resumable orphan always re-dispatches here, exactly as before R8.
-    const policy = decideDeadRunPolicy({ goal: row.goal, resumable, oom: false });
+    const policy = decideDeadRunPolicy({
+      goal: row.goal,
+      resumable: resumable || serverResumable,
+      oom: false,
+    });
     if (policy === "redispatch") {
       await db.update(agentSessions)
         .set({ workerScope: null })
@@ -4405,6 +4771,30 @@ export async function countInFlightWorkers(): Promise<number> {
     .where(
       and(
         eq(agentSessions.runtime, "worker"),
+        isNotNull(agentSessions.workerScope),
+        gt(agentSessions.heartbeatAt, new Date(Date.now() - HEARTBEAT_STALE_MS))
+      )
+    );
+  return rows.length;
+}
+
+/**
+ * Count live lightweight children: runtime='server' rows holding a claim with a
+ * fresh heartbeat. Each represents an active lightweight execution (a spawned
+ * memory-capped child under 'child' isolation, or an in-process server turn under
+ * 'inprocess'). dispatchRun uses this to bound the lightweight tier's concurrency
+ * (TASK_ORCH_LIGHTWEIGHT_MAX_CHILDREN) so a burst of chats can't fork-bomb the
+ * host — over-cap dispatches park at 'pending' and drain through the pump. A dead
+ * child's stale claim (expired heartbeat) is excluded, so a crashed child frees
+ * its slot the moment the reaper would reclaim it.
+ */
+export async function countInFlightLightweightChildren(): Promise<number> {
+  const rows = await db
+    .select({ id: agentSessions.id })
+    .from(agentSessions)
+    .where(
+      and(
+        eq(agentSessions.runtime, "server"),
         isNotNull(agentSessions.workerScope),
         gt(agentSessions.heartbeatAt, new Date(Date.now() - HEARTBEAT_STALE_MS))
       )
