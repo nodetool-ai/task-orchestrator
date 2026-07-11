@@ -29,6 +29,8 @@ const PRICING: Record<string, ModelPrice> = {
   "gpt-5.6-sol": { inputPerMTok: 5, outputPerMTok: 30 },
   "gpt-5.6-terra": { inputPerMTok: 2.5, outputPerMTok: 15 },
   "gpt-5.6-luna": { inputPerMTok: 1, outputPerMTok: 6 },
+  // Fable tier — $10 / $50 per MTok.
+  "claude-fable-5": { inputPerMTok: 10, outputPerMTok: 50 },
   // Opus tier — $5 / $25 per MTok.
   "claude-opus-4-8": { inputPerMTok: 5, outputPerMTok: 25 },
   "claude-opus-4-7": { inputPerMTok: 5, outputPerMTok: 25 },
@@ -47,7 +49,7 @@ const PRICING: Record<string, ModelPrice> = {
 // the most expensive known tier so the estimate is an UPPER bound: a budget
 // backstop should trip early rather than let an unknown-priced model run
 // unbounded. This is approximate by design.
-const FALLBACK_PRICE: ModelPrice = { inputPerMTok: 5, outputPerMTok: 25 };
+const FALLBACK_PRICE: ModelPrice = { inputPerMTok: 10, outputPerMTok: 50 };
 
 /** Strip a provider prefix ("anthropic/claude-...") to the bare model id. */
 function bareModelId(model: string): string {
