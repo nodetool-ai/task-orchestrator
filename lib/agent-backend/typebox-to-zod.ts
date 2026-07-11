@@ -110,6 +110,12 @@ export function toZodRawShape(objectSchema: TSchema | any): z.ZodRawShape {
   for (const [key, value] of Object.entries(props)) {
     let zt = toZodType(value);
     if (!required.includes(key)) zt = zt.optional();
+    // Honor JSON-Schema `default`s so the Claude/MCP paths fill omitted params
+    // the same way the pi backend does (Zod's .default() also implies optional
+    // input, applied last so it wraps the optional above).
+    if (value && typeof value === "object" && (value as any).default !== undefined) {
+      zt = zt.default((value as any).default);
+    }
     shape[key] = zt;
   }
   return shape;

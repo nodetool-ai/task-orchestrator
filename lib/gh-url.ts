@@ -65,7 +65,11 @@ export function ownerRepoFromRemote(
 export function branchUrlFromRemote(remote: string | null, branch: string): string | null {
   const parsed = ownerRepoFromRemote(remote);
   if (!parsed) return null;
-  return `https://github.com/${parsed.owner}/${parsed.repo}/tree/${encodeURIComponent(branch)}`;
+  // Encode each path segment but keep the `/` separators literal — GitHub's
+  // `/tree/` route does not decode `%2F` back into a path separator, so a
+  // branch like `feature/login` must render as `.../tree/feature/login`.
+  const encodedBranch = branch.split("/").map(encodeURIComponent).join("/");
+  return `https://github.com/${parsed.owner}/${parsed.repo}/tree/${encodedBranch}`;
 }
 
 export interface UrlValidation {

@@ -99,6 +99,10 @@ export class AgentLoop {
     const liveBuilder = new TranscriptBuilder();
     const abort = new AbortController();
     let lastEdit = 0;
+    // Tracks the most recent in-flight throttled draft edit. finalizeWith awaits
+    // it first so a mid-stream edit can never land AFTER finalize and clobber
+    // the finalized answer.
+    let pendingEdit: Promise<void> = Promise.resolve();
 
     // Mid-stream edit: only the first chunk (Discord rate-limits edits + caps
     // messages at 2000 chars). Throttled by the caller.
@@ -144,7 +148,7 @@ export class AgentLoop {
       const now = Date.now();
       if (now - lastEdit >= this.config.editThrottleMs) {
         lastEdit = now;
-        void updateDraft(liveBuilder.text()).catch(() => {}); // swallow mid-stream edit failures
+        pendingEdit = updateDraft(liveBuilder.text()).catch(() => {}); // swallow mid-stream edit failures
       }
     };
     const onBusEvent = (event: unknown) => {
@@ -218,6 +222,9 @@ export class AgentLoop {
     } else {
       finalText = liveBuilder.text();
     }
+    // Ensure any throttled mid-stream edit still in flight settles before we
+    // finalize, so the final answer is always the last write to the draft.
+    await pendingEdit;
     await finalizeWith(finalText).catch((err) => {
       console.error("[pipe] final flush failed:", err);
     });

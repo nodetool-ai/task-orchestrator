@@ -64,8 +64,11 @@ async function readFileTail(filePath: string, maxBytes: number): Promise<string 
     if (length <= 0) return "";
     handle = await open(filePath, "r");
     const buf = Buffer.alloc(length);
-    await handle.read(buf, 0, length, start);
-    return buf.toString("utf8");
+    // Decode only the bytes actually read: a short read (file truncated between
+    // stat and read, or a partial read) would otherwise leave trailing NUL bytes
+    // from the zero-filled buffer, which Postgres text columns reject.
+    const { bytesRead } = await handle.read(buf, 0, length, start);
+    return buf.subarray(0, bytesRead).toString("utf8");
   } catch {
     return null;
   } finally {

@@ -18,6 +18,10 @@ interface GitResult {
 
 const MAX_FILE_BYTES = 256 * 1024;
 const MAX_OUTPUT_BYTES = 512 * 1024;
+// Hard ceiling on captured git stdout before we kill the child. Set to the
+// largest max_bytes any tool advertises (1 MB) so read_diff/show_commit/blame
+// still have enough bytes for truncate() to honor their declared cap.
+const OUTPUT_KILL_CEILING_BYTES = 1024 * 1024;
 
 function ok(text: string) {
   return { content: [{ type: "text" as const, text }], details: undefined };
@@ -33,6 +37,7 @@ function git(args: string[], cwd: string): Promise<GitResult> {
     let stdout = "";
     let stderr = "";
     let done = false;
+    let killedForBytes = false;
     const finish = (result: GitResult) => {
       if (done) return;
       done = true;
@@ -44,7 +49,10 @@ function git(args: string[], cwd: string): Promise<GitResult> {
     }, 30_000);
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
-      if (stdout.length > MAX_OUTPUT_BYTES) child.kill("SIGKILL");
+      if (stdout.length > OUTPUT_KILL_CEILING_BYTES && !killedForBytes) {
+        killedForBytes = true;
+        child.kill("SIGKILL");
+      }
     });
     child.stderr.on("data", (chunk) => (stderr += chunk.toString()));
     child.on("error", (err) => {
@@ -53,7 +61,11 @@ function git(args: string[], cwd: string): Promise<GitResult> {
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      finish({ code: code ?? -1, stdout, stderr });
+      // A kill triggered solely by the byte ceiling is not a git failure: report
+      // success with the accumulated stdout so callers truncate() it gracefully
+      // instead of surfacing a bogus "exit -1" for large-but-valid output.
+      if (killedForBytes) finish({ code: 0, stdout, stderr });
+      else finish({ code: code ?? -1, stdout, stderr });
     });
   });
 }

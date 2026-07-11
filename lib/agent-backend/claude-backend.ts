@@ -196,6 +196,11 @@ export class ClaudeBackend implements AgentBackend {
     let lastAssistantText: string | null = null;
     let turns = 0;
     let sessionId: string | null = null;
+    // Tracks whether a system/init has already been handed to onEvent (and thus
+    // persisted). Lives ACROSS attempts so the fresh-session retry doesn't
+    // persist a second init when attempt 0 already emitted one before dying —
+    // that would leave a duplicate init row for the run.
+    let persistedInit = false;
 
     // One attempt with the stored resume id, plus at most one fresh-session
     // retry when that id's transcript is missing (RESUME_LOST_RE below). The
@@ -225,9 +230,13 @@ export class ClaudeBackend implements AgentBackend {
         options: {
           cwd,
           model: model.id,
-          // Persona thinkingLevel maps 1:1 onto the SDK's effort levels
+          // Persona thinkingLevel maps onto the SDK's effort levels
           // ('low' | 'medium' | 'high'); omitted lets the model default apply.
-          ...(thinkingLevel ? { effort: thinkingLevel } : {}),
+          // 'xhigh' is not an SDK effort value, so it clamps to 'high' (the
+          // pi backend, which does support 'xhigh', keeps the raw value).
+          ...(thinkingLevel
+            ? { effort: thinkingLevel === "xhigh" ? "high" : thinkingLevel }
+            : {}),
           permissionMode: "bypassPermissions",
           systemPrompt: {
             type: "preset",
@@ -266,11 +275,20 @@ export class ClaudeBackend implements AgentBackend {
           }
 
           for (const env of mapClaudeMessage(msg)) {
-            if (env.type === "system" && env.subtype === "init" && env.session_id) {
+            const isInit = env.type === "system" && env.subtype === "init";
+            if (isInit && env.session_id) {
               env.session_id = `${TAG}${env.session_id}`;
             }
             envelopes.push(env);
-            await onEvent(env);
+            // Keep the init in the in-memory envelope list (it carries the
+            // resume token) but don't re-persist it on the fresh-session retry
+            // if attempt 0 already persisted one.
+            if (isInit && attempt > 0 && persistedInit) {
+              // duplicate init from the retry — in-memory only, not persisted
+            } else {
+              if (isInit) persistedInit = true;
+              await onEvent(env);
+            }
 
             if (env.type === "assistant" && env.message?.content) {
               const text = env.message.content

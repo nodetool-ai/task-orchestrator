@@ -236,9 +236,22 @@ export async function autoLaunchEligibleTasks(deps: AutoLaunchDeps = {}): Promis
         continue;
       }
       const session = await start({ taskId: candidate.id });
-      await tagAutoLaunched(session.id, candidate.id);
+      // The run is live now — count it against the budget BEFORE tagging, so a
+      // failed tag insert can never leave a successfully-started run uncounted
+      // (which would let countActiveAutoLaunched under-count and the concurrency
+      // ceiling be exceeded on a later tick).
       budget -= 1;
       launched.push(candidate.id);
+      try {
+        await tagAutoLaunched(session.id, candidate.id);
+      } catch (tagErr) {
+        // Best-effort tag: the run started and is already counted this tick; a
+        // missing tag only affects cross-tick accounting. Log, do not un-launch.
+        console.warn(
+          `auto-launch: task ${candidate.id} started but tagging failed:`,
+          tagErr instanceof Error ? tagErr.message : tagErr
+        );
+      }
     } catch (err) {
       // Best-effort: a single failed launch (e.g. a lost race to a manual start,
       // or a dispatch error) must not stop the others.

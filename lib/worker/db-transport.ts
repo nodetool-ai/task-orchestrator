@@ -345,38 +345,38 @@ export const dbTransport: RunTransport = {
     // Resource-lock guard (§5.2): a `pr:<url>` lease answers "which run owns
     // this PR right now". A different LIVE (non-terminal) owner refuses the
     // mutation; a dead owner's lease is taken over.
+    //
+    // Ownership is resolved by a SINGLE conditional upsert so the check and the
+    // write are atomic (no TOCTOU): two concurrent runs cannot both come away
+    // believing they own the lease. The DO UPDATE fires only when the existing
+    // owner is this same run (re-affirm) or is dead/terminal (takeover); a live
+    // different owner leaves the row untouched, so RETURNING yields no row.
     const resource = `pr:${prUrl}`;
-    const existing = (
-      await db
-        .select({ ownerRunId: resourceLocks.ownerRunId })
-        .from(resourceLocks)
-        .where(eq(resourceLocks.resource, resource))
-    )[0];
-    if (existing && existing.ownerRunId !== runId) {
-      const ownerRow = (
-        await db
-          .select({ status: agentSessions.status })
-          .from(agentSessions)
-          .where(eq(agentSessions.id, existing.ownerRunId))
-      )[0];
-      const ownerAlive = ownerRow
-        ? !isTerminalStatus(ownerRow.status as SessionStatus)
-        : false;
-      if (ownerAlive) {
-        return {
-          ok: false,
-          reason: `run #${existing.ownerRunId} owns this PR (${prUrl}); append_message it instead of mutating the PR directly.`,
-        };
-      }
-    }
-    await db
+    const acquired = await db
       .insert(resourceLocks)
       .values({ resource, ownerRunId: runId })
       .onConflictDoUpdate({
         target: resourceLocks.resource,
         set: { ownerRunId: runId, acquiredAt: new Date() },
-      });
-    return { ok: true };
+        setWhere: sql`${eq(resourceLocks.ownerRunId, runId)} or not exists (select 1 from ${agentSessions} where ${and(
+          eq(agentSessions.id, resourceLocks.ownerRunId),
+          notInArray(agentSessions.status, TERMINAL_STATUSES)
+        )})`,
+      })
+      .returning({ ownerRunId: resourceLocks.ownerRunId });
+    if (acquired.length > 0) return { ok: true };
+    // Lost the race to a live different owner; read it back for a helpful
+    // message (best-effort — the ownership decision above already stands).
+    const owner = (
+      await db
+        .select({ ownerRunId: resourceLocks.ownerRunId })
+        .from(resourceLocks)
+        .where(eq(resourceLocks.resource, resource))
+    )[0];
+    return {
+      ok: false,
+      reason: `run #${owner?.ownerRunId ?? "?"} owns this PR (${prUrl}); append_message it instead of mutating the PR directly.`,
+    };
   },
 
   async callTool(runId, tool, params, ctx) {

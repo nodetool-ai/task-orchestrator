@@ -23,8 +23,11 @@ import type { ApplyStatusOpts, WireStatusGuard } from "./protocol";
 const log = createLogger("worker-api");
 
 /** Runs we've already logged as talking the unversioned protocol — once per
- *  run, not once per request (an old worker beats/polls constantly). */
+ *  run, not once per request (an old worker beats/polls constantly). Bounded:
+ *  it only de-dups a warning, so old entries are evicted FIFO rather than
+ *  letting the set grow one entry per legacy run forever. */
 const unversionedLogged = new Set<number>();
+const UNVERSIONED_LOGGED_CAP = 4096;
 
 /**
  * Enforce the wire-protocol major version. Returns a 409 Response on a
@@ -36,6 +39,10 @@ function checkProtocol(req: Request, runId: number): Response | null {
   const raw = req.headers.get(WORKER_PROTOCOL_HEADER);
   if (raw === null || raw === "") {
     if (!unversionedLogged.has(runId)) {
+      if (unversionedLogged.size >= UNVERSIONED_LOGGED_CAP) {
+        const oldest = unversionedLogged.values().next().value;
+        if (oldest !== undefined) unversionedLogged.delete(oldest);
+      }
       unversionedLogged.add(runId);
       log.warn("runner_protocol_unversioned", {
         runId,

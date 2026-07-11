@@ -11,7 +11,7 @@ import * as agent from "./lib/agent";
 import * as users from "./lib/users";
 import { createMagicToken } from "./lib/magic-link";
 import { sql } from "./db";
-import { TASK_STATES, isTerminalStatus, type TaskState } from "./lib/types";
+import { TASK_STATES, isTerminalStatus, type TaskState, type SessionStatus } from "./lib/types";
 import { assistantText, toolUses, type SdkMessageEnvelope } from "./lib/sdk-message";
 import { collectRunnerInventory } from "./lib/runner/inventory";
 import { reapOrphanVolumes } from "./lib/runner/fly";
@@ -23,13 +23,33 @@ function isTaskState(s: string): s is TaskState {
 
 type Args = { _: string[]; [k: string]: unknown };
 
+// Flags that are always boolean (never consume a following token as their
+// value), so a positional after them stays a positional. Everything else is
+// value-bearing and supports both `--flag=value` and space-separated
+// `--flag value` forms.
+const BOOLEAN_FLAGS = new Set(["json", "no-follow", "reap"]);
+
 function parseArgs(argv: string[]): Args {
   const args: Args = { _: [] };
-  for (const a of argv) {
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
     if (a.startsWith("--")) {
       const eq = a.indexOf("=");
-      if (eq === -1) args[a.slice(2)] = true;
-      else args[a.slice(2, eq)] = a.slice(eq + 1);
+      if (eq !== -1) {
+        args[a.slice(2, eq)] = a.slice(eq + 1);
+        continue;
+      }
+      const name = a.slice(2);
+      // Space-separated value form: `--flag value`. Consume the next token as
+      // the value unless this is a known boolean flag or the next token is
+      // itself a flag / absent (in which case the flag is a boolean true).
+      const next = argv[i + 1];
+      if (!BOOLEAN_FLAGS.has(name) && next !== undefined && !next.startsWith("--")) {
+        args[name] = next;
+        i++;
+      } else {
+        args[name] = true;
+      }
     } else {
       args._.push(a);
     }
@@ -236,14 +256,18 @@ async function cmdCrit(args: Args) {
   if (sub === "done" || sub === "undone") {
     const cid = args._.shift();
     if (!cid) throw new Error(`Usage: crit ${sub} <criterion-id>`);
-    await repo.updateCriterion(parseInt(cid, 10), { done: sub === "done" });
+    const cidNum = parseInt(cid, 10);
+    if (Number.isNaN(cidNum)) throw new Error(`Invalid criterion id: ${cid}`);
+    await repo.updateCriterion(cidNum, { done: sub === "done" });
     console.log(`Criterion ${cid}: done=${sub === "done"}`);
     return 0;
   }
   if (sub === "rm") {
     const cid = args._.shift();
     if (!cid) throw new Error("Usage: crit rm <criterion-id>");
-    await repo.deleteCriterion(parseInt(cid, 10));
+    const cidNum = parseInt(cid, 10);
+    if (Number.isNaN(cidNum)) throw new Error(`Invalid criterion id: ${cid}`);
+    await repo.deleteCriterion(cidNum);
     console.log(`Removed criterion ${cid}`);
     return 0;
   }
@@ -289,7 +313,9 @@ async function cmdAttach(args: Args) {
     const idArg = args._.shift();
     const out = asString(args.out);
     if (!idArg || !out) throw new Error("Usage: attach get <attachment-id> --out=<path>");
-    const att = await repo.getAttachment(parseInt(idArg, 10));
+    const idNum = parseInt(idArg, 10);
+    if (Number.isNaN(idNum)) throw new Error(`Invalid attachment id: ${idArg}`);
+    const att = await repo.getAttachment(idNum);
     if (!att) throw new Error(`Attachment not found: ${idArg}`);
     writeFileSync(out, att.content);
     console.log(`Wrote ${att.sizeBytes} bytes to ${out}`);
@@ -298,7 +324,9 @@ async function cmdAttach(args: Args) {
   if (sub === "rm") {
     const idArg = args._.shift();
     if (!idArg) throw new Error("Usage: attach rm <attachment-id>");
-    await repo.deleteAttachment(parseInt(idArg, 10));
+    const idNum = parseInt(idArg, 10);
+    if (Number.isNaN(idNum)) throw new Error(`Invalid attachment id: ${idArg}`);
+    await repo.deleteAttachment(idNum);
     console.log(`Removed attachment ${idArg}`);
     return 0;
   }
@@ -414,7 +442,7 @@ async function tailSession(sessionId: number) {
       printAgentEvent(event);
       if (event.type === "status") {
         const s = (event.payload as { status?: string })?.status;
-        if (s && ["completed", "failed", "cancelled"].includes(s)) {
+        if (s && isTerminalStatus(s as SessionStatus)) {
           off();
           resolveP();
         }

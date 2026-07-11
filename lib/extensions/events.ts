@@ -533,8 +533,10 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
         state: "open",
       };
 
-      await recordTurnEffect(patchRunColumns(runId), { kind: "question", question: pendingQuestion });
-
+      // Arm the deadline timer BEFORE parking. If the timer cap is hit we bail
+      // out here without recording the question, so the child never parks with
+      // no automatic expiry and no parent notification (which would strand it
+      // until a human intervenes).
       const timerRes = await createTimer({
         runId,
         minutes,
@@ -542,13 +544,12 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
         correlationId: questionId,
       });
       if (!timerRes.ok) {
-        // Timer cap hit: the question row is still recorded, but there is no
-        // automatic expiry. Surface this loudly rather than silently parking
-        // forever with no wake guarantee beyond the parent's answer.
         return errResult(
-          `Question recorded but could not arm the ${minutes}m deadline timer: ${timerRes.error}`
+          `Could not arm the ${minutes}m deadline timer: ${timerRes.error}. Question not sent; retry or ask fewer questions concurrently.`
         );
       }
+
+      await recordTurnEffect(patchRunColumns(runId), { kind: "question", question: pendingQuestion });
 
       await emitInboxEvent({
         targetRunId: self.parentRunId,

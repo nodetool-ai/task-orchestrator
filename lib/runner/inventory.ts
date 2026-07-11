@@ -122,7 +122,15 @@ export async function collectRunnerInventory(flyClient?: FlyClient): Promise<Run
     const machineId = vol.attachedMachineId ?? mapping?.machineId ?? null;
     const machineState = machineId ? machineById.get(machineId)?.state ?? null : null;
     const createdAt = mapping?.createdAt ?? vol.createdAt ?? null;
-    const orphan = !vol.attachedMachineId && !claimedVolumeIds.has(vol.id);
+    // Mirror the reaper's isReapableVolume name guard (lib/runner/fly.ts): only a
+    // `vol_run_*` volume we created is a reap candidate, so the persistent
+    // prewarm_seed volume (named without that prefix) is never misreported as an
+    // orphan even though it is unattached and unclaimed.
+    const orphan =
+      !!vol.name &&
+      vol.name.startsWith("vol_run_") &&
+      !vol.attachedMachineId &&
+      !claimedVolumeIds.has(vol.id);
     rows.push({
       runId: mapping?.runId ?? null,
       machineId,

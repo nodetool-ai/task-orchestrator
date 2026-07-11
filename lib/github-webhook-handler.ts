@@ -114,11 +114,20 @@ export async function handleWebhookEvent(
   // from the PR's *rolled-up* GitHub state (re-read, not this one check's
   // conclusion). Runs before handleNeedsFix so the task is already `failing`
   // when the implementor is resumed to fix it.
+  // Gate autofix on the PR's *authoritative* rolled-up CI state (what
+  // applyCiState just re-read), NOT this single event's mapped conclusion. A
+  // new commit makes GitHub cancel the prior in-flight check-runs, and
+  // ciStateFrom maps "cancelled"/"stale" → "failure"; firing autofix off that
+  // one event would spuriously "fix" a run that was merely superseded. The
+  // rolled-up state reflects the real picture (new checks pending/green).
+  let ciRedAndOpen = false;
   if (event.kind === "ci") {
-    actions.push(...(await applyCiState(matchedTasks, event, fetchPrState)));
+    const ci = await applyCiState(matchedTasks, event, fetchPrState);
+    actions.push(...ci.actions);
+    ciRedAndOpen = ci.redAndOpen;
   }
 
-  const isCiFailure = event.kind === "ci" && event.ciState === "failure";
+  const isCiFailure = event.kind === "ci" && ciRedAndOpen;
   const isChangesRequested =
     event.kind === "review" && (event.conclusion ?? "") === "changes_requested";
 
@@ -219,8 +228,14 @@ async function applyCiState(
   matchedTasks: MatchedTask[],
   event: NormalizedWebhookEvent,
   fetchPrState: PrGithubStateFetcher
-): Promise<string[]> {
+): Promise<{ actions: string[]; redAndOpen: boolean }> {
   const actions: string[] = [];
+  // Whether any matched task's authoritative rolled-up CI is genuinely red on
+  // an open PR — used by the caller to gate autofix (rather than the single
+  // event's mapped conclusion, which is spuriously "failure" for a superseded
+  // check-run). Defaults false, so a failed/absent re-read never fires autofix;
+  // the poller re-reads and covers that case.
+  let redAndOpen = false;
   for (const { task } of matchedTasks) {
     const prUrl = task.prUrl ?? event.prUrls[0] ?? null;
     if (!prUrl) continue;
@@ -236,9 +251,10 @@ async function applyCiState(
     // An already-blocked task with still-red CI has been escalated (or its PR
     // was closed) and is awaiting a human — a stray CI-failure webhook must not
     // drag it back to `failing`. Recovery (green/merged) is not skipped.
-    const redAndOpen =
+    const taskRedAndOpen =
       ghState.ciConclusion === "failure" && !ghState.merged && !ghState.closed;
-    if (redAndOpen && prev === "blocked") continue;
+    if (taskRedAndOpen) redAndOpen = true;
+    if (taskRedAndOpen && prev === "blocked") continue;
     try {
       await applyTaskStateFromPr({ id: task.id, state: task.state }, ghState);
     } catch (err) {
@@ -248,7 +264,7 @@ async function applyCiState(
     const now = await repo.getTask(task.id);
     if (now && now.state !== prev) actions.push(`task ${task.id} → ${now.state}`);
   }
-  return actions;
+  return { actions, redAndOpen };
 }
 
 async function handleNeedsFix(
