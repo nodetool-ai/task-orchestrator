@@ -582,10 +582,26 @@ export async function attachRunToTask(
   // and only claim the slot when it's still empty/unusable.
   await db.transaction(async (tx) => {
     const row = (
-      await tx.select({ id: tasks.id }).from(tasks).where(eq(tasks.id, taskId)).for("update")
+      await tx
+        .select({ id: tasks.id, rid: tasks.attachedRunId })
+        .from(tasks)
+        .where(eq(tasks.id, taskId))
+        .for("update")
     )[0];
     if (!row) return;
-    if (await resolveAttachedRun(taskId)) return;
+    // Re-check the current attachment UNDER the lock using tx. Calling the
+    // db-scoped resolveAttachedRun here would grab a second pool connection
+    // while this transaction holds one, risking pool starvation/deadlock and
+    // reading outside the FOR UPDATE lock we just took.
+    if (row.rid) {
+      const r = (
+        await tx
+          .select({ status: agentSessions.status })
+          .from(agentSessions)
+          .where(eq(agentSessions.id, row.rid))
+      )[0];
+      if (r && isUsableAttachedRun(r.status)) return;
+    }
     await tx.update(tasks).set({ attachedRunId: runId }).where(eq(tasks.id, taskId));
   });
 }
@@ -983,6 +999,15 @@ export interface TransitionInput {
   state: TaskState;
   assignee?: string;
   note?: string;
+  /**
+   * Enforce the acceptance-criteria gate on the `merged` terminal. Off by
+   * default: at the repo layer criteria are informational and never block a
+   * transition (the PR-merge sync in pr-task-state.ts and ci-autofix depend on
+   * this — a PR already merged on GitHub must always reflect into task state).
+   * The agent-facing `transition_task` tool opts in so an agent can't hand-merge
+   * a task with unchecked criteria.
+   */
+  enforceCriteria?: boolean;
 }
 
 export async function transitionTask(id: string, input: TransitionInput): Promise<TaskFull> {
@@ -1016,13 +1041,13 @@ export async function transitionTask(id: string, input: TransitionInput): Promis
     if (input.state === "in_progress" && !assignee) {
       throw new RepoError("Going to in_progress requires an assignee", 400);
     }
-    // done-criteria gate: `merged` is the success terminal, and it's rejected
-    // while any acceptance criterion is still open. Runs inside the same
-    // FOR UPDATE transaction as the guard above so a criterion can't be
-    // unchecked between the check and the write. Only fires on an actual
-    // transition into `merged` (not a no-op when already merged); zero criteria
-    // means nothing to gate, so an empty set is allowed.
-    if (input.state === "merged" && input.state !== prev) {
+    // done-criteria gate: `merged` is the success terminal, and (when the caller
+    // opts in via enforceCriteria) it's rejected while any acceptance criterion
+    // is still open. Runs inside the same FOR UPDATE transaction as the guard
+    // above so a criterion can't be unchecked between the check and the write.
+    // Only fires on an actual transition into `merged` (not a no-op when already
+    // merged); zero criteria means nothing to gate, so an empty set is allowed.
+    if (input.enforceCriteria && input.state === "merged" && input.state !== prev) {
       const [openRow] = await tx
         .select({ n: count() })
         .from(acceptanceCriteria)

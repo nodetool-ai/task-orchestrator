@@ -677,7 +677,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       const taskId = resolveTaskId(id, ctx);
       if (!taskId) return errResult("Error: task id required");
       const result = await safe(() =>
-        repo.transitionTask(taskId, { state: state as TaskState, assignee, note })
+        repo.transitionTask(taskId, { state: state as TaskState, assignee, note, enforceCriteria: true })
       );
       if ("_error" in result) return errResult(`Error: ${result._error}`);
       return ok(`Task ${result.id} → ${result.state}.`);

@@ -186,6 +186,26 @@ describe("transitionTask", () => {
     expect(after.state).toBe("merged");
   });
 
+  it("rejects merged with open criteria when enforceCriteria is set", async () => {
+    await repo.addCriterion(id, "ship it");
+    await repo.transitionTask(id, { state: "in_progress", assignee: "alice" });
+    await repo.transitionTask(id, { state: "testing" });
+    await expect(
+      repo.transitionTask(id, { state: "merged", enforceCriteria: true })
+    ).rejects.toMatchObject({ status: 400 });
+    expect((await repo.getTask(id))!.state).toBe("testing");
+  });
+
+  it("permits merged with enforceCriteria once every criterion is checked", async () => {
+    await repo.addCriterion(id, "ship it");
+    const t = (await repo.getTask(id))!;
+    for (const c of t.criteria) await repo.updateCriterion(c.id, { done: true });
+    await repo.transitionTask(id, { state: "in_progress", assignee: "alice" });
+    await repo.transitionTask(id, { state: "testing" });
+    const after = await repo.transitionTask(id, { state: "merged", enforceCriteria: true });
+    expect(after.state).toBe("merged");
+  });
+
   it("permits merged when every criterion is checked", async () => {
     await repo.addCriterion(id, "ship it");
     await repo.addCriterion(id, "tests pass");
