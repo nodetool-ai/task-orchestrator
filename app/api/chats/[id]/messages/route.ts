@@ -13,8 +13,16 @@ export async function POST(
 ) {
   const { id } = await params;
   const chatId = Number(id);
+  if (!Number.isFinite(chatId)) {
+    return new Response("Not found", { status: 404 });
+  }
   const session = await auth();
   const uid = session?.user?.id ? Number(session.user.id) : null;
+  // A null userId means "no scoping" in lib/chat — an id-less session must
+  // fail closed here rather than post into another user's chat.
+  if (uid == null) {
+    return new Response("Unauthorized", { status: 401 });
+  }
   const author = session?.user?.email ?? "chat";
   const existing = await chat.getChat(chatId, uid);
   if (!existing) {

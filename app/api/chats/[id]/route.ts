@@ -11,6 +11,12 @@ async function userId(): Promise<number | null> {
   return id ? Number(id) : null;
 }
 
+// A null userId means "no scoping" in lib/chat — an id-less session must fail
+// closed here rather than gain read/write access to every user's chats.
+function unauthorized() {
+  return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+}
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -18,7 +24,12 @@ export async function GET(
   try {
     const { id } = await params;
     const uid = await userId();
-    const c = await chat.getChat(Number(id), uid);
+    if (uid == null) return unauthorized();
+    const chatId = Number(id);
+    if (!Number.isFinite(chatId)) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    const c = await chat.getChat(chatId, uid);
     if (!c) return NextResponse.json({ error: "Not found" }, { status: 404 });
     const messages = await chat.listMessages(c.id);
     return NextResponse.json({ chat: c, messages });
@@ -34,7 +45,12 @@ export async function DELETE(
   try {
     const { id } = await params;
     const uid = await userId();
-    await chat.deleteChat(Number(id), uid);
+    if (uid == null) return unauthorized();
+    const chatId = Number(id);
+    if (!Number.isFinite(chatId)) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    await chat.deleteChat(chatId, uid);
     return new NextResponse(null, { status: 204 });
   } catch (e) {
     return errorResponse(e);
@@ -48,6 +64,11 @@ export async function PATCH(
   try {
     const { id } = await params;
     const uid = await userId();
+    if (uid == null) return unauthorized();
+    const chatId = Number(id);
+    if (!Number.isFinite(chatId)) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
     const body = (await req.json()) as {
       title?: string;
       model?: string | null;
@@ -69,8 +90,8 @@ export async function PATCH(
         typeof body.repoId === "string" && body.repoId.trim() ? body.repoId.trim() : null;
     }
 
-    await chat.updateChatSettings(Number(id), patch, uid);
-    return NextResponse.json(await chat.getChat(Number(id), uid));
+    await chat.updateChatSettings(chatId, patch, uid);
+    return NextResponse.json(await chat.getChat(chatId, uid));
   } catch (e) {
     return errorResponse(e);
   }

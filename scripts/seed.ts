@@ -22,7 +22,7 @@ async function main() {
 
   // Personas are FK targets for agent_runs.persona_id; seed them every time so
   // CLI flows (which never boot instrumentation.ts) still find them.
-  seedPersonas();
+  await seedPersonas();
 
   if (process.env.SEED_DEMO !== "1") {
     console.log("Seeded personas. Set SEED_DEMO=1 to also seed the demo plan.");

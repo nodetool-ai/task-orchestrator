@@ -68,10 +68,16 @@ export async function POST(
     const text = PROCEED_MESSAGES[action];
 
     void (async () => {
-      for await (const ev of runs.append({ runId, role: "user", text, author })) {
-        if (ev.type === "error") {
-          console.error(`[planning approve] run=${runId} append error:`, ev.error);
+      try {
+        for await (const ev of runs.append({ runId, role: "user", text, author })) {
+          if (ev.type === "error") {
+            console.error(`[planning approve] run=${runId} append error:`, ev.error);
+          }
         }
+      } catch (err) {
+        // Fire-and-forget: a throw here would otherwise be an unhandled
+        // rejection (the response has already been sent).
+        console.error(`[planning approve] run=${runId} append failed:`, err);
       }
     })();
 

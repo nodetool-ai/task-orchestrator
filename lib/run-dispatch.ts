@@ -1268,6 +1268,13 @@ export async function sweepWorkerContainers(dockerArg?: DockerLike): Promise<voi
     return;
   }
   for (const run of leased) {
+    // Only worker-runtime claims correspond to containers. A lightweight
+    // (runtime='server') claim's scope never appears in Docker's list by
+    // construction, so "container doesn't exist" is meaningless for it —
+    // declaring it dead after SWEEP_MIN_SILENCE_MS (30s) would reap healthy
+    // in-process turns that are entitled to the 5-minute heartbeat contract
+    // enforced by reconcileOrphanedRuns.
+    if (run.runtime !== "worker") continue;
     if (!run.workerScope || liveNames.has(run.workerScope)) continue;
     const lastSeen = run.heartbeatAt?.getTime() ?? 0;
     if (now - lastSeen < SWEEP_MIN_SILENCE_MS) continue;

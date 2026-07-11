@@ -22,7 +22,12 @@ function loadAssignees(): Promise<string[]> {
       cache = b.assignees;
       return cache;
     })
-    .catch(() => []);
+    .catch((): string[] => {
+      // Clear the in-flight promise so the next call retries — caching the
+      // failure would leave the picker empty until a hard reload.
+      inFlight = null;
+      return [];
+    });
   return inFlight;
 }
 

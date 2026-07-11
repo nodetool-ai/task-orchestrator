@@ -11,10 +11,22 @@ import { unlinkSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// This script only knows how to reset the legacy SQLite file. On a Postgres
+// deployment it would delete nothing, then print "Initialized …" — silently
+// leaving the real database untouched. Fail loudly instead.
+if (process.env.DATABASE_URL) {
+  console.error(
+    "db:reset only removes legacy SQLite files, but DATABASE_URL is set (Postgres).\n" +
+      "Drop and recreate the Postgres database manually, then restart so migrations re-run."
+  );
+  process.exit(1);
+}
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
+// scripts/ is one level below the repo root, so a single ".." lands on it.
 const DB_PATH = process.env.TASK_ORCH_DB
   ? resolve(process.env.TASK_ORCH_DB)
-  : resolve(__dirname, "..", "..", "data.db");
+  : resolve(__dirname, "..", "data.db");
 
 for (const suffix of ["", "-shm", "-wal"]) {
   const p = DB_PATH + suffix;
@@ -28,4 +40,7 @@ async function init() {
   await import("../db");
   console.log(`Initialized ${DB_PATH}`);
 }
-init();
+init().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

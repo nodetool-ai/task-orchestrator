@@ -10,7 +10,11 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const session = await agent.getSession(parseInt(id, 10));
+    const sessionId = parseInt(id, 10);
+    if (!Number.isFinite(sessionId)) {
+      return NextResponse.json({ error: "Bad id" }, { status: 400 });
+    }
+    const session = await agent.getSession(sessionId);
     if (!session) return NextResponse.json({ error: "Not found" }, { status: 404 });
     const events = await agent.getSessionEvents(session.id);
     return NextResponse.json({ ...session, events, live: agent.isLive(session.id) });

@@ -322,7 +322,11 @@ export const config = Object.freeze({
       return truthy(process.env.TASK_ORCH_AUTO_LAUNCH);
     },
     get ciAutofix(): boolean {
-      return truthy(process.env.TASK_ORCH_CI_AUTOFIX);
+      // Default ON, matching the real gate (autofixEnabledFor in
+      // github-webhook.ts): only an explicit 0/false/no/off disables it.
+      // truthy() here would misreport the default deploy as disabled — and
+      // silently invert the default if control flow ever migrates to this getter.
+      return !/^(0|false|no|off)$/i.test((process.env.TASK_ORCH_CI_AUTOFIX ?? "").trim());
     },
     /** Keep worktrees after a run finishes (debugging). */
     get keepWorktrees(): boolean {

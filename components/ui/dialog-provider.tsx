@@ -48,6 +48,10 @@ function settle(req: DialogRequest, accepted: boolean, value: string) {
 
 export function DialogProvider({ children }: { children: React.ReactNode }) {
   const [req, setReq] = React.useState<DialogRequest | null>(null);
+  // Monotonic id per opened dialog: used as DialogHost's key so a superseding
+  // dialog REMOUNTS rather than reusing the previous host's input state (which
+  // would leak the old prompt's typed text and ignore the new initialValue).
+  const [seq, setSeq] = React.useState(0);
   const activeRef = React.useRef<DialogRequest | null>(null);
   activeRef.current = req;
 
@@ -56,6 +60,7 @@ export function DialogProvider({ children }: { children: React.ReactNode }) {
     // so its awaiting caller doesn't hang forever.
     if (activeRef.current) settle(activeRef.current, false, "");
     setReq(next);
+    setSeq((n) => n + 1);
   }, []);
 
   const api = React.useMemo<DialogApi>(
@@ -76,7 +81,7 @@ export function DialogProvider({ children }: { children: React.ReactNode }) {
   return (
     <DialogContext.Provider value={api}>
       {children}
-      {req && <DialogHost req={req} onClose={() => setReq(null)} />}
+      {req && <DialogHost key={seq} req={req} onClose={() => setReq(null)} />}
     </DialogContext.Provider>
   );
 }

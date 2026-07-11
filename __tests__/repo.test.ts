@@ -262,6 +262,26 @@ describe("acceptance criteria", () => {
     const parsed = validators.updateCriterionSchema.safeParse({});
     expect(parsed.success).toBe(false);
   });
+
+  it("update/delete refuse a criterion belonging to another task when scoped", async () => {
+    await repo.createTask({ id: "T-other", planId: "P-test", title: "Other", date: "2026-01-15" });
+    await repo.addCriterion(id, "mine");
+    const c = (await repo.getTask(id))!.criteria[0];
+
+    // Addressed through the wrong task id (the task-scoped API route): must 404,
+    // and must not touch the real owner's criterion.
+    await expect(repo.updateCriterion(c.id, { done: true }, "T-other")).rejects.toThrow(/not found/);
+    expect((await repo.getTask(id))!.criteria[0].done).toBe(false);
+
+    await repo.deleteCriterion(c.id, "T-other"); // silent no-op, wrong owner
+    expect((await repo.getTask(id))!.criteria).toHaveLength(1);
+
+    // Correct owner still works.
+    await repo.updateCriterion(c.id, { done: true }, id);
+    expect((await repo.getTask(id))!.criteria[0].done).toBe(true);
+    await repo.deleteCriterion(c.id, id);
+    expect((await repo.getTask(id))!.criteria).toHaveLength(0);
+  });
 });
 
 describe("notes", () => {

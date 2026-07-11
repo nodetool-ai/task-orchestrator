@@ -339,24 +339,30 @@ export function EmptyNote({ children }: { children: React.ReactNode }) {
 
 export function Elapsed({
   startMs,
+  endMs,
   paused,
   format = "long",
   style,
 }: {
   startMs: number;
+  /** Fixed end time for finished work. Without it, `paused` merely freezes the
+   *  tick at mount time — a run that finished days ago would show wall-clock
+   *  time since it started, not its duration. */
+  endMs?: number | null;
   paused?: boolean;
   format?: "long" | "hms";
   style?: StyleProp<TextStyle>;
 }) {
   const [now, setNow] = React.useState(Date.now());
   React.useEffect(() => {
-    if (paused) return;
+    if (paused || endMs != null) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [paused]);
+  }, [paused, endMs]);
+  const end = endMs ?? now;
   return (
     <Text style={[{ fontFamily: mono, fontVariant: ["tabular-nums"] }, style]}>
-      {format === "hms" ? elapsedHms(startMs, now) : fmtElapsed(startMs, now)}
+      {format === "hms" ? elapsedHms(startMs, end) : fmtElapsed(startMs, end)}
     </Text>
   );
 }

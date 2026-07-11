@@ -11,8 +11,12 @@ export async function PATCH(
 ) {
   try {
     const { id, cid } = await params;
+    const criterionId = parseInt(cid, 10);
+    if (!Number.isFinite(criterionId)) {
+      return NextResponse.json({ error: "Bad criterion id" }, { status: 400 });
+    }
     const input = updateCriterionSchema.parse(await req.json());
-    await repo.updateCriterion(parseInt(cid, 10), input);
+    await repo.updateCriterion(criterionId, input, id);
     return NextResponse.json(await repo.getTask(id));
   } catch (e) {
     return errorResponse(e);
@@ -25,7 +29,11 @@ export async function DELETE(
 ) {
   try {
     const { id, cid } = await params;
-    await repo.deleteCriterion(parseInt(cid, 10));
+    const criterionId = parseInt(cid, 10);
+    if (!Number.isFinite(criterionId)) {
+      return NextResponse.json({ error: "Bad criterion id" }, { status: 400 });
+    }
+    await repo.deleteCriterion(criterionId, id);
     return NextResponse.json(await repo.getTask(id));
   } catch (e) {
     return errorResponse(e);

@@ -97,7 +97,9 @@ AUTH_SECRET="${AUTH_SECRET:-$(openssl rand -base64 32)}"
 # ── 1. Apps ──────────────────────────────────────────────────────────────────
 bold "--- 1/6  Creating Fly apps ---"
 create_app() {  # app_name
-  if "$FLY" apps list 2>/dev/null | grep -qw "$1"; then
+  # Exact-match on the NAME column: grep -qw treats '-' as a word boundary, so
+  # "task-orchestrator" would false-positive on "task-orchestrator-runners".
+  if "$FLY" apps list 2>/dev/null | awk '{print $1}' | grep -qx "$1"; then
     info "app $1 already exists"
   else
     "$FLY" apps create "$1" --org "$ORG" && info "created app $1"
@@ -114,7 +116,7 @@ if [[ -n "${DATABASE_URL:-}" ]]; then
 elif "$FLY" secrets list -a "$APP" 2>/dev/null | grep -qw DATABASE_URL; then
   info "DATABASE_URL secret already present on $APP — leaving it."
 else
-  if ! "$FLY" apps list 2>/dev/null | grep -qw "$PG_APP"; then
+  if ! "$FLY" apps list 2>/dev/null | awk '{print $1}' | grep -qx "$PG_APP"; then
     info "Creating Fly Postgres cluster $PG_APP (this takes a minute)…"
     "$FLY" postgres create \
       --name "$PG_APP" --org "$ORG" --region "$REGION" \
@@ -181,7 +183,10 @@ bold "--- 5/6  Deploying the server ---"
 bold "--- 6/6  Admin account ---"
 if [[ -n "${ADMIN_EMAIL:-}" && -n "${ADMIN_PASSWORD:-}" ]]; then
   info "Creating dashboard login $ADMIN_EMAIL…"
-  "$FLY" ssh console -a "$APP" -C "npm run task -- user add $ADMIN_EMAIL --password=$ADMIN_PASSWORD" \
+  # ${var@Q}: shell-quote the credentials — the -C string is re-parsed by the
+  # remote shell, so an unquoted password with spaces/metacharacters would be
+  # word-split or executed there.
+  "$FLY" ssh console -a "$APP" -C "npm run task -- user add ${ADMIN_EMAIL@Q} --password=${ADMIN_PASSWORD@Q}" \
     || warn "Could not create the admin user automatically — create it manually (see below)."
 else
   info "Set ADMIN_EMAIL + ADMIN_PASSWORD to auto-create a login, or run:"

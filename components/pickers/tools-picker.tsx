@@ -24,7 +24,12 @@ function loadProfiles(): Promise<string[]> {
       catalogCache = b.profiles;
       return catalogCache;
     })
-    .catch(() => []);
+    .catch((): string[] => {
+      // Clear the in-flight promise so the next call retries — caching the
+      // failure would leave the picker empty until a hard reload.
+      catalogPromise = null;
+      return [];
+    });
   return catalogPromise;
 }
 

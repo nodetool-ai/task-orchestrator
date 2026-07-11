@@ -83,7 +83,12 @@ function loadProviders(): Promise<Catalog> {
       catalogCache = { defaultBackend, byBackend };
       return catalogCache;
     })
-    .catch((): Catalog => ({ defaultBackend: "pi", byBackend: new Map() }));
+    .catch((): Catalog => {
+      // Clear the in-flight promise so the next call retries — caching the
+      // failure would leave the pickers empty until a hard reload.
+      catalogPromise = null;
+      return { defaultBackend: "pi", byBackend: new Map() };
+    });
   return catalogPromise;
 }
 

@@ -24,7 +24,7 @@
 // Pure helpers are exported for direct unit testing without DB setup.
 
 import { Type } from "typebox";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import { db } from "@/db";
 import { agentSessions, runTimers } from "@/db/schema";
@@ -600,10 +600,24 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
         state: "answered",
         answered_at: answeredAt,
       };
-      await db
+      // Conditional write: checkAnswerable above is a read-then-write race —
+      // two concurrent answers (or a retried tool call) could both pass the
+      // gate. Guard the UPDATE on the question still being open so exactly one
+      // answer wins and the loser gets the documented "already answered" error.
+      const claimed = await db
         .update(agentSessions)
         .set({ pendingQuestion: updated })
-        .where(eq(agentSessions.id, child_run_id));
+        .where(
+          and(
+            eq(agentSessions.id, child_run_id),
+            sql`${agentSessions.pendingQuestion}->>'question_id' = ${question_id}`,
+            sql`${agentSessions.pendingQuestion}->>'state' = 'open'`
+          )
+        )
+        .returning({ id: agentSessions.id });
+      if (claimed.length === 0) {
+        return errResult(`Question '${question_id}' was already answered.`);
+      }
 
       // Cancel the child's deadline timer (correlated by question_id).
       const timerRow = (
