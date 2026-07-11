@@ -78,7 +78,12 @@ export interface NormalizedWebhookEvent {
 // PR url canonicalization (self-contained; no repo lookup)
 // ──────────────────────────────────────────────────────────
 
-const PR_URL_RE = /github\.com\/([^/\s]+)\/([^/\s]+?)(?:\.git)?\/pull\/(\d+)/i;
+// Anchored to a host boundary (start of string, the "//" of a scheme, or
+// whitespace/brackets) so `evil-github.com/...` or
+// `https://phish.example/github.com/...` cannot be canonicalized into a
+// legitimate-looking github.com PR link. Keep in sync with gh-url.ts parsePrUrl.
+const PR_URL_RE =
+  /(?:^|\/\/|[\s<([])(?:www\.)?github\.com\/([^/\s]+)\/([^/\s]+?)(?:\.git)?\/pull\/(\d+)/i;
 
 /** Canonicalize any PR url/short form to a lowercased comparison key, or null. */
 export function canonicalizePrUrl(input: string | null | undefined): string | null {

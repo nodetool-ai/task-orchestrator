@@ -14,6 +14,11 @@ async function userId(): Promise<number | null> {
 export async function GET() {
   try {
     const uid = await userId();
+    // A null userId means "no scoping" in lib/chat — an id-less session must
+    // fail closed here rather than list every user's chats.
+    if (uid == null) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
     return NextResponse.json(await chat.listChats(uid));
   } catch (e) {
     return errorResponse(e);
@@ -23,6 +28,9 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   try {
     const uid = await userId();
+    if (uid == null) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
     let repoId: string | undefined;
     try {
       const body = (await req.json()) as { repoId?: string | null };

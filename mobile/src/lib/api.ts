@@ -274,7 +274,17 @@ export const api = {
   // await the POST (surfacing an immediate error) but drain the stream in the
   // background so the connection stays open — dropping it aborts the turn. The
   // reply itself surfaces through the run-detail poll, not this call.
-  sendRunMessage: async (id: number, text: string): Promise<void> => {
+  sendRunMessage: async (
+    id: number,
+    text: string,
+    // Immediate rejections (e.g. "a turn is already in flight") arrive as an
+    // SSE `error` frame on an HTTP 200 stream, not as a non-OK status. RN's
+    // fetch has no body streaming, so the background drain reports a leading
+    // error frame through this callback once the stream closes (immediately,
+    // for a rejection) — otherwise the message would be silently lost after
+    // the UI already said "Sent".
+    onStreamError?: (message: string) => void
+  ): Promise<void> => {
     if (!baseUrl) throw new ApiError("No server configured", 0);
     const res = await fetch(`${baseUrl}/api/runs/${id}/messages`, {
       method: "POST",
@@ -288,7 +298,21 @@ export const api = {
       const t = await res.text().catch(() => "");
       throw new ApiError(t || `Request failed (${res.status})`, res.status);
     }
-    void res.text().catch(() => {});
+    void res
+      .text()
+      .then((body) => {
+        const line = body.split("\n").find((l) => l.startsWith("data: "));
+        if (!line) return;
+        try {
+          const ev = JSON.parse(line.slice(6)) as { type?: string; error?: string };
+          if (ev.type === "error") {
+            onStreamError?.(ev.error || "The agent rejected the message.");
+          }
+        } catch {
+          // non-JSON frame — ignore
+        }
+      })
+      .catch(() => {});
   },
   transitionTask: (id: string, state: string, extra?: { assignee?: string; note?: string }) =>
     request<unknown>(`/api/tasks/${id}/transition`, {

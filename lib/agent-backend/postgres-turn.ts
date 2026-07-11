@@ -241,15 +241,29 @@ function reconstructContext(
   rows: PostgresMessageRow[],
   model: { provider: string; id: string },
   currentInputText: string,
-  ephemeralInput: boolean
+  ephemeralInput: boolean,
+  // Id of the user row this turn processes. When a backlog is drained
+  // oldest-first, later user rows belong to FUTURE turns and must not appear in
+  // this turn's context; the override also targets this row (not the newest).
+  inputMessageId?: number
 ): Message[] {
-  let lastUserIndex = -1;
+  let overrideIndex = -1;
   const messages: Message[] = [];
   for (const row of rows) {
+    // Skip user rows queued after the one this turn handles — they're future
+    // backlog a later turn will process on its own.
+    if (
+      inputMessageId != null &&
+      row.role === "user" &&
+      row.id > inputMessageId
+    ) {
+      continue;
+    }
+    const isCurrent = inputMessageId == null || row.id === inputMessageId;
     const embedded = embeddedPiMessage(row.content);
     if (embedded) {
       messages.push(embedded);
-      if (embedded.role === "user") lastUserIndex = messages.length - 1;
+      if (embedded.role === "user" && isCurrent) overrideIndex = messages.length - 1;
       continue;
     }
     if (row.role === "user") {
@@ -258,7 +272,7 @@ function reconstructContext(
         content: userContentFromBlocks(row.content),
         timestamp: row.createdAt,
       });
-      lastUserIndex = messages.length - 1;
+      if (isCurrent) overrideIndex = messages.length - 1;
     } else if (row.role === "agent") {
       messages.push(fallbackAssistantMessage(model, row));
     } else if (row.role === "tool") {
@@ -268,8 +282,8 @@ function reconstructContext(
   }
   if (ephemeralInput) {
     messages.push({ role: "user", content: currentInputText, timestamp: Date.now() });
-  } else if (lastUserIndex >= 0) {
-    const current = messages[lastUserIndex] as UserMessage;
+  } else if (overrideIndex >= 0) {
+    const current = messages[overrideIndex] as UserMessage;
     if (typeof current.content === "string") {
       current.content = currentInputText;
     } else {
@@ -291,7 +305,13 @@ async function annotateLatestUserMessage(
   rows: PostgresMessageRow[],
   inputText: string
 ): Promise<void> {
-  const row = [...rows].reverse().find((candidate) => candidate.role === "user");
+  // Target the specific message this turn processes when known (a drained
+  // backlog handles messages oldest-first), else the newest user row — pinning
+  // it prevents an earlier turn from embedding its text into a later row.
+  const row =
+    ctx.inputMessageId != null
+      ? rows.find((candidate) => candidate.id === ctx.inputMessageId)
+      : [...rows].reverse().find((candidate) => candidate.role === "user");
   const visibleBlocks = row?.content.length ? row.content : [{ type: "text", text: inputText }];
   const message: UserMessage = {
     role: "user",
@@ -438,7 +458,13 @@ export async function runPostgresTurn(args: RunTurnArgs): Promise<TurnOutcome> {
   if (!ctx.ephemeralInput) {
     await annotateLatestUserMessage(ctx, rows, ctx.rawUserText ?? prompt);
   }
-  const contextMessages = reconstructContext(rows, args.model, prompt, ctx.ephemeralInput);
+  const contextMessages = reconstructContext(
+    rows,
+    args.model,
+    prompt,
+    ctx.ephemeralInput,
+    ctx.inputMessageId
+  );
 
   const entries = toolEntries(collected.tools);
   const tools = entries.map((entry) => entry.tool);

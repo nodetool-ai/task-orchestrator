@@ -136,6 +136,8 @@ export async function maybeTriggerAutofix(
     ) ?? null;
 
   // Always leave a breadcrumb on the task so it's visible even without autofix.
+  // Scoped to a resumable target on purpose: an abandoned run (all candidates
+  // closed/cancelled) records only the durable 'github' event, not a task note.
   if (target?.taskId && ctx.breadcrumb) {
     try {
       await repo.addNote(target.taskId, "github-webhook", ctx.breadcrumb);

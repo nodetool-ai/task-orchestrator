@@ -703,7 +703,7 @@ Commands:
   user add <email> [--password=...] Create a user. Prompts for password if omitted.
   user passwd <email> [--password=...]
                                     Update a user's password.
-  user link <email> [--origin=...]  Generate a one-time magic login link.
+  user link <email> [--origin=...]  Generate a magic login link (valid 1h, reusable until expiry).
   user rm <email>                   Delete a user.
 
   runners [--json] [--reap]         List runner Machines + volumes with state, run, age, est. cost. --reap destroys orphan volumes.

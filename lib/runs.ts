@@ -89,6 +89,7 @@ import {
   cancelTimersByCorrelation,
   claimInboxEventsTx,
   emitInboxEvent,
+  pendingOwnerCount,
   quarantineEvent,
   setClaimTurn,
   takeUnrenderedControlEvents,
@@ -385,6 +386,12 @@ export interface AppendInput {
   /** True for event-only wakeups: `text` is an ephemeral model prompt, not an
    *  existing user row and not something that should be shown in the transcript. */
   ephemeralInput?: boolean;
+  /** Postgres-mode: the id of the persisted user row this turn is processing.
+   *  When a backlog of user messages is drained oldest-first (one turn each),
+   *  this pins context reconstruction/annotation to the message actually being
+   *  handled — without it both target the NEWEST user row, so an earlier turn
+   *  would splice its text into a later message's row. Unset → latest row. */
+  inputMessageId?: number;
 }
 
 export interface AppendStreamEvent {
@@ -1291,6 +1298,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
           cwd,
           prompt: promptForTurn,
           rawUserText: input.text,
+          inputMessageId: input.inputMessageId,
           abort,
           author,
           // Event-wake turns pass an ephemeral prompt (the digest is injected as
@@ -1743,14 +1751,29 @@ export async function followUp(
       // prior turn errored; take the slot anyway
     }
   }
+  // Claim the slot SYNCHRONOUSLY before any await: an await between the wait
+  // loop and the claim is a window where a concurrent append()/followUp()
+  // (whose own claim is synchronous after its wait loop) can observe the lock
+  // free and start a turn — resuming here would then overwrite its claim and
+  // drive two turns against the same worktree.
+  let release!: () => void;
+  lock.busy = new Promise<void>((res) => (release = res));
   // Re-check liveness after acquiring the slot (another follow-up may have run
   // while we waited). Re-read the row: a detached worker may have claimed/started
   // a turn cross-process while we were queued, which only a FRESH read reveals.
-  if (isLive(runId)) return;
-  const fresh = await get(runId);
-  if (!fresh || isLeaseLive(fresh) || isWorkerLive(fresh)) return;
-  let release!: () => void;
-  lock.busy = new Promise<void>((res) => (release = res));
+  let fresh: RunRow | null = null;
+  try {
+    if (!isLive(runId)) fresh = await get(runId);
+  } catch (err) {
+    release();
+    lock.busy = null;
+    throw err;
+  }
+  if (!fresh || isLeaseLive(fresh) || isWorkerLive(fresh)) {
+    release();
+    lock.busy = null;
+    return;
+  }
 
   const abort = new AbortController();
   const bus = new EventEmitter();
@@ -3181,7 +3204,6 @@ export async function driveChatSession(runId: number): Promise<void> {
     wake = null;
   };
   abort.signal.addEventListener("abort", onAbort);
-  let handledEventWake = false;
 
   try {
     for (;;) {
@@ -3197,12 +3219,19 @@ export async function driveChatSession(runId: number): Promise<void> {
         // but no human message was added. Run one turn with a small synthetic
         // prompt; append() injects the claimed inbox digest before this text, so
         // the model sees the actual child/timer events that woke it.
-        if (
-          !handledEventWake &&
+        //
+        // Gate on there actually being pending owner events: parkReason is set
+        // by ANY park (timer__sleep, await_session), so firing purely on it
+        // would defeat the park — an empty digest re-woken instantly, burning a
+        // turn. And drive the turn on every genuine wake, not just the first:
+        // keying off handledEventWake stranded a second in-worker park until the
+        // idle timeout. The pending-count check is the real, self-resetting gate.
+        const pendingEvents =
           run.parkReason != null &&
           (run.status === "preparing" || run.status === "parked")
-        ) {
-          handledEventWake = true;
+            ? await pendingOwnerCount(runId)
+            : 0;
+        if (pendingEvents > 0) {
           for await (const _ev of append({
             runId,
             role: "user",
@@ -3234,6 +3263,9 @@ export async function driveChatSession(runId: number): Promise<void> {
             role: "user",
             text,
             persistUser: false,
+            // Pin context reconstruction to THIS backlogged message so an
+            // earlier turn doesn't splice its text into a later message's row.
+            inputMessageId: m.id,
             takeover: run.status === "preparing",
             abort,
           })) {
@@ -3613,6 +3645,9 @@ interface RunOneTurnArgs {
   /** Postgres-mode only: user-authored text before a transient event digest was
    *  prefixed to `prompt`; this is what belongs in persisted model history. */
   rawUserText?: string;
+  /** Postgres-mode only: id of the persisted user row this turn processes; pins
+   *  context override/annotation to that row when a backlog is drained. */
+  inputMessageId?: number;
 }
 
 interface TurnResult {
@@ -3799,6 +3834,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
         goal: run.goal,
         ephemeralInput: args.ephemeralInput === true,
         rawUserText: args.rawUserText,
+        inputMessageId: args.inputMessageId,
         loadMessages: () => loadPostgresContextMessages(run.id),
         annotateMessage: async (id, content) => {
           await db
@@ -4698,7 +4734,7 @@ export async function handleWorkerDeath(
   // set and remoteRunnerEnabled() reduces to its presence (given detached), so
   // this preserves the old `!!TASK_ORCH_WORKER_IMAGE` gate; on Fly it is now also
   // correct (branch check, not the never-present server worktree path).
-  const resumable = isResumableDeadRun({
+  const worktreeResumable = isResumableDeadRun({
     detached: runDispatch.detachedRunsEnabled(),
     remote: runDispatch.remoteRunnerEnabled(),
     isImplementWorktree: isImplementWorktree(row),
@@ -4706,6 +4742,13 @@ export async function handleWorkerDeath(
     hasBranch: !!row.branch,
     worktreeOnDisk: !!row.worktreePath && existsSync(row.worktreePath),
   });
+  // Same carve-out as reconcileOrphanedRuns: a lightweight plan executor's
+  // whole state lives in Postgres, so it resumes cleanly regardless of
+  // worktree/branch — without this, a dead lightweight executor routed here
+  // (e.g. via the container sweep) lands `failed` instead of re-dispatched.
+  const serverResumable =
+    row.runtime === "server" && row.goal === "<execute>" && !!row.planId;
+  const resumable = worktreeResumable || serverResumable;
   // §3.1: durable infra-death fact for the parent, whatever policy follows
   // below (re-dispatch / idle / failed). Deduped per container so the events
   // monitor and the sweep racing each other produce ONE event, not two.

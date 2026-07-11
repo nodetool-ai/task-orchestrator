@@ -10,7 +10,11 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
-    return NextResponse.json(await agent.cancelSession(parseInt(id, 10)));
+    const sessionId = parseInt(id, 10);
+    if (!Number.isFinite(sessionId)) {
+      return NextResponse.json({ error: "Bad id" }, { status: 400 });
+    }
+    return NextResponse.json(await agent.cancelSession(sessionId));
   } catch (e) {
     return errorResponse(e);
   }

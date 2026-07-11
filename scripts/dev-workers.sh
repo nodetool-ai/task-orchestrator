@@ -86,22 +86,28 @@ seed() {
   # /<owner>_<repo>.git — the exact path lib/runs.ts containerCheckoutAt looks
   # up for `git clone --reference`. Auth header via `git -c` so the token never
   # lands in the mirror's stored config.
-  local auth=""
-  if [[ -n "${GH_TOKEN:-}" ]]; then
-    auth="-c http.extraHeader=Authorization: Basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
-  fi
   for repo in $TARGET_REPOS; do
     d="/${repo//\//_}.git"
     echo "  $repo -> $VOLUME:$d"
+    # Only send an Authorization header when GH_TOKEN is set: a header built
+    # from an empty token makes GitHub return 401 even for public repos,
+    # breaking the anonymous-clone fallback the warning below promises.
     if docker run --rm --entrypoint sh -v "$VOLUME:/cache" -e GH_TOKEN="${GH_TOKEN:-}" alpine/git \
         -c "set -e; \
                d='/cache${d}'; \
-               if [ -d \"\$d\" ]; then \
+               if [ -n \"\$GH_TOKEN\" ]; then \
                  AUTH='Authorization: basic '\$(printf 'x-access-token:%s' \"\$GH_TOKEN\" | base64 | tr -d '\n'); \
-                 git -c http.extraHeader=\"\$AUTH\" -C \"\$d\" fetch --prune origin '+refs/heads/*:refs/heads/*'; \
+                 if [ -d \"\$d\" ]; then \
+                   git -c http.extraHeader=\"\$AUTH\" -C \"\$d\" fetch --prune origin '+refs/heads/*:refs/heads/*'; \
+                 else \
+                   git -c http.extraHeader=\"\$AUTH\" clone --mirror \"https://github.com/$repo\" \"\$d\"; \
+                 fi; \
                else \
-                 AUTH='Authorization: basic '\$(printf 'x-access-token:%s' \"\$GH_TOKEN\" | base64 | tr -d '\n'); \
-                 git -c http.extraHeader=\"\$AUTH\" clone --mirror \"https://github.com/$repo\" \"\$d\"; \
+                 if [ -d \"\$d\" ]; then \
+                   git -C \"\$d\" fetch --prune origin '+refs/heads/*:refs/heads/*'; \
+                 else \
+                   git clone --mirror \"https://github.com/$repo\" \"\$d\"; \
+                 fi; \
                fi"; then
       :
     else

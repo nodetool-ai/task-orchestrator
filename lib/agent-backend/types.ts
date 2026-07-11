@@ -118,6 +118,10 @@ export interface PostgresContextSource {
    *  may additionally contain a claimed event digest for this turn; that
    *  transient prefix must not become permanent conversation history. */
   rawUserText?: string;
+  /** Id of the persisted user row this turn is processing. When a backlog is
+   *  drained oldest-first, this pins the context override and annotation to the
+   *  message actually being handled; unset falls back to the latest user row. */
+  inputMessageId?: number;
   /** Read the persisted agent_messages rows (id-ordered) for this run. */
   loadMessages: () => Promise<PostgresMessageRow[]>;
   /** Rewrite one persisted row's content JSON in place — used to embed the pi

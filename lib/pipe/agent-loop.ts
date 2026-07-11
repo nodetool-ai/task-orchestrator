@@ -99,9 +99,10 @@ export class AgentLoop {
     const liveBuilder = new TranscriptBuilder();
     const abort = new AbortController();
     let lastEdit = 0;
-    // Tracks the most recent in-flight throttled draft edit. finalizeWith awaits
-    // it first so a mid-stream edit can never land AFTER finalize and clobber
-    // the finalized answer.
+    // Serializes throttled draft edits: each edit is chained onto the previous
+    // one so a slow earlier edit (e.g. a rate-limit retry) can never complete
+    // out of order and clobber a newer edit — or, worse, the finalized answer.
+    // finalizeWith awaits the chain tail before writing.
     let pendingEdit: Promise<void> = Promise.resolve();
 
     // Mid-stream edit: only the first chunk (Discord rate-limits edits + caps
@@ -148,7 +149,10 @@ export class AgentLoop {
       const now = Date.now();
       if (now - lastEdit >= this.config.editThrottleMs) {
         lastEdit = now;
-        pendingEdit = updateDraft(liveBuilder.text()).catch(() => {}); // swallow mid-stream edit failures
+        const text = liveBuilder.text();
+        pendingEdit = pendingEdit
+          .then(() => updateDraft(text))
+          .catch(() => {}); // swallow mid-stream edit failures
       }
     };
     const onBusEvent = (event: unknown) => {

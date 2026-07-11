@@ -18,7 +18,13 @@ import { reconcileOrphanedRuns } from "../lib/runs";
 async function main() {
   // Self-heal runs left "in flight" by a previous process that died mid-turn
   // (e.g. OOM-killed): without this they'd stay stuck and reject every message.
-  reconcileOrphanedRuns();
+  // Awaited so stuck runs are healed before the bridge accepts messages; a
+  // transient DB failure must not crash the process as an unhandled rejection.
+  try {
+    await reconcileOrphanedRuns();
+  } catch (err) {
+    console.error("[pipe] orphaned-run reconciliation failed:", err);
+  }
 
   const cfg = loadPipeConfig();
   const discord = new DiscordChannel(cfg.discord);

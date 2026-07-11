@@ -4,8 +4,8 @@
 // These intentionally expose narrow git/file reads instead of a shell.
 
 import { spawn } from "node:child_process";
-import { readdir, readFile, stat } from "node:fs/promises";
-import { relative, resolve, sep } from "node:path";
+import { readdir, readFile, realpath, stat } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { Type } from "typebox";
 
 import type { ExtensionFactory } from "./types";
@@ -81,6 +81,32 @@ function safeRepoPath(cwd: string, rawPath: string): { ok: true; path: string; r
     return { ok: false, error: "path must stay inside the repository root." };
   }
   return { ok: true, path: full, rel };
+}
+
+// Filesystem-hardened variant for tools that read the disk directly (rather
+// than going through git, which never leaves the work tree): safeRepoPath's
+// containment check is purely lexical, so a symlink committed inside the
+// checkout could otherwise point a read outside the repository root — a real
+// escape for review runs, which check out untrusted PRs.
+async function safeRepoFsPath(
+  cwd: string,
+  rawPath: string
+): Promise<{ ok: true; path: string; rel: string } | { ok: false; error: string }> {
+  const checked = safeRepoPath(cwd, rawPath);
+  if (!checked.ok) return checked;
+  let real: string;
+  try {
+    real = await realpath(checked.path);
+  } catch {
+    // Path doesn't exist — nothing to follow; the caller's read surfaces ENOENT.
+    return checked;
+  }
+  const rootReal = await realpath(cwd).catch(() => cwd);
+  const rel = relative(rootReal, real);
+  if (rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    return { ok: false, error: "path must stay inside the repository root." };
+  }
+  return { ok: true, path: real, rel: checked.rel };
 }
 
 function sliceLines(text: string, startLine?: number, maxLines?: number): string {
@@ -186,7 +212,7 @@ export const repoReadExtension =
         max_lines: Type.Optional(Type.Integer({ minimum: 1, maximum: 5000 })),
       }),
       execute: async (_id, { path, start_line, max_lines }) => {
-        const checked = safeRepoPath(cwd, path);
+        const checked = await safeRepoFsPath(cwd, path);
         if (!checked.ok) return errResult(checked.error);
         let data: Buffer;
         try {
@@ -251,9 +277,12 @@ export const repoReadExtension =
       execute: async (_id, { path, max_depth, max_entries }) => {
         let startPath = cwd;
         if (typeof path === "string" && path.trim()) {
-          const checked = safeRepoPath(cwd, path.trim());
+          // Validate with the symlink-following check, but keep the lexical
+          // path for the walk — treeForPath's containment filter compares
+          // entries against the lexical cwd.
+          const checked = await safeRepoFsPath(cwd, path.trim());
           if (!checked.ok) return errResult(checked.error);
-          startPath = checked.path;
+          startPath = resolve(cwd, checked.rel);
         }
         if (!(await pathExists(startPath))) return errResult(`Path does not exist: ${path ?? "."}`);
         const limit = Math.min(max_entries ?? 500, 2000);

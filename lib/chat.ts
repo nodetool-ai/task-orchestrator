@@ -91,7 +91,9 @@ export async function createChat(
   cwdStrategy: CwdStrategy = "none"
 ): Promise<ChatRow> {
   if (repoId === undefined) repoId = await repo.defaultRepoId();
-  if (repoId && !(await repo.getRepository(repoId))) {
+  // `!= null` (not truthiness): an empty-string repoId must hit the existence
+  // check and 404 rather than slip through to runs.create and violate the FK.
+  if (repoId != null && !(await repo.getRepository(repoId))) {
     throw new repo.RepoError(`Repository ${repoId} not found`, 404);
   }
   // Delegate to runs.create so the row gets goal/cwdStrategy/profile in one

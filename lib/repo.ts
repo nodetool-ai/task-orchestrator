@@ -72,6 +72,17 @@ function planIdFromTitle(title: string, date: string): string {
   return `P-${date}-${slug}`;
 }
 
+/**
+ * True for a Postgres unique-violation error (SQLSTATE 23505) — postgres.js
+ * surfaces this as an error object with a `code` property; drizzle may wrap it
+ * with the original as `cause`.
+ */
+function isUniqueViolation(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  if ((err as { code?: unknown }).code === "23505") return true;
+  return isUniqueViolation((err as { cause?: unknown }).cause);
+}
+
 async function nextTaskId(date: string): Promise<string> {
   const datePart = date.replace(/-/g, "");
   const prefix = `T-${datePart}-`;
@@ -792,7 +803,7 @@ export async function createTask(input: CreateTaskInput): Promise<TaskFull> {
     throw new RepoError(`Plan ${input.planId} not found`, 404);
   }
   const date = input.date ?? today();
-  const id = input.id ?? await nextTaskId(date);
+  let id = input.id ?? await nextTaskId(date);
   if ((await db.select().from(tasks).where(eq(tasks.id, id)))[0]) {
     throw new RepoError(`Task ${id} already exists`, 409);
   }
@@ -833,37 +844,55 @@ export async function createTask(input: CreateTaskInput): Promise<TaskFull> {
     }
   }
   const now = new Date();
-  await db.transaction(async (tx) => {
-    await tx.insert(tasks)
-      .values({
-        id,
-        title: input.title,
-        state: "todo",
-        planId: input.planId,
-        assignee: input.assignee ?? null,
-        body: input.body ?? "",
-        estimate: input.estimate ?? null,
-        tags: JSON.stringify(input.tags ?? []),
-        repoId: resolvedRepoId,
-        createdAt: now,
-        updatedAt: now,
+  // nextTaskId's MAX-scan → insert is a TOCTOU: two concurrent createTask
+  // calls on the same date compute the same id and the loser hits the PK.
+  // For auto-generated ids, regenerate and retry instead of surfacing a raw
+  // unique-violation (opaque 500) to the caller.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await db.transaction(async (tx) => {
+        await tx.insert(tasks)
+          .values({
+            id,
+            title: input.title,
+            state: "todo",
+            planId: input.planId,
+            assignee: input.assignee ?? null,
+            body: input.body ?? "",
+            estimate: input.estimate ?? null,
+            tags: JSON.stringify(input.tags ?? []),
+            repoId: resolvedRepoId,
+            createdAt: now,
+            updatedAt: now,
+          });
+        if (deps.length > 0) {
+          await tx.insert(taskDependencies)
+            .values(deps.map((d) => ({ taskId: id, dependsOnId: d })));
+        }
+        if (input.criteria?.length) {
+          await tx.insert(acceptanceCriteria)
+            .values(
+              input.criteria.map((text, i) => ({
+                taskId: id,
+                text,
+                done: false,
+                position: i,
+              }))
+            );
+        }
       });
-    if (deps.length > 0) {
-      await tx.insert(taskDependencies)
-        .values(deps.map((d) => ({ taskId: id, dependsOnId: d })));
+      break;
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        if (input.id === undefined && attempt < 3) {
+          id = await nextTaskId(date);
+          continue;
+        }
+        throw new RepoError(`Task ${id} already exists`, 409);
+      }
+      throw err;
     }
-    if (input.criteria?.length) {
-      await tx.insert(acceptanceCriteria)
-        .values(
-          input.criteria.map((text, i) => ({
-            taskId: id,
-            text,
-            done: false,
-            position: i,
-          }))
-        );
-    }
-  });
+  }
   return (await getTask(id))!;
 }
 
@@ -1063,12 +1092,20 @@ export async function addCriterion(taskId: string, text: string) {
   await db.update(tasks).set({ updatedAt: new Date() }).where(eq(tasks.id, taskId));
 }
 
-export async function updateCriterion(criterionId: number, patch: { done?: boolean; text?: string }) {
+export async function updateCriterion(
+  criterionId: number,
+  patch: { done?: boolean; text?: string },
+  // When provided, the criterion must belong to this task — callers addressing
+  // a criterion through a task-scoped URL must not reach another task's rows.
+  taskId?: string
+) {
   const row = (await db
     .select()
     .from(acceptanceCriteria)
     .where(eq(acceptanceCriteria.id, criterionId)))[0];
-  if (!row) throw new RepoError(`Criterion ${criterionId} not found`, 404);
+  if (!row || (taskId !== undefined && row.taskId !== taskId)) {
+    throw new RepoError(`Criterion ${criterionId} not found`, 404);
+  }
   const values: Record<string, unknown> = {};
   if (patch.done !== undefined) values.done = patch.done;
   if (patch.text !== undefined) values.text = patch.text;
@@ -1079,12 +1116,12 @@ export async function updateCriterion(criterionId: number, patch: { done?: boole
   await db.update(tasks).set({ updatedAt: new Date() }).where(eq(tasks.id, row.taskId));
 }
 
-export async function deleteCriterion(criterionId: number) {
+export async function deleteCriterion(criterionId: number, taskId?: string) {
   const row = (await db
     .select()
     .from(acceptanceCriteria)
     .where(eq(acceptanceCriteria.id, criterionId)))[0];
-  if (!row) return;
+  if (!row || (taskId !== undefined && row.taskId !== taskId)) return;
   await db.delete(acceptanceCriteria).where(eq(acceptanceCriteria.id, criterionId));
   await db.update(tasks).set({ updatedAt: new Date() }).where(eq(tasks.id, row.taskId));
 }

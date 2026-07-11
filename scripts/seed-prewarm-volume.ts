@@ -139,14 +139,21 @@ async function main() {
   console.log(`seed machine final: state=${final?.state ?? "timeout"} exit=${exit ?? "?"}`);
   await client.destroyMachine(machine.id, { force: true }).catch(() => {});
 
+  // Success requires a clean exit 0. A machine that vanished ("gone") or
+  // stopped without reporting an exit code proves nothing about the volume —
+  // treating that as success would bless an empty/partial seed.
   const failure =
     !final
       ? `seed machine did not finish within ${Math.round(TIMEOUT_MS / 60_000)}m`
-      : final.state === "failed"
-        ? "seed machine entered failed state"
-        : typeof exit === "number" && exit !== 0
-          ? `prewarm install exited non-zero (${exit}) — seed NOT refreshed`
-          : null;
+      : final.state === "gone"
+        ? "seed machine disappeared before finishing — seed NOT verified"
+        : final.state === "failed"
+          ? "seed machine entered failed state"
+          : typeof exit !== "number"
+            ? `seed machine ${final.state} with no exit code — seed NOT verified`
+            : exit !== 0
+              ? `prewarm install exited non-zero (${exit}) — seed NOT refreshed`
+              : null;
 
   if (failure) {
     // Don't leave an empty/partial seed for create() to fork. Only destroy a

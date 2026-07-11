@@ -9,7 +9,7 @@
 import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, asc, desc, eq, gt, isNotNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 
 import { db } from "@/db";
 import { agentEvents, agentSessions } from "@/db/schema";
@@ -17,6 +17,7 @@ import { autoLaunchEligibleTasks, autoLaunchEnabled, autoLaunchIntervalMs } from
 import { syncPrBackedTasks } from "./pr-task-state";
 import * as repo from "./repo";
 import { insideWorker } from "./runner/provider";
+import { HEARTBEAT_STALE_MS } from "./run-liveness";
 import * as runs from "./runs";
 import {
   isTerminalStatus,
@@ -121,9 +122,34 @@ async function reapOrphans() {
       )
   ).filter((row) => {
     if (!NON_TERMINAL_BUT_DEAD.includes(row.status)) return false;
-    // pending rows are fresh dispatch-queue entries; only reap if genuinely stale
+    // A resumable worktree implement run (branch + SDK session persist) is the
+    // pump's job, not ours: runs.reconcileOrphanedRuns re-dispatches it to a
+    // fresh worker. Failing it here — and worse, removing its worktree below —
+    // would abandon recoverable work on a plain restart. Defer to the pump.
+    if (
+      (row.status === "preparing" || row.status === "running") &&
+      row.cwdStrategy === "worktree" &&
+      !!row.branch &&
+      !!row.sdkSessionId
+    ) {
+      return false;
+    }
+    // Server-placement <execute> runs resume from Postgres alone (no worktree);
+    // reconcileOrphanedRuns redispatches them too. Leave them for the pump.
+    if (
+      (row.status === "preparing" || row.status === "running") &&
+      row.runtime === "server" &&
+      row.goal === "<execute>" &&
+      !!row.planId
+    ) {
+      return false;
+    }
+    // pending rows are fresh dispatch-queue entries; only reap if genuinely
+    // stale. Measure from the last heartbeat (the pump re-defers long-lived runs
+    // into `pending` and restamps the heartbeat), falling back to startedAt.
     if (row.status === "pending") {
-      return now.getTime() - row.startedAt.getTime() > PENDING_GRACE_PERIOD_MS;
+      const since = (row.heartbeatAt ?? row.startedAt).getTime();
+      return now.getTime() - since > PENDING_GRACE_PERIOD_MS;
     }
     return true;
   });
@@ -142,17 +168,38 @@ async function reapOrphans() {
     if (runs.isLive(orphan.id)) continue;
     if (runs.isLeaseLive(orphan)) continue;
     const now = new Date();
+    // CAS guard: only fail the row if it's STILL in the snapshot status with no
+    // fresh heartbeat. The isLeaseLive check above is a stale snapshot — a
+    // dispatch that claimed this row (status→preparing, fresh heartbeat) between
+    // our SELECT and here must not be clobbered to `failed`, nor have its
+    // worktree removed underneath the live turn.
+    const staleThreshold = new Date(now.getTime() - HEARTBEAT_STALE_MS);
+    let reaped = false;
     // One transaction for the status column write and its paired event: the same
     // both-or-neither guarantee the runs.ts finalize path now gives — a lost
     // column write must never leave the event orphaned (and vice versa).
     await db.transaction(async (tx) => {
-      await tx.update(agentSessions)
+      const res = await tx.update(agentSessions)
         .set({
           status: "failed",
           error: orphan.error ?? "Orphaned by server restart",
           completedAt: now,
         })
-        .where(eq(agentSessions.id, orphan.id));
+        .where(
+          and(
+            eq(agentSessions.id, orphan.id),
+            eq(agentSessions.status, orphan.status),
+            or(
+              isNull(agentSessions.heartbeatAt),
+              lt(agentSessions.heartbeatAt, staleThreshold)
+            )
+          )
+        );
+      // drizzle/postgres exposes affected-row count as `rowCount`/`count`.
+      const affected = (res as { rowCount?: number; count?: number }).rowCount
+        ?? (res as { count?: number }).count ?? 0;
+      if (affected === 0) return; // a concurrent claim owns it now — leave it alone
+      reaped = true;
       await tx.insert(agentEvents)
         .values({
           sessionId: orphan.id,
@@ -161,7 +208,7 @@ async function reapOrphans() {
           createdAt: now,
         });
     });
-    if (orphan.worktreePath && orphan.taskId) {
+    if (reaped && orphan.worktreePath && orphan.taskId) {
       const root = await repoRootForSession(orphan.taskId);
       cleanupWorktree(orphan.worktreePath, root).catch(() => {});
     }

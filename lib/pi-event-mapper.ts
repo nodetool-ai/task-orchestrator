@@ -174,11 +174,15 @@ function sumAssistantUsage(
 }
 
 function extractLastText(
-  messages: Array<{ content?: RunEnvelopeContentBlock[] }> | undefined
+  messages: Array<{ role?: string; content?: RunEnvelopeContentBlock[] }> | undefined
 ): string | null {
   if (!messages || messages.length === 0) return null;
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
+    // Only assistant text can be the run's result — without this filter, a
+    // final assistant message carrying only tool calls would make the user's
+    // last prompt (or a tool result) get reported as the run outcome.
+    if (m?.role !== "assistant") continue;
     const text = (m.content ?? [])
       .filter((b) => b.type === "text" && typeof b.text === "string")
       .map((b) => b.text!)

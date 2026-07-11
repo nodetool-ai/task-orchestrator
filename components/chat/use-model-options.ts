@@ -62,13 +62,17 @@ function loadCatalog(): Promise<BackendCatalog> {
       catalogCache = { defaultBackend, backendOptions, modelsByBackend };
       return catalogCache;
     })
-    .catch(
-      (): BackendCatalog => ({
+    .catch((): BackendCatalog => {
+      // Clear the in-flight promise so the next call retries — caching the
+      // failure would leave every composer with an empty catalog until a hard
+      // reload. (catalogCache stays unset: only successes are cached.)
+      catalogPromise = null;
+      return {
         defaultBackend: "pi",
         backendOptions: [],
         modelsByBackend: {},
-      })
-    );
+      };
+    });
 
   return catalogPromise;
 }

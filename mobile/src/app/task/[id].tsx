@@ -513,7 +513,7 @@ function RunAgentSheet({
       });
       if (!seed) {
         const body = created ? `${taskPrefix(task)}\n\n---\n\n${text}` : text;
-        await api.sendRunMessage(runId, body);
+        await api.sendRunMessage(runId, body, (m) => onToast(`Not delivered: ${m}`));
       }
       setMessage("");
       onGo(runId);

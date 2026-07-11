@@ -213,7 +213,7 @@ export default function RunDetailScreen() {
     if (!text || sending) return;
     setSending(true);
     try {
-      await api.sendRunMessage(run.id, text);
+      await api.sendRunMessage(run.id, text, (m) => toast(`Not delivered: ${m}`));
       setMsg("");
       setCtrlOpen(false);
       toast("Sent to agent");
@@ -528,7 +528,13 @@ function RunBody({
           <View style={{ flex: 1 }} />
           <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
             <Icon name="clock" size={11} color={c.muted} />
-            <Elapsed startMs={startedMs} paused={!live} format="hms" style={{ fontSize: 11, color: c.muted }} />
+            <Elapsed
+              startMs={startedMs}
+              endMs={run.completedAt ? new Date(run.completedAt).getTime() : null}
+              paused={!live}
+              format="hms"
+              style={{ fontSize: 11, color: c.muted }}
+            />
           </View>
         </View>
         <View style={{ height: 9 }} />

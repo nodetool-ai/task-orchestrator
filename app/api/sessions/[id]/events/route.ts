@@ -11,6 +11,9 @@ export async function GET(
 ) {
   const { id } = await params;
   const sessionId = parseInt(id, 10);
+  if (!Number.isFinite(sessionId)) {
+    return new Response("Bad id", { status: 400 });
+  }
   const session = await agent.getSession(sessionId);
   if (!session) {
     return new Response("Not found", { status: 404 });
@@ -18,10 +21,12 @@ export async function GET(
 
   const sinceParam = req.nextUrl.searchParams.get("since");
   const limitParam = req.nextUrl.searchParams.get("limit");
-  const since = sinceParam ? parseInt(sinceParam, 10) : 0;
+  const sinceParsed = sinceParam ? parseInt(sinceParam, 10) : 0;
+  const since = Number.isFinite(sinceParsed) ? sinceParsed : 0;
   // Cap the initial replay so a long session doesn't blow up a reconnecting
   // client. Live events stream in regardless once the replay completes.
-  const limit = limitParam ? Math.max(1, Math.min(2000, parseInt(limitParam, 10))) : 500;
+  const limitParsed = limitParam ? parseInt(limitParam, 10) : NaN;
+  const limit = Number.isFinite(limitParsed) ? Math.max(1, Math.min(2000, limitParsed)) : 500;
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -36,32 +41,56 @@ export async function GET(
         }
       };
 
+      const finish = (event: { type: string; payload?: unknown }) => {
+        if (event.type !== "status") return false;
+        const payload = event.payload as { status?: string };
+        return !!payload?.status && ["completed", "failed", "cancelled"].includes(payload.status);
+      };
+
+      // Subscribe BEFORE the replay read so an event emitted while we read the
+      // DB (in particular the terminal status that ends the stream) is never
+      // lost — a lost terminal event would leave the SSE stream open forever.
+      // Live events that arrive during the replay are buffered and flushed
+      // after it, preserving order.
+      let replaying = true;
+      const buffered: Parameters<Parameters<typeof agent.subscribe>[1]>[0][] = [];
+      const unsubscribe = agent.subscribe(sessionId, (event) => {
+        if (replaying) {
+          buffered.push(event);
+          return;
+        }
+        send(event);
+        if (finish(event)) {
+          send({ type: "_eos" });
+          unsubscribe();
+          try {
+            controller.close();
+          } catch {}
+          closed = true;
+        }
+      });
+
       // Replay buffered events, capped to the requested limit so long
       // sessions don't blow up the initial frame.
       for (const e of await agent.getSessionEvents(sessionId, since, limit)) send(e);
 
-      const live = agent.isLive(sessionId);
-      if (!live) {
+      // Flush live events that arrived mid-replay, then go fully live.
+      let terminal = !agent.isLive(sessionId);
+      for (const e of buffered) {
+        send(e);
+        if (finish(e)) terminal = true;
+      }
+      replaying = false;
+
+      if (terminal) {
         send({ type: "_eos" });
-        controller.close();
+        unsubscribe();
+        try {
+          controller.close();
+        } catch {}
         closed = true;
         return;
       }
-
-      const unsubscribe = agent.subscribe(sessionId, (event) => {
-        send(event);
-        if (event.type === "status") {
-          const payload = event.payload as { status?: string };
-          if (payload?.status && ["completed", "failed", "cancelled"].includes(payload.status)) {
-            send({ type: "_eos" });
-            unsubscribe();
-            try {
-              controller.close();
-            } catch {}
-            closed = true;
-          }
-        }
-      });
 
       // Keep-alive ping every 15s.
       const ping = setInterval(() => {

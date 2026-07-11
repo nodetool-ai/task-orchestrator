@@ -42,7 +42,11 @@ function segment(messages: MessageRow[]): Segment[] {
   let toolKey = "";
   const flushTools = () => {
     if (!toolBuf.length) return;
-    segs.push({ kind: "tools", key: `t${toolKey}`, tools: pairTools(toolBuf) });
+    // Suffix with segs.length (mirrors web segmentTranscript): one message can
+    // flush two tool groups (tool_use, text, tool_use), and both would
+    // otherwise share the message-id key — duplicate sibling keys make React
+    // mis-reconcile the groups.
+    segs.push({ kind: "tools", key: `t${toolKey}-${segs.length}`, tools: pairTools(toolBuf) });
     toolBuf = [];
   };
   for (const m of messages) {
