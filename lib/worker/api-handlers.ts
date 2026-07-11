@@ -452,8 +452,14 @@ async function controlStream(req: Request, runId: number): Promise<Response> {
       let poll: ReturnType<typeof setInterval> | null = null;
       let ping: ReturnType<typeof setInterval> | null = null;
 
+      let cleanedUp = false;
       const cleanup = () => {
-        if (closed) return;
+        // Idempotent: `closed` gates writes, but cleanup must be able to run
+        // more than once (an abort during the subscribe awaits, then again from
+        // a later path) and free every resource that exists yet — including
+        // intervals that may not have been installed at first call.
+        if (cleanedUp) return;
+        cleanedUp = true;
         closed = true;
         unsubInput?.();
         unsubStream?.();
@@ -504,13 +510,27 @@ async function controlStream(req: Request, runId: number): Promise<Response> {
 
       try {
         unsubInput = await dbTransport.subscribeInput(runId, () => send({ type: "input" }));
+        // If the client aborted while this await was in flight, cleanup() ran
+        // with unsubInput still null; release the just-obtained subscription
+        // directly and bail before installing intervals (which would otherwise
+        // leak, never being cleared after close).
+        if (closed) {
+          unsubInput?.();
+          return;
+        }
         unsubStream = await subscribeRunStream(runId, () => void checkCancel());
+        if (closed) {
+          unsubStream?.();
+          return;
+        }
       } catch (err) {
         clog.warn("LISTEN unavailable; relying on poll", { error: err as Error });
       }
+      if (closed) return;
       clog.info("control stream opened");
 
       await checkCancel();
+      if (closed) return;
       poll = setInterval(() => void checkCancel(), CONTROL_POLL_MS);
       ping = setInterval(sendPing, CONTROL_PING_MS);
     },

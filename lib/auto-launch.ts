@@ -178,6 +178,15 @@ async function tagAutoLaunched(runId: number, taskId: string): Promise<void> {
 // Scheduler tick
 // ──────────────────────────────────────────────────────────
 
+// Re-entrancy guard. The interval fires autoLaunchEligibleTasks() with no wait
+// for the previous tick, and a run's `auto_launch` tag is only inserted AFTER
+// startSession() returns — so an overlapping tick would count NONE of the first
+// tick's in-flight launches when it recomputes the budget, and could launch a
+// full budget again (up to 2× the ceiling). While one tick is running, later
+// ticks no-op instead of double-launching. Module-level (not on globalThis):
+// the interval and the guard live in the same process, so this is sufficient.
+let tickRunning = false;
+
 /**
  * One scheduler tick. No-op unless TASK_ORCH_AUTO_LAUNCH is enabled.
  *
@@ -197,6 +206,18 @@ async function tagAutoLaunched(runId: number, taskId: string): Promise<void> {
 export async function autoLaunchEligibleTasks(deps: AutoLaunchDeps = {}): Promise<void> {
   if (!autoLaunchEnabled()) return;
 
+  // Skip this tick if a prior one is still in flight: its launches are not yet
+  // tagged/counted, so recomputing the budget now would overshoot the ceiling.
+  if (tickRunning) return;
+  tickRunning = true;
+  try {
+    await runAutoLaunchTick(deps);
+  } finally {
+    tickRunning = false;
+  }
+}
+
+async function runAutoLaunchTick(deps: AutoLaunchDeps): Promise<void> {
   const start = deps.startSession ?? defaultStarter;
   const assignee = autoLaunchAssignee();
   const max = autoLaunchMaxConcurrent();

@@ -199,9 +199,39 @@ export async function maybeTriggerAutofix(
     return { target, triggered: false, actions };
   }
 
-  // Record the attempt up front (also powers the cap + debounce checks) then
-  // kick the follow-up turn in the background — we don't block the caller on a
-  // full agent turn.
+  // BUG 11: only record the attempt when the follow-up will ACTUALLY dispatch.
+  // runs.followUp() silently no-ops if the run went live in the race (an
+  // in-process turn started, or a detached worker claimed one cross-process) or
+  // is no longer a resumable worktree run — but the attempt row used to be
+  // inserted BEFORE firing it, so a no-op still consumed AUTOFIX_MAX budget and
+  // armed the debounce. A flappy webhook burst could then exhaust the cap with
+  // zero fix turns actually running and wrongly escalate the task to `blocked`.
+  //
+  // followUp returns void, so it gives no post-hoc dispatch signal; the safe fix
+  // is to re-read the run immediately before recording and mirror followUp's own
+  // gate (isLive / isLeaseLive / isWorkerLive + resumable-worktree shape). If it
+  // would no-op, consume no budget and do not arm escalation. Residual (tiny)
+  // race: the run could still go live between this re-check and followUp's own
+  // internal re-check a couple of awaits later, in which case the attempt is
+  // recorded but the turn no-ops — vastly narrower than the previous full
+  // cap/debounce window, and the only remaining gap without editing runs.ts.
+  const fresh = await runs.get(target.id);
+  const willDispatch =
+    !!fresh &&
+    !runs.isLive(target.id) &&
+    !runs.isLeaseLive(fresh) &&
+    !runs.isWorkerLive(fresh) &&
+    fresh.cwdStrategy === "worktree" &&
+    !!fresh.branch &&
+    !!fresh.worktreePath;
+  if (!willDispatch) {
+    actions.push(`autofix skipped: run #${target.id} went live before dispatch`);
+    return { target, triggered: false, actions };
+  }
+
+  // The follow-up will dispatch: record the attempt (also powers the cap +
+  // debounce checks) then kick the turn in the background — we don't block the
+  // caller on a full agent turn.
   await db.insert(agentEvents).values({
     sessionId: target.id,
     type: "github_autofix",

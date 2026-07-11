@@ -12,6 +12,11 @@ export async function POST(
   try {
     const { id } = await params;
     const priorId = parseInt(id, 10);
+    // Guard before the id reaches Postgres: an un-parseable id yields NaN, which
+    // otherwise surfaces as an opaque 500 from the DB layer rather than a 400.
+    if (!Number.isFinite(priorId)) {
+      return NextResponse.json({ error: "Invalid session id" }, { status: 400 });
+    }
     const prior = await agent.getSession(priorId);
     if (!prior) return NextResponse.json({ error: "Not found" }, { status: 404 });
     const raw =

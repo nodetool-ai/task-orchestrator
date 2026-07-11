@@ -27,6 +27,18 @@ const nextConfig = {
     // the pi packages, so keep it external too.
     "@anthropic-ai/claude-agent-sdk",
   ],
+  // Baseline security header applied to every response. `nosniff` stops the
+  // browser from MIME-sniffing a response past its declared Content-Type — a
+  // defense-in-depth companion to the per-attachment hardening in
+  // app/api/attachments/[id]/route.ts.
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: [{ key: "X-Content-Type-Options", value: "nosniff" }],
+      },
+    ];
+  },
 };
 
 export default nextConfig;

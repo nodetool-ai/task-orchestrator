@@ -1,5 +1,6 @@
 import { type NextRequest } from "next/server";
 import * as agent from "@/lib/agent";
+import { isTerminalStatus, type SessionStatus } from "@/lib/run-state";
 
 export const dynamic = "force-dynamic";
 
@@ -44,7 +45,10 @@ export async function GET(
       const finish = (event: { type: string; payload?: unknown }) => {
         if (event.type !== "status") return false;
         const payload = event.payload as { status?: string };
-        return !!payload?.status && ["completed", "failed", "cancelled"].includes(payload.status);
+        // Use the shared terminal set so budget_exhausted / closed also end the
+        // stream (the old ["completed","failed","cancelled"] triple left those
+        // streams hanging open).
+        return !!payload?.status && isTerminalStatus(payload.status as SessionStatus);
       };
 
       // Subscribe BEFORE the replay read so an event emitted while we read the
@@ -75,7 +79,14 @@ export async function GET(
       for (const e of await agent.getSessionEvents(sessionId, since, limit)) send(e);
 
       // Flush live events that arrived mid-replay, then go fully live.
-      let terminal = !agent.isLive(sessionId);
+      // Derive terminal from the PERSISTED run status, not the in-process
+      // runners map: `agent.isLive` only knows about runs whose worker lives in
+      // THIS process, so a detached-worker run or a just-started run (whose
+      // runner hasn't registered yet) is not "live" here yet is very much still
+      // running — keying off isLive slammed those streams shut with an immediate
+      // _eos. A non-terminal persisted status means the run may still emit, so
+      // keep the stream open and let live/terminal events close it.
+      let terminal = isTerminalStatus(session.status as SessionStatus);
       for (const e of buffered) {
         send(e);
         if (finish(e)) terminal = true;

@@ -876,7 +876,10 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
       if (detachedRunsEnabled()) {
         await launchDetached(run.id, input.initialPrompt, input.parentRunId ?? null);
       } else await kickoffFirstTurn(run.id, prompt, input.baseBranch);
-    })();
+      // Match the <execute> sibling branch's fire-and-forget guard: a rejection
+      // from launchDetached/kickoffFirstTurn off this un-awaited IIFE would
+      // otherwise surface as an unhandled rejection.
+    })().catch(() => {});
   }
 
   // Review-style runs: spin up a worktree at the PR's head ref and run a
@@ -890,7 +893,10 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
       if (detachedRunsEnabled()) {
         await launchDetached(run.id, input.initialPrompt, input.parentRunId ?? null);
       } else await runReview(run.id, input.prUrl!, input.initialPrompt ?? null);
-    })();
+      // Match the <execute> sibling branch's fire-and-forget guard: a rejection
+      // from launchDetached/runReview off this un-awaited IIFE would otherwise
+      // surface as an unhandled rejection.
+    })().catch(() => {});
   }
 
   // Plan-executor runs: a single long-running agent that drives a whole plan
@@ -1628,10 +1634,14 @@ export async function interrupt(id: number): Promise<boolean> {
   runner.abort.abort();
   // Keep the worktree intact (no cleanupWorktree) so the next message resumes
   // instantly. Clear completedAt: an idle run is mid-conversation, not finished.
-  await db.update(agentSessions)
-    .set({ status: "idle", completedAt: null })
-    .where(eq(agentSessions.id, id));
-  await emitStatus(id, "idle");
+  // Guard on a non-terminal status (mirror cancel()): a cancel()/close() that
+  // raced this /stop already landed the row terminal — flipping it back to 'idle'
+  // here would resurrect a cancelled/closed run. The guard matches 0 rows in that
+  // case (no write, no event), leaving the terminal landing intact.
+  await applyStatusTx(id, "idle", {
+    set: { completedAt: null },
+    guard: notInArray(agentSessions.status, TERMINAL_STATUSES),
+  });
   return true;
 }
 
@@ -1647,9 +1657,17 @@ export async function close(id: number): Promise<RunRow> {
   // polls it at heartbeat cadence and aborts its turn) and hard-stop the runner as
   // the belt. Without this, closing a run in the containerized deploy leaves the
   // worker's turn burning tokens to completion.
-  await db.update(agentSessions)
-    .set({ status: "closed", completedAt: new Date(), cancelRequested: 1 })
-    .where(eq(agentSessions.id, id));
+  //
+  // Route through applyStatusTx (not a bare UPDATE): it writes the status column
+  // AND the paired 'closed' status event in ONE transaction, so readStreamSince /
+  // the SSE relays actually see a terminal frame (a bare UPDATE emitted none, so
+  // relays hung until timeout) and any pending run-timers are cancelled in the
+  // same tx. The terminal no-op guard makes close() idempotent and stops it from
+  // clobbering a run another path already landed terminal (e.g. a raced cancel()).
+  await applyStatusTx(id, "closed", {
+    set: { completedAt: new Date(), cancelRequested: 1 },
+    guard: notInArray(agentSessions.status, TERMINAL_STATUSES),
+  });
   await cancelPendingTimersForRun(id).catch(() => {});
   // Event system (§6.6): close() also flips cancel_requested cross-process, so
   // mirror it with the same control-class row (deduped with cancel()'s).
@@ -1676,6 +1694,47 @@ export async function close(id: number): Promise<RunRow> {
     await cancel(child.id).catch(() => {});
   }
   return (await get(id))!;
+}
+
+/**
+ * BUG 4: one-agent-per-task, also enforced on RESUME/dispatch. create() rejects a
+ * SECOND non-terminal worktree run per task under the per-task advisory lock — but
+ * that check only runs at creation. A worktree run that has gone terminal
+ * (completed/failed) is RESUMABLE: a follow-up message (sendMessageToRun) or a
+ * webhook autofix (followUp) can re-drive it. If a DIFFERENT run on the same task
+ * became live in the meantime (created after this one finished), reviving this run
+ * would put two agents on the same canonical branch.
+ *
+ * Returns the id of a rival live run on the SAME task — a DIFFERENT (id !=) run
+ * that is non-terminal AND actually live (a fresh lease or a live worker claim) —
+ * or null when there is none. Chat runs and task-less/non-worktree runs have no
+ * canonical branch to contend for, so they never have a rival (returns null); this
+ * also means resuming THIS run is never blocked by its own in-flight turn.
+ */
+async function findRivalTaskRun(run: {
+  id: number;
+  goal: string;
+  taskId: string | null;
+  cwdStrategy: string;
+}): Promise<number | null> {
+  if (run.goal === "<chat>" || !run.taskId || run.cwdStrategy !== "worktree") return null;
+  const now = Date.now();
+  const siblings = await db
+    .select()
+    .from(agentSessions)
+    .where(
+      and(
+        eq(agentSessions.taskId, run.taskId),
+        eq(agentSessions.cwdStrategy, "worktree"),
+        sql`${agentSessions.goal} != '<chat>'`,
+        sql`${agentSessions.id} != ${run.id}`,
+        notInArray(agentSessions.status, TERMINAL_STATUS_LIST)
+      )
+    );
+  for (const s of siblings) {
+    if (isLeaseLive(s, now) || isWorkerLive(s, now)) return s.id;
+  }
+  return null;
 }
 
 /**
@@ -1715,6 +1774,11 @@ export async function followUp(
   // when the row shows a live lease (a turn in flight anywhere) or a live worker
   // owns it — mirrored below on a fresh read after the lock is acquired.
   if (isLeaseLive(run) || isWorkerLive(run)) return;
+  // BUG 4: one-agent-per-task on resume. Reviving this (terminal, resumable) run
+  // while a DIFFERENT live run drives the same task would put two agents on the
+  // same canonical branch. Bail quietly — same contract as the same-run liveness
+  // check above ("already in flight elsewhere on the task").
+  if ((await findRivalTaskRun(run)) != null) return;
   if (run.cwdStrategy !== "worktree" || !run.branch || !run.worktreePath) return;
 
   // Remote-runner deployments (Fly Machines / Docker worker image): route the
@@ -2486,9 +2550,12 @@ async function runReview(
   // append()/reconcileOrphanedRuns() can't mistake this live review for an
   // orphan and take it over / mark it failed mid-turn. The same interval polls
   // the cross-process cancel flag so a detached review aborts on cancel().
-  const heartbeat = startHeartbeatWithCancel(runId, abort);
+  // Started INSIDE the try below (matches append()): starting it here, with
+  // awaited calls before the try, would leak the interval forever if one of
+  // those awaits threw before the finally could clear it.
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
 
-  let run = (await get(runId))!;
+  let run!: RunRow;
   const branch = `review-${runId}`;
   // Stable, per-run ref for the fetched PR head. FETCH_HEAD is a single shared
   // file in the repo's .git, so under concurrent runs another run's `git fetch`
@@ -2502,6 +2569,8 @@ async function runReview(
   let worktreePath = "";
 
   try {
+    heartbeat = startHeartbeatWithCancel(runId, abort);
+    run = (await get(runId))!;
     const parsed = parsePrUrl(prUrl);
     if (!parsed) {
       await setError(runId, `Could not parse PR url: ${prUrl}`);
@@ -2617,7 +2686,7 @@ async function runReview(
     }
     await setError(runId, describe(err), { retries: FINALIZE_RETRIES });
   } finally {
-    clearInterval(heartbeat);
+    if (heartbeat) clearInterval(heartbeat);
     closeBus(runId);
     runners.delete(runId);
     // Last resort: never let a review turn end without SOME terminal status — the
@@ -2658,12 +2727,16 @@ async function runExecute(
   // Keep the liveness lease fresh for the whole (long-running) executor turn so
   // append()/reconcileOrphanedRuns() never treat this live run as an orphan. The
   // same interval polls the cross-process cancel flag so a detached executor
-  // aborts on cancel().
-  const heartbeat = startHeartbeatWithCancel(runId, abort);
+  // aborts on cancel(). Started INSIDE the try below (matches append()): starting
+  // it here, with an awaited get() before the try, would leak the interval
+  // forever if that await threw before the finally could clear it.
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
 
-  let run = (await get(runId))!;
+  let run!: RunRow;
 
   try {
+    heartbeat = startHeartbeatWithCancel(runId, abort);
+    run = (await get(runId))!;
     const transport = await runTransport();
     const plan = await transport.getPlan(planId);
     if (!plan) {
@@ -2779,7 +2852,7 @@ async function runExecute(
     }
     await setError(runId, describe(err), { retries: FINALIZE_RETRIES });
   } finally {
-    clearInterval(heartbeat);
+    if (heartbeat) clearInterval(heartbeat);
     closeBus(runId);
     runners.delete(runId);
     // Last resort: an executor turn must always land a terminal status (its
@@ -3177,35 +3250,44 @@ export async function driveChatSession(runId: number): Promise<void> {
   const abort = new AbortController();
   // Keep the heartbeat fresh even while idle-waiting (so reconcile can't reap a
   // parked worker) AND poll the cross-process cancel flag so a UI cancel aborts.
-  const heartbeat = startHeartbeatWithCancel(runId, abort);
-
-  // On (re)start, skip user messages a prior worker already handled — the resumed
-  // SDK session already contains those turns. Each completed turn emits exactly one
-  // turn_done and messages are drained in id order, so the turn_done count is the
-  // number of already-processed user messages. (A fresh chat has 0 → start at 0.)
-  const priorTurns = await transport.countEvents(runId, "turn_done");
-  const priorUserIds = (await listMessages(runId))
-    .filter((m) => m.role === "user")
-    .map((m) => m.id)
-    .sort((a, b) => a - b);
-  let lastProcessed =
-    priorTurns > 0 && priorTurns <= priorUserIds.length ? priorUserIds[priorTurns - 1] : 0;
+  // Both the heartbeat and the input subscription are started INSIDE the try
+  // below (matches append()): starting them here, with awaited calls between them
+  // and the try, would leak the interval/subscription forever if one of those
+  // awaits threw before the finally could clear them.
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+  let unsub: Awaited<ReturnType<typeof transport.subscribeInput>> | null = null;
+  let onAbort: (() => void) | null = null;
+  let lastProcessed = 0;
   let pendingWake = false;
   let wake: (() => void) | null = null;
-  // New-user-message wakeups: Postgres LISTEN 'run_input' in db mode, the
-  // /control SSE channel in http mode.
-  const unsub = await transport.subscribeInput(runId, () => {
-    pendingWake = true;
-    wake?.();
-    wake = null;
-  });
-  const onAbort = () => {
-    wake?.();
-    wake = null;
-  };
-  abort.signal.addEventListener("abort", onAbort);
 
   try {
+    heartbeat = startHeartbeatWithCancel(runId, abort);
+
+    // On (re)start, skip user messages a prior worker already handled — the resumed
+    // SDK session already contains those turns. Each completed turn emits exactly one
+    // turn_done and messages are drained in id order, so the turn_done count is the
+    // number of already-processed user messages. (A fresh chat has 0 → start at 0.)
+    const priorTurns = await transport.countEvents(runId, "turn_done");
+    const priorUserIds = (await listMessages(runId))
+      .filter((m) => m.role === "user")
+      .map((m) => m.id)
+      .sort((a, b) => a - b);
+    lastProcessed =
+      priorTurns > 0 && priorTurns <= priorUserIds.length ? priorUserIds[priorTurns - 1] : 0;
+    // New-user-message wakeups: Postgres LISTEN 'run_input' in db mode, the
+    // /control SSE channel in http mode.
+    unsub = await transport.subscribeInput(runId, () => {
+      pendingWake = true;
+      wake?.();
+      wake = null;
+    });
+    onAbort = () => {
+      wake?.();
+      wake = null;
+    };
+    abort.signal.addEventListener("abort", onAbort);
+
     for (;;) {
       // Drain all unprocessed user messages oldest-first, one turn each (handles
       // messages that arrived while the previous turn was running).
@@ -3309,9 +3391,9 @@ export async function driveChatSession(runId: number): Promise<void> {
       pendingWake = false;
     }
   } finally {
-    clearInterval(heartbeat);
-    unsub();
-    abort.signal.removeEventListener("abort", onAbort);
+    if (heartbeat) clearInterval(heartbeat);
+    if (unsub) unsub();
+    if (onAbort) abort.signal.removeEventListener("abort", onAbort);
     // Release the claim so the next message spawns a fresh worker, land the run
     // resumable-idle (unless cancel/close already wrote a terminal row), and
     // drain any message stranded by the idle-timeout race: a user message can
@@ -3399,18 +3481,45 @@ export async function* sendMessageToRun(opts: {
           await deferRunForServerDispatch(runId, run.parentRunId ?? null);
         } else {
           // Clear a dead worker's stale claim so dispatchRun can re-claim (idle chat
-          // rows aren't a lease status, so reconcile never cleared it).
-          if (fresh.workerScope) {
-            await db
-              .update(agentSessions)
-              .set({ workerScope: null, workerPid: null })
-              .where(eq(agentSessions.id, runId));
-          }
+          // rows aren't a lease status, so reconcile never cleared it). BUG 6a:
+          // guard the clear exactly as deferRunForServerDispatch does — only when
+          // the claim is unowned OR its heartbeat has gone stale. The isWorkerLive
+          // read above is a snapshot; a worker that (re-)claimed between it and this
+          // UPDATE is live, and an unguarded clear would rip its claim out from
+          // under a turn already in flight.
+          const staleBefore = new Date(Date.now() - HEARTBEAT_STALE_MS);
+          await db
+            .update(agentSessions)
+            .set({ workerScope: null, workerPid: null })
+            .where(
+              and(
+                eq(agentSessions.id, runId),
+                or(
+                  isNull(agentSessions.workerScope),
+                  isNull(agentSessions.heartbeatAt),
+                  lt(agentSessions.heartbeatAt, staleBefore)
+                )
+              )
+            );
           await runDispatch.dispatchRun(runId);
         }
       }
       // else: a live worker will pick up the run_input notify.
     } else {
+      // BUG 4: one-agent-per-task on dispatch. A resumable (terminal) worktree run
+      // re-driven by this follow-up must not join a DIFFERENT live run already on
+      // the same task/canonical branch. Never blocks a task-less run, a <review>/
+      // <execute> run (non-'worktree' cwd), or resuming THIS run's own in-flight
+      // turn. The message we just persisted stays for whenever the run legitimately
+      // resumes; here we refuse to spawn a rival agent.
+      const rival = await findRivalTaskRun(run);
+      if (rival != null) {
+        yield {
+          type: "error",
+          error: `Task ${run.taskId} already has a live run (#${rival}); not resuming run ${runId} concurrently.`,
+        };
+        return;
+      }
       // Non-chat follow-up: dispatch a single-turn worker. If the prior turn is
       // still in flight the claim is held and dispatchRun returns already-claimed
       // (harmless — that turn will resume onto this freshly persisted message).
@@ -4577,8 +4686,26 @@ export async function reconcileOrphanedRuns(): Promise<number> {
     .from(agentSessions)
     .where(inArray(agentSessions.status, LEASE_STATUSES));
   let reaped = 0;
+  const staleBefore = new Date(now - HEARTBEAT_STALE_MS);
   for (const row of rows) {
     if (isLeaseLive(row, now)) continue; // fresh lease → owned by a live process
+    // BUG 6b: the SELECT above is a snapshot; a run can be re-claimed (re-dispatch
+    // / worker adoption) between it and any write below. Every mutation on this row
+    // is therefore conditioned on `stillOrphan` — a CAS (like handleWorkerDeath's
+    // scope match) that the row is STILL in a lease status, STILL stale/absent
+    // heartbeat, and STILL held by the SAME worker scope we snapshotted. A
+    // re-claim stamps a fresh heartbeat (and a new scope), so it fails this guard
+    // and we leave the row to its new owner instead of clobbering it.
+    const stillOrphan = and(
+      inArray(agentSessions.status, LEASE_STATUSES),
+      or(
+        isNull(agentSessions.heartbeatAt),
+        lt(agentSessions.heartbeatAt, staleBefore)
+      ),
+      row.workerScope == null
+        ? isNull(agentSessions.workerScope)
+        : eq(agentSessions.workerScope, row.workerScope)
+    );
     // A completion EVENT can outlive a lost terminal column write: if the DB
     // drops the connection mid-finalize, emitStatus's event insert can land
     // while the paired `status='completed'` column update is rolled back,
@@ -4589,15 +4716,17 @@ export async function reconcileOrphanedRuns(): Promise<number> {
     // means a genuine mid-turn orphan and falls through to the reap below.
     const lastEvent = await latestEventStatus(row.id);
     if (lastEvent?.status === "completed") {
-      // Atomic status+event. Guard on the row still being in a lease status: a
-      // real finalize that landed between our SELECT and here already wrote
-      // 'completed' + its event, so this becomes a no-op instead of clobbering it.
-      await applyStatusTx(row.id, "completed", {
+      // Atomic status+event. Guard on `stillOrphan` (BUG 6b): a real finalize that
+      // landed between our SELECT and here left a lease status (→ no clobber), but a
+      // RE-DISPATCH that re-claimed to 'preparing' is ALSO a lease status — the old
+      // lease-only guard would still fire 'completed' over that fresh claim. The
+      // stale-heartbeat/scope CAS closes that window.
+      const wrote = await applyStatusTx(row.id, "completed", {
         set: { error: null, completedAt: lastEvent.at },
-        guard: inArray(agentSessions.status, LEASE_STATUSES),
+        guard: stillOrphan,
         extra: { reconciled: true },
       });
-      reaped++;
+      if (wrote) reaped++;
       continue;
     }
     // Detached mode: a worker that died mid-turn (host reboot / OOM) on a
@@ -4639,10 +4768,18 @@ export async function reconcileOrphanedRuns(): Promise<number> {
       resumable: resumable || serverResumable,
       oom: false,
     });
+    // BUG 6b: atomically take this orphan out of any worker's hands before acting
+    // on it — the shared ownership token, mirroring handleWorkerDeath's guarded
+    // claim release. Clearing heartbeatAt too is what lets a redispatch actually
+    // re-claim (dispatchRun's isLeaseLive guard would otherwise read the dead
+    // worker's last beat as "still live"). If the CAS matches 0 rows the run was
+    // re-claimed since our SELECT — leave it to its new owner without reaping.
+    const claimed = await db.update(agentSessions)
+      .set({ workerScope: null, workerPid: null, heartbeatAt: null })
+      .where(and(eq(agentSessions.id, row.id), stillOrphan))
+      .returning({ id: agentSessions.id });
+    if (claimed.length === 0) continue;
     if (policy === "redispatch") {
-      await db.update(agentSessions)
-        .set({ workerScope: null })
-        .where(eq(agentSessions.id, row.id));
       void runDispatch.dispatchRun(row.id).catch(() => {});
       reaped++;
       continue;
