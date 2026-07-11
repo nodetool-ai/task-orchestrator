@@ -28,7 +28,7 @@ primary_region = "ams"
   # Cap concurrently-active runner Machines (cost/quota guard). 0 = unlimited.
   TASK_ORCH_MAX_MACHINES = "4"
   TASK_ORCH_AGENT_BACKEND = "claude"
-  TASK_ORCH_CHAT_MODEL = "anthropic/claude-opus-4-8"
+  TASK_ORCH_CHAT_MODEL = "openai/gpt-5.6-sol"
   TASK_ORCH_AGENT_MODEL = "anthropic/claude-opus-4-8"
   # Behind Fly's proxy the app terminates TLS at the edge; trust the forwarded host.
   AUTH_TRUST_HOST = "true"

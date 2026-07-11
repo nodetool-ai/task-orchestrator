@@ -25,6 +25,10 @@ interface ModelPrice {
 // Keyed by bare model id (provider prefix stripped). Kept in sync with the
 // models exposed by the backends' listProviders() / used as DEFAULT_MODEL.
 const PRICING: Record<string, ModelPrice> = {
+  // GPT-5.6 Sol — $5 / $30 per MTok (limited preview).
+  "gpt-5.6-sol": { inputPerMTok: 5, outputPerMTok: 30 },
+  "gpt-5.6-terra": { inputPerMTok: 2.5, outputPerMTok: 15 },
+  "gpt-5.6-luna": { inputPerMTok: 1, outputPerMTok: 6 },
   // Opus tier — $5 / $25 per MTok.
   "claude-opus-4-8": { inputPerMTok: 5, outputPerMTok: 25 },
   "claude-opus-4-7": { inputPerMTok: 5, outputPerMTok: 25 },

@@ -27,7 +27,7 @@ const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
 // ("kimi-coding" for the seeded personas), which the Claude backend rejects —
 // the first turn of a new chat would fail. The model picker emits the same
 // qualified shape, so this matches what an explicit pick produces.
-const DEFAULT_MODEL = process.env.TASK_ORCH_CHAT_MODEL ?? "anthropic/claude-sonnet-4-6";
+const DEFAULT_MODEL = process.env.TASK_ORCH_CHAT_MODEL ?? "openai/gpt-5.6-sol";
 
 export type { ChatRole, ChatRow, ChatMessageRow };
 

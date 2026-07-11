@@ -148,7 +148,7 @@ runDispatch.__setRunsApi({
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
-const DEFAULT_MODEL = config.agent.model ?? "anthropic/claude-sonnet-4-6";
+const DEFAULT_MODEL = config.agent.model ?? "anthropic/claude-opus-4-8";
 const KEEP_WORKTREES = config.features.keepWorktrees;
 
 function runnerProviderLabel(): "local" | "fly" {

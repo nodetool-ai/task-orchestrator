@@ -130,7 +130,7 @@ export async function POST(
     description: defaults.description,
     systemPrompt: defaults.systemPrompt,
     modelProvider: defaults.modelProvider ?? "anthropic",
-    modelId: defaults.modelId ?? "claude-sonnet-4-6",
+    modelId: defaults.modelId ?? "claude-opus-4-8",
     thinkingLevel: defaults.thinkingLevel ?? null,
     toolsProfile: defaults.toolsProfile,
     backend: defaults.backend ?? null,

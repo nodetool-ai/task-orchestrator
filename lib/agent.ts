@@ -26,7 +26,7 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
-const DEFAULT_MODEL = process.env.TASK_ORCH_AGENT_MODEL ?? "claude-sonnet-4-6";
+const DEFAULT_MODEL = process.env.TASK_ORCH_AGENT_MODEL ?? "claude-opus-4-8";
 
 // ──────────────────────────────────────────────────────────
 // Background tasks (orphan reaper, PR → task-state sync).

@@ -32,7 +32,7 @@ const HELP = [
   "`/stop` — interrupt the agent's current turn (aliases: `/cancel`, `/abort`)",
   "`/status` — show whether the agent is working right now",
   "`/new` or `/reset` — start a fresh conversation",
-  "`/model <provider/id>` — set the model (e.g. `anthropic/claude-sonnet-4-6`)",
+  "`/model <provider/id>` — set the model (e.g. `openai/gpt-5.6-sol`)",
   "`/whoami` or `/session` — show the current run id, model, and repo",
   "`/help` — this message",
   "Anything else is sent to the agent.",

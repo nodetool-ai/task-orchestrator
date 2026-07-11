@@ -237,7 +237,8 @@ redeploy to change:
 | `TASK_ORCH_DETACHED_RUNS` | `1` | Never run a turn in the web process. |
 | `TASK_ORCH_MAX_MACHINES` | `4` | Cap on concurrently-active runner Machines. `0` = unlimited. |
 | `TASK_ORCH_AGENT_BACKEND` | `claude` | Agent backend (`claude` or `pi`). Runner Machines inherit it, so flipping it (plus staging the matching provider keys) switches what the run containers execute. |
-| `TASK_ORCH_CHAT_MODEL` / `TASK_ORCH_AGENT_MODEL` | `anthropic/claude-opus-4-8` | Default models. |
+| `TASK_ORCH_CHAT_MODEL` | `openai/gpt-5.6-sol` | Default Pi chat model. |
+| `TASK_ORCH_AGENT_MODEL` | `anthropic/claude-opus-4-8` | Default Claude agent model. |
 | `AUTH_TRUST_HOST` | `true` | Trust Fly's forwarded host/proto behind the edge proxy. |
 | `PORT` | `3000` | Internal listen port (matches `internal_port`). |
 

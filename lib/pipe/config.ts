@@ -30,7 +30,7 @@ export function loadPipeConfig(): PipeConfig {
       allowedUsers,
       allowedChannels: csv(process.env.DISCORD_ALLOWED_CHANNELS),
     },
-    defaultModel: process.env.TASK_ORCH_CHAT_MODEL ?? "anthropic/claude-sonnet-4-6",
+    defaultModel: process.env.TASK_ORCH_CHAT_MODEL ?? "openai/gpt-5.6-sol",
     editThrottleMs: positiveInt(process.env.TASK_ORCH_PIPE_EDIT_MS, 750),
   };
 }

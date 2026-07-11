@@ -66,7 +66,7 @@ export interface DiscordConfig {
 
 export interface PipeConfig {
   discord: DiscordConfig;
-  /** Provider-qualified default model, e.g. "anthropic/claude-sonnet-4-6". */
+  /** Provider-qualified default model, e.g. "openai/gpt-5.6-sol". */
   defaultModel: string;
   /** Throttle for in-place draft edits, in ms. */
   editThrottleMs: number;

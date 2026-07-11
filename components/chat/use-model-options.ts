@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import type { ModelOption } from "@/components/chat/model-picker";
 
-export const DEFAULT_CHAT_MODEL = "anthropic/claude-sonnet-4-6";
+export const DEFAULT_CHAT_MODEL = "openai/gpt-5.6-sol";
 
 export type BackendId = "pi" | "claude";
 

@@ -6,10 +6,10 @@
 import { api } from "./api";
 import type { BackendId, ProvidersResponse } from "./types";
 
-export const DEFAULT_CHAT_MODEL = "anthropic/claude-sonnet-4-6";
+export const DEFAULT_CHAT_MODEL = "openai/gpt-5.6-sol";
 
 export interface ModelOption {
-  id: string; // e.g. "claude-sonnet-4-6"
+  id: string; // e.g. "gpt-5.6-sol"
   name: string; // e.g. "Claude Sonnet 4.6"
   provider: string; // e.g. "anthropic"
 }

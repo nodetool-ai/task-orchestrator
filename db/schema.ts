@@ -520,7 +520,7 @@ export const personas = pgTable("personas", {
   description: text("description"),
   systemPrompt: text("system_prompt").notNull(),
   modelProvider: text("model_provider").notNull().default("anthropic"),
-  modelId: text("model_id").notNull().default("claude-sonnet-4-6"),
+  modelId: text("model_id").notNull().default("claude-opus-4-8"),
   thinkingLevel: text("thinking_level"),
   toolsProfile: text("tools_profile").notNull(),
   // Agent backend default for runs that pick this persona without an explicit
