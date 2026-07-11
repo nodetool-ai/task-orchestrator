@@ -396,6 +396,10 @@ export function createHttpTransport(opts: HttpTransportOpts): RunTransport {
     },
 
     async releaseClaim(runId, { lastProcessedUserMsgId, idleIfNonTerminal }) {
+      // Terminal exit path for this run — drop any un-acked cancel latch so a
+      // run whose worker never called ackCancel (it died/exited mid-cancel)
+      // doesn't leak an entry for the lifetime of this transport.
+      cancelLatch.delete(runId);
       await flushMessageAppends("releaseClaim");
       await request(
         "POST",

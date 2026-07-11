@@ -60,13 +60,19 @@ export async function getUserById(id: number): Promise<User | undefined> {
 // — this account exists only to satisfy the users.id foreign keys on runs,
 // chats and tokens; it is never logged into.
 export async function ensureDevUser(): Promise<User> {
-  const existing = await findUser(DEV_USER_EMAIL);
-  if (existing) return existing;
-  const [row] = await db
+  // Atomic find-or-create: insert-then-nothing-on-conflict avoids a race where
+  // two concurrent cold-DB callers both miss a prior lookup and the second
+  // insert throws on the unique email column.
+  const [inserted] = await db
     .insert(users)
     .values({ email: DEV_USER_EMAIL, passwordHash: "!dev-no-login" })
+    .onConflictDoNothing()
     .returning();
-  return row;
+  if (inserted) return inserted;
+  // Row already existed (we lost the insert race): re-select it.
+  const existing = await findUser(DEV_USER_EMAIL);
+  if (!existing) throw new Error("ensureDevUser: dev user missing after upsert");
+  return existing;
 }
 
 export async function verifyCredentials(

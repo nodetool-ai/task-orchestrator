@@ -13,6 +13,9 @@ export const abortBridgeFactory =
   (reg) => {
     reg.onAgentStart((ctx) => {
       const onAbort = () => { try { ctx.abort(); } catch { /* swallow */ } };
-      abort.signal.addEventListener("abort", onAbort, { once: true });
+      // An already-aborted signal never fires "abort", so deliver it inline;
+      // otherwise the cancel is lost and the turn burns budget until discarded.
+      if (abort.signal.aborted) onAbort();
+      else abort.signal.addEventListener("abort", onAbort, { once: true });
     });
   };

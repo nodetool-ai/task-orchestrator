@@ -467,10 +467,12 @@ const MAX_PARENT_WALK = 64;
 // runOneTurn — NOT cumulatively across continuations — so an agent that keeps
 // ending turns quickly without ever opening a PR would loop forever. Cap the
 // number of consecutive no-PR continuations; on exhaustion, land 'failed' with a
-// structured result instead of spinning. Tunable via env; floored at 1 so the
-// loop always makes at least one continuation attempt before giving up.
+// structured result instead of spinning. Tunable via env; floored at 2 so the
+// loop always makes at least one continuation attempt before giving up —
+// prContinuations is incremented BEFORE the `>=` cap test, so a floor of 1 would
+// trip the cap on the very first no-PR turn (zero continuations).
 export const MAX_PR_CONTINUATIONS = Math.max(
-  1,
+  2,
   Math.floor(Number(process.env.TASK_ORCH_MAX_PR_CONTINUATIONS ?? 25)) || 25
 );
 
@@ -909,9 +911,12 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
         // server-turn claim (R2) so a duplicate wake (an inbox emit racing this
         // create-time turn) can't drive a second coordinator turn concurrently.
         // withServerClaim no-ops the drive if the claim is already held.
+        // Match the sibling dispatch branches' fire-and-forget guard: a throw
+        // from claimServerTurn/withServerClaim would otherwise surface as an
+        // unhandled rejection off this un-awaited IIFE.
         await withServerClaim(run.id, () =>
           runExecute(run.id, input.planId!, input.initialPrompt ?? null)
-        );
+        ).catch(() => {});
       }
     })();
   }
@@ -3209,7 +3214,9 @@ export async function driveChatSession(runId: number): Promise<void> {
           })) {
             void _ev;
           }
-          await emitTurnDone(runId);
+          // No emitTurnDone here: an event wake consumes no user message, so
+          // emitting one would push the turn_done count above priorUserIds.length
+          // and drive the restart seed to 0 → full replay of every message.
           continue;
         }
       }
@@ -3217,22 +3224,29 @@ export async function driveChatSession(runId: number): Promise<void> {
         if (abort.signal.aborted) return;
         const run = await get(runId);
         if (!run || run.status === "closed") return;
-        lastProcessed = m.id;
         const text = messageText(m);
-        if (!text) continue;
         // takeover only on the very first turn (run still 'preparing' from
         // dispatchRun's claim); later turns see 'idle'. persistUser=false: the
         // message is already in the DB — it's how we were woken.
-        for await (const _ev of append({
-          runId,
-          role: "user",
-          text,
-          persistUser: false,
-          takeover: run.status === "preparing",
-          abort,
-        })) {
-          void _ev; // frames reach clients via the run_stream tail (server relay)
+        if (text) {
+          for await (const _ev of append({
+            runId,
+            role: "user",
+            text,
+            persistUser: false,
+            takeover: run.status === "preparing",
+            abort,
+          })) {
+            void _ev; // frames reach clients via the run_stream tail (server relay)
+          }
         }
+        // Advance and emit exactly one turn_done per consumed message — including
+        // an empty one (skipped above) — so the turn_done count stays 1:1 with the
+        // messages we've drained. The restart seed (priorUserIds[priorTurns-1])
+        // relies on that correspondence; advancing lastProcessed without an emit
+        // (the prior empty-text `continue`) desynced it into reprocessing an
+        // already-answered message.
+        lastProcessed = m.id;
         await emitTurnDone(runId);
       }
       if (abort.signal.aborted) break;

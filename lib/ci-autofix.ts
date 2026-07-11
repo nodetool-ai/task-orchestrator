@@ -52,14 +52,24 @@ export const AUTOFIX_ENABLED = autofixEnabled();
 // terminal/blocked states themselves. `blocked` is a legal target from each of
 // these (see TASK_TRANSITIONS in lib/types.ts).
 const ESCALATABLE_STATES: TaskState[] = ["in_progress", "testing", "failing", "passing"];
+// Parse a non-negative-integer env var, falling back to `dflt` when the value
+// is unset, empty, or non-numeric. Plain `Number("")` is 0 and `Number("x")` is
+// NaN — both of which would silently break the cap/debounce below (0 disables
+// autofix; NaN makes `>= NaN` / `<= 0` never trip), so guard against them.
+function intFromEnv(value: string | undefined, dflt: number): number {
+  const trimmed = (value ?? "").trim();
+  if (trimmed === "") return dflt;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : dflt;
+}
 // Cap auto-fix attempts per run so a persistently-red PR can't loop forever.
-export const AUTOFIX_MAX = Math.max(0, Number(process.env.TASK_ORCH_CI_AUTOFIX_MAX ?? 3));
+export const AUTOFIX_MAX = intFromEnv(process.env.TASK_ORCH_CI_AUTOFIX_MAX, 3);
 // Debounce: ignore repeat triggers within this window (a single push fans out
 // into many check_run/workflow_run/check_suite deliveries, and the poller can
 // also fire close behind a webhook).
-export const AUTOFIX_DEBOUNCE_MS = Math.max(
-  0,
-  Number(process.env.TASK_ORCH_CI_AUTOFIX_DEBOUNCE_MS ?? 120_000)
+export const AUTOFIX_DEBOUNCE_MS = intFromEnv(
+  process.env.TASK_ORCH_CI_AUTOFIX_DEBOUNCE_MS,
+  120_000
 );
 
 /** The run fields the trigger needs; RunRow is structurally compatible. */
@@ -214,13 +224,48 @@ export async function maybeTriggerAutofix(
   return { target, triggered: true, actions };
 }
 
+/**
+ * Timestamp of the most recent "recovery" signal on a run: a merge, or a green
+ * CI webhook (a recorded `github` event with `ci_state === "success"`). The
+ * attempt cap and the exhausted-escalation guard are scoped to events AFTER
+ * this so a PR that went green and then failed again gets a fresh attempt
+ * budget — otherwise the all-time count plus the one-shot exhausted guard would
+ * permanently wedge autofix off after a recover-then-refail. Null when the run
+ * has never recovered.
+ */
+async function lastRecoveryAt(runId: number): Promise<Date | null> {
+  const rows = await db
+    .select({
+      type: agentEvents.type,
+      payload: agentEvents.payload,
+      createdAt: agentEvents.createdAt,
+    })
+    .from(agentEvents)
+    .where(eq(agentEvents.sessionId, runId))
+    .orderBy(desc(agentEvents.id));
+  for (const r of rows) {
+    if (r.type === "pr_merged") return r.createdAt;
+    if (r.type === "github") {
+      try {
+        if ((JSON.parse(r.payload) as { ci_state?: unknown }).ci_state === "success")
+          return r.createdAt;
+      } catch {
+        // ignore malformed payloads
+      }
+    }
+  }
+  return null;
+}
+
 export async function countAutofixAttempts(runId: number): Promise<number> {
-  return (
-    await db
-      .select({ id: agentEvents.id })
-      .from(agentEvents)
-      .where(and(eq(agentEvents.sessionId, runId), eq(agentEvents.type, "github_autofix")))
-  ).length;
+  const since = await lastRecoveryAt(runId);
+  const rows = await db
+    .select({ createdAt: agentEvents.createdAt })
+    .from(agentEvents)
+    .where(and(eq(agentEvents.sessionId, runId), eq(agentEvents.type, "github_autofix")));
+  if (!since) return rows.length;
+  const cutoff = since.getTime();
+  return rows.filter((r) => r.createdAt.getTime() > cutoff).length;
 }
 
 export async function recentlyAutofixed(runId: number): Promise<boolean> {
@@ -258,8 +303,12 @@ async function escalateExhausted(
   payload: Record<string, unknown>
 ): Promise<boolean> {
   try {
+    // Scope the one-shot guard to events since the last recovery: an exhausted
+    // marker recorded BEFORE the PR recovered must not suppress a fresh
+    // escalation after it fails again.
+    const since = await lastRecoveryAt(anchorRunId);
     const already = await db
-      .select({ id: agentEvents.id })
+      .select({ createdAt: agentEvents.createdAt })
       .from(agentEvents)
       .where(
         and(
@@ -267,7 +316,8 @@ async function escalateExhausted(
           eq(agentEvents.type, "github_autofix_exhausted")
         )
       );
-    if (already.length > 0) return false;
+    const cutoff = since?.getTime() ?? -Infinity;
+    if (already.some((r) => r.createdAt.getTime() > cutoff)) return false;
 
     const task = await repo.getTask(taskId);
     if (!task) return false;

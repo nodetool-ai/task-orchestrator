@@ -169,12 +169,38 @@ export async function reapOrphanVolumes(flyClient: FlyClient, nowMs: number = Da
   // Protect every volumeId still mapped by a non-"gone" runner_instances row —
   // the run may still resume or is mid-lifecycle. Conservative by design.
   const mappings = await db
-    .select({ volumeId: runnerInstances.volumeId, state: runnerInstances.state })
+    .select({
+      volumeId: runnerInstances.volumeId,
+      state: runnerInstances.state,
+      createdAt: runnerInstances.createdAt,
+      lastStartedAt: runnerInstances.lastStartedAt,
+      lastSuspendedAt: runnerInstances.lastSuspendedAt,
+      runStatus: agentSessions.status,
+      heartbeatAt: agentSessions.heartbeatAt,
+      completedAt: agentSessions.completedAt,
+    })
     .from(runnerInstances)
     .leftJoin(agentSessions, eq(agentSessions.id, runnerInstances.runId));
+  // sweep() marks a machine-missing row "gone" but leaves volumeId set; resume()
+  // cold-recovers a fresh machine from that same volume for the full terminal-
+  // retention window the lifecycle keeps it (TASK_ORCH_RUNNER_TERMINAL_MS,
+  // default 24h). So a "gone" row whose run is still within that window must stay
+  // PROTECTED here — reaping it would strand that recovery on an empty volume.
+  const terminalWindowMs = terminalRetentionMs();
   const protectedVolumeIds = new Set<string>();
   for (const m of mappings) {
-    if (m.volumeId && m.state !== "gone") protectedVolumeIds.add(m.volumeId);
+    if (!m.volumeId) continue;
+    if (m.state !== "gone") {
+      protectedVolumeIds.add(m.volumeId);
+      continue;
+    }
+    if (
+      m.runStatus &&
+      isTerminalStatus(m.runStatus as SessionStatus) &&
+      nowMs - lastActivityMs(m) < terminalWindowMs
+    ) {
+      protectedVolumeIds.add(m.volumeId);
+    }
   }
 
   const destroyed: string[] = [];
@@ -224,6 +250,17 @@ export async function reapOrphanVolumes(flyClient: FlyClient, nowMs: number = Da
     }
   }
   return destroyed;
+}
+
+// Terminal-retention window the lifecycle policy keeps a terminal run's volume
+// for (mirrors lifecycle's nextLifecycleAction default DAY_MS = 24h). Kept on the
+// same env knob so the orphan reaper never destroys a volume the lifecycle still
+// considers cold-recoverable.
+function terminalRetentionMs(): number {
+  const raw = process.env.TASK_ORCH_RUNNER_TERMINAL_MS;
+  if (raw == null || raw === "") return 24 * 60 * 60 * 1000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 24 * 60 * 60 * 1000;
 }
 
 function lastActivityMs(row: {
@@ -560,7 +597,11 @@ export class FlyRunnerProvider implements RunnerProvider {
           this.flyClient.createMachine({
             name: scope,
             region,
-            config: buildFlyMachineConfig(runId, volumeId),
+            // Mirror create(): a prewarm-forked volume carries its baked deps at
+            // PREWARM_MOUNT_DIR, so the recovered machine must point PREWARM_DIR
+            // there to boot warm. lib/prewarm.ts existsSync-guards it, so a non-
+            // forked (cold-install) volume that lacks the dir is unaffected.
+            config: buildFlyMachineConfig(runId, volumeId, { prewarmDir: PREWARM_MOUNT_DIR }),
           }),
         { provider: "fly", fields: { runId, region, scope } }
       );

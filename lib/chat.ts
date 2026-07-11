@@ -213,7 +213,11 @@ export async function* runChat({
   // generator returns so it survives the request lifetime. See lib/chat-title.ts.
   let titleUpgrade: Promise<void> | null = null;
   if (chat.title === "New chat") {
-    const derived = deriveTitle(userText);
+    // deriveTitle strips fenced code blocks wholesale, so a first message that
+    // is only a code block reduces to "". Fall back to a cleaned snippet of the
+    // raw text so the documented floor holds: a chat is never left showing
+    // "New chat" once it has a message.
+    const derived = deriveTitle(userText) || fallbackTitle(userText);
     if (derived) {
       await renameChat(chatId, derived);
       titleUpgrade = upgradeTitle(chatId, userText, derived);
@@ -248,6 +252,17 @@ export async function* runChat({
     // it isn't torn down by a serverless teardown after the stream closes.
     if (titleUpgrade) await titleUpgrade;
   }
+}
+
+// Salvage a title when deriveTitle() returns "" because it stripped the entire
+// message as a fenced code block. Retry with just the ``` delimiter lines
+// removed so the code body itself is titled; the first non-empty line is the
+// last resort. Returns "" only when the message has no visible characters.
+function fallbackTitle(userText: string): string {
+  const unfenced = deriveTitle(userText.replace(/^[ \t]*`{3,}.*$/gm, " "));
+  if (unfenced) return unfenced;
+  const firstLine = userText.split("\n").find((l) => l.trim().length > 0) ?? "";
+  return deriveTitle(firstLine);
 }
 
 // Best-effort upgrade of an auto-derived title to a model-generated one. Only

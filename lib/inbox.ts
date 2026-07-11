@@ -252,6 +252,26 @@ export async function emitInboxEvent(input: EmitInput): Promise<EmitResult> {
             lt(inboxEvents.attempt, input.attempt)
           )
         );
+      // The stale attempt's supervisor COPY (§5.2) lives on the live grandparent
+      // (target.parentRunId), not on target.id, so the update above misses it —
+      // supersede it too, else a supervising ancestor sees the stale attempt
+      // alongside the newest one.
+      if (target.parentRunId != null) {
+        await tx
+          .update(inboxEvents)
+          .set({ status: "superseded" })
+          .where(
+            and(
+              eq(inboxEvents.targetRunId, target.parentRunId),
+              eq(inboxEvents.audience, "supervisor"),
+              eq(inboxEvents.sourceKind, "run"),
+              eq(inboxEvents.sourceId, String(input.sourceId)),
+              eq(inboxEvents.status, "pending"),
+              inArray(inboxEvents.type, [...TERMINAL_CHILD_TYPES]),
+              lt(inboxEvents.attempt, input.attempt)
+            )
+          );
+      }
     }
     const rows = await tx
       .insert(inboxEvents)
@@ -343,7 +363,11 @@ export async function emitInboxEvent(input: EmitInput): Promise<EmitResult> {
   if (
     eventId != null &&
     !input.noWake &&
-    audience === "owner" &&
+    // Owner-audience notify events wake their target; a bubbled child.exception /
+    // child.died re-routed to a parked live ancestor (§5.3, audience 'supervisor',
+    // bubbledFrom set) must ALSO wake it at emit time, not only on the next pump
+    // sweep — consistent with the supervisor-copy wake below.
+    (audience === "owner" || bubbledFrom != null) &&
     !CONTROL_TYPES.has(input.type) &&
     target.status === "parked"
   ) {
@@ -782,21 +806,35 @@ export async function fireDueTimers(now = new Date()): Promise<number> {
     .set({ status: "fired", firedAt: now })
     .where(and(eq(runTimers.status, "pending"), sql`${runTimers.fireAt} <= ${now}`))
     .returning();
+  let fired = 0;
   for (const t of due) {
-    await emitInboxEvent({
-      targetRunId: t.runId,
-      type: "timer.fired",
-      sourceKind: "timer",
-      sourceId: String(t.id),
-      correlationId: t.correlationId,
-      dedupeKey: `timer:${t.id}`,
-      payload: {
-        timer_id: t.id,
-        note: t.note,
-        set_at: t.createdAt.toISOString(),
-        fire_at: t.fireAt.toISOString(),
-      },
-    }).catch(() => {});
+    try {
+      await emitInboxEvent({
+        targetRunId: t.runId,
+        type: "timer.fired",
+        sourceKind: "timer",
+        sourceId: String(t.id),
+        correlationId: t.correlationId,
+        dedupeKey: `timer:${t.id}`,
+        payload: {
+          timer_id: t.id,
+          note: t.note,
+          set_at: t.createdAt.toISOString(),
+          fire_at: t.fireAt.toISOString(),
+        },
+      });
+      fired += 1;
+    } catch {
+      // At-least-once (§7): the atomic claim already flipped this row to 'fired',
+      // but the emit did not durably land — leaving it 'fired' would lose the
+      // event forever (never re-selected). Revert to 'pending' so the next pump
+      // re-emits; the `timer:<id>` dedupe key makes a possible double-emit safe.
+      await db
+        .update(runTimers)
+        .set({ status: "pending", firedAt: null })
+        .where(eq(runTimers.id, t.id))
+        .catch(() => {});
+    }
   }
-  return due.length;
+  return fired;
 }

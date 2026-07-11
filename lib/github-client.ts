@@ -96,6 +96,34 @@ export interface RollupCheckEntry {
  * Check-runs come from the Checks API; legacy statuses from the combined-status
  * endpoint (already deduped to the latest per context).
  */
+/**
+ * Fetch ALL legacy commit-status contexts for a ref across pages. The combined
+ * status endpoint paginates the nested `statuses` array (30/page default), so a
+ * single request silently drops contexts past the first page.
+ */
+async function fetchAllCombinedStatuses(
+  octokit: GithubClient,
+  owner: string,
+  repo: string,
+  ref: string
+): Promise<Array<Record<string, unknown>>> {
+  const all: Array<Record<string, unknown>> = [];
+  for (let page = 1; ; page++) {
+    const { data } = await octokit.repos.getCombinedStatusForRef({
+      owner,
+      repo,
+      ref,
+      per_page: 100,
+      page,
+    });
+    const statuses = (data.statuses ?? []) as Array<Record<string, unknown>>;
+    all.push(...statuses);
+    // Stop once a short page arrives or we've collected the reported total.
+    if (statuses.length < 100 || all.length >= (data.total_count ?? all.length)) break;
+  }
+  return all;
+}
+
 export async function fetchChecksRollupForRef(
   owner: string,
   repo: string,
@@ -109,10 +137,15 @@ export async function fetchChecksRollupForRef(
       ref,
       per_page: 100,
     }),
-    octokit.repos
-      .getCombinedStatusForRef({ owner, repo, ref })
-      .then((r) => r.data.statuses)
-      .catch(() => [] as Array<Record<string, unknown>>),
+    // The combined-status endpoint returns only 30 contexts per page by default,
+    // so a ref with >30 legacy statuses would drop any FAILING context past
+    // page 1 and be misreported as green. Paginate explicitly by page (its
+    // response carries a top-level `url`, which defeats octokit.paginate's
+    // list-normalization, so we can't rely on that helper here) and aggregate
+    // every page's `statuses`.
+    fetchAllCombinedStatuses(octokit, owner, repo, ref).catch(
+      () => [] as Array<Record<string, unknown>>
+    ),
   ]);
 
   const out: RollupCheckEntry[] = [];
