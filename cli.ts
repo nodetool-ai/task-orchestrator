@@ -11,7 +11,7 @@ import * as agent from "./lib/agent";
 import * as users from "./lib/users";
 import { createMagicToken } from "./lib/magic-link";
 import { sql } from "./db";
-import { TASK_STATES, isTerminalStatus, type TaskState } from "./lib/types";
+import { TASK_STATES, isTerminalStatus, type TaskState, type SessionStatus } from "./lib/types";
 import { assistantText, toolUses, type SdkMessageEnvelope } from "./lib/sdk-message";
 import { collectRunnerInventory } from "./lib/runner/inventory";
 import { reapOrphanVolumes } from "./lib/runner/fly";
@@ -414,7 +414,7 @@ async function tailSession(sessionId: number) {
       printAgentEvent(event);
       if (event.type === "status") {
         const s = (event.payload as { status?: string })?.status;
-        if (s && ["completed", "failed", "cancelled"].includes(s)) {
+        if (s && isTerminalStatus(s as SessionStatus)) {
           off();
           resolveP();
         }

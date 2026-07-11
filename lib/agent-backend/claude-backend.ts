@@ -225,9 +225,13 @@ export class ClaudeBackend implements AgentBackend {
         options: {
           cwd,
           model: model.id,
-          // Persona thinkingLevel maps 1:1 onto the SDK's effort levels
+          // Persona thinkingLevel maps onto the SDK's effort levels
           // ('low' | 'medium' | 'high'); omitted lets the model default apply.
-          ...(thinkingLevel ? { effort: thinkingLevel } : {}),
+          // 'xhigh' is not an SDK effort value, so it clamps to 'high' (the
+          // pi backend, which does support 'xhigh', keeps the raw value).
+          ...(thinkingLevel
+            ? { effort: thinkingLevel === "xhigh" ? "high" : thinkingLevel }
+            : {}),
           permissionMode: "bypassPermissions",
           systemPrompt: {
             type: "preset",
