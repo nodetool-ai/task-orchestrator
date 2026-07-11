@@ -32,6 +32,7 @@ import { desc, eq, isNotNull, max } from "drizzle-orm";
 import { db } from "@/db";
 import { agentMessages, agentSessions, repositories } from "@/db/schema";
 import { describe } from "@/lib/utils";
+import { isLeaseLive, isWorkerLive } from "./run-liveness";
 
 const DEFAULT_GC_DAYS = 7;
 const HOUR_MS = 60 * 60 * 1000;
@@ -144,6 +145,27 @@ export interface RunGcOnceOptions {
   isWorktreeDirty?: (worktree: string) => Promise<boolean>;
   /** Injection point for tests: existence check. */
   worktreeExists?: (path: string) => boolean;
+  /**
+   * Returns true iff ANY run sharing `worktreePath` is still live (an in-flight
+   * status, a live lease/worker heartbeat) or was active within the threshold
+   * window — in which case the shared checkout must NOT be removed. Task runs
+   * share one `.worktrees/<taskid>` checkout across many agent_sessions rows, so
+   * the per-candidate idle gate is not enough: a sibling run resumed on the same
+   * path would be clobbered by `git worktree remove --force`. Defaults to a DB
+   * query; tests inject a stub.
+   */
+  sharedWorktreeBusy?: (
+    worktreePath: string,
+    now: Date,
+    thresholdDays: number
+  ) => Promise<boolean>;
+  /**
+   * Re-read a run's CURRENT status (defaults to a DB lookup). The sweep works
+   * off a snapshot taken at start and its loop is slow (git shell-outs per
+   * candidate), so a run resumed mid-sweep must be re-checked immediately before
+   * the destructive `git worktree remove`. Returns null when the row is gone.
+   */
+  currentStatus?: (runId: number) => Promise<string | null>;
   /** Injection point for tests: `git worktree remove --force <path>`. */
   removeWorktree?: (worktree: string, repoRoot: string) => Promise<void>;
   /** Injection point for tests: `git -C <root> worktree prune`. */
@@ -173,6 +195,8 @@ export async function runWorktreeGcOnce(opts: RunGcOnceOptions = {}): Promise<Ru
   const revListCount = opts.revListCount ?? defaultRevListCount;
   const isWorktreeDirty = opts.isWorktreeDirty ?? defaultWorktreeDirty;
   const worktreeExists = opts.worktreeExists ?? defaultWorktreeExists;
+  const sharedWorktreeBusy = opts.sharedWorktreeBusy ?? defaultSharedWorktreeBusy;
+  const currentStatus = opts.currentStatus ?? defaultCurrentStatus;
   const removeWorktree = opts.removeWorktree ?? defaultRemoveWorktree;
   const pruneAdmin = opts.pruneAdmin ?? defaultPruneAdmin;
   const resolveRepoRoot = opts.resolveRepoRoot ?? defaultResolveRepoRoot;
@@ -193,6 +217,29 @@ export async function runWorktreeGcOnce(opts: RunGcOnceOptions = {}): Promise<Ru
       isWorktreeDirty,
     });
     if (!decision.remove) continue;
+    // Shared-checkout safety: task runs share one .worktrees/<taskid> across many
+    // agent_sessions rows, and shouldRemoveWorktree only inspected THIS row. Refuse
+    // removal if any run sharing the path is live or recently active, or this force
+    // remove would delete a checkout a sibling run is still using.
+    if (c.worktreePath) {
+      let busy = false;
+      try {
+        busy = await sharedWorktreeBusy(c.worktreePath, now, thresholdDays);
+      } catch (err) {
+        // Fail closed: if we can't prove the shared checkout is idle, keep it.
+        console.warn(
+          `[worktree-gc] shared-worktree check failed for ${c.worktreePath}; keeping: ${describe(err)}`
+        );
+        busy = true;
+      }
+      if (busy) {
+        console.log(
+          `[worktree-gc] skip run #${c.runId}: worktree ${c.worktreePath} is ` +
+            `shared with a live or recently-active run.`
+        );
+        continue;
+      }
+    }
     if (keep) {
       // KEEP_WORKTREES: preview only. Log to the console instead of inserting an
       // agent_messages row — a 'system' note here would set the run's newest
@@ -211,6 +258,23 @@ export async function runWorktreeGcOnce(opts: RunGcOnceOptions = {}): Promise<Ru
     const root = await resolveRepoRoot(c);
     if (!root) {
       result.errors++;
+      continue;
+    }
+    // Re-read the candidate's status immediately before the force-remove: the
+    // decision above came off a snapshot and this loop is slow (git shell-outs
+    // per candidate), so a run resumed since the scan must not be clobbered.
+    try {
+      const fresh = await currentStatus(c.runId);
+      if (fresh !== "idle") {
+        console.log(
+          `[worktree-gc] skip run #${c.runId}: status changed to ${fresh ?? "gone"} mid-sweep.`
+        );
+        continue;
+      }
+    } catch (err) {
+      console.warn(
+        `[worktree-gc] status re-check failed for run #${c.runId}; keeping: ${describe(err)}`
+      );
       continue;
     }
     try {
@@ -355,6 +419,69 @@ function coerceDate(v: unknown): Date | null {
     return isNaN(d.getTime()) ? null : d;
   }
   return null;
+}
+
+// Statuses that mean a turn is being provisioned or is actively running — a run
+// in any of these is in flight regardless of its heartbeat freshness.
+const IN_FLIGHT_STATUSES = new Set(["pending", "preparing", "running"]);
+
+/**
+ * True iff any run sharing `worktreePath` is still live or recently active.
+ * "Live" = an in-flight status OR a live lease/worker heartbeat (reusing the
+ * shared HEARTBEAT_STALE_MS window via isLeaseLive/isWorkerLive). "Recently
+ * active" = its newest activity (max agent_messages.created_at, else startedAt)
+ * is within the GC threshold window. A safely-idle candidate whose own activity
+ * predates the window does NOT trip this on itself — that's the whole point of
+ * the idle gate — but a sibling run on the same checkout does.
+ */
+async function defaultSharedWorktreeBusy(
+  worktreePath: string,
+  now: Date,
+  thresholdDays: number
+): Promise<boolean> {
+  const lastMsg = db
+    .select({
+      runId: agentMessages.runId,
+      last: max(agentMessages.createdAt).as("last"),
+    })
+    .from(agentMessages)
+    .groupBy(agentMessages.runId)
+    .as("last_msg");
+
+  const rows = await db
+    .select({
+      status: agentSessions.status,
+      startedAt: agentSessions.startedAt,
+      heartbeatAt: agentSessions.heartbeatAt,
+      workerScope: agentSessions.workerScope,
+      lastMessageAt: lastMsg.last,
+    })
+    .from(agentSessions)
+    .leftJoin(lastMsg, eq(lastMsg.runId, agentSessions.id))
+    .where(eq(agentSessions.worktreePath, worktreePath));
+
+  const windowMs = thresholdDays * 24 * 60 * 60 * 1000;
+  const nowMs = now.getTime();
+
+  for (const r of rows) {
+    if (IN_FLIGHT_STATUSES.has(r.status)) return true;
+    const heartbeatAt = coerceDate(r.heartbeatAt);
+    const liveRow = { status: r.status, heartbeatAt, workerScope: r.workerScope };
+    if (isLeaseLive(liveRow, nowMs) || isWorkerLive(liveRow, nowMs)) return true;
+    const last = coerceDate(r.lastMessageAt) ?? coerceDate(r.startedAt);
+    if (last && nowMs - last.getTime() < windowMs) return true;
+  }
+  return false;
+}
+
+async function defaultCurrentStatus(runId: number): Promise<string | null> {
+  const row = (
+    await db
+      .select({ status: agentSessions.status })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, runId))
+  )[0];
+  return row?.status ?? null;
 }
 
 function defaultWorktreeExists(p: string): boolean {

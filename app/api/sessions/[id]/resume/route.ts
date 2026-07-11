@@ -11,7 +11,17 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
-    const priorId = parseInt(id, 10);
+    // Guard before the id reaches Postgres. Require the WHOLE param to be a
+    // positive integer: parseInt("123abc") would coerce to 123 and resume an
+    // unintended session, and a non-numeric id would otherwise surface as an
+    // opaque 500 from the DB layer rather than a 400.
+    if (!/^[0-9]+$/.test(id)) {
+      return NextResponse.json({ error: "Invalid session id" }, { status: 400 });
+    }
+    const priorId = Number(id);
+    if (!Number.isSafeInteger(priorId) || priorId <= 0) {
+      return NextResponse.json({ error: "Invalid session id" }, { status: 400 });
+    }
     const prior = await agent.getSession(priorId);
     if (!prior) return NextResponse.json({ error: "Not found" }, { status: 404 });
     const raw =

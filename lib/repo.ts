@@ -572,8 +572,38 @@ export async function attachRunToTask(
   runId: number,
   opts: { ifUnset?: boolean } = {}
 ): Promise<void> {
-  if (opts.ifUnset && (await resolveAttachedRun(taskId))) return;
-  await db.update(tasks).set({ attachedRunId: runId }).where(eq(tasks.id, taskId));
+  if (!opts.ifUnset) {
+    await db.update(tasks).set({ attachedRunId: runId }).where(eq(tasks.id, taskId));
+    return;
+  }
+  // ifUnset must be atomic: a check-then-set (resolveAttachedRun + UPDATE) lets
+  // two concurrent runs both observe an empty slot and clobber each other. Lock
+  // the task row FOR UPDATE, re-resolve the current attached run under the lock,
+  // and only claim the slot when it's still empty/unusable.
+  await db.transaction(async (tx) => {
+    const row = (
+      await tx
+        .select({ id: tasks.id, rid: tasks.attachedRunId })
+        .from(tasks)
+        .where(eq(tasks.id, taskId))
+        .for("update")
+    )[0];
+    if (!row) return;
+    // Re-check the current attachment UNDER the lock using tx. Calling the
+    // db-scoped resolveAttachedRun here would grab a second pool connection
+    // while this transaction holds one, risking pool starvation/deadlock and
+    // reading outside the FOR UPDATE lock we just took.
+    if (row.rid) {
+      const r = (
+        await tx
+          .select({ status: agentSessions.status })
+          .from(agentSessions)
+          .where(eq(agentSessions.id, row.rid))
+      )[0];
+      if (r && isUsableAttachedRun(r.status)) return;
+    }
+    await tx.update(tasks).set({ attachedRunId: runId }).where(eq(tasks.id, taskId));
+  });
 }
 
 /** Distinct non-null assignees observed across all tasks, alphabetical. */
@@ -736,6 +766,10 @@ export async function addPlanRepository(planId: string, repoId: string): Promise
   if (!(await getRepository(repoId))) throw new RepoError(`Repository ${repoId} not found`, 404);
   if (plan.repos.some((r) => r.id === repoId)) return plan;
   await db.transaction(async (tx) => {
+    // Lock the plan row FOR UPDATE so the MAX(position)+1 read and the insert
+    // are serialized: two concurrent adds would otherwise both read the same
+    // MAX and insert duplicate positions.
+    await tx.select({ id: plans.id }).from(plans).where(eq(plans.id, planId)).for("update");
     // Derive the next position from MAX(position)+1 rather than the row count:
     // removePlanRepository doesn't compact positions, so a count would collide
     // with an existing row after a removal and corrupt append order (which in
@@ -965,6 +999,15 @@ export interface TransitionInput {
   state: TaskState;
   assignee?: string;
   note?: string;
+  /**
+   * Enforce the acceptance-criteria gate on the `merged` terminal. Off by
+   * default: at the repo layer criteria are informational and never block a
+   * transition (the PR-merge sync in pr-task-state.ts and ci-autofix depend on
+   * this — a PR already merged on GitHub must always reflect into task state).
+   * The agent-facing `transition_task` tool opts in so an agent can't hand-merge
+   * a task with unchecked criteria.
+   */
+  enforceCriteria?: boolean;
 }
 
 export async function transitionTask(id: string, input: TransitionInput): Promise<TaskFull> {
@@ -997,6 +1040,25 @@ export async function transitionTask(id: string, input: TransitionInput): Promis
     const assignee = input.assignee ?? row.assignee ?? undefined;
     if (input.state === "in_progress" && !assignee) {
       throw new RepoError("Going to in_progress requires an assignee", 400);
+    }
+    // done-criteria gate: `merged` is the success terminal, and (when the caller
+    // opts in via enforceCriteria) it's rejected while any acceptance criterion
+    // is still open. Runs inside the same FOR UPDATE transaction as the guard
+    // above so a criterion can't be unchecked between the check and the write.
+    // Only fires on an actual transition into `merged` (not a no-op when already
+    // merged); zero criteria means nothing to gate, so an empty set is allowed.
+    if (input.enforceCriteria && input.state === "merged" && input.state !== prev) {
+      const [openRow] = await tx
+        .select({ n: count() })
+        .from(acceptanceCriteria)
+        .where(and(eq(acceptanceCriteria.taskId, id), eq(acceptanceCriteria.done, false)));
+      const open = Number(openRow?.n ?? 0);
+      if (open > 0) {
+        throw new RepoError(
+          `Cannot transition ${prev} → ${input.state}: ${open} acceptance ${open === 1 ? "criterion is" : "criteria are"} still open. Check them off first.`,
+          400
+        );
+      }
     }
     const now = new Date();
     await tx.update(tasks)
@@ -1082,14 +1144,20 @@ export async function addNote(taskId: string, author: string, body: string) {
 
 export async function addCriterion(taskId: string, text: string) {
   if (!(await getTask(taskId))) throw new RepoError(`Task ${taskId} not found`, 404);
-  const lastPos = (await db
-    .select({ p: sql<number>`COALESCE(MAX(${acceptanceCriteria.position}), -1)` })
-    .from(acceptanceCriteria)
-    .where(eq(acceptanceCriteria.taskId, taskId)))[0];
-  const pos = (lastPos?.p ?? -1) + 1;
-  await db.insert(acceptanceCriteria)
-    .values({ taskId, text, done: false, position: pos });
-  await db.update(tasks).set({ updatedAt: new Date() }).where(eq(tasks.id, taskId));
+  await db.transaction(async (tx) => {
+    // Lock the task row FOR UPDATE so the MAX(position)+1 read and the insert
+    // are serialized: two concurrent adds would otherwise both read the same
+    // MAX and insert colliding positions.
+    await tx.select({ id: tasks.id }).from(tasks).where(eq(tasks.id, taskId)).for("update");
+    const lastPos = (await tx
+      .select({ p: sql<number>`COALESCE(MAX(${acceptanceCriteria.position}), -1)` })
+      .from(acceptanceCriteria)
+      .where(eq(acceptanceCriteria.taskId, taskId)))[0];
+    const pos = (lastPos?.p ?? -1) + 1;
+    await tx.insert(acceptanceCriteria)
+      .values({ taskId, text, done: false, position: pos });
+    await tx.update(tasks).set({ updatedAt: new Date() }).where(eq(tasks.id, taskId));
+  });
 }
 
 export async function updateCriterion(

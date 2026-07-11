@@ -223,6 +223,7 @@ export async function buildImplementPrompt(task: TaskFull): Promise<string> {
   lines.push("- `mcp__task_orch__add_attachment(filename, text|content_base64)`: attach useful artifacts you produce.");
   lines.push("");
   lines.push("# Finish");
+  lines.push("- Before you stop, check off every acceptance criterion you satisfied with `mcp__task_orch__check_criterion` (confirm with `list_criteria`). The orchestrator blocks the terminal `merged` transition while any criterion stays open, so an unchecked criterion strands the task. If one genuinely can't be met, leave it open and call it out in your summary.");
   lines.push("- Commit all intended changes with a clear message, then stop.");
   lines.push("- Do NOT push and do NOT open a PR. After your turn, the orchestrator detects your commits, pushes the branch, opens or updates the PR, and moves the task forward.");
   lines.push("- Your final assistant message becomes the PR description/summary. Include:");
