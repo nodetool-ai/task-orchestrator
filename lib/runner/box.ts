@@ -48,8 +48,9 @@ export function boxOrphansForCleanup(
 // The worker inherits the allowlisted per-Box environment passed during fork.
 const WORKER_BOOTSTRAP_COMMAND = [
   'mkdir -p "$SESSION_ROOT/logs"',
-  'nohup node /home/user/task-orchestrator/dist/run-worker.js "$TASK_ORCH_RUN_ID" >>"$SESSION_ROOT/logs/runner.log" 2>&1 </dev/null &',
-  "echo $!",
+  // Keep the background launch and its PID echo in one shell group. Joining a
+  // trailing `&` with `&& echo $!` is invalid POSIX shell syntax (`& &&`).
+  '{ nohup node /home/user/task-orchestrator/dist/run-worker.js "$TASK_ORCH_RUN_ID" >>"$SESSION_ROOT/logs/runner.log" 2>&1 </dev/null & echo $!; }',
 ].join(" && ");
 
 function boxName(input: CreateRunnerInput): string {

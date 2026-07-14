@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
+import { spawnSync } from "node:child_process";
 
 import { db } from "../db";
 import { agentSessions, runnerInstances } from "../db/schema";
 import * as repo from "../lib/repo";
 import { create } from "../lib/runs";
-import { BoxRunnerProvider } from "../lib/runner/box";
+import { BoxRunnerProvider, WORKER_BOOTSTRAP_COMMAND } from "../lib/runner/box";
 import type { BoxClient } from "../lib/runner/box-client";
 
 const manifest = JSON.stringify({
@@ -102,6 +103,12 @@ async function runWithClaim() {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("Box provider fake-client flow", () => {
+  it("uses syntactically valid shell for detached worker bootstrap", () => {
+    const parsed = spawnSync("sh", ["-n", "-c", WORKER_BOOTSTRAP_COMMAND], { encoding: "utf8" });
+    expect(parsed.status).toBe(0);
+    expect(WORKER_BOOTSTRAP_COMMAND).not.toContain("& &&");
+  });
+
   it("forks a template with noEnv and a hygienic explicit worker environment", async () => {
     boxEnv();
     const fake = fakeBox();
