@@ -24,6 +24,8 @@ import { recordRunnerEvent } from "./telemetry";
 
 const MANIFEST_COMMAND_TIMEOUT_SECONDS = 15;
 const WORKER_BOOTSTRAP_TIMEOUT_SECONDS = 30;
+const BOOTSTRAP_LOG_TIMEOUT_SECONDS = 10;
+const BOOTSTRAP_LOG_TAIL_LINES = 200;
 const SWEEP_KEY = "__taskOrchBoxRunnerSweep";
 
 /** Strict ownership boundary for retention/orphan cleanup. */
@@ -46,12 +48,35 @@ export function boxOrphansForCleanup(
 
 // Keep this shell text static: it contains no environment values or secrets.
 // The worker inherits the allowlisted per-Box environment passed during fork.
+//
+// The bootstrap writes its own milestones before Node evaluates the worker
+// bundle. That gives us useful evidence when the worker exits before its first
+// application log or heartbeat (the exact failure mode a Box command's normal
+// success result cannot expose).
 const WORKER_BOOTSTRAP_COMMAND = [
   'mkdir -p "$SESSION_ROOT/logs"',
+  'log="$SESSION_ROOT/logs/runner.log"',
+  'entry="/home/user/task-orchestrator/dist/run-worker.js"',
+  // Do not dump the environment: it contains the signed worker token and may
+  // contain agent credentials. The metadata below is sufficient to distinguish
+  // a missing/stale template artifact from a failure inside the worker process.
+  '{ printf "%s [box-bootstrap] starting run_id=%s entry=%s\\n" "$(date -Iseconds 2>/dev/null || date)" "$TASK_ORCH_RUN_ID" "$entry"; command -v node || true; node --version || true; ls -l "$entry" || true; } >>"$log" 2>&1',
+  'if [ ! -f "$entry" ]; then printf "%s [box-bootstrap] worker entrypoint missing\\n" "$(date -Iseconds 2>/dev/null || date)" >>"$log"; exit 127; fi',
   // Keep the background launch and its PID echo in one shell group. Joining a
   // trailing `&` with `&& echo $!` is invalid POSIX shell syntax (`& &&`).
-  '{ nohup node /home/user/task-orchestrator/dist/run-worker.js "$TASK_ORCH_RUN_ID" >>"$SESSION_ROOT/logs/runner.log" 2>&1 </dev/null & echo $!; }',
+  'nohup node "$entry" "$TASK_ORCH_RUN_ID" >>"$log" 2>&1 </dev/null &',
+  'pid=$!',
+  'printf "%s [box-bootstrap] launched pid=%s\\n" "$(date -Iseconds 2>/dev/null || date)" "$pid" >>"$log"',
+  // A one-second probe catches syntax/import/config failures before the
+  // provider returns success. Long-running workers remain fully detached.
+  'sleep 1',
+  'if kill -0 "$pid" 2>/dev/null; then printf "%s [box-bootstrap] alive pid=%s\\n" "$(date -Iseconds 2>/dev/null || date)" "$pid" >>"$log"; else wait "$pid"; status=$?; printf "%s [box-bootstrap] exited-early pid=%s status=%s\\n" "$(date -Iseconds 2>/dev/null || date)" "$pid" "$status" >>"$log"; exit "$status"; fi',
+  'printf "%s\\n" "$pid"',
 ].join(" && ");
+
+const BOOTSTRAP_LOG_TAIL_COMMAND =
+  `if [ -f "$SESSION_ROOT/logs/runner.log" ]; then tail -n ${BOOTSTRAP_LOG_TAIL_LINES} ` +
+  '"$SESSION_ROOT/logs/runner.log"; fi';
 
 function boxName(input: CreateRunnerInput): string {
   // input.scope already carries dispatch's collision-resistant run nonce.
@@ -78,6 +103,30 @@ async function emitBoxEvent(runId: number, type: string, payload: Record<string,
   } catch {
     // Runner telemetry must never turn a successfully launched worker into a
     // failed one merely because its observability mirror is unavailable.
+  }
+}
+
+/**
+ * Persist the early Box-side log before the worker's own log flusher starts.
+ * This is best-effort observability: a busy/unavailable command endpoint must
+ * never change runner lifecycle semantics.
+ */
+async function captureBootstrapLog(box: BoxClient, runId: number, boxId: string): Promise<void> {
+  try {
+    const result = await box.command(boxId, {
+      command: BOOTSTRAP_LOG_TAIL_COMMAND,
+      cwd: ".",
+      timeoutSeconds: BOOTSTRAP_LOG_TIMEOUT_SECONDS,
+    });
+    if (!result.success || result.timedOut || result.exitCode !== 0 || !result.stdout) return;
+    // The command is static and the bootstrap never prints its environment.
+    // Cap defensively in case a worker emits a very large stack trace early.
+    const workerLog = result.stdout.slice(-64 * 1024);
+    await db.update(agentSessions).set({ workerLog }).where(eq(agentSessions.id, runId));
+    await emitBoxEvent(runId, "runner_box_bootstrap_log", { boxId, captured: true });
+  } catch {
+    // A Box may still be busy transitioning between command requests. The
+    // worker's regular in-process flusher remains the fallback once it starts.
   }
 }
 
@@ -267,9 +316,14 @@ export class BoxRunnerProvider implements RunnerProvider {
         timeoutSeconds: WORKER_BOOTSTRAP_TIMEOUT_SECONDS,
       });
       if (!launched.success || launched.timedOut || launched.exitCode !== 0) {
+        await captureBootstrapLog(box, input.runId, boxId);
         throw new Error("Box worker bootstrap command failed");
       }
       parseDetachedPid(launched.stdout);
+      // Capture the bootstrap header immediately. If the detached Node process
+      // dies before it reaches scripts/run-worker.ts, this is the only durable
+      // evidence available to the control plane.
+      await captureBootstrapLog(box, input.runId, boxId);
 
       // DispatchRun performs the guarded scope→Box-ID handoff immediately after
       // create() returns. Check ownership here as well so a claim lost while the
@@ -285,6 +339,7 @@ export class BoxRunnerProvider implements RunnerProvider {
       return { runId: input.runId, handle: boxId, provider: "box" };
     } catch (error) {
       const normalized = await normalizeBoxApiError(error);
+      await captureBootstrapLog(box, input.runId, boxId);
       await this.recordFailure(input.runId, boxId, normalized);
       await box.stop(boxId).catch(() => {});
       throw error;

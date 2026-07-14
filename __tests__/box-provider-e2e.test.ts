@@ -64,10 +64,23 @@ function fakeBox() {
       calls.push(`remove:${id}`);
     },
     command: async (_id, input) => {
-      calls.push(`command:${input.command.startsWith("cat ") ? "manifest" : "worker"}`);
-      return input.command.startsWith("cat ")
-        ? { success: true, exitCode: 0, stdout: manifest, stderr: "", timedOut: false }
-        : { success: true, exitCode: 0, stdout: "42\n", stderr: "", timedOut: false };
+      const kind = input.command.startsWith("cat ")
+        ? "manifest"
+        : input.command.includes("tail -n")
+          ? "bootstrap-log"
+          : "worker";
+      calls.push(`command:${kind}`);
+      if (kind === "manifest") return { success: true, exitCode: 0, stdout: manifest, stderr: "", timedOut: false };
+      if (kind === "bootstrap-log") {
+        return {
+          success: true,
+          exitCode: 0,
+          stdout: "2026-01-01T00:00:00Z [box-bootstrap] alive pid=42\n",
+          stderr: "",
+          timedOut: false,
+        };
+      }
+      return { success: true, exitCode: 0, stdout: "42\n", stderr: "", timedOut: false };
     },
     getLatestBoxSnapshot: async (id) => ({ id: `snap_${id}`, status: "completed", completedAt: new Date() }),
   };
@@ -107,6 +120,9 @@ describe("Box provider fake-client flow", () => {
     const parsed = spawnSync("sh", ["-n", "-c", WORKER_BOOTSTRAP_COMMAND], { encoding: "utf8" });
     expect(parsed.status).toBe(0);
     expect(WORKER_BOOTSTRAP_COMMAND).not.toContain("& &&");
+    expect(WORKER_BOOTSTRAP_COMMAND).toContain("[box-bootstrap] starting");
+    expect(WORKER_BOOTSTRAP_COMMAND).toContain("[box-bootstrap] exited-early");
+    expect(WORKER_BOOTSTRAP_COMMAND).not.toContain("printenv");
   });
 
   it("forks a template with noEnv and a hygienic explicit worker environment", async () => {
@@ -122,6 +138,12 @@ describe("Box provider fake-client flow", () => {
     expect(fake.forks[0]!.input.env).not.toHaveProperty("DATABASE_URL");
     const [mapping] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
     expect(mapping).toMatchObject({ boxId: ref?.handle, boxTemplateId: "bx_template", state: "running" });
+    const [session] = await db
+      .select({ workerLog: agentSessions.workerLog })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, run.id));
+    expect(session?.workerLog).toContain("[box-bootstrap] alive pid=42");
+    expect(fake.calls).toContain("command:bootstrap-log");
   });
 
   it("checkpoints, resumes the same Box, and uses noEnv on resume", async () => {
