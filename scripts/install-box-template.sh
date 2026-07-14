@@ -9,6 +9,7 @@
 # persist a GitHub token; use the Box's existing Git credential setup.
 #
 # Optional overrides:
+#   BOX_SHELL=zsh                         # shell that defines `box` (default: zsh)
 #   TASK_ORCH_REPO_URL=https://github.com/nodetool-ai/task-orchestrator.git
 #   TASK_ORCH_REPO_REF=main
 #   NODETOOL_REPO_URL=https://github.com/nodetool-ai/nodetool.git
@@ -22,8 +23,18 @@ if [[ ! "$box_id" =~ ^bx_[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
   exit 2
 fi
 
-if ! command -v box >/dev/null 2>&1; then
-  echo "The Box CLI ('box') must be installed and authenticated." >&2
+box_shell="${BOX_SHELL:-zsh}"
+if ! command -v "$box_shell" >/dev/null 2>&1; then
+  echo "BOX_SHELL '${box_shell}' was not found." >&2
+  exit 2
+fi
+
+# `box` is commonly a shell function rather than an executable. A child bash
+# process cannot inherit that definition, so every invocation goes through the
+# user's interactive login shell (normally zsh), where .zshrc defines it.
+if ! "$box_shell" -lic 'command -v box >/dev/null' >/dev/null 2>&1; then
+  echo "The 'box' shell function is not available in ${box_shell} -lic." >&2
+  echo "Set BOX_SHELL to the shell that defines it, or make the function available in its login config." >&2
   exit 2
 fi
 
@@ -41,7 +52,7 @@ run_step() {
   local command="$2"
   echo
   echo "==> ${label}"
-  box ssh "$box_id" "$command"
+  "$box_shell" -lic 'box ssh "$@"' -- "$box_id" "$command"
 }
 
 task_orch_dir="/home/user/task-orchestrator"
