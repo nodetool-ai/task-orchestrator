@@ -62,11 +62,9 @@ const WORKER_BOOTSTRAP_COMMAND = [
   // a missing/stale template artifact from a failure inside the worker process.
   '{ printf "%s [box-bootstrap] starting run_id=%s entry=%s\\n" "$(date -Iseconds 2>/dev/null || date)" "$TASK_ORCH_RUN_ID" "$entry"; command -v node || true; node --version || true; ls -l "$entry" || true; } >>"$log" 2>&1',
   'if [ ! -f "$entry" ]; then printf "%s [box-bootstrap] worker entrypoint missing\\n" "$(date -Iseconds 2>/dev/null || date)" >>"$log"; exit 127; fi',
-  // Keep the background launch and its PID echo in one shell group. Joining a
-  // trailing `&` with `&& echo $!` is invalid POSIX shell syntax (`& &&`).
-  'nohup node "$entry" "$TASK_ORCH_RUN_ID" >>"$log" 2>&1 </dev/null &',
-  'pid=$!',
-  'printf "%s [box-bootstrap] launched pid=%s\\n" "$(date -Iseconds 2>/dev/null || date)" "$pid" >>"$log"',
+  // Keep the background launch and its PID handling in a brace group. Joining
+  // a trailing `&` with `&&` is invalid POSIX shell syntax (`& &&`).
+  '{ nohup node "$entry" "$TASK_ORCH_RUN_ID" >>"$log" 2>&1 </dev/null & pid=$!; printf "%s [box-bootstrap] launched pid=%s\\n" "$(date -Iseconds 2>/dev/null || date)" "$pid" >>"$log"; }',
   // A one-second probe catches syntax/import/config failures before the
   // provider returns success. Long-running workers remain fully detached.
   'sleep 1',
