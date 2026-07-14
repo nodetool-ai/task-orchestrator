@@ -19,7 +19,7 @@ primary_region = "ams"
   # Route agent runs onto archived/resumable Box sandboxes. BOX_API_KEY is a
   # Fly secret; worker tokens use the existing AUTH_SECRET fallback.
   TASK_ORCH_RUNNER = "box"
-  TASK_ORCH_BOX_TEMPLATE_ID = "bx_9tx8644v"
+  TASK_ORCH_BOX_TEMPLATE_ID = "bx_htkmny98"
   TASK_ORCH_BOX_REPO_PATH = "/home/user/nodetool"
   TASK_ORCH_BOX_MAX_ACTIVE = "1"
   TASK_ORCH_WORKER_API_URL = "https://task-orchestrator.fly.dev"
