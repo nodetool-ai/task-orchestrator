@@ -7,15 +7,22 @@ config({ path: ".env.local" });
 import { readFileSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
 import * as repo from "./lib/repo";
-import * as agent from "./lib/agent";
 import * as users from "./lib/users";
 import { createMagicToken } from "./lib/magic-link";
-import { sql } from "./db";
+import { closeDb } from "./db";
 import { TASK_STATES, isTerminalStatus, type TaskState, type SessionStatus } from "./lib/types";
 import { assistantText, toolUses, type SdkMessageEnvelope } from "./lib/sdk-message";
 import { collectRunnerInventory } from "./lib/runner/inventory";
 import { reapOrphanVolumes } from "./lib/runner/fly";
 import { makeFlyClient } from "./lib/runner/fly-client";
+import { makeBoxClient } from "./lib/runner/box-client";
+import {
+  publishBoxTemplate,
+  requireTemplatePublishConfirmation,
+  validateBoxTemplate,
+} from "./lib/runner/box-template-operator";
+import { config as taskOrchConfig } from "./lib/config";
+import { normalizeBoxApiError, redactBoxErrorText } from "./lib/runner/box-errors";
 
 function isTaskState(s: string): s is TaskState {
   return (TASK_STATES as readonly string[]).includes(s);
@@ -27,7 +34,7 @@ type Args = { _: string[]; [k: string]: unknown };
 // value), so a positional after them stays a positional. Everything else is
 // value-bearing and supports both `--flag=value` and space-separated
 // `--flag value` forms.
-const BOOLEAN_FLAGS = new Set(["json", "no-follow", "reap"]);
+const BOOLEAN_FLAGS = new Set(["json", "no-follow", "reap", "yes"]);
 
 function parseArgs(argv: string[]): Args {
   const args: Args = { _: [] };
@@ -366,6 +373,11 @@ async function cmdPlanTransition(args: Args) {
 }
 
 async function cmdAgent(args: Args) {
+  // lib/agent starts control-plane background jobs at import time (orphan
+  // reaping and PR polling). Load it only for `task agent ...`: Box template
+  // commands are intentionally DB-free and must not acquire a background DB
+  // connection that can fail or race their provider waiters.
+  const agent = await import("./lib/agent");
   const sub = args._[0];
   if (sub === "list") {
     args._.shift();
@@ -432,6 +444,7 @@ async function cmdAgent(args: Args) {
 // and return immediately. Otherwise subscribe and wait for the bus to
 // emit a terminal status event.
 async function tailSession(sessionId: number) {
+  const agent = await import("./lib/agent");
   const current = await agent.getSession(sessionId);
   if (current && isTerminalStatus(current.status)) {
     for (const e of await agent.getSessionEvents(sessionId)) printAgentEvent(e);
@@ -593,6 +606,55 @@ async function cmdUser(args: Args): Promise<number> {
   }
 }
 
+function safeBoxCliText(value: string): string {
+  return redactBoxErrorText(value)
+    .replace(/\bDATABASE_URL\s*([:=])\s*[^\s,;"']+/gi, "DATABASE_URL$1[redacted]")
+    .replace(/\bpostgres(?:ql)?:\/\/[^\s"'<>]+/gi, "[redacted-url]");
+}
+
+async function cmdBox(args: Args): Promise<number> {
+  const area = args._.shift();
+  const action = args._.shift();
+  const boxId = args._.shift();
+  if (area !== "template" || (action !== "validate" && action !== "publish") || !boxId) {
+    throw new Error("Usage: box template <validate|publish> <bx_...> [--yes]");
+  }
+
+  try {
+    // Confirmation happens before creating a client or making any API read,
+    // keeping a mistyped publish command completely side-effect free.
+    if (action === "publish") requireTemplatePublishConfirmation(args.yes);
+    const client = makeBoxClient();
+    const options = { expectedRepositoryPath: taskOrchConfig.box.repoPath };
+    if (action === "validate") {
+      const validated = await validateBoxTemplate(client, boxId, options);
+      console.log(
+        `Box template ${validated.boxId} has a verified archived completed snapshot ${validated.snapshot.id}. ` +
+          "Filesystem/runtime checks require `box template publish ... --yes`, which resumes the template."
+      );
+      return 0;
+    }
+
+    const published = await publishBoxTemplate(client, boxId, {
+      ...options,
+      timeoutMs: taskOrchConfig.box.readyTimeoutMs,
+      pollMs: taskOrchConfig.box.pollMs,
+    });
+    console.log(
+      `Box template ${published.boxId} published with completed snapshot ${published.snapshot.id}. ` +
+        `resume-action=${published.resumeActionId} stop-action=${published.stopActionId}`
+    );
+    return 0;
+  } catch (error) {
+    // Never let the top-level CLI error handler serialize a generated SDK
+    // error: responses may include a signed URL or echoed bearer credential.
+    const normalized = await normalizeBoxApiError(error);
+    const message = safeBoxCliText(normalized.message);
+    const requestId = normalized.requestId ? ` (Box request ID: ${safeBoxCliText(normalized.requestId)})` : "";
+    throw new Error(`Box template ${action} failed: ${message}${requestId}`);
+  }
+}
+
 function formatAge(ms: number | null): string {
   if (ms == null) return "—";
   const mins = Math.floor(ms / 60_000);
@@ -609,30 +671,54 @@ async function cmdRunners(args: Args): Promise<number> {
     return 0;
   }
 
+  const flyRows = inv.rows.filter((row) => row.provider === "fly");
+  const boxRows = inv.rows.filter((row) => row.provider === "box");
+
   if (inv.rows.length === 0) {
     console.log("(no runner machines or volumes)");
   } else {
-    console.log(
-      `${pad("RUN", 6)} ${pad("MACHINE", 20)} ${pad("M-STATE", 10)} ${pad("VOLUME", 22)} ${pad("V-STATE", 10)} ${pad("SIZE", 6)} ${pad("AGE", 6)} ${pad("$/MO", 8)} ORPHAN`
-    );
-    for (const r of inv.rows) {
+    // Keep Fly's established table intact. Box output is a distinct block so
+    // an operator cannot mistake a Box ID for a Machine or Volume ID.
+    if (flyRows.length) {
       console.log(
-        `${pad(r.runId != null ? "#" + r.runId : "—", 6)} ` +
-          `${pad(r.machineId ?? "—", 20)} ` +
-          `${pad(r.machineState ?? "—", 10)} ` +
-          `${pad(r.volumeId ?? "—", 22)} ` +
-          `${pad(r.volumeState ?? "—", 10)} ` +
-          `${pad(r.sizeGb != null ? `${r.sizeGb}G` : "—", 6)} ` +
-          `${pad(formatAge(r.ageMs), 6)} ` +
-          `${pad(`$${r.estMonthlyCostUsd.toFixed(2)}`, 8)} ` +
-          `${r.orphan ? "⚠ orphan" : ""}`
+        `${pad("RUN", 6)} ${pad("MACHINE", 20)} ${pad("M-STATE", 10)} ${pad("VOLUME", 22)} ${pad("V-STATE", 10)} ${pad("SIZE", 6)} ${pad("AGE", 6)} ${pad("$/MO", 8)} ORPHAN`
       );
+      for (const r of flyRows) {
+        console.log(
+          `${pad(r.runId != null ? "#" + r.runId : "—", 6)} ` +
+            `${pad(r.machineId ?? "—", 20)} ` +
+            `${pad(r.machineState ?? "—", 10)} ` +
+            `${pad(r.volumeId ?? "—", 22)} ` +
+            `${pad(r.volumeState ?? "—", 10)} ` +
+            `${pad(r.sizeGb != null ? `${r.sizeGb}G` : "—", 6)} ` +
+            `${pad(formatAge(r.ageMs), 6)} ` +
+            `${pad(`$${r.estMonthlyCostUsd.toFixed(2)}`, 8)} ` +
+            `${r.orphan ? "⚠ orphan" : ""}`
+        );
+      }
+    }
+    if (boxRows.length) {
+      if (flyRows.length) console.log("");
+      console.log("Box runners (persisted mappings; no live Box API read):");
+      for (const r of boxRows) {
+        const checkpoint = r.checkpointStatus
+          ? `${r.checkpointStatus}${r.checkpointAgeMs != null ? ` ${formatAge(r.checkpointAgeMs)} ago` : ""}`
+          : "—";
+        console.log(
+          `  run=${r.runId != null ? `#${r.runId}` : "—"} ` +
+            `box=${r.boxId ?? "—"} state=${r.boxState ?? r.runnerState ?? "—"} ` +
+            `template=${r.boxTemplateId ?? "—"} worker=${r.workerVersion ?? "—"} ` +
+            `checkpoint=${checkpoint} source=${r.boxSourceId ?? "—"} ` +
+            `active=${formatAge(r.activeDurationMs)}` +
+            (r.lastProviderError ? ` error=${r.lastProviderError}` : "")
+        );
+      }
     }
   }
 
   const t = inv.totals;
   console.log(
-    `\n${t.machines} machines, ${t.volumes} volumes, ${t.totalGb} GB, ~$${t.estMonthlyCostUsd.toFixed(2)}/mo (${t.orphanVolumes} orphan volumes)`
+    `\n${t.machines} machines, ${t.volumes} volumes, ${t.boxes} boxes, ${t.totalGb} GB, ~$${t.estMonthlyCostUsd.toFixed(2)}/mo (${t.orphanVolumes} orphan volumes)`
   );
 
   if (args.reap) {
@@ -706,7 +792,10 @@ Commands:
   user link <email> [--origin=...]  Generate a magic login link (valid 1h, reusable until expiry).
   user rm <email>                   Delete a user.
 
-  runners [--json] [--reap]         List runner Machines + volumes with state, run, age, est. cost. --reap destroys orphan volumes.
+  runners [--json] [--reap]         List runner Fly Machines/volumes and persisted Box mappings. --reap destroys orphan Fly volumes.
+  box template validate <bx_...>    Read-only archived-state and completed-snapshot validation.
+  box template publish <bx_...> --yes
+                                    Resume, stop, and verify a new template snapshot.
 
 States:
   Tasks: ${TASK_STATES.join(", ")}
@@ -719,7 +808,7 @@ DB: data.db (override with TASK_ORCH_DB env var).
 // Entry
 // ──────────────────────────────────────────────────────────
 
-async function main() {
+async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const cmd = args._.shift();
   try {
@@ -765,6 +854,9 @@ async function main() {
       case "runners":
         code = await cmdRunners(args);
         break;
+      case "box":
+        code = await cmdBox(args);
+        break;
       case "help":
       case undefined:
         help();
@@ -772,24 +864,27 @@ async function main() {
       default:
         throw new Error(`Unknown command: ${cmd}`);
     }
-    shutdown(code);
+    await shutdown(code);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     console.error(`tasks: ${message}`);
-    shutdown(1);
+    await shutdown(1);
   }
 }
 
-function shutdown(code: number): never {
+async function shutdown(code: number): Promise<void> {
   try {
-    void sql.end();
+    await closeDb();
   } catch {
-    // ignore — process is exiting anyway
+    // Closing an already-used DB connection is best-effort. Do not turn a
+    // successful remote Box checkpoint into a failed CLI command.
   }
-  process.exit(code);
+  // Do not force process.exit(): it can truncate the publish-success line when
+  // stdout is piped, and it bypasses the awaited connection shutdown above.
+  process.exitCode = code;
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error("tasks:", err instanceof Error ? err.message : String(err));
-  shutdown(1);
+  await shutdown(1);
 });

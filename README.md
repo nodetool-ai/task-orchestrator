@@ -29,6 +29,8 @@ single Postgres database.
 - **[AGENTS.md](AGENTS.md)** — workflow contract for humans and agents
 - **[docs/fly-deployment.md](docs/fly-deployment.md)** — one-command deploy of the
   whole app (server + agent runners + database) to Fly.io
+- **[docs/box-deployment.md](docs/box-deployment.md)** — configure and operate
+  Box managed runners, templates, snapshots, capacity, and rollback
 - **[docs/test-deployment.md](docs/test-deployment.md)** — full containerized
   stack (Postgres + server + Docker workers) for validating the run → PR loop
 

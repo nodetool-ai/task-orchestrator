@@ -318,33 +318,54 @@ export const agentSessions = pgTable(
   })
 );
 
-export const runnerInstances = pgTable("runner_instances", {
-  runId: integer("run_id")
-    .primaryKey()
-    .references(() => agentSessions.id, { onDelete: "cascade" }),
-  provider: text("provider").notNull().default("fly"),
-  flyApp: text("fly_app"),
-  machineId: text("machine_id"),
-  volumeId: text("volume_id"),
-  region: text("region"),
-  // RunnerState: creating | starting | running | suspended | stopped | gone.
-  state: text("state").notNull().default("creating"),
-  repoPath: text("repo_path").notNull().default("/mnt/session/repo"),
-  claudePath: text("claude_path").notNull().default("/mnt/session/claude"),
-  createdAt: ts("created_at").notNull().defaultNow(),
-  lastStartedAt: ts("last_started_at"),
-  lastSuspendedAt: ts("last_suspended_at"),
-  // Wake-intent lease: stamped immediately BEFORE the Fly start/create call that
-  // wakes this runner, cleared by the worker's first heartbeat (or superseded by
-  // age — TASK_ORCH_RUNNER_WAKE_GRACE_MS). Bridges the window between "machine
-  // told to start" and "worker writes its first heartbeat", during which the
-  // lifecycle sweep would otherwise see a running machine with no live claim and
-  // suspend it out from under the boot (incident: run 139 was suspended 64ms
-  // after its wake; the reaper then failed it for the heartbeat it never got to
-  // write).
-  wakeRequestedAt: ts("wake_requested_at"),
-  archivedUri: text("archived_uri"),
-});
+export const runnerInstances = pgTable(
+  "runner_instances",
+  {
+    runId: integer("run_id")
+      .primaryKey()
+      .references(() => agentSessions.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull().default("fly"),
+    flyApp: text("fly_app"),
+    machineId: text("machine_id"),
+    volumeId: text("volume_id"),
+    region: text("region"),
+    // RunnerState: creating | starting | running | suspended | stopped | gone.
+    state: text("state").notNull().default("creating"),
+    repoPath: text("repo_path").notNull().default("/mnt/session/repo"),
+    claudePath: text("claude_path").notNull().default("/mnt/session/claude"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    lastStartedAt: ts("last_started_at"),
+    lastSuspendedAt: ts("last_suspended_at"),
+    // Wake-intent lease: stamped immediately BEFORE the Fly start/create call that
+    // wakes this runner, cleared by the worker's first heartbeat (or superseded by
+    // age — TASK_ORCH_RUNNER_WAKE_GRACE_MS). Bridges the window between "machine
+    // told to start" and "worker writes its first heartbeat", during which the
+    // lifecycle sweep would otherwise see a running machine with no live claim and
+    // suspend it out from under the boot (incident: run 139 was suspended 64ms
+    // after its wake; the reaper then failed it for the heartbeat it never got to
+    // write).
+    wakeRequestedAt: ts("wake_requested_at"),
+    archivedUri: text("archived_uri"),
+    // Box-specific restoration and checkpoint metadata. These are deliberately
+    // separate from Fly's machine/volume mapping so existing Fly rows retain
+    // their semantics throughout the provider migration.
+    boxId: text("box_id"),
+    boxTemplateId: text("box_template_id"),
+    boxSourceId: text("box_source_id"),
+    snapshotId: text("snapshot_id"),
+    snapshotCompletedAt: ts("snapshot_completed_at"),
+    checkpointRequestedAt: ts("checkpoint_requested_at"),
+    lastCheckpointAt: ts("last_checkpoint_at"),
+    credentialsVersion: integer("credentials_version"),
+    credentialsExpiresAt: ts("credentials_expires_at"),
+    workerVersion: text("worker_version"),
+    lastProviderError: text("last_provider_error"),
+  },
+  (t) => ({
+    // Reconciliation and orphan detection locate current Box mappings by ID.
+    boxIdIdx: index("runner_instances_box_id_idx").on(t.boxId),
+  })
+);
 
 export const agentMessages = pgTable(
   "agent_messages",

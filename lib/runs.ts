@@ -70,7 +70,7 @@ import {
   isFailedResult,
   resultPrUrl,
 } from "./run-state";
-import { config, lightweightIsolation, runnerProviderKind } from "./config";
+import { config, lightweightIsolation, runnerProviderKind, type RunnerProviderKind } from "./config";
 import {
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_STALE_MS,
@@ -152,7 +152,7 @@ const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
 const DEFAULT_MODEL = config.agent.model ?? "anthropic/claude-opus-4-8";
 const KEEP_WORKTREES = config.features.keepWorktrees;
 
-function runnerProviderLabel(): "local" | "fly" {
+function runnerProviderLabel(): RunnerProviderKind {
   return runnerProviderKind();
 }
 
@@ -2117,8 +2117,27 @@ async function repoDefaultBranch(run: {
  * No-op once a branch exists (later turns re-materialize via prepareCwd).
  */
 function sessionRepoPath(): string | null {
+  // A managed runner with a pre-populated filesystem (currently Box) supplies
+  // its checkout directly. It must be an absolute path: accepting a relative
+  // value would make a worker's repo depend on its launch cwd and risks
+  // operating in the worker-runtime checkout instead of the selected repo.
+  // This is deliberately provider-neutral. Box translates its control-plane
+  // template setting into this run-scoped worker value; reading the Box setting
+  // here would unexpectedly alter local/Fly workers in a shared environment.
+  const configured = config.worker.runnerRepoPath;
+  if (configured) {
+    if (!path.isAbsolute(configured)) {
+      throw new Error("TASK_ORCH_RUNNER_REPO_PATH must be an absolute path inside the runner.");
+    }
+    return resolve(configured);
+  }
   const root = process.env.SESSION_ROOT;
   return root ? resolve(root, "repo") : null;
+}
+
+function isConfiguredRunnerRepoPath(work: string): boolean {
+  const configured = config.worker.runnerRepoPath;
+  return !!configured && path.isAbsolute(configured) && resolve(configured) === resolve(work);
 }
 
 // Worker/Fly git checkout: clone the run's repo from GitHub, optionally using the
@@ -2147,6 +2166,15 @@ async function containerCheckoutAt(
   const url = `https://github.com/${parsed.owner}/${parsed.repo}`;
   await mkdir(dirname(work), { recursive: true });
   if (!(await hasUsableGitCheckout(work))) {
+    // A Box template promises an already-selected checkout. Never delete and
+    // reclone its configured path: a bad template should fail loudly, while a
+    // resumed template may contain the only copy of uncommitted run work.
+    if (isConfiguredRunnerRepoPath(work)) {
+      throw new Error(
+        `Run #${run.id}: configured runner repository '${work}' is missing or is not a valid Git checkout. ` +
+          "Repair TASK_ORCH_RUNNER_REPO_PATH or publish a valid Box template."
+      );
+    }
     if (existsSync(work)) await rm(work, { recursive: true, force: true });
     const reference = mirror && existsSync(mirror) ? ["--reference", mirror, "--dissociate"] : [];
     // Blobless partial clone: history blobs are fetched on demand through the

@@ -1,0 +1,165 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { eq } from "drizzle-orm";
+
+import { db } from "../db";
+import { agentSessions, runnerInstances } from "../db/schema";
+import * as repo from "../lib/repo";
+import { create } from "../lib/runs";
+import { BoxRunnerProvider } from "../lib/runner/box";
+import type { BoxClient } from "../lib/runner/box-client";
+
+const manifest = JSON.stringify({
+  formatVersion: 1,
+  workerBuildSha: "test-worker",
+  workerProtocolVersion: 1,
+  repository: "acme/test",
+  repositoryPath: "/home/user/repository",
+});
+
+function fakeBox() {
+  const calls: string[] = [];
+  const states = new Map<string, string>();
+  const forks: Array<{ source: string; input: { env: Record<string, string>; noEnv: true } }> = [];
+  let next = 0;
+  let limit = { canStart: true, activeBoxes: 0, maxActiveBoxes: 2 };
+  let missing = false;
+  const client: BoxClient = {
+    limits: async () => limit,
+    boxes: async () => ({ boxes: [] }),
+    get: async (id) => {
+      calls.push(`get:${id}`);
+      if (missing) throw Object.assign(new Error("missing"), { response: new Response("", { status: 404 }) });
+      const state = states.get(id) ?? "ready";
+      return {
+        id,
+        state,
+        ...(state === "archived" ? { lastSnapshotStatus: "completed", snapshotCompletedAt: new Date() } : {}),
+      };
+    },
+    update: async (id) => ({ id, state: states.get(id) ?? "ready" }),
+    fork: async (source, input) => {
+      forks.push({ source, input });
+      const id = `bx_run_${++next}`;
+      states.set(id, "ready");
+      calls.push(`fork:${source}`);
+      return { id, status: "accepted" };
+    },
+    resume: async (id, input) => {
+      calls.push(`resume:${id}:${String(input?.noEnv)}`);
+      states.set(id, "ready");
+      return { id, status: "accepted" };
+    },
+    stop: async (id) => {
+      calls.push(`stop:${id}`);
+      states.set(id, "archived");
+      return { id, status: "accepted" };
+    },
+    remove: async (id) => {
+      calls.push(`remove:${id}`);
+    },
+    command: async (_id, input) => {
+      calls.push(`command:${input.command.startsWith("cat ") ? "manifest" : "worker"}`);
+      return input.command.startsWith("cat ")
+        ? { success: true, exitCode: 0, stdout: manifest, stderr: "", timedOut: false }
+        : { success: true, exitCode: 0, stdout: "42\n", stderr: "", timedOut: false };
+    },
+    getLatestBoxSnapshot: async (id) => ({ id: `snap_${id}`, status: "completed", completedAt: new Date() }),
+  };
+  return {
+    client,
+    calls,
+    forks,
+    states,
+    setLimit: (value: typeof limit) => (limit = value),
+    setMissing: (value: boolean) => (missing = value),
+  };
+}
+
+function boxEnv() {
+  vi.stubEnv("TASK_ORCH_RUNNER", "box");
+  vi.stubEnv("BOX_API_KEY", "control-plane-only-key");
+  vi.stubEnv("TASK_ORCH_BOX_TEMPLATE_ID", "bx_template");
+  vi.stubEnv("TASK_ORCH_BOX_REPO_PATH", "/home/user/repository");
+  vi.stubEnv("TASK_ORCH_BOX_POLL_MS", "0");
+  vi.stubEnv("TASK_ORCH_WORKER_API_URL", "https://orchestrator.example.test");
+  vi.stubEnv("TASK_ORCH_WORKER_API_SECRET", "worker-signing-secret");
+  vi.stubEnv("DATABASE_URL", "postgres://must-not-leak");
+}
+
+async function runWithClaim() {
+  const repository = await repo.createRepository({ name: `box-e2e-${Date.now()}-${Math.random()}` });
+  const run = await create({ goal: "<implement>", defer: true, repoId: repository.id });
+  const scope = `run-${run.id}-fake`;
+  await db.update(agentSessions).set({ workerScope: scope }).where(eq(agentSessions.id, run.id));
+  return { run, scope };
+}
+
+afterEach(() => vi.unstubAllEnvs());
+
+describe("Box provider fake-client flow", () => {
+  it("forks a template with noEnv and a hygienic explicit worker environment", async () => {
+    boxEnv();
+    const fake = fakeBox();
+    const { run, scope } = await runWithClaim();
+    const ref = await new BoxRunnerProvider(fake.client).create({ runId: run.id, scope });
+
+    expect(ref).toMatchObject({ provider: "box", handle: "bx_run_1" });
+    expect(fake.forks).toHaveLength(1);
+    expect(fake.forks[0]).toMatchObject({ source: "bx_template", input: { noEnv: true } });
+    expect(fake.forks[0]!.input.env).not.toHaveProperty("BOX_API_KEY");
+    expect(fake.forks[0]!.input.env).not.toHaveProperty("DATABASE_URL");
+    const [mapping] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(mapping).toMatchObject({ boxId: "bx_run_1", boxTemplateId: "bx_template", state: "running" });
+  });
+
+  it("checkpoints, resumes the same Box, and uses noEnv on resume", async () => {
+    boxEnv();
+    const fake = fakeBox();
+    const { run, scope } = await runWithClaim();
+    const provider = new BoxRunnerProvider(fake.client);
+    const first = await provider.create({ runId: run.id, scope });
+    await provider.checkpoint(run.id);
+    await provider.create({ runId: run.id, scope });
+
+    expect(fake.calls).toContain(`stop:${first!.handle}`);
+    expect(fake.calls).toContain(`resume:${first!.handle}:true`);
+    expect(fake.forks).toHaveLength(1);
+    const [mapping] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(mapping).toMatchObject({ boxId: first!.handle, snapshotId: `snap_${first!.handle}`, state: "running" });
+  });
+
+  it("defers capacity and preserves a mapped Box for recoverable or missing remote state", async () => {
+    boxEnv();
+    const fake = fakeBox();
+    fake.setLimit({ canStart: false, activeBoxes: 2, maxActiveBoxes: 2 });
+    const provider = new BoxRunnerProvider(fake.client);
+    await expect(provider.admit({ runId: 1, reservedActive: 0 })).resolves.toMatchObject({ decision: "defer" });
+
+    fake.setLimit({ canStart: true, activeBoxes: 0, maxActiveBoxes: 2 });
+    const { run, scope } = await runWithClaim();
+    const ref = await provider.create({ runId: run.id, scope });
+    fake.states.set(ref!.handle, "error");
+    await provider.sweep();
+    fake.setMissing(true);
+    await provider.sweep();
+
+    const [mapping] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(mapping?.boxId).toBe(ref!.handle);
+    expect(mapping?.lastProviderError).toBeTruthy();
+    expect(fake.calls.some((call) => call.startsWith("remove:"))).toBe(false);
+  });
+
+  it("uses checkpointing—not deletion—for a mapped cancellation fallback", async () => {
+    boxEnv();
+    const fake = fakeBox();
+    const { run, scope } = await runWithClaim();
+    const provider = new BoxRunnerProvider(fake.client);
+    const ref = await provider.create({ runId: run.id, scope });
+    await provider.stop(ref!.handle);
+
+    expect(fake.calls).toContain(`stop:${ref!.handle}`);
+    expect(fake.calls.some((call) => call.startsWith("remove:"))).toBe(false);
+    const [mapping] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(mapping).toMatchObject({ state: "stopped", snapshotId: `snap_${ref!.handle}` });
+  });
+});

@@ -22,7 +22,14 @@ import {
 import { isWorkerLive } from "./run-liveness";
 import { runNonce } from "./run-nonce";
 import { HARD_TERMINAL_STATUSES } from "./run-state";
-import { getRunnerProvider, runnerProviderKindFromEnv, insideWorker, nestedDispatchMode } from "./runner/provider";
+import {
+  getRunnerProvider,
+  runnerProviderKindFromEnv,
+  insideWorker,
+  nestedDispatchMode,
+  type RunnerAdmission,
+  type RunnerAdmissionInput,
+} from "./runner/provider";
 import { recordDispatch, recordRunnerEvent, timeRunnerPhase } from "./runner/telemetry";
 import { isTerminalStatus } from "./types";
 import { workerDispatchEnv } from "./worker/token";
@@ -35,6 +42,8 @@ export type SpawnFn = (runId: number, scope: string) => number | null | Promise<
 export type AdmitDecision = "admit" | "defer" | "never-fits";
 /** Injectable admission check (tests override it; defaults to `admit`). */
 export type AdmitFn = (runId: number) => AdmitDecision | Promise<AdmitDecision>;
+/** Injectable provider admission (used by Box capacity tests). */
+export type ProviderAdmitFn = (input: RunnerAdmissionInput) => RunnerAdmission | Promise<RunnerAdmission>;
 
 export type DispatchResult =
   | "spawned"
@@ -116,7 +125,7 @@ export function detachedRunsEnabled(): boolean {
  *  in exactly the environment that most needs the remote path. */
 export function remoteRunnerEnabled(): boolean {
   if (insideWorker() && nestedDispatchMode() === "isolate") return true;
-  return detachedRunsEnabled() && (runnerProviderKind() === "fly" || !!config.deployment.workerImage);
+  return detachedRunsEnabled() && (runnerProviderKind() !== "local" || !!config.deployment.workerImage);
 }
 
 // ── env helpers ────────────────────────────────────────────────────────────
@@ -290,6 +299,10 @@ export function lightweightAdmissionDecision(i: {
 
 /** The gate only runs for managed worker backends, and can be turned off. */
 function admissionEnabled(): boolean {
+  // Box admission always probes account limits before a fork/resume. Unlike the
+  // legacy host gate, disabling TASK_ORCH_ADMISSION_ENABLED must not allow a
+  // deployment to exceed the remote account's capacity.
+  if (runnerProviderKind() === "box") return true;
   if (!config.dispatch.admissionFlag) return false;
   if (runnerProviderKind() === "fly") return config.dispatch.maxMachines > 0;
   return !!config.deployment.workerImage;
@@ -323,6 +336,12 @@ async function admit(runId: number): Promise<AdmitDecision> {
     memTotalMB: host.memTotalMB,
     memAvailableMB: host.memAvailableMB,
   });
+}
+
+async function providerAdmit(input: RunnerAdmissionInput): Promise<RunnerAdmission> {
+  const provider = getRunnerProvider();
+  if (provider.admit) return provider.admit(input);
+  return { decision: await admit(input.runId) };
 }
 
 /** The lightweight-child gate runs whenever the child has a memory reservation
@@ -369,7 +388,7 @@ function withAdmissionLock<T>(fn: () => Promise<T>): Promise<T> {
 
 export async function dispatchRun(
   runId: number,
-  opts: { spawn?: SpawnFn; admit?: AdmitFn } = {}
+  opts: { spawn?: SpawnFn; admit?: AdmitFn; providerAdmit?: ProviderAdmitFn } = {}
 ): Promise<DispatchResult> {
   const provider = runnerProviderKindFromEnv();
   const dispatchStarted = process.hrtime.bigint();
@@ -449,8 +468,20 @@ export async function dispatchRun(
     //    whenever the child has a memory reserve or a count cap (i.e. by default).
     const gateActive = lightweightChild ? lightweightGateActive() : admissionEnabled();
     if (gateActive) {
-      const chosenAdmit = opts.admit ?? (lightweightChild ? lightweightAdmit : admit);
-      let decision = await chosenAdmit(runId);
+      let decision: AdmitDecision;
+      if (opts.admit) {
+        decision = await opts.admit(runId);
+      } else if (lightweightChild) {
+        decision = await lightweightAdmit(runId);
+      } else {
+        const reservedActive = await runs().countInFlightWorkers();
+        const providerDecision = await (opts.providerAdmit ?? providerAdmit)({ runId, reservedActive });
+        if (providerDecision.decision === "reject") {
+          await runs().failRun(runId, providerDecision.message);
+          return { kind: "spawn-failed" };
+        }
+        decision = providerDecision.decision;
+      }
       // Deadlock breaker (M1): a plan-executor run occupies a worker slot for
       // its ENTIRE turn (countInFlightWorkers/flyAdmit count it the whole
       // time), and blocks in await_session waiting on the very children it

@@ -2,12 +2,14 @@
 
 import {
   runnerProviderKind,
+  type RunnerProviderKind,
   insideWorker as insideWorkerCfg,
   nestedDispatchMode as nestedDispatchModeCfg,
   type NestedDispatchMode,
 } from "../config";
 import { FlyRunnerProvider } from "./fly";
 import { LocalRunnerProvider } from "./local";
+import { BoxRunnerProvider } from "./box";
 
 export type { NestedDispatchMode } from "../config";
 
@@ -22,9 +24,9 @@ export type RunnerState =
 export interface RunnerRef {
   /** Run id this runner serves. */
   runId: number;
-  /** Provider-scoped id: Docker container name, or Fly machine id. */
+  /** Provider-scoped id: Docker container name, Fly machine id, or Box id. */
   handle: string;
-  provider: "local" | "fly";
+  provider: RunnerProviderKind;
 }
 
 export interface CreateRunnerInput {
@@ -33,8 +35,25 @@ export interface CreateRunnerInput {
   scope: string;
 }
 
+/** A provider's pre-provisioning capacity decision. */
+export type RunnerAdmission =
+  | { decision: "admit" }
+  | { decision: "defer"; reason?: string }
+  /** Legacy host-memory permanent rejection. */
+  | { decision: "never-fits" }
+  | { decision: "reject"; message: string };
+
+/** Context dispatch owns while it serializes admission and the worker claim. */
+export interface RunnerAdmissionInput {
+  runId: number;
+  /** Claims already held in this server process, including in-flight forks. */
+  reservedActive: number;
+}
+
 export interface RunnerProvider {
-  readonly kind: "local" | "fly";
+  readonly kind: RunnerProviderKind;
+  /** Optional while legacy providers retain their established dispatch gates. */
+  admit?(input: RunnerAdmissionInput): Promise<RunnerAdmission>;
   /** Create + start the runner for a claimed run. Returns null on failure. */
   create(input: CreateRunnerInput): Promise<RunnerRef | null>;
   /** Best-effort hard stop (cancel fallback). No-op if already gone. */
@@ -47,7 +66,7 @@ export interface RunnerProvider {
 
 /** @deprecated alias — reads via lib/config's runnerProviderKind(). Kept for the
  *  many call sites that import it from here; the semantics live in config. */
-export function runnerProviderKindFromEnv(): "local" | "fly" {
+export function runnerProviderKindFromEnv(): RunnerProviderKind {
   return runnerProviderKind();
 }
 
@@ -74,7 +93,7 @@ export function nestedDispatchMode(): NestedDispatchMode {
 }
 
 const PROVIDER_KEY = "__taskOrchRunnerProvider";
-type ProviderCache = { kind: "local" | "fly"; provider: RunnerProvider };
+type ProviderCache = { kind: RunnerProviderKind; provider: RunnerProvider };
 
 /** Factory for the selected execution backend. Memoized per provider kind so
  * tests/env flips and rollbacks can switch without carrying a stale instance. */
@@ -84,7 +103,16 @@ export function getRunnerProvider(): RunnerProvider {
   const cached = g[PROVIDER_KEY] as ProviderCache | undefined;
   if (cached?.kind === kind) return cached.provider;
 
-  const provider: RunnerProvider = kind === "fly" ? new FlyRunnerProvider() : new LocalRunnerProvider();
+  const provider: RunnerProvider = (() => {
+    switch (kind) {
+      case "local":
+        return new LocalRunnerProvider();
+      case "fly":
+        return new FlyRunnerProvider();
+      case "box":
+        return new BoxRunnerProvider();
+    }
+  })();
   g[PROVIDER_KEY] = { kind, provider } satisfies ProviderCache;
   return provider;
 }

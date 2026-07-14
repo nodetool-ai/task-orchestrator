@@ -47,8 +47,9 @@ const RETRY_BACKOFF_MS = [500, 1000, 2000];
 /** SSE reconnect backoff (resets after a healthy connection). */
 const SSE_RECONNECT_MS = [1000, 2000, 5000, 10_000];
 
-function runnerProviderLabel(): "local" | "fly" | "unknown" {
+function runnerProviderLabel(): "local" | "fly" | "box" | "unknown" {
   if (process.env.TASK_ORCH_RUNNER === "fly" || process.env.FLY_APP_NAME) return "fly";
+  if (process.env.TASK_ORCH_RUNNER === "box") return "box";
   if (process.env.TASK_ORCH_WORKER_IMAGE || process.env.TASK_ORCH_INSIDE_WORKER) return "local";
   return "unknown";
 }

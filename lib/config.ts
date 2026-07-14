@@ -73,7 +73,7 @@ function strEnv(key: string, dflt?: string): string | undefined {
   return v == null || v === "" ? dflt : v;
 }
 
-export type RunnerProviderKind = "local" | "fly";
+export type RunnerProviderKind = "local" | "fly" | "box";
 export type NestedDispatchMode = "isolate" | "inline";
 export type LightweightIsolation = "child" | "inprocess";
 
@@ -95,10 +95,18 @@ export function lightweightIsolation(): LightweightIsolation {
 
 // ── Derived values (were duplicated across modules) ────────────────────────
 
-/** The execution backend. Exact-equality on "fly" (NOT truthiness): any other
- *  value — including "local", "docker", "" — means the local provider. */
+/** The execution backend. Exact-equality on a supported remote provider (NOT
+ *  truthiness): any other value — including "local", "docker", "" — means
+ *  the local provider. */
 export function runnerProviderKind(): RunnerProviderKind {
-  return process.env.TASK_ORCH_RUNNER === "fly" ? "fly" : "local";
+  switch (process.env.TASK_ORCH_RUNNER) {
+    case "fly":
+      return "fly";
+    case "box":
+      return "box";
+    default:
+      return "local";
+  }
 }
 
 /** True inside a worker process (Fly Machine / Docker worker container).
@@ -112,12 +120,13 @@ export function insideWorker(): boolean {
 
 /**
  * True when user turns run out-of-process (detached worker per turn).
- * INTERACTION: the Fly provider FORCES this on — a Fly deployment is detached
- * by construction — so an unset/"0" TASK_ORCH_DETACHED_RUNS is overridden to
- * true whenever runnerProviderKind() === "fly". Off Fly it is the plain flag.
+ * INTERACTION: managed remote providers FORCE this on — their deployments are
+ * detached by construction — so an unset/"0" TASK_ORCH_DETACHED_RUNS is
+ * overridden to true whenever runnerProviderKind() is "fly" or "box". Local
+ * execution uses the plain flag.
  */
 export function detachedRunsEnabled(): boolean {
-  if (runnerProviderKind() === "fly") return true;
+  if (runnerProviderKind() !== "local") return true;
   return truthy(process.env.TASK_ORCH_DETACHED_RUNS);
 }
 
@@ -127,7 +136,7 @@ export function detachedRunsEnabled(): boolean {
  * the long form).
  *  1. Explicit TASK_ORCH_NESTED_DISPATCH "isolate"/"inline" (case-insensitive)
  *     wins; any other value falls through.
- *  2. Default: "isolate" on Fly, else "inline".
+ *  2. Default: "isolate" on a managed remote provider, else "inline".
  * INTERACTION: inside a worker the value arrives already RESOLVED via
  * buildFlyWorkerEnv (workers never set TASK_ORCH_RUNNER), so the env passthrough
  * — not this default — is what turns isolation on inside the worker.
@@ -139,7 +148,7 @@ export function nestedDispatchMode(): NestedDispatchMode {
     if (v === "isolate") return "isolate";
     if (v === "inline") return "inline";
   }
-  return runnerProviderKind() === "fly" ? "isolate" : "inline";
+  return runnerProviderKind() === "local" ? "inline" : "isolate";
 }
 
 // ── Grouped registry ───────────────────────────────────────────────────────
@@ -150,11 +159,11 @@ export function nestedDispatchMode(): NestedDispatchMode {
 export const config = Object.freeze({
   /** Deployment / execution backend. */
   deployment: Object.freeze({
-    /** "fly" | "local". @see runnerProviderKind */
+    /** "local" | "fly" | "box". @see runnerProviderKind */
     get runnerKind(): RunnerProviderKind {
       return runnerProviderKind();
     },
-    /** Out-of-process turns; Fly forces on. @see detachedRunsEnabled */
+    /** Out-of-process turns; managed remote providers force on. @see detachedRunsEnabled */
     get detachedRuns(): boolean {
       return detachedRunsEnabled();
     },
@@ -206,6 +215,10 @@ export const config = Object.freeze({
     /** HMAC secret the orchestrator signs run-scoped worker tokens with. */
     get apiSecret(): string | undefined {
       return strEnv("TASK_ORCH_WORKER_API_SECRET");
+    },
+    /** Existing checkout supplied by a managed runner snapshot (for example Box). */
+    get runnerRepoPath(): string | undefined {
+      return strEnv("TASK_ORCH_RUNNER_REPO_PATH");
     },
     /** Test-only escape hatch: let a simulated worker env touch Postgres. */
     get allowDb(): boolean {
@@ -363,6 +376,44 @@ export const config = Object.freeze({
     },
   }),
 
+  /** Box managed-runner settings. These remain inert until TASK_ORCH_RUNNER=box. */
+  box: Object.freeze({
+    /** Control-plane credential. Deliberately excluded from snapshot(). */
+    get apiKey(): string | undefined {
+      return strEnv("BOX_API_KEY");
+    },
+    get baseUrl(): string {
+      return strEnv("TASK_ORCH_BOX_BASE_URL", "https://ascii.dev/api/box/v1");
+    },
+    get templateId(): string | undefined {
+      return strEnv("TASK_ORCH_BOX_TEMPLATE_ID");
+    },
+    get templateVersion(): string | undefined {
+      return strEnv("TASK_ORCH_BOX_TEMPLATE_VERSION");
+    },
+    get repoPath(): string | undefined {
+      return strEnv("TASK_ORCH_BOX_REPO_PATH");
+    },
+    /** Grace before checkpointing an idle Box. */
+    get idleStopMs(): number {
+      return intEnv("TASK_ORCH_BOX_IDLE_STOP_MS", 30_000);
+    },
+    get pollMs(): number {
+      return intEnv("TASK_ORCH_BOX_POLL_MS", 5_000);
+    },
+    get readyTimeoutMs(): number {
+      return intEnv("TASK_ORCH_BOX_READY_TIMEOUT_MS", 120_000);
+    },
+    /** Archived-Box retention; defaults to 30 days. */
+    get retentionMs(): number {
+      return intEnv("TASK_ORCH_BOX_RETENTION_MS", 30 * 24 * 60 * 60_000);
+    },
+    /** 0 delegates the active-Box limit to the Box account. */
+    get maxActive(): number {
+      return intEnv("TASK_ORCH_BOX_MAX_ACTIVE", 0);
+    },
+  }),
+
   /** Storage / persistence. */
   db: Object.freeze({
     /** SQLite/pg path override (TASK_ORCH_DB); DATABASE_URL is separate. */
@@ -380,6 +431,60 @@ export const config = Object.freeze({
     },
   }),
 });
+
+const BOX_ID_RE = /^bx_[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const BOX_NON_NEGATIVE_INTEGER_KEYS = [
+  "TASK_ORCH_BOX_IDLE_STOP_MS",
+  "TASK_ORCH_BOX_POLL_MS",
+  "TASK_ORCH_BOX_READY_TIMEOUT_MS",
+  "TASK_ORCH_BOX_RETENTION_MS",
+  "TASK_ORCH_BOX_MAX_ACTIVE",
+] as const;
+
+/**
+ * Validate the Box-only deployment settings before a provider forks a Box.
+ * This intentionally reads the live registry and has no SDK or network side
+ * effects, so tests and long-lived processes can change env between calls.
+ * Local and Fly deployments remain valid without any Box variables.
+ */
+export function validateBoxConfig(): void {
+  if (runnerProviderKind() !== "box") return;
+
+  const errors: string[] = [];
+  if (!config.box.apiKey) errors.push("BOX_API_KEY is required when TASK_ORCH_RUNNER=box");
+  if (!config.box.templateId) {
+    errors.push("TASK_ORCH_BOX_TEMPLATE_ID is required when TASK_ORCH_RUNNER=box");
+  } else if (!BOX_ID_RE.test(config.box.templateId)) {
+    errors.push("TASK_ORCH_BOX_TEMPLATE_ID must be a Box ID beginning with bx_");
+  }
+  if (!config.worker.apiUrl) {
+    errors.push("TASK_ORCH_WORKER_API_URL is required when TASK_ORCH_RUNNER=box");
+  }
+  if (!config.worker.apiSecret && !strEnv("AUTH_SECRET")) {
+    errors.push(
+      "TASK_ORCH_WORKER_API_SECRET or AUTH_SECRET is required to sign worker tokens when TASK_ORCH_RUNNER=box"
+    );
+  }
+
+  const baseUrl = config.box.baseUrl;
+  try {
+    const url = new URL(baseUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("unsupported protocol");
+  } catch {
+    errors.push("TASK_ORCH_BOX_BASE_URL must be a valid http(s) URL");
+  }
+
+  for (const key of BOX_NON_NEGATIVE_INTEGER_KEYS) {
+    const raw = process.env[key];
+    if (raw == null || raw === "") continue;
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < 0) {
+      errors.push(`${key} must be a non-negative integer`);
+    }
+  }
+
+  if (errors.length > 0) throw new Error(`Invalid Box configuration: ${errors.join("; ")}`);
+}
 
 /**
  * A frozen, plain-value snapshot of the whole config for logging/telemetry.
@@ -399,6 +504,8 @@ export function snapshot() {
     agent: dump(config.agent),
     features: dump(config.features),
     fly: dump(config.fly),
+    // Never serialize a control-plane credential into logs or telemetry.
+    box: Object.freeze({ ...dump(config.box), apiKey: "[redacted]" }),
     db: dump(config.db),
     derived: Object.freeze({
       runnerProviderKind: runnerProviderKind(),
