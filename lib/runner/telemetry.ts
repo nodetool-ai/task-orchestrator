@@ -89,7 +89,9 @@ function makeState(): TelemetryState {
     runnerInstances: new Gauge({
       name: "task_orch_runner_instances",
       help: "Current detached runner instances by provider and state.",
-      labelNames: ["provider", "state"] as const,
+      // Keep the service label first to match the stable metric exposition
+      // shape used by dashboards and the telemetry contract.
+      labelNames: ["service", "provider", "state"] as const,
       registers: [registry],
     }),
   };
@@ -203,7 +205,11 @@ export function setRunnerInstances(
   telemetry().runnerInstances.reset();
   for (const row of rows) {
     telemetry().runnerInstances
-      .labels(row.provider ?? "unknown", row.state ?? "unknown")
+      .labels({
+        service: "task-orchestrator",
+        provider: row.provider ?? "unknown",
+        state: row.state ?? "unknown",
+      })
       .set(row.count);
   }
 }

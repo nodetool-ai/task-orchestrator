@@ -339,6 +339,15 @@ async function admit(runId: number): Promise<AdmitDecision> {
 }
 
 async function providerAdmit(input: RunnerAdmissionInput): Promise<RunnerAdmission> {
+  // Fly and local retain the established host/DB admission gates below.  In
+  // particular, do not instantiate FlyRunnerProvider just to decide capacity:
+  // its client correctly requires TASK_ORCH_FLY_APP, while the legacy
+  // TASK_ORCH_MAX_MACHINES gate is deliberately usable without it (including
+  // before a worker image/app has been configured).  Box is the only provider
+  // with a remote-account admission probe.
+  if (runnerProviderKindFromEnv() !== "box") {
+    return { decision: await admit(input.runId) };
+  }
   const provider = getRunnerProvider();
   if (provider.admit) return provider.admit(input);
   return { decision: await admit(input.runId) };

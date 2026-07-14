@@ -16,7 +16,12 @@ const manifest = JSON.stringify({
   repositoryPath: "/home/user/repository",
 });
 
+// The test database is shared across examples. Real Box IDs are globally
+// unique, so model that here instead of reusing `bx_run_1` in every fake.
+let fakeBoxSequence = 0;
+
 function fakeBox() {
+  const sequence = ++fakeBoxSequence;
   const calls: string[] = [];
   const states = new Map<string, string>();
   const forks: Array<{ source: string; input: { env: Record<string, string>; noEnv: true } }> = [];
@@ -39,7 +44,7 @@ function fakeBox() {
     update: async (id) => ({ id, state: states.get(id) ?? "ready" }),
     fork: async (source, input) => {
       forks.push({ source, input });
-      const id = `bx_run_${++next}`;
+      const id = `bx_run_${sequence}_${++next}`;
       states.set(id, "ready");
       calls.push(`fork:${source}`);
       return { id, status: "accepted" };
@@ -103,13 +108,13 @@ describe("Box provider fake-client flow", () => {
     const { run, scope } = await runWithClaim();
     const ref = await new BoxRunnerProvider(fake.client).create({ runId: run.id, scope });
 
-    expect(ref).toMatchObject({ provider: "box", handle: "bx_run_1" });
+    expect(ref).toMatchObject({ provider: "box" });
     expect(fake.forks).toHaveLength(1);
     expect(fake.forks[0]).toMatchObject({ source: "bx_template", input: { noEnv: true } });
     expect(fake.forks[0]!.input.env).not.toHaveProperty("BOX_API_KEY");
     expect(fake.forks[0]!.input.env).not.toHaveProperty("DATABASE_URL");
     const [mapping] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
-    expect(mapping).toMatchObject({ boxId: "bx_run_1", boxTemplateId: "bx_template", state: "running" });
+    expect(mapping).toMatchObject({ boxId: ref?.handle, boxTemplateId: "bx_template", state: "running" });
   });
 
   it("checkpoints, resumes the same Box, and uses noEnv on resume", async () => {

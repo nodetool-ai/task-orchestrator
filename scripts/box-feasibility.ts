@@ -5,8 +5,8 @@
 
 import { makeBoxClient } from "../lib/runner/box-client";
 import { waitForBoxCheckpoint, waitForBoxReady } from "../lib/runner/box-waiters";
+import { config } from "../lib/config";
 
-const TEMPLATE_ID = process.env.TASK_ORCH_BOX_TEMPLATE_ID;
 const PREFIX = `task-orch-feasibility-${Date.now().toString(36)}`;
 
 function requireLiveConfig(): string {
@@ -14,8 +14,9 @@ function requireLiveConfig(): string {
     throw new Error("Refusing live Box test: set BOX_LIVE_TEST=1 explicitly.");
   }
   if (!process.env.BOX_API_KEY) throw new Error("BOX_API_KEY is required for the live Box test.");
-  if (!TEMPLATE_ID) throw new Error("TASK_ORCH_BOX_TEMPLATE_ID is required for the live Box test.");
-  return TEMPLATE_ID;
+  const templateId = config.box.templateId;
+  if (!templateId) throw new Error("TASK_ORCH_BOX_TEMPLATE_ID is required for the live Box test.");
+  return templateId;
 }
 
 async function main(): Promise<void> {
