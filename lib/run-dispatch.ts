@@ -41,6 +41,8 @@ import {
 } from "./worker-channel/repository";
 import { connectRun, reapStaleChannels } from "./worker-channel/controller";
 import {
+  dockerDialEndpoint,
+  dockerListenEndpoint,
   localDialEndpoint,
   localListenEndpoint,
   localSocketPath,
@@ -635,11 +637,12 @@ export async function dispatchRun(
       }
       pid = spawned;
     } else {
-      // The worker protocol is WebSocket-only (plan section 18). Only the local
-      // child provisions a private control-plane-to-worker WebSocket endpoint
-      // today; Docker, Fly, and Box dispatch fail fast with an explicit
-      // unsupported-provider error until their provisioning sections (19/20/box)
-      // land — never an HTTP fallback.
+      // The worker protocol is WebSocket-only (plan section 18). The "local"
+      // runner kind covers both the plain detached tsx process and the Docker
+      // worker container (plan section 19) — LocalRunnerProvider.create picks
+      // between them on TASK_ORCH_WORKER_IMAGE. Fly and Box dispatch still fail
+      // fast with an explicit unsupported-provider error until their
+      // provisioning sections (20/box) land — never an HTTP fallback.
       if (provider !== "local") {
         return finish(await failSpawn(runId, outcome.scope, unsupportedWsProviderMessage(provider)));
       }
@@ -714,10 +717,10 @@ export interface LocalChannelProvisioning {
 }
 
 /** The exact unsupported-provider message for a provider whose ws provisioning
- *  section has not landed (Docker: 19, Fly: 20, Box: pending private ingress). */
+ *  section has not landed (Fly: 20, Box: pending private ingress). Docker
+ *  provisioning landed in plan section 19 — see dockerSpawn. */
 export function unsupportedWsProviderMessage(provider: string): string {
   const section: Record<string, string> = {
-    docker: "Docker runner WebSocket provisioning is not implemented yet (see plan section 19).",
     fly: "Fly runner WebSocket provisioning is not implemented yet (see plan section 20).",
     box: "Box runners do not yet expose a private control-plane-to-worker WebSocket endpoint.",
   };
@@ -952,14 +955,24 @@ export function stopPendingRunPump(): void {
 
 // Worker execution runs in its own process/container so a web-service restart or
 // redeploy cannot signal it. The worker protocol is WebSocket-only (plan section
-// 18); today only the plain detached tsx process provisions its private channel
-// endpoint. The ad-hoc Docker container path (TASK_ORCH_WORKER_IMAGE) fails fast
-// with the unsupported-provider error until section 19 rebuilds it on the channel.
-export const defaultSpawn = async (runId: number, scope: string, channelInstanceId?: string, channelEndpoint?: string): Promise<number | null> => {
-  if (process.env.TASK_ORCH_WORKER_IMAGE) {
-    throw new Error(unsupportedWsProviderMessage("docker"));
+// 18). The plain detached tsx process and the Docker worker container (plan
+// section 19) both provision a private channel endpoint; Fly and Box dispatch
+// still fail fast with the unsupported-provider error until their sections land.
+export const defaultSpawn = async (
+  runId: number,
+  scope: string,
+  channelInstanceId?: string,
+  channelEndpoint?: string
+): Promise<{ pid: number; channelEndpoint: string } | null> => {
+  if (config.deployment.workerImage) {
+    if (!channelInstanceId) {
+      throw new Error("Docker worker dispatch requires a provisioned channel instance id");
+    }
+    return dockerSpawn(runId, scope, channelInstanceId);
   }
-  return detachedSpawn(runId, scope, channelInstanceId, channelEndpoint);
+  const pid = detachedSpawn(runId, scope, channelInstanceId, channelEndpoint);
+  if (pid == null || !channelEndpoint) return null;
+  return { pid, channelEndpoint };
 };
 
 // One worker container per run, launched via the mounted Docker socket. The
@@ -968,15 +981,28 @@ export const defaultSpawn = async (runId: number, scope: string, channelInstance
 // container name; the worker monitor below tracks the container's REAL state;
 // cancel() calls stopWorkerContainer.
 
-/** Full createContainer options for a run's worker (exported for tests). */
-export function buildWorkerContainerConfig(runId: number, scope: string): Record<string, unknown> {
+/** Channel identity injected into a Docker worker's env (plan section 19). */
+export interface DockerChannelConfig {
+  instanceId: string;
+  /** What the worker binds — always `tcp:0.0.0.0:8787` (plan section 2). */
+  listenEndpoint: string;
+}
+
+/** Full createContainer options for a run's worker (exported for tests). The
+ *  `channel` argument is omitted only by tests that don't exercise the
+ *  websocket wiring; real dispatch always provides it. */
+export function buildWorkerContainerConfig(
+  runId: number,
+  scope: string,
+  channel?: DockerChannelConfig
+): Record<string, unknown> {
   const image = process.env.TASK_ORCH_WORKER_IMAGE!;
   const pass = (k: string) => `${k}=${process.env[k] ?? ""}`;
-  // Worker container config skeleton (labels, limits, mounts). The channel
-  // identity and endpoint injection is added by section 19 (Docker provisioning);
-  // until then this path is unreachable — defaultSpawn fails fast on
-  // TASK_ORCH_WORKER_IMAGE. Workers hold NO database credentials — DATABASE_URL is
-  // deliberately absent.
+  // Worker container config skeleton (labels, limits, mounts). Workers hold NO
+  // database credentials — DATABASE_URL is deliberately absent. Channel
+  // credentials (instance id, bearer token, listen endpoint) are added below,
+  // the same env shape the local detached worker gets — see
+  // workerChannelDispatchEnv.
   const env = [
     pass("GH_TOKEN"),
     // Agent credentials for BOTH backends: the Claude auth pair plus every pi
@@ -998,6 +1024,11 @@ export function buildWorkerContainerConfig(runId: number, scope: string): Record
     // dispatches turns to a worker, but the worker itself must run them in-process
     // (never re-dispatch). Any code branching on "am I the worker" reads this.
     "TASK_ORCH_INSIDE_WORKER=1",
+    ...(channel
+      ? Object.entries(workerChannelDispatchEnv(runId, channel.instanceId, channel.listenEndpoint)).map(
+          ([k, v]) => `${k}=${v}`
+        )
+      : []),
   ];
   const binds: string[] = [];
   const claudeHome = process.env.TASK_ORCH_CLAUDE_HOME_HOST;
@@ -1023,6 +1054,12 @@ export function buildWorkerContainerConfig(runId: number, scope: string): Record
     // to THIS instance by INSTANCE_LABEL (so a co-hosted stack's workers are
     // never touched — see the label docs above).
     Labels: { [RUN_LABEL]: String(runId), [INSTANCE_LABEL]: instanceId() },
+    // The worker's private channel port. No PortBindings — this is never
+    // published to the host; the control plane dials it over the Docker
+    // network (named network) or the container's bridge IP (host dev) — see
+    // resolveDockerDialHost. Publishing it would be public worker ingress,
+    // which plan section 23 forbids.
+    ExposedPorts: { "8787/tcp": {} },
     HostConfig: {
       // Deliberately NO AutoRemove: when the container dies, the monitor first
       // captures `docker logs` + the exit code into the run row, THEN removes
@@ -1050,11 +1087,76 @@ export function buildWorkerContainerConfig(runId: number, scope: string): Record
   };
 }
 
-export async function dockerSpawn(runId: number, scope: string): Promise<number | null> {
-  const docker = await getDocker();
-  const container = await docker.createContainer(buildWorkerContainerConfig(runId, scope));
+/** Docker Desktop host dev (no shared TASK_ORCH_DOCKER_NETWORK) has no DNS
+ *  entry for the container name, so the control plane must dial its private
+ *  bridge IP instead. Inspected AFTER start — the network isn't assigned at
+ *  create time. */
+export async function resolveDockerDialHost(docker: DockerLike, scope: string): Promise<string | null> {
+  if (config.deployment.dockerNetwork) return scope;
+  const info = await docker.getContainer(scope).inspect();
+  const direct = info.NetworkSettings?.IPAddress;
+  if (direct) return direct;
+  const networks = info.NetworkSettings?.Networks ?? {};
+  const first = Object.values(networks).find((n) => n.IPAddress);
+  return first?.IPAddress ?? null;
+}
+
+/** Poll a bare TCP connect to the worker's channel port until it accepts or the
+ *  deadline lapses. `container.start()` resolving only means the process
+ *  launched — not that the worker's WebSocket listener is bound yet — so
+ *  provisioning must not report success on start() alone (plan section 19).
+ *  This is a liveness probe, not the authenticated handshake: the control
+ *  plane's connectRun() (invoked right after dispatch, via
+ *  startChannelForRun) performs the real `channel.hello`/`channel.accept`
+ *  exchange and is what actually proves the worker is authenticated. */
+export async function waitForDockerPortReady(
+  host: string,
+  port = 8787,
+  timeoutMs = 30_000
+): Promise<boolean> {
+  const { connect } = await import("node:net");
+  const probeOnce = () =>
+    new Promise<boolean>((resolve) => {
+      const socket = connect({ host, port, timeout: 2_000 });
+      const finish = (ok: boolean) => {
+        socket.removeAllListeners();
+        socket.destroy();
+        resolve(ok);
+      };
+      socket.once("connect", () => finish(true));
+      socket.once("timeout", () => finish(false));
+      socket.once("error", () => finish(false));
+    });
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (await probeOnce()) return true;
+    await new Promise((r) => setTimeout(r, 250));
+  } while (Date.now() < deadline);
+  return false;
+}
+
+/**
+ * Start one worker container per run, wired to its private WebSocket channel
+ * (plan section 19): exposes the fixed channel port, resolves the
+ * control-plane-dialable endpoint (named network or bridge IP), and waits for
+ * the worker's listener to come up before reporting success — a started
+ * container is not yet a ready one.
+ */
+export async function dockerSpawn(
+  runId: number,
+  scope: string,
+  channelInstanceId: string,
+  dockerArg?: DockerLike
+): Promise<{ pid: number; channelEndpoint: string } | null> {
+  const docker = dockerArg ?? (await getDocker());
+  const channel: DockerChannelConfig = { instanceId: channelInstanceId, listenEndpoint: dockerListenEndpoint() };
+  const container = await docker.createContainer(buildWorkerContainerConfig(runId, scope, channel));
   await container.start();
-  return 1; // sentinel: container started (not a host pid). cancel() uses the name.
+  const host = await resolveDockerDialHost(docker, scope);
+  if (!host) return null;
+  const ready = await waitForDockerPortReady(host);
+  if (!ready) return null;
+  return { pid: 1, channelEndpoint: dockerDialEndpoint(host) }; // pid 1: sentinel — container started (not a host pid); cancel() uses the name.
 }
 
 // Shared core of both local-child spawn paths: a detached
@@ -1197,7 +1299,10 @@ export type DockerLike = {
   >;
   getContainer(ref: string): {
     logs(opts: unknown): Promise<Buffer | NodeJS.ReadableStream>;
-    inspect(): Promise<{ State?: { ExitCode?: number; OOMKilled?: boolean } }>;
+    inspect(): Promise<{
+      State?: { ExitCode?: number; OOMKilled?: boolean };
+      NetworkSettings?: { IPAddress?: string; Networks?: Record<string, { IPAddress?: string }> };
+    }>;
     remove(opts?: unknown): Promise<unknown>;
     stop(opts?: unknown): Promise<unknown>;
   };

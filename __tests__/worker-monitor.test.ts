@@ -17,14 +17,18 @@ import {
   INSTANCE_LABEL,
   RUN_LABEL,
   buildWorkerContainerConfig,
+  defaultSpawn,
   demuxDockerLog,
   dispatchRun,
+  dockerSpawn,
   handleContainerExit,
   handleWorkerEvent,
   instanceId,
   provisionLocalChannel,
+  resolveDockerDialHost,
   sweepWorkerContainers,
   sweepWorkerSockets,
+  waitForDockerPortReady,
   type DockerLike,
 } from "../lib/run-dispatch";
 
@@ -61,7 +65,10 @@ interface FakeContainer {
 function fakeDocker(opts: {
   containers?: FakeContainer[];
   logs?: Buffer;
-  inspect?: { State?: { ExitCode?: number; OOMKilled?: boolean } };
+  inspect?: {
+    State?: { ExitCode?: number; OOMKilled?: boolean };
+    NetworkSettings?: { IPAddress?: string; Networks?: Record<string, { IPAddress?: string }> };
+  };
 }) {
   const calls = { removed: [] as string[], stopped: [] as string[] };
   const docker: DockerLike = {
@@ -123,6 +130,113 @@ describe("buildWorkerContainerConfig", () => {
     const cfg = buildWorkerContainerConfig(7, "run-7-x") as { Labels: Record<string, string> };
     expect(cfg.Labels[INSTANCE_LABEL]).toBe("prod-1");
     expect(instanceId()).toBe("prod-1");
+  });
+
+  // plan section 19: Docker provisioning
+  it("exposes the fixed channel port with no PortBindings (never public ingress)", () => {
+    vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
+    const cfg = buildWorkerContainerConfig(1, "run-1-x") as {
+      ExposedPorts: Record<string, unknown>;
+      HostConfig: Record<string, unknown>;
+    };
+    expect(cfg.ExposedPorts).toEqual({ "8787/tcp": {} });
+    expect(cfg.HostConfig.PortBindings).toBeUndefined();
+  });
+
+  it("injects the channel identity, credential, and tcp listen endpoint when given a channel", () => {
+    vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
+    const cfg = buildWorkerContainerConfig(1, "run-1-x", {
+      instanceId: "wi_" + "a".repeat(32),
+      listenEndpoint: "tcp:0.0.0.0:8787",
+    }) as { Env: string[] };
+    expect(cfg.Env).toContain(`TASK_ORCH_WORKER_INSTANCE_ID=wi_${"a".repeat(32)}`);
+    expect(cfg.Env).toContain("TASK_ORCH_WORKER_CHANNEL_ENDPOINT=tcp:0.0.0.0:8787");
+    expect(cfg.Env.some((e) => e.startsWith("TASK_ORCH_WORKER_CHANNEL_CREDENTIAL="))).toBe(true);
+  });
+
+  it("omits channel env when no channel is given (legacy 2-arg call)", () => {
+    vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
+    const cfg = buildWorkerContainerConfig(1, "run-1-x") as { Env: string[] };
+    expect(cfg.Env.some((e) => e.startsWith("TASK_ORCH_WORKER_INSTANCE_ID="))).toBe(false);
+  });
+
+  it("uses NetworkMode from TASK_ORCH_DOCKER_NETWORK when configured", () => {
+    vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
+    vi.stubEnv("TASK_ORCH_DOCKER_NETWORK", "compose_net");
+    const cfg = buildWorkerContainerConfig(1, "run-1-x") as { HostConfig: { NetworkMode?: string } };
+    expect(cfg.HostConfig.NetworkMode).toBe("compose_net");
+  });
+});
+
+describe("resolveDockerDialHost", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("dials by container name when a shared Docker network is configured", async () => {
+    vi.stubEnv("TASK_ORCH_DOCKER_NETWORK", "compose_net");
+    const { docker } = fakeDocker({ inspect: {} });
+    await expect(resolveDockerDialHost(docker, "run-1-x")).resolves.toBe("run-1-x");
+  });
+
+  it("falls back to the container's bridge IP without a shared network", async () => {
+    vi.stubEnv("TASK_ORCH_DOCKER_NETWORK", "");
+    const { docker } = fakeDocker({
+      inspect: { NetworkSettings: { IPAddress: "172.17.0.5" } },
+    });
+    await expect(resolveDockerDialHost(docker, "run-1-x")).resolves.toBe("172.17.0.5");
+  });
+
+  it("falls back to a named-network entry when the top-level IPAddress is empty", async () => {
+    vi.stubEnv("TASK_ORCH_DOCKER_NETWORK", "");
+    const { docker } = fakeDocker({
+      inspect: {
+        NetworkSettings: { IPAddress: "", Networks: { bridge: { IPAddress: "172.18.0.9" } } },
+      },
+    });
+    await expect(resolveDockerDialHost(docker, "run-1-x")).resolves.toBe("172.18.0.9");
+  });
+
+  it("returns null when no address can be resolved", async () => {
+    vi.stubEnv("TASK_ORCH_DOCKER_NETWORK", "");
+    const { docker } = fakeDocker({ inspect: {} });
+    await expect(resolveDockerDialHost(docker, "run-1-x")).resolves.toBeNull();
+  });
+});
+
+describe("waitForDockerPortReady", () => {
+  it("succeeds once a listener is bound on the port", async () => {
+    const server = createServer((socket) => socket.destroy());
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    try {
+      await expect(waitForDockerPortReady("127.0.0.1", port, 5_000)).resolves.toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("times out when nothing ever listens (container.start() resolving is not readiness)", async () => {
+    // Port 1 is a reserved low port with nothing listening; connect fails fast.
+    await expect(waitForDockerPortReady("127.0.0.1", 1, 800)).resolves.toBe(false);
+  });
+});
+
+describe("dockerSpawn", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("returns null (without waiting for readiness) when no dial host can be resolved", async () => {
+    vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
+    vi.stubEnv("TASK_ORCH_DOCKER_NETWORK", "");
+    const { docker } = fakeDocker({ inspect: {} }); // no NetworkSettings ⇒ no resolvable host
+    await expect(dockerSpawn(1, "run-1-x", "wi_" + "b".repeat(32), docker)).resolves.toBeNull();
+  });
+});
+
+describe("defaultSpawn", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("routes to the Docker path when TASK_ORCH_WORKER_IMAGE is set", async () => {
+    vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
+    await expect(defaultSpawn(1, "run-1-x")).rejects.toThrow(/channel instance id/);
   });
 });
 

@@ -41,6 +41,25 @@ export function dialEndpointToSocketPath(dialEndpoint: string): string | null {
   return dialEndpoint.slice(prefix.length, dialEndpoint.length - suffix.length);
 }
 
+// ── Docker worker endpoints (plan section 19) ───────────────────────────────
+// A Docker worker binds a real TCP port (fixed at 8787 per plan section 2)
+// instead of a Unix socket. The dial host is either the container name (a
+// shared TASK_ORCH_DOCKER_NETWORK, resolvable by Docker DNS) or the
+// container's private bridge IP (host dev without a shared network) — see
+// resolveDockerDialHost in lib/run-dispatch.ts.
+
+const DOCKER_CHANNEL_PORT = 8787;
+
+/** Endpoint the Docker worker container binds. */
+export function dockerListenEndpoint(): string {
+  return `tcp:0.0.0.0:${DOCKER_CHANNEL_PORT}`;
+}
+
+/** Endpoint the control plane stores and dials for a Docker worker. */
+export function dockerDialEndpoint(host: string): string {
+  return `ws://${host}:${DOCKER_CHANNEL_PORT}${CHANNEL_PATH}`;
+}
+
 /**
  * WebSocket-only supervisor environment. It intentionally contains no
  * control-plane URL, API token, or database credential — the worker learns

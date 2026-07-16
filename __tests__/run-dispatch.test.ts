@@ -126,7 +126,6 @@ describe("unsupportedWsProviderMessage", () => {
     expect(unsupportedWsProviderMessage("box")).toBe(
       "Box runners do not yet expose a private control-plane-to-worker WebSocket endpoint."
     );
-    expect(unsupportedWsProviderMessage("docker")).toMatch(/section 19/);
     expect(unsupportedWsProviderMessage("fly")).toMatch(/section 20/);
   });
 });
