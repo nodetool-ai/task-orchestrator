@@ -239,17 +239,26 @@ describe("Box configuration", () => {
     expect(() => validateBoxConfig()).not.toThrow();
   });
 
-  it("always rejects Box with the unsupported-provider message (websocket-only worker protocol)", () => {
-    // The worker protocol is WebSocket-only (plan section 18) and Box has no
-    // private control-plane-to-worker ingress, so Box is rejected regardless of
-    // any other configuration until its provider supplies a private inbound
-    // endpoint.
+  it("accepts Box when the account credential and template are configured", () => {
+    // Box worker-channel ingress is the ascii.dev `host` proxy (discovered per
+    // run); validateBoxConfig only checks the account credential and the fork
+    // template up front.
     set("TASK_ORCH_RUNNER", "box");
     set("BOX_API_KEY", "box-api-key-secret");
     set("TASK_ORCH_BOX_TEMPLATE_ID", "bx_template_123");
-    expect(() => validateBoxConfig()).toThrow(
-      /Box runners do not yet expose a private control-plane-to-worker WebSocket endpoint\./
-    );
+    expect(() => validateBoxConfig()).not.toThrow();
+  });
+
+  it("rejects Box without an API key", () => {
+    set("TASK_ORCH_RUNNER", "box");
+    set("TASK_ORCH_BOX_TEMPLATE_ID", "bx_template_123");
+    expect(() => validateBoxConfig()).toThrow(/BOX_API_KEY is required/);
+  });
+
+  it("rejects Box without a template id", () => {
+    set("TASK_ORCH_RUNNER", "box");
+    set("BOX_API_KEY", "box-api-key-secret");
+    expect(() => validateBoxConfig()).toThrow(/TASK_ORCH_BOX_TEMPLATE_ID is required/);
   });
 
   it("reads Box settings lazily with the documented defaults", () => {

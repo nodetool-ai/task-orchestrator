@@ -8,6 +8,8 @@ import {
   validateBoxWorkerEnv,
 } from "../lib/runner/box-env";
 
+const CHANNEL_INSTANCE_ID = `wi_${"a".repeat(32)}`;
+
 const KNOBS = [
   "TASK_ORCH_BOX_REPO_PATH",
   "TASK_ORCH_BOX_TEMPLATE_VERSION",
@@ -20,6 +22,8 @@ const KNOBS = [
   "GH_TOKEN",
   "OPENAI_API_KEY",
   "CEREBRAS_API_KEY",
+  "AUTH_SECRET",
+  "TASK_ORCH_WORKER_CHANNEL_SECRET",
 ] as const;
 
 afterEach(() => {
@@ -31,6 +35,9 @@ function stubBaseEnv(): void {
   vi.stubEnv("TASK_ORCH_BOX_REPO_PATH", "/home/user/repository");
   vi.stubEnv("TASK_ORCH_BOX_TEMPLATE_VERSION", "template-2026-07-14");
   vi.stubEnv("TASK_ORCH_INSTANCE_ID", "staging-a");
+  // The worker channel credential is an HMAC over (runId, instanceId); minting
+  // it needs the channel signing secret (falls back to AUTH_SECRET).
+  vi.stubEnv("AUTH_SECRET", "test-channel-secret");
 }
 
 describe("buildBoxWorkerEnv", () => {
@@ -44,7 +51,7 @@ describe("buildBoxWorkerEnv", () => {
     vi.stubEnv("CEREBRAS_API_KEY", "");
     vi.stubEnv("TASK_ORCH_RUNNER", "box");
 
-    const env = buildBoxWorkerEnv({ runId: 42, repoId: "repo_123" });
+    const env = buildBoxWorkerEnv({ runId: 42, repoId: "repo_123", channelInstanceId: CHANNEL_INSTANCE_ID });
 
     expect(env).toMatchObject({
       TASK_ORCH_INSIDE_WORKER: "1",
@@ -58,7 +65,14 @@ describe("buildBoxWorkerEnv", () => {
       GH_TOKEN: "ghp-run-token",
       OPENAI_API_KEY: "sk-agent-key",
       CEREBRAS_API_KEY: "",
+      // Worker WebSocket channel identity (plan section 20): the worker binds the
+      // fixed TCP listener and derives its credential from (runId, instanceId).
+      TASK_ORCH_WORKER_INSTANCE_ID: CHANNEL_INSTANCE_ID,
+      TASK_ORCH_WORKER_CHANNEL_ENDPOINT: "tcp:0.0.0.0:8787",
     });
+    // The credential is present and non-empty, but its exact value is an HMAC we
+    // do not assert byte-for-byte here.
+    expect(env.TASK_ORCH_WORKER_CHANNEL_CREDENTIAL).toMatch(/^wc1\./);
     // The worker protocol is WebSocket-only (plan section 18): no run-scoped HTTP
     // API URL/token is forwarded to a Box worker.
     expect(env).not.toHaveProperty("TASK_ORCH_WORKER_API_URL");
@@ -74,6 +88,7 @@ describe("buildBoxWorkerEnv", () => {
     const env = buildBoxWorkerEnv({
       runId: 7,
       repoId: "repo_7",
+      channelInstanceId: CHANNEL_INSTANCE_ID,
       repoPath: "/home/user/another-repository",
       sessionRoot: "/home/user/.task-orchestrator/runs/7",
       nestedDispatch: "inline",
@@ -94,9 +109,16 @@ describe("buildBoxWorkerEnv", () => {
     stubBaseEnv();
     vi.stubEnv("GH_TOKEN", "x".repeat(BOX_ENV_MAX_BYTES));
 
-    expect(() => buildBoxWorkerEnv({ runId: 7, repoId: "repo_7" })).toThrow(
-      /Box worker environment is .* bytes; Box permits at most 65536 bytes/
-    );
+    expect(() =>
+      buildBoxWorkerEnv({ runId: 7, repoId: "repo_7", channelInstanceId: CHANNEL_INSTANCE_ID })
+    ).toThrow(/Box worker environment is .* bytes; Box permits at most 65536 bytes/);
+  });
+
+  it("rejects a malformed channel instance id before minting a credential", () => {
+    stubBaseEnv();
+    expect(() =>
+      buildBoxWorkerEnv({ runId: 7, repoId: "repo_7", channelInstanceId: "not-a-valid-id" })
+    ).toThrow(/invalid channelInstanceId/);
   });
 });
 

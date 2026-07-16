@@ -68,7 +68,9 @@ function fakeBox() {
         ? "manifest"
         : input.command.includes("tail -n")
           ? "bootstrap-log"
-          : "worker";
+          : input.command.includes(".ascii/host")
+            ? "host"
+            : "worker";
       calls.push(`command:${kind}`);
       if (kind === "manifest") return { success: true, exitCode: 0, stdout: manifest, stderr: "", timedOut: false };
       if (kind === "bootstrap-log") {
@@ -76,6 +78,18 @@ function fakeBox() {
           success: true,
           exitCode: 0,
           stdout: "2026-01-01T00:00:00Z [box-bootstrap] alive pid=42\n",
+          stderr: "",
+          timedOut: false,
+        };
+      }
+      if (kind === "host") {
+        // Mirror `host <port>`'s output: log lines then the gated public URL.
+        return {
+          success: true,
+          exitCode: 0,
+          stdout:
+            `Opening firewall for port 8787...\n` +
+            `https://box-${sequence}-8787.on.ascii.dev?_token=faketoken${sequence}\n`,
           stderr: "",
           timedOut: false,
         };
@@ -101,6 +115,9 @@ function boxEnv() {
   vi.stubEnv("TASK_ORCH_BOX_REPO_PATH", "/home/user/repository");
   vi.stubEnv("TASK_ORCH_BOX_POLL_MS", "0");
   vi.stubEnv("DATABASE_URL", "postgres://must-not-leak");
+  // The worker channel credential is an HMAC over (runId, instanceId); the Box
+  // env builder mints it during provisioning and needs the signing secret.
+  vi.stubEnv("AUTH_SECRET", "test-channel-secret");
 }
 
 async function runWithClaim() {
@@ -113,12 +130,11 @@ async function runWithClaim() {
 
 afterEach(() => vi.unstubAllEnvs());
 
-// The worker protocol is WebSocket-only (plan section 18) and Box has no private
-// control-plane-to-worker ingress, so validateBoxConfig() — invoked by
-// BoxRunnerProvider.create() — now rejects Box unconditionally. The create/resume
-// flow tests below exercise Box client plumbing (fork noEnv, checkpoint, capacity)
-// that Box's future private-ingress section will re-enable; they are skipped until
-// then rather than deleted so that work can revive them.
+// Box worker-channel ingress is provided by the ascii.dev `host` proxy: the
+// worker binds tcp:0.0.0.0:8787 inside the Box, create() runs `host 8787`, and
+// the control plane dials the resulting public WSS URL. These fake-client flows
+// exercise the fork(noEnv), bootstrap, host-discovery, checkpoint, and capacity
+// plumbing without a real Box.
 describe("Box provider fake-client flow", () => {
   it("uses syntactically valid shell for detached worker bootstrap", () => {
     const parsed = spawnSync("sh", ["-n", "-c", WORKER_BOOTSTRAP_COMMAND], { encoding: "utf8" });
@@ -129,7 +145,7 @@ describe("Box provider fake-client flow", () => {
     expect(WORKER_BOOTSTRAP_COMMAND).not.toContain("printenv");
   });
 
-  it.skip("forks a template with noEnv and a hygienic explicit worker environment", async () => {
+  it("forks a template with noEnv, a hygienic worker environment, and a hosted channel", async () => {
     boxEnv();
     const fake = fakeBox();
     const { run, scope } = await runWithClaim();
@@ -140,8 +156,25 @@ describe("Box provider fake-client flow", () => {
     expect(fake.forks[0]).toMatchObject({ source: "bx_template", input: { noEnv: true } });
     expect(fake.forks[0]!.input.env).not.toHaveProperty("BOX_API_KEY");
     expect(fake.forks[0]!.input.env).not.toHaveProperty("DATABASE_URL");
+    // The worker gets its channel identity (binds tcp:0.0.0.0:8787).
+    expect(fake.forks[0]!.input.env).toMatchObject({
+      TASK_ORCH_WORKER_INSTANCE_ID: ref!.channelInstanceId,
+      TASK_ORCH_WORKER_CHANNEL_ENDPOINT: "tcp:0.0.0.0:8787",
+    });
+    // create() hosted the port and resolved a WSS dial endpoint carrying the
+    // proxy token as _port_auth.
+    expect(fake.calls).toContain("command:host");
+    expect(ref!.channelEndpoint).toMatch(
+      /^wss:\/\/box-\d+-8787\.on\.ascii\.dev\/worker\/channel\?_port_auth=faketoken\d+$/
+    );
     const [mapping] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
-    expect(mapping).toMatchObject({ boxId: ref?.handle, boxTemplateId: "bx_template", state: "running" });
+    expect(mapping).toMatchObject({
+      boxId: ref?.handle,
+      boxTemplateId: "bx_template",
+      state: "running",
+      channelInstanceId: ref!.channelInstanceId,
+      channelEndpoint: ref!.channelEndpoint,
+    });
     const [session] = await db
       .select({ workerLog: agentSessions.workerLog })
       .from(agentSessions)
@@ -150,7 +183,7 @@ describe("Box provider fake-client flow", () => {
     expect(fake.calls).toContain("command:bootstrap-log");
   });
 
-  it.skip("checkpoints, resumes the same Box, and uses noEnv on resume", async () => {
+  it("checkpoints, resumes the same Box, and uses noEnv on resume", async () => {
     boxEnv();
     const fake = fakeBox();
     const { run, scope } = await runWithClaim();
@@ -166,7 +199,7 @@ describe("Box provider fake-client flow", () => {
     expect(mapping).toMatchObject({ boxId: first!.handle, snapshotId: `snap_${first!.handle}`, state: "running" });
   });
 
-  it.skip("defers capacity and preserves a mapped Box for recoverable or missing remote state", async () => {
+  it("defers capacity and preserves a mapped Box for recoverable or missing remote state", async () => {
     boxEnv();
     const fake = fakeBox();
     fake.setLimit({ canStart: false, activeBoxes: 2, maxActiveBoxes: 2 });
@@ -187,7 +220,7 @@ describe("Box provider fake-client flow", () => {
     expect(fake.calls.some((call) => call.startsWith("remove:"))).toBe(false);
   });
 
-  it.skip("uses checkpointing—not deletion—for a mapped cancellation fallback", async () => {
+  it("uses checkpointing—not deletion—for a mapped cancellation fallback", async () => {
     boxEnv();
     const fake = fakeBox();
     const { run, scope } = await runWithClaim();

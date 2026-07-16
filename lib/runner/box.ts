@@ -13,6 +13,8 @@ import { BOX_TEMPLATE_MANIFEST_PATH, parseBoxTemplateManifest } from "./box-temp
 import { waitForBoxCheckpoint, waitForBoxReady } from "./box-waiters";
 import { boxStateToRunnerState } from "./box-waiters";
 import { isWakeIntentFresh, isWorkerClaimLive } from "./lifecycle";
+import { newChannelInstanceId } from "../worker-channel/credential";
+import { boxChannelDialEndpoint, parseBoxHostUrl } from "../worker-channel/dispatch-env";
 import type {
   CreateRunnerInput,
   RunnerAdmission,
@@ -27,6 +29,17 @@ const WORKER_BOOTSTRAP_TIMEOUT_SECONDS = 30;
 const BOOTSTRAP_LOG_TIMEOUT_SECONDS = 10;
 const BOOTSTRAP_LOG_TAIL_LINES = 200;
 const SWEEP_KEY = "__taskOrchBoxRunnerSweep";
+// The worker binds this fixed TCP port (plan section 2) inside the Box; the
+// ascii.dev `host` proxy exposes it as a public WSS URL the control plane dials.
+const BOX_CHANNEL_PORT = 8787;
+const HOST_COMMAND_TIMEOUT_SECONDS = 30;
+// Expose the worker's channel port and print its public HTTPS URL. `host` is
+// the Box CLI's port-hosting tool (docs.ascii.dev/box/hosting); the absolute
+// $HOME path is robust against a minimal command-API PATH. `host <port>` opens
+// the firewall + registers the reverse proxy (a bare `host url` did not
+// establish forwarding in testing), and prints `https://<sub>-<port>.on.ascii.dev?_token=…`.
+const HOST_CHANNEL_COMMAND =
+  `"$HOME/.ascii/host" ${BOX_CHANNEL_PORT} --title task-orch-worker-channel`;
 
 /** Strict ownership boundary for retention/orphan cleanup. */
 export function isTaskOrchestratorBoxName(name: string | undefined): boolean {
@@ -198,15 +211,22 @@ export class BoxRunnerProvider implements RunnerProvider {
     validateBoxConfig();
     const box = this.box();
     const existing = await this.getInstance(input.runId);
+    // Resume-identity rule: a run that already has a channel instance id (its
+    // Box snapshot survives resume) reuses it so the derived worker credential
+    // stays stable; a first-time provision takes the id dispatch reserved (or
+    // mints one). The worker binds its WS listener under this identity and the
+    // control plane dials it via the host proxy.
+    const channelInstanceId =
+      existing?.channelInstanceId ?? input.channelInstanceId ?? newChannelInstanceId();
     if (existing?.boxId) {
       // A retry continues its tracked fork. It must never fork a second Box for
       // a mapping that is still usable/provisioning.
       if (existing.credentialsExpiresAt && existing.credentialsExpiresAt.getTime() <= Date.now()) {
-        return this.refreshCredentials(input, existing.boxId);
+        return this.refreshCredentials(input, existing.boxId, channelInstanceId);
       }
       const current = await box.get(existing.boxId);
-      if (current.state === "archived") return this.resumeExisting(input, existing.boxId);
-      return this.readyAndLaunch(input, existing.boxId);
+      if (current.state === "archived") return this.resumeExisting(input, existing.boxId, channelInstanceId);
+      return this.readyAndLaunch(input, existing.boxId, channelInstanceId);
     }
 
     const [run] = await db
@@ -228,7 +248,7 @@ export class BoxRunnerProvider implements RunnerProvider {
       );
     }
 
-    const env = buildBoxWorkerEnv({ runId: input.runId, repoId: run.repoId });
+    const env = buildBoxWorkerEnv({ runId: input.runId, repoId: run.repoId, channelInstanceId });
     const templateId = config.box.templateId;
     if (!templateId) throw new Error("TASK_ORCH_BOX_TEMPLATE_ID is required when TASK_ORCH_RUNNER=box");
 
@@ -252,6 +272,7 @@ export class BoxRunnerProvider implements RunnerProvider {
           lastStartedAt: new Date(),
           credentialsVersion: 1,
           lastProviderError: null,
+          channelInstanceId,
         })
         .onConflictDoUpdate({
           target: runnerInstances.runId,
@@ -263,11 +284,12 @@ export class BoxRunnerProvider implements RunnerProvider {
             lastStartedAt: new Date(),
             credentialsVersion: 1,
             lastProviderError: null,
+            channelInstanceId,
           },
         });
 
       await box.update(boxId, { name: boxName(input) });
-      return await this.readyAndLaunch(input, boxId);
+      return await this.readyAndLaunch(input, boxId, channelInstanceId);
     } catch (error) {
       const normalized = await normalizeBoxApiError(error);
       if (boxId) {
@@ -280,7 +302,11 @@ export class BoxRunnerProvider implements RunnerProvider {
     }
   }
 
-  private async readyAndLaunch(input: CreateRunnerInput, boxId: string): Promise<RunnerRef> {
+  private async readyAndLaunch(
+    input: CreateRunnerInput,
+    boxId: string,
+    channelInstanceId: string,
+  ): Promise<RunnerRef> {
     const box = this.box();
     try {
       await waitForBoxReady(box, boxId, {
@@ -334,7 +360,19 @@ export class BoxRunnerProvider implements RunnerProvider {
         await box.stop(boxId).catch(() => {});
         throw new Error("Box worker claim ownership was lost during bootstrap");
       }
-      return { runId: input.runId, handle: boxId, provider: "box" };
+
+      // Expose the worker's WS listener through the ascii.dev host proxy and
+      // derive the control-plane dial endpoint (wss URL + `_port_auth` token).
+      // The worker may still be binding 8787 — `host` opens the firewall and
+      // registers the proxy regardless; the control plane's boot backoff retries
+      // the dial until the listener is up.
+      const channelEndpoint = await this.hostWorkerChannel(box, boxId);
+      await db
+        .update(runnerInstances)
+        .set({ channelInstanceId, channelEndpoint })
+        .where(and(eq(runnerInstances.runId, input.runId), eq(runnerInstances.boxId, boxId)));
+      await emitBoxEvent(input.runId, "runner_box_channel_hosted", { boxId });
+      return { runId: input.runId, handle: boxId, provider: "box", channelInstanceId, channelEndpoint };
     } catch (error) {
       const normalized = await normalizeBoxApiError(error);
       await captureBootstrapLog(box, input.runId, boxId);
@@ -342,6 +380,28 @@ export class BoxRunnerProvider implements RunnerProvider {
       await box.stop(boxId).catch(() => {});
       throw error;
     }
+  }
+
+  /**
+   * Run `host <channel port>` inside the Box and derive the control-plane dial
+   * endpoint from its public HTTPS URL. Idempotent: re-hosting an already-hosted
+   * port returns the same subdomain and token, so a retry/resume rebuilds the
+   * same endpoint. Throws when the command fails or prints no usable URL.
+   */
+  private async hostWorkerChannel(box: BoxClient, boxId: string): Promise<string> {
+    const result = await box.command(boxId, {
+      command: HOST_CHANNEL_COMMAND,
+      cwd: ".",
+      timeoutSeconds: HOST_COMMAND_TIMEOUT_SECONDS,
+    });
+    if (!result.success || result.timedOut || result.exitCode !== 0) {
+      throw new Error(
+        `Box host command for the worker channel failed (exit ${result.exitCode ?? "null"}${result.timedOut ? ", timed out" : ""})`,
+      );
+    }
+    const hosted = parseBoxHostUrl(result.stdout);
+    if (!hosted) throw new Error("Box host command did not return a public URL for the worker channel");
+    return boxChannelDialEndpoint(hosted.origin, hosted.token);
   }
 
   /** Durable checkpoint: stop is complete only after a new completed snapshot. */
@@ -389,7 +449,11 @@ export class BoxRunnerProvider implements RunnerProvider {
   }
 
   /** Resume the archived current Box; no template fork occurs on this path. */
-  private async resumeExisting(input: CreateRunnerInput, boxId: string): Promise<RunnerRef> {
+  private async resumeExisting(
+    input: CreateRunnerInput,
+    boxId: string,
+    channelInstanceId: string,
+  ): Promise<RunnerRef> {
     const box = this.box();
     try {
       await db
@@ -398,7 +462,7 @@ export class BoxRunnerProvider implements RunnerProvider {
         .where(and(eq(runnerInstances.runId, input.runId), eq(runnerInstances.boxId, boxId)));
       await box.resume(boxId, { noEnv: true });
       await emitBoxEvent(input.runId, "runner_box_resumed", { boxId });
-      return await this.readyAndLaunch(input, boxId);
+      return await this.readyAndLaunch(input, boxId, channelInstanceId);
     } catch (error) {
       await this.recordFailure(input.runId, boxId, await normalizeBoxApiError(error));
       // A resume failure retains the old archived mapping for reconciliation; do
@@ -412,10 +476,20 @@ export class BoxRunnerProvider implements RunnerProvider {
    * source mapping remains untouched until the replacement has passed readiness,
    * so a failed refresh leaves the original snapshot resumable.
    */
-  async refreshCredentials(input: CreateRunnerInput, sourceBoxId?: string): Promise<RunnerRef> {
+  async refreshCredentials(
+    input: CreateRunnerInput,
+    sourceBoxId?: string,
+    channelInstanceIdArg?: string,
+  ): Promise<RunnerRef> {
     const instance = await this.getInstance(input.runId);
     const sourceId = sourceBoxId ?? instance?.boxId;
     if (!sourceId) throw new Error(`Box runner ${input.runId} has no source Box to refresh`);
+    // The worker channel identity is deterministic and does NOT expire (unlike
+    // the Box per-fork account credentials this refresh rotates), so the same
+    // channel instance id — hence the same derived worker credential — carries
+    // across the fork. Reuse the caller's id, else the row's, else mint.
+    const channelInstanceId =
+      channelInstanceIdArg ?? instance?.channelInstanceId ?? newChannelInstanceId();
     const source = await this.box().get(sourceId);
     if (source.state !== "archived") throw new Error("Box credential refresh requires an archived source Box");
     const [run] = await db
@@ -427,7 +501,7 @@ export class BoxRunnerProvider implements RunnerProvider {
     const box = this.box();
     let replacementId: string | undefined;
     try {
-      const env = buildBoxWorkerEnv({ runId: input.runId, repoId: run.repoId });
+      const env = buildBoxWorkerEnv({ runId: input.runId, repoId: run.repoId, channelInstanceId });
       replacementId = (await box.fork(sourceId, { env, noEnv: true })).id;
       await box.update(replacementId, { name: boxName(input) });
       await waitForBoxReady(box, replacementId, { timeoutMs: config.box.readyTimeoutMs, pollMs: config.box.pollMs });
@@ -443,10 +517,11 @@ export class BoxRunnerProvider implements RunnerProvider {
           credentialsVersion: (instance?.credentialsVersion ?? 0) + 1,
           credentialsExpiresAt: null,
           lastProviderError: null,
+          channelInstanceId,
         })
         .where(and(eq(runnerInstances.runId, input.runId), eq(runnerInstances.boxId, sourceId)));
       await emitBoxEvent(input.runId, "runner_box_rotated", { boxId: replacementId, sourceBoxId: sourceId });
-      return await this.readyAndLaunch(input, replacementId);
+      return await this.readyAndLaunch(input, replacementId, channelInstanceId);
     } catch (error) {
       if (replacementId) await box.stop(replacementId).catch(() => {});
       await this.recordFailure(input.runId, sourceId, await normalizeBoxApiError(error));

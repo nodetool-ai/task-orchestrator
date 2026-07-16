@@ -96,6 +96,34 @@ function safeCloseReason(reason: string): string {
   return Buffer.byteLength(reason, "utf8") <= 123 ? reason : reason.slice(0, 100);
 }
 
+/**
+ * Split a stored dial endpoint into the URL to dial and any extra request
+ * headers it implies. A Box endpoint carries the ascii.dev proxy's per-port
+ * token as a `_port_auth` query param; the proxy gate is a cookie, and sending
+ * `?_port_auth=` on the upgrade would 302 (cookie-set redirect) instead of
+ * proxying, so we lift it into a `Cookie: _port_auth=<t>` header and dial the
+ * clean URL. Every other endpoint (ws+unix://…, ws://[ip]:8787/…) passes
+ * through unchanged with no extra headers.
+ */
+export function resolveDialTarget(endpoint: string): { url: string; headers: Record<string, string> } {
+  // Unix-socket URLs are not parseable by WHATWG URL; they never carry proxy
+  // auth, so short-circuit before touching URL().
+  if (endpoint.startsWith("ws+unix://")) return { url: endpoint, headers: {} };
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return { url: endpoint, headers: {} };
+  }
+  const portAuth = url.searchParams.get("_port_auth");
+  if (!portAuth) return { url: endpoint, headers: {} };
+  url.searchParams.delete("_port_auth");
+  // Preserve any remaining query; drop the trailing "?" when none is left.
+  const query = url.searchParams.toString();
+  const clean = `${url.protocol}//${url.host}${url.pathname}${query ? `?${query}` : ""}`;
+  return { url: clean, headers: { Cookie: `_port_auth=${portAuth}` } };
+}
+
 function raw(data: RawData): string | ArrayBuffer | Uint8Array {
   if (typeof data === "string") return data;
   if (Array.isArray(data)) return Buffer.concat(data);
@@ -187,8 +215,11 @@ export class ControllerConnection {
     const lease = await acquireControllerLease(this.runId, this.controllerId, new Date());
     this.epoch = lease.epoch;
     const credential = mintChannelCredential(this.runId, this.instanceId);
-    const socket = this.createSocket(this.endpoint, [WORKER_CHANNEL_SUBPROTOCOL], {
-      headers: { Authorization: `Bearer ${credential}` },
+    // A Box endpoint carries the ascii.dev proxy token; lift it into a cookie
+    // and dial the clean URL. Non-Box endpoints pass through unchanged.
+    const { url: dialUrl, headers: proxyHeaders } = resolveDialTarget(this.endpoint);
+    const socket = this.createSocket(dialUrl, [WORKER_CHANNEL_SUBPROTOCOL], {
+      headers: { Authorization: `Bearer ${credential}`, ...proxyHeaders },
       handshakeTimeout: 10_000,
     });
     this.socket = socket;

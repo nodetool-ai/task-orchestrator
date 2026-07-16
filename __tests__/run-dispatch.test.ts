@@ -122,10 +122,11 @@ describe("provisionLocalChannel", () => {
 });
 
 describe("unsupportedWsProviderMessage", () => {
-  it("names the Box private-ingress gap; fly is no longer deferred (plan section 20)", () => {
-    expect(unsupportedWsProviderMessage("box")).toBe(
-      "Box runners do not yet expose a private control-plane-to-worker WebSocket endpoint."
+  it("is a generic guard now that local/fly/box all provision a WS channel", () => {
+    // Every known provider kind has its own dispatch branch; this helper is only
+    // reached for a genuinely unknown provider.
+    expect(unsupportedWsProviderMessage("mystery")).toBe(
+      "Runner provider 'mystery' does not expose a private control-plane-to-worker WebSocket endpoint."
     );
-    expect(unsupportedWsProviderMessage("fly")).toMatch(/does not expose a private control-plane-to-worker WebSocket endpoint/);
   });
 });

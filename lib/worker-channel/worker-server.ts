@@ -209,8 +209,14 @@ function parseEndpoint(config: WorkerServerConfig): ListenerAddress {
     }
     return { kind: "tcp", host: endpoint.host ?? "0.0.0.0", port: endpoint.port ?? 8787 };
   }
-  if (typeof endpoint === "string" && endpoint.startsWith("tcp://")) {
-    const parsed = new URL(endpoint);
+  if (typeof endpoint === "string" && (endpoint.startsWith("tcp://") || endpoint.startsWith("tcp:"))) {
+    // Accept both the URL form `tcp://host:port` and the listen form
+    // `tcp:host:port` — the latter is what dockerListenEndpoint/flyListenEndpoint
+    // emit (symmetric with the `unix:` listen form handled above). Without the
+    // colon-form branch a Docker/Fly worker's endpoint fell through to the unix
+    // default and bound a socket under the root-owned /app instead of TCP.
+    const normalized = endpoint.startsWith("tcp://") ? endpoint : `tcp://${endpoint.slice("tcp:".length)}`;
+    const parsed = new URL(normalized);
     return { kind: "tcp", host: parsed.hostname, port: Number(parsed.port || 8787) };
   }
   if (config.transport === "tcp" || config.port !== undefined || process.env.FLY_APP_NAME) {

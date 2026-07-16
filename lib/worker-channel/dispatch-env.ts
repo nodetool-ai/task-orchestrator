@@ -79,6 +79,58 @@ export function flyChannelDialEndpoint(privateIp: string): string {
   return `ws://[${privateIp}]:${DOCKER_CHANNEL_PORT}${CHANNEL_PATH}`;
 }
 
+// ── Box worker endpoints (plan section 20; Box ingress via ascii.dev host) ───
+// A Box worker binds the same fixed TCP port (8787) as Docker/Fly, but the
+// control plane cannot reach the Box's private network directly. Instead the
+// worker runs `host 8787` inside the Box, which registers an HTTPS reverse
+// proxy at `https://<subdomain>-8787.on.ascii.dev` (WSS-capable) gated by a
+// per-port `_token`. The control plane dials that public URL over `wss://`.
+//
+// The proxy gate is a Caddy `_port_auth` cookie: visiting `?_token=<t>` 302s
+// and sets the cookie, so a programmatic client must NOT send `?_token=` on the
+// upgrade (it would 302) — it carries the token as the `_port_auth` query param
+// on the STORED dial endpoint, which the connection dialer moves into a
+// `Cookie: _port_auth=<t>` header before dialing (see resolveDialTarget).
+
+const BOX_CHANNEL_PORT = 8787;
+
+/** Endpoint the Box worker binds (same fixed-port convention as Docker/Fly). */
+export function boxListenEndpoint(): string {
+  return `tcp:0.0.0.0:${BOX_CHANNEL_PORT}`;
+}
+
+/**
+ * Parse the public HTTPS URL and per-port token from `host <port>` stdout, e.g.
+ *   https://sous-scarp-toneme-8787.on.ascii.dev?_token=<hex>
+ * Returns null when no such URL is present (the command failed or printed
+ * nothing usable). Tolerates surrounding log lines.
+ */
+export function parseBoxHostUrl(stdout: string): { origin: string; token: string } | null {
+  const match = stdout.match(/https:\/\/[^\s?]+\?_token=[A-Za-z0-9_-]+/);
+  if (!match) return null;
+  let url: URL;
+  try {
+    url = new URL(match[0]);
+  } catch {
+    return null;
+  }
+  const token = url.searchParams.get("_token");
+  if (!token) return null;
+  return { origin: `${url.protocol}//${url.host}`, token };
+}
+
+/**
+ * The control-plane dial endpoint for a Box worker, built from a `host <port>`
+ * result. The `_port_auth` token rides as a query param on the stored endpoint;
+ * the dialer (resolveDialTarget) lifts it into the proxy's auth cookie and dials
+ * the clean `/worker/channel` URL. `origin` is the `https://…` host (converted
+ * to `wss://`).
+ */
+export function boxChannelDialEndpoint(origin: string, token: string): string {
+  const wss = origin.replace(/^https:\/\//i, "wss://").replace(/^http:\/\//i, "ws://");
+  return `${wss}${CHANNEL_PATH}?_port_auth=${encodeURIComponent(token)}`;
+}
+
 /**
  * WebSocket-only supervisor environment. It intentionally contains no
  * control-plane URL, API token, or database credential — the worker learns

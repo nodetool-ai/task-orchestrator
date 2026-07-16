@@ -185,6 +185,35 @@ describe("worker WebSocket supervisor", () => {
     socket.close();
   });
 
+  it("binds TCP from the `tcp:host:port` listen form dockerListenEndpoint emits", async () => {
+    // Regression: parseEndpoint only recognized the `tcp://` URL form, so the
+    // colon listen form (dockerListenEndpoint/flyListenEndpoint) fell through to
+    // the unix-socket default and a Docker/Fly worker bound a socket under the
+    // root-owned /app instead of TCP. The endpoint string must win over the
+    // transport/host/port fields, so pass ONLY it.
+    const root = await mkdtemp(join(tmpdir(), "worker-channel-server-"));
+    roots.push(root);
+    const runId = 71;
+    const instanceId = `wi_${"a".repeat(32)}`;
+    const token = mintChannelCredential(runId, instanceId, { secret });
+    const server = await startWorkerServer({
+      runId,
+      instanceId,
+      credential: token,
+      credentialSecret: secret,
+      outboxRoot: root,
+      endpoint: "tcp:127.0.0.1:0",
+    });
+    servers.push(server);
+    const address = server.address();
+    expect(address && typeof address === "object").toBe(true);
+
+    const socket = connect(server, token);
+    await openSocket(socket);
+    expect((await nextFrame(socket)).type).toBe("channel.hello");
+    socket.close();
+  });
+
   it("forwards controller frames to the session and streams session output to the socket", async () => {
     const { server, token, instanceId } = await makeServer();
     const socket = connect(server, token);

@@ -452,14 +452,17 @@ export const config = Object.freeze({
 export function validateBoxConfig(): void {
   if (runnerProviderKind() !== "box") return;
 
-  // Box has no private control-plane-to-worker WebSocket ingress, so the channel
-  // transport cannot be provisioned for it. The worker protocol is WebSocket-only
-  // (plan section 18); Box stays rejected until its provider supplies a private
-  // inbound endpoint. Reject explicitly rather than falling back to any other
-  // transport.
-  throw new Error(
-    "Box runners do not yet expose a private control-plane-to-worker WebSocket endpoint."
-  );
+  // Box supplies worker-channel ingress via the ascii.dev `host` proxy: the
+  // worker binds tcp:0.0.0.0:8787 inside the Box, runs `host 8787`, and the
+  // control plane dials the resulting public WSS URL (token-gated). Validate the
+  // account credential and the template the fork is created from; the endpoint
+  // itself is discovered per-run at provision time.
+  if (!config.box.apiKey) {
+    throw new Error("BOX_API_KEY is required when TASK_ORCH_RUNNER=box.");
+  }
+  if (!config.box.templateId) {
+    throw new Error("TASK_ORCH_BOX_TEMPLATE_ID is required when TASK_ORCH_RUNNER=box.");
+  }
 }
 
 /**

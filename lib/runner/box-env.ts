@@ -4,6 +4,8 @@
 
 import { AGENT_CREDENTIAL_ENV_KEYS, agentCredentialEnv } from "../agent-backend/provider-env";
 import { config, nestedDispatchMode, type NestedDispatchMode } from "../config";
+import { boxListenEndpoint, workerChannelDispatchEnv } from "../worker-channel/dispatch-env";
+import { INSTANCE_ID_PATTERN } from "../worker-channel/credential";
 
 /** Limits documented by the Box fork API. */
 export const BOX_ENV_MAX_VARIABLES = 100;
@@ -17,6 +19,10 @@ export type BoxWorkerEnvInput = {
   runId: number;
   /** The control-plane repository id, for diagnostics and worker context. */
   repoId: string;
+  /** The worker channel instance id. The worker binds its WS listener and
+   *  presents the credential derived from (runId, instanceId); the control
+   *  plane dials it over the Box `host` proxy. Required for a WS-transport Box. */
+  channelInstanceId: string;
   /** Overrides deployment config in tests or for an explicitly named instance. */
   instanceId?: string;
   /** Overrides the configured template version when the caller has resolved it. */
@@ -70,6 +76,10 @@ export function buildBoxWorkerEnv(input: BoxWorkerEnvInput): Record<string, stri
   const repoId = requiredString(input.repoId, "repoId");
   const instanceId = input.instanceId ?? config.deployment.instanceId ?? "default";
   const templateVersion = input.templateVersion ?? config.box.templateVersion ?? "unknown";
+  const channelInstanceId = requiredString(input.channelInstanceId, "channelInstanceId");
+  if (!INSTANCE_ID_PATTERN.test(channelInstanceId)) {
+    throw new Error(`Cannot build Box worker environment: invalid channelInstanceId ${channelInstanceId}`);
+  }
 
   // This is intentionally an allowlist. Do not replace it with a process.env
   // spread: Box templates may have account credentials or dashboard secrets.
@@ -82,6 +92,11 @@ export function buildBoxWorkerEnv(input: BoxWorkerEnvInput): Record<string, stri
     TASK_ORCH_NESTED_DISPATCH: input.nestedDispatch ?? nestedDispatchMode(),
     TASK_ORCH_RUNNER_REPO_PATH: repoPath,
     SESSION_ROOT: input.sessionRoot ?? DEFAULT_SESSION_ROOT,
+    // Worker WebSocket channel identity: the worker binds boxListenEndpoint()
+    // (tcp:0.0.0.0:8787) and requires the control plane to present the credential
+    // derived from (runId, channelInstanceId). Same env shape the Docker/Fly
+    // workers receive — see workerChannelDispatchEnv.
+    ...workerChannelDispatchEnv(input.runId, channelInstanceId, boxListenEndpoint()),
   };
 
   // Keep the allowlist coupled to the credential registry.  Iterating the
