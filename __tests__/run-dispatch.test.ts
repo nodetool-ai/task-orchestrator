@@ -1,10 +1,15 @@
 // __tests__/run-dispatch.test.ts
 import { describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
+import { join } from "node:path";
 import { db } from "../db";
-import { agentSessions } from "../db/schema";
+import { agentSessions, runnerInstances } from "../db/schema";
 import { create, get } from "../lib/runs";
-import { dispatchRun } from "../lib/run-dispatch";
+import {
+  dispatchRun,
+  provisionLocalChannel,
+  unsupportedWsProviderMessage,
+} from "../lib/run-dispatch";
 
 describe("dispatchRun", () => {
   it("claims an unclaimed run and calls spawn once", async () => {
@@ -83,5 +88,45 @@ describe("dispatchRun", () => {
     expect(row.status).toBe("preparing");
     expect(row.error).toBeNull();
     expect(row.completedAt).toBeNull();
+  });
+});
+
+describe("provisionLocalChannel", () => {
+  it("reserves the dial endpoint and derives matching local endpoints", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    const channel = await provisionLocalChannel(run.id);
+
+    const expectedSocket = join(process.cwd(), ".worker-sockets", `${channel.instanceId}.sock`);
+    expect(channel.instanceId).toMatch(/^wi_[a-f0-9]{32}$/);
+    expect(channel.socketPath).toBe(expectedSocket);
+    // Worker binds the `unix:` listen form; control plane dials the `ws+unix://` form.
+    expect(channel.listenEndpoint).toBe(`unix:${expectedSocket}`);
+    expect(channel.dialEndpoint).toBe(`ws+unix://${expectedSocket}:/worker/channel`);
+
+    // A runner_instances row now carries the reserved channel identity + dial endpoint.
+    const [row] = await db
+      .select()
+      .from(runnerInstances)
+      .where(eq(runnerInstances.runId, run.id));
+    expect(row.channelInstanceId).toBe(channel.instanceId);
+    expect(row.channelEndpoint).toBe(channel.dialEndpoint);
+    expect(row.provider).toBe("local");
+  });
+
+  it("is idempotent for the same instance id", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    const first = await provisionLocalChannel(run.id);
+    const second = await provisionLocalChannel(run.id, first.instanceId);
+    expect(second.dialEndpoint).toBe(first.dialEndpoint);
+  });
+});
+
+describe("unsupportedWsProviderMessage", () => {
+  it("names the Box private-ingress gap and each deferred provider section", () => {
+    expect(unsupportedWsProviderMessage("box")).toBe(
+      "Box runners do not yet expose a private control-plane-to-worker WebSocket endpoint."
+    );
+    expect(unsupportedWsProviderMessage("docker")).toMatch(/section 19/);
+    expect(unsupportedWsProviderMessage("fly")).toMatch(/section 20/);
   });
 });

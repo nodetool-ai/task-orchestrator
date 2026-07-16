@@ -12,11 +12,13 @@
 import { config } from "dotenv";
 config({ path: ".env.local" });
 
+import { config as appConfig } from "../lib/config";
 import { driveDispatchedRun } from "../lib/runs";
 import { insideWorker } from "../lib/runner/provider";
 import { startWorkerLogFlusher } from "../lib/runner/worker-log-store";
 import { installProcessSafetyNet } from "../lib/transient-errors";
-import { httpTransportConfigured } from "../lib/worker";
+import { httpTransportConfigured, websocketTransportConfigured } from "../lib/worker";
+import { startWorkerServer, type WorkerServer } from "../lib/worker-channel/worker-server";
 import { ProtocolMismatchError } from "../lib/worker/http-transport";
 import { createLogger } from "../lib/worker/log";
 
@@ -36,7 +38,7 @@ async function main() {
 
   log.info("worker starting", {
     runId,
-    transport: httpTransportConfigured() ? "http" : "db",
+    transport: websocketTransportConfigured() ? "ws" : httpTransportConfigured() ? "http" : "db",
     pid: process.pid,
   });
 
@@ -59,7 +61,16 @@ async function main() {
   }
 
   let exitCode = 0;
+  let supervisor: WorkerServer | undefined;
   try {
+    if (websocketTransportConfigured()) {
+      supervisor = await startWorkerServer({
+        runId,
+        instanceId: appConfig.worker.channelInstanceId!,
+        credential: appConfig.worker.channelCredential!,
+        endpoint: appConfig.worker.channelEndpoint!,
+      });
+    }
     await driveDispatchedRun(runId);
     log.info("worker finished", { runId });
   } catch (e) {
@@ -78,6 +89,7 @@ async function main() {
     }
     exitCode = 1;
   } finally {
+    await supervisor?.close().catch(() => {});
     // Terminal flush of runner.log — wraps BOTH the success and the catch path
     // so the last bytes land regardless of how the run ended. Runs BEFORE
     // process.exit (which would otherwise terminate before this awaited flush).

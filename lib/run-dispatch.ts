@@ -2,8 +2,9 @@
 import { and, eq, inArray, isNull, notInArray } from "drizzle-orm";
 import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { lstat, mkdir, readdir, unlink } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { db } from "../db";
 import { agentSessions, runnerInstances } from "../db/schema";
 import { AGENT_CREDENTIAL_ENV_KEYS } from "./agent-backend/provider-env";
@@ -18,6 +19,7 @@ import {
   floatEnv,
   lightweightIsolation,
   runnerProviderKind,
+  workerTransport,
 } from "./config";
 import { isWorkerLive } from "./run-liveness";
 import { runNonce } from "./run-nonce";
@@ -33,6 +35,18 @@ import {
 import { recordDispatch, recordRunnerEvent, timeRunnerPhase } from "./runner/telemetry";
 import { isTerminalStatus } from "./types";
 import { workerDispatchEnv } from "./worker/token";
+import { newChannelInstanceId } from "./worker-channel/credential";
+import {
+  reserveChannelIdentity,
+  setChannelEndpoint,
+} from "./worker-channel/repository";
+import { connectRun } from "./worker-channel/controller";
+import {
+  localDialEndpoint,
+  localListenEndpoint,
+  localSocketPath,
+  workerChannelDispatchEnv,
+} from "./worker-channel/dispatch-env";
 
 // Spawns the worker for a run and returns a truthy "pid" on success or null on
 // failure. May be async (the Docker API is): dispatchRun awaits it.
@@ -620,13 +634,39 @@ export async function dispatchRun(
       }
       pid = spawned;
     } else {
+      const useChannel = workerTransport() === "ws";
+      // Until sections 19/20 land, only the local child provisions a private
+      // control-plane-to-worker WebSocket endpoint. Every other provider fails
+      // fast with an explicit unsupported-provider error — never an HTTP fallback.
+      if (useChannel && provider !== "local") {
+        return finish(await failSpawn(runId, outcome.scope, unsupportedWsProviderMessage(provider)));
+      }
+      let channel: LocalChannelProvisioning | undefined;
+      if (useChannel) channel = await provisionLocalChannel(runId);
       const ref = await timeRunnerPhase(
         "runner_create",
-        () => getRunnerProvider().create({ runId, scope: outcome.scope }),
+        () => getRunnerProvider().create({
+          runId,
+          scope: outcome.scope,
+          channelInstanceId: channel?.instanceId,
+          channelEndpoint: channel?.dialEndpoint,
+        }),
         { provider, fields: { runId, scope: outcome.scope } }
       );
       if (!ref) {
         return finish(await failSpawn(runId, outcome.scope, "run worker did not start (spawn returned no pid — worker image/runtime available?)"));
+      }
+      if (channel) {
+        // A ws-mode provider must surface a control-plane-dialable endpoint.
+        if (!ref.channelEndpoint) {
+          return finish(await failSpawn(runId, outcome.scope, "runner started without a worker channel endpoint"));
+        }
+        await setChannelEndpoint(runId, channel.instanceId, ref.channelEndpoint);
+        // Connect off the dispatch path: the worker is still booting its
+        // listener, and dispatch must not block on the controller handshake.
+        void connectRun(runId).catch((err) =>
+          console.error(`Worker channel connect failed for run ${runId}:`, err)
+        );
       }
       handle = ref.handle;
     }
@@ -659,6 +699,102 @@ async function failSpawn(runId: number, scope: string, message: string): Promise
   if (released.count === 0) return "already-claimed";
   await runs().failRun(runId, message);
   return "spawn-failed";
+}
+
+// ── worker channel provisioning (local) ──────────────────────────────────────
+
+/** Endpoints a local ws-mode dispatch derives for one worker instance. */
+export interface LocalChannelProvisioning {
+  instanceId: string;
+  /** What the worker binds (unix:<absolute path>). */
+  listenEndpoint: string;
+  /** What the control plane dials (ws+unix://<path>:/worker/channel). */
+  dialEndpoint: string;
+  socketPath: string;
+}
+
+/** The exact unsupported-provider message for a provider whose ws provisioning
+ *  section has not landed (Docker: 19, Fly: 20, Box: pending private ingress). */
+export function unsupportedWsProviderMessage(provider: string): string {
+  const section: Record<string, string> = {
+    docker: "Docker runner WebSocket provisioning is not implemented yet (see plan section 19).",
+    fly: "Fly runner WebSocket provisioning is not implemented yet (see plan section 20).",
+    box: "Box runners do not yet expose a private control-plane-to-worker WebSocket endpoint.",
+  };
+  return section[provider] ?? `Runner provider '${provider}' does not expose a private control-plane-to-worker WebSocket endpoint.`;
+}
+
+/**
+ * Reserve a channel identity for a local worker and derive its endpoints. The
+ * dial endpoint (a `ws+unix://` URL) is stored on the runner_instances row so a
+ * reconnect finds it; the listen endpoint is handed to the worker via env.
+ * Idempotent for the same instance id.
+ */
+export async function provisionLocalChannel(
+  runId: number,
+  instanceId: string = newChannelInstanceId(),
+): Promise<LocalChannelProvisioning> {
+  const socketPath = localSocketPath(instanceId);
+  const listenEndpoint = localListenEndpoint(socketPath);
+  const dialEndpoint = localDialEndpoint(socketPath);
+  // Create the socket directory (0700) at dispatch so the worker only has to
+  // bind. The worker recreates it defensively too.
+  await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 });
+  // Local dispatch has no runner_instances row of its own; create one so the
+  // channel state (identity, endpoint, controller lease) has somewhere to live.
+  await db
+    .insert(runnerInstances)
+    .values({ runId, provider: "local", state: "starting" })
+    .onConflictDoNothing();
+  await reserveChannelIdentity(runId, instanceId, dialEndpoint);
+  return { instanceId, listenEndpoint, dialEndpoint, socketPath };
+}
+
+/**
+ * Unlink abandoned local worker sockets. A socket is safe to remove only when it
+ * is a socket owned by the current uid AND its run is gone or terminal with no
+ * live worker — never one whose worker is still live. Runs each local sweep tick.
+ */
+export async function sweepWorkerSockets(cwd: string = process.cwd()): Promise<void> {
+  const dir = join(cwd, ".worker-sockets");
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return; // no socket dir yet — nothing to clean
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  for (const entry of entries) {
+    if (!entry.endsWith(".sock")) continue;
+    const instanceId = entry.slice(0, -".sock".length);
+    if (!/^wi_[a-f0-9]{32}$/.test(instanceId)) continue;
+    const full = join(dir, entry);
+    let info;
+    try {
+      info = await lstat(full);
+    } catch {
+      continue;
+    }
+    if (!info.isSocket()) continue;
+    if (uid !== undefined && info.uid !== uid) continue;
+    const rows = await db
+      .select({
+        status: agentSessions.status,
+        workerScope: agentSessions.workerScope,
+        heartbeatAt: agentSessions.heartbeatAt,
+      })
+      .from(runnerInstances)
+      .innerJoin(agentSessions, eq(runnerInstances.runId, agentSessions.id))
+      .where(eq(runnerInstances.channelInstanceId, instanceId));
+    const row = rows[0];
+    // Keep a socket only while its run is non-terminal AND a live worker owns it.
+    const live =
+      row != null &&
+      !isTerminalStatus(row.status as Parameters<typeof isTerminalStatus>[0]) &&
+      isWorkerLive({ workerScope: row.workerScope, heartbeatAt: row.heartbeatAt });
+    if (live) continue;
+    await unlink(full).catch(() => {});
+  }
 }
 
 // ── pending-run pump ───────────────────────────────────────────────────────
@@ -788,9 +924,9 @@ export function stopPendingRunPump(): void {
 // Worker execution runs in its own process/container so a web-service restart or
 // redeploy cannot signal it. Prefer an ad-hoc Docker container (TASK_ORCH_WORKER_IMAGE
 // set — the compose/prod path); fall back to a plain detached tsx process for dev.
-export const defaultSpawn: SpawnFn = async (runId, scope) => {
+export const defaultSpawn = async (runId: number, scope: string, channelInstanceId?: string, channelEndpoint?: string): Promise<number | null> => {
   if (process.env.TASK_ORCH_WORKER_IMAGE) return dockerSpawn(runId, scope);
-  return detachedSpawn(runId, scope);
+  return detachedSpawn(runId, scope, channelInstanceId, channelEndpoint);
 };
 
 // One worker container per run, launched via the mounted Docker socket. The
@@ -919,11 +1055,21 @@ function spawnLocalRunWorker(
 // or NEXTAUTH_URL in dev) with a run-scoped token and NO database credentials —
 // the same contract as the container paths. No restart-survival, but dev
 // doesn't redeploy.
-function detachedSpawn(runId: number, _scope: string): number | null {
+function detachedSpawn(
+  runId: number,
+  _scope: string,
+  channelInstanceId?: string,
+  listenEndpoint?: string,
+): number | null {
+  // In ws mode the worker gets only its channel identity + listen endpoint
+  // (no control-plane URL, token, or DATABASE_URL). Otherwise fall back to the
+  // legacy HTTP dispatch env until section 18 deletes it.
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     TASK_ORCH_INSIDE_WORKER: "1",
-    ...workerDispatchEnv(runId),
+    ...(channelInstanceId && listenEndpoint
+      ? workerChannelDispatchEnv(runId, channelInstanceId, listenEndpoint)
+      : workerDispatchEnv(runId)),
   };
   delete env.DATABASE_URL;
   return spawnLocalRunWorker(runId, { env });

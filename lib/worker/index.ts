@@ -32,7 +32,15 @@ function insideWorkerProcess(): boolean {
 
 /** True when this process should (and can) speak the worker HTTP protocol. */
 export function httpTransportConfigured(): boolean {
-  return insideWorkerProcess() && !!config.worker.apiUrl && !!config.worker.apiToken;
+  return insideWorkerProcess() && config.worker.transport === "http" && !!config.worker.apiUrl && !!config.worker.apiToken;
+}
+
+/** True when the supervisor has everything needed to expose its private WS
+ * listener. The run driver remains on the legacy HTTP adapter during the
+ * compatibility migration, but this prevents accidental credential fallback. */
+export function websocketTransportConfigured(): boolean {
+  return insideWorkerProcess() && config.worker.transport === "ws" &&
+    !!config.worker.channelInstanceId && !!config.worker.channelCredential && !!config.worker.channelEndpoint;
 }
 
 /** Test-only escape hatch (see the module docstring). */
@@ -51,7 +59,7 @@ let cached: Promise<RunTransport> | null = null;
  */
 export function runTransport(): Promise<RunTransport> {
   if (!cached) {
-    if (insideWorkerProcess() && !httpTransportConfigured() && !dbAllowedInWorker()) {
+    if (insideWorkerProcess() && config.worker.transport === "http" && !httpTransportConfigured() && !dbAllowedInWorker()) {
       throw new Error(
         "This process is a run worker (TASK_ORCH_INSIDE_WORKER=1) without worker " +
           "API credentials. Workers speak the HTTP protocol only — dispatch must " +
@@ -70,6 +78,12 @@ export function runTransport(): Promise<RunTransport> {
         });
         log.info("worker transport selected", { kind: "http", baseUrl: config.worker.apiUrl });
         return t;
+      }
+      // The websocket supervisor is started by scripts/run-worker.  The driver
+      // still uses the in-process compatibility seam until its semantic event
+      // migration lands; never silently select the HTTP transport in ws mode.
+      if (insideWorkerProcess() && config.worker.transport === "ws" && !dbAllowedInWorker()) {
+        throw new Error("WebSocket worker transport requires the websocket compatibility driver; no HTTP fallback is permitted.");
       }
       const { dbTransport } = await import("./db-transport");
       if (insideWorkerProcess()) log.debug("worker transport selected", { kind: "db" });

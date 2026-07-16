@@ -58,3 +58,28 @@ describe("driveDispatchedRun", () => {
     await expect(driveDispatchedRun(999999)).resolves.toBeUndefined();
   });
 });
+
+// The env a locally dispatched ws-mode worker receives: only its channel
+// identity + listen endpoint, no control-plane URL/token/DATABASE_URL.
+describe("workerChannelDispatchEnv (local ws worker)", () => {
+  it("carries the channel identity and listen endpoint only", async () => {
+    const { workerChannelDispatchEnv, localListenEndpoint, localSocketPath } = await import(
+      "../lib/worker-channel/dispatch-env"
+    );
+    process.env.TASK_ORCH_WORKER_CHANNEL_SECRET = "run-worker-test-secret";
+    const instanceId = "wi_00112233445566778899aabbccddeeff";
+    const listen = localListenEndpoint(localSocketPath(instanceId));
+    const env = workerChannelDispatchEnv(7, instanceId, listen);
+
+    expect(env).toMatchObject({
+      TASK_ORCH_WORKER_TRANSPORT: "ws",
+      TASK_ORCH_WORKER_INSTANCE_ID: instanceId,
+      TASK_ORCH_WORKER_CHANNEL_ENDPOINT: listen,
+    });
+    expect(env.TASK_ORCH_WORKER_CHANNEL_CREDENTIAL).toMatch(/^wc1\./);
+    expect(env).not.toHaveProperty("DATABASE_URL");
+    expect(env).not.toHaveProperty("TASK_ORCH_WORKER_API_URL");
+    expect(env).not.toHaveProperty("TASK_ORCH_WORKER_TOKEN");
+    delete process.env.TASK_ORCH_WORKER_CHANNEL_SECRET;
+  });
+});

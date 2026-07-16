@@ -188,8 +188,10 @@ async function removeOwnedSocket(socketPath: string): Promise<void> {
 
 function parseEndpoint(config: WorkerServerConfig): ListenerAddress {
   const endpoint = config.endpoint ?? appConfig.worker.channelEndpoint;
-  if (config.socketPath || (typeof endpoint === "string" && (endpoint.startsWith("/") || endpoint.startsWith("unix://")))) {
-    const raw = config.socketPath ?? (typeof endpoint === "string" ? endpoint.replace(/^unix:\/\//, "") : undefined);
+  if (config.socketPath || (typeof endpoint === "string" && (endpoint.startsWith("/") || endpoint.startsWith("unix:")))) {
+    // Accept both the listen form `unix:<abs path>` and the URL form
+    // `unix://<abs path>`; the control plane dials the separate `ws+unix://` URL.
+    const raw = config.socketPath ?? (typeof endpoint === "string" ? endpoint.replace(/^unix:(\/\/)?/, "") : undefined);
     const socketPath = raw ? decodeURIComponent(raw) : join(process.cwd(), ".worker-sockets", `${config.instanceId}.sock`);
     return { kind: "unix", socketPath };
   }

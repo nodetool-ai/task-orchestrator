@@ -481,6 +481,15 @@ const BOX_NON_NEGATIVE_INTEGER_KEYS = [
 export function validateBoxConfig(): void {
   if (runnerProviderKind() !== "box") return;
 
+  // Box has no private control-plane-to-worker WebSocket ingress yet, so the
+  // channel transport cannot be provisioned for it (plan section 10.3). Reject
+  // explicitly rather than silently falling back to another transport.
+  if (workerTransport() === "ws") {
+    throw new Error(
+      "Box runners do not yet expose a private control-plane-to-worker WebSocket endpoint."
+    );
+  }
+
   const errors: string[] = [];
   if (!config.box.apiKey) errors.push("BOX_API_KEY is required when TASK_ORCH_RUNNER=box");
   if (!config.box.templateId) {

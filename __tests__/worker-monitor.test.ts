@@ -7,6 +7,8 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
+import { existsSync } from "node:fs";
+import { createServer } from "node:net";
 import { db } from "../db";
 import { agentSessions } from "../db/schema";
 import { create, get, getWorkerLog, handleWorkerDeath } from "../lib/runs";
@@ -20,7 +22,9 @@ import {
   handleContainerExit,
   handleWorkerEvent,
   instanceId,
+  provisionLocalChannel,
   sweepWorkerContainers,
+  sweepWorkerSockets,
   type DockerLike,
 } from "../lib/run-dispatch";
 
@@ -517,5 +521,43 @@ describe("sweepWorkerContainers", () => {
     await sweepWorkerContainers(docker);
 
     expect((await get(run.id))?.status).toBe("preparing");
+  });
+});
+
+// Local reaper socket cleanup (plan section 10.2): abandoned worker sockets are
+// unlinked, but a live worker's socket is spared.
+describe("sweepWorkerSockets", () => {
+  async function bindSocket(path: string): Promise<() => Promise<void>> {
+    const server = createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(path, () => resolve());
+    });
+    return () => new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
+  it("unlinks an abandoned socket but keeps a live worker's socket", async () => {
+    const dead = await create({ goal: "<chat>", defer: true });
+    const live = await create({ goal: "<chat>", defer: true });
+    const deadCh = await provisionLocalChannel(dead.id);
+    const liveCh = await provisionLocalChannel(live.id);
+
+    const closers = [await bindSocket(deadCh.socketPath), await bindSocket(liveCh.socketPath)];
+    try {
+      // The dead run is terminal; the live run holds a fresh worker claim.
+      await patchRun(dead.id, { status: "failed", workerScope: null, heartbeatAt: null });
+      await patchRun(live.id, {
+        status: "running",
+        workerScope: `run-${live.id}-live`,
+        heartbeatAt: new Date(),
+      });
+
+      await sweepWorkerSockets();
+
+      expect(existsSync(deadCh.socketPath)).toBe(false);
+      expect(existsSync(liveCh.socketPath)).toBe(true);
+    } finally {
+      await Promise.all(closers.map((close) => close().catch(() => undefined)));
+    }
   });
 });

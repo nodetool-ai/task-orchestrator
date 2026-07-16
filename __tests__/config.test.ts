@@ -49,6 +49,7 @@ const KEYS = [
   "TASK_ORCH_BOX_MAX_ACTIVE",
   "TASK_ORCH_WORKER_API_URL",
   "TASK_ORCH_WORKER_API_SECRET",
+  "TASK_ORCH_WORKER_TRANSPORT",
   "AUTH_SECRET",
 ] as const;
 const saved: Record<string, string | undefined> = {};
@@ -247,6 +248,14 @@ describe("Box configuration", () => {
   it("is inert when Box is not selected", () => {
     set("TASK_ORCH_RUNNER", "local");
     expect(() => validateBoxConfig()).not.toThrow();
+  });
+
+  it("rejects the WebSocket transport with the unsupported-provider message", () => {
+    selectBoxWithRequiredValues();
+    set("TASK_ORCH_WORKER_TRANSPORT", "ws");
+    expect(() => validateBoxConfig()).toThrow(
+      /Box runners do not yet expose a private control-plane-to-worker WebSocket endpoint\./
+    );
   });
 
   it("reads Box settings lazily with the documented defaults", () => {

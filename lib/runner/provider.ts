@@ -27,12 +27,16 @@ export interface RunnerRef {
   /** Provider-scoped id: Docker container name, Fly machine id, or Box id. */
   handle: string;
   provider: RunnerProviderKind;
+  channelEndpoint?: string;
+  channelInstanceId?: string;
 }
 
 export interface CreateRunnerInput {
   runId: number;
   /** Container/machine name, e.g. `run-<id>-<nonce>` (today's workerScope). */
   scope: string;
+  channelInstanceId?: string;
+  channelEndpoint?: string;
 }
 
 /** A provider's pre-provisioning capacity decision. */

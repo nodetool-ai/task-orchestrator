@@ -109,15 +109,23 @@ export class ControllerConnection {
         throw new ControllerProtocolError("worker does not support protocol v1", CLOSE_CODE_PROTOCOL_MISMATCH, false);
       }
       const lastAcceptedWorkerSeq = await getLastAcceptedWorkerSeq(this.runId, this.instanceId);
-      this.send(this.frame("channel.accept", {
-        protocol: WORKER_CHANNEL_PROTOCOL,
-        controllerEpoch: lease.epoch,
-        leaseId: lease.leaseId,
-        lastAcceptedWorkerSeq,
-        heartbeatMs: DEFAULT_HEARTBEAT_MS,
-        disconnectGraceMs: DEFAULT_DISCONNECT_GRACE_MS,
-        maxInFlightBytes: DEFAULT_MAX_IN_FLIGHT_BYTES,
-      }) as WireFrame);
+      // channel.accept is a handshake frame ({v,type,seq,payload}), not an
+      // envelope: the codec validates it strictly, so it must not carry the
+      // id/runId/instanceId/sentAt envelope fields.
+      this.send({
+        v: WORKER_CHANNEL_PROTOCOL,
+        type: "channel.accept",
+        seq: 0,
+        payload: {
+          protocol: WORKER_CHANNEL_PROTOCOL,
+          controllerEpoch: lease.epoch,
+          leaseId: lease.leaseId,
+          lastAcceptedWorkerSeq,
+          heartbeatMs: DEFAULT_HEARTBEAT_MS,
+          disconnectGraceMs: DEFAULT_DISCONNECT_GRACE_MS,
+          maxInFlightBytes: DEFAULT_MAX_IN_FLIGHT_BYTES,
+        },
+      } as WireFrame);
       await markChannelConnected(this.runId, this.instanceId, new Date());
       await rebasePendingCommands(this.runId, this.instanceId, lease.epoch);
       for (const command of await listPendingCommands(this.runId, this.instanceId, lease.epoch)) this.sendCommandRow(command);
