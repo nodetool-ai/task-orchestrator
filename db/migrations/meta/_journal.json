@@ -120,6 +120,13 @@
       "when": 1784016000000,
       "tag": "0016_runner_instances_box",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1784151341000,
+      "tag": "0017_worker_channels",
+      "breakpoints": true
     }
   ]
 }

@@ -3,11 +3,13 @@ import {
   pgTable,
   text,
   integer,
+  bigint,
   real,
   serial,
   boolean,
   timestamp,
   customType,
+  uuid,
   primaryKey,
   index,
   uniqueIndex,
@@ -360,10 +362,85 @@ export const runnerInstances = pgTable(
     credentialsExpiresAt: ts("credentials_expires_at"),
     workerVersion: text("worker_version"),
     lastProviderError: text("last_provider_error"),
+    channelInstanceId: text("channel_instance_id"),
+    channelEndpoint: text("channel_endpoint"),
+    controllerEpoch: integer("controller_epoch").notNull().default(0),
+    controllerId: text("controller_id"),
+    controllerLeaseExpiresAt: ts("controller_lease_expires_at"),
+    channelConnectedAt: ts("channel_connected_at"),
+    channelLastSeenAt: ts("channel_last_seen_at"),
   },
   (t) => ({
     // Reconciliation and orphan detection locate current Box mappings by ID.
     boxIdIdx: index("runner_instances_box_id_idx").on(t.boxId),
+    controllerLeaseExpiresIdx: index("runner_instances_controller_lease_expires_at_idx").on(
+      t.controllerLeaseExpiresAt
+    ),
+    channelInstanceIdIdx: uniqueIndex("runner_instances_channel_instance_id_idx")
+      .on(t.channelInstanceId)
+      .where(sql`${t.channelInstanceId} IS NOT NULL`),
+  })
+);
+
+export const workerChannelCommands = pgTable(
+  "worker_channel_commands",
+  {
+    id: uuid("id").primaryKey(),
+    runId: integer("run_id")
+      .notNull()
+      .references(() => agentSessions.id, { onDelete: "cascade" }),
+    instanceId: text("instance_id").notNull(),
+    controllerEpoch: integer("controller_epoch").notNull(),
+    seq: bigint("seq", { mode: "number" }).notNull(),
+    type: text("type").notNull(),
+    payload: jsonb("payload").notNull(),
+    state: text("state").notNull().default("pending"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    ackedAt: ts("acked_at"),
+  },
+  (t) => ({
+    runInstanceEpochSeqUniq: uniqueIndex(
+      "worker_channel_commands_run_instance_epoch_seq_uniq"
+    ).on(t.runId, t.instanceId, t.controllerEpoch, t.seq),
+    runInstanceStateSeqIdx: index("worker_channel_commands_run_instance_state_seq_idx").on(
+      t.runId,
+      t.instanceId,
+      t.state,
+      t.seq
+    ),
+    stateCheck: check(
+      "worker_channel_commands_state_check",
+      sql`${t.state} IN ('pending', 'acked')`
+    ),
+    seqCheck: check("worker_channel_commands_seq_check", sql`${t.seq} > 0`),
+  })
+);
+
+export const workerChannelReceipts = pgTable(
+  "worker_channel_receipts",
+  {
+    id: uuid("id").primaryKey(),
+    runId: integer("run_id")
+      .notNull()
+      .references(() => agentSessions.id, { onDelete: "cascade" }),
+    instanceId: text("instance_id").notNull(),
+    workerSeq: bigint("worker_seq", { mode: "number" }).notNull(),
+    controllerEpoch: integer("controller_epoch").notNull(),
+    type: text("type").notNull(),
+    payloadSha256: text("payload_sha256").notNull(),
+    resultCommandId: uuid("result_command_id").references(() => workerChannelCommands.id),
+    appliedAt: ts("applied_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    runInstanceWorkerSeqUniq: uniqueIndex(
+      "worker_channel_receipts_run_instance_worker_seq_uniq"
+    ).on(t.runId, t.instanceId, t.workerSeq),
+    runInstanceWorkerSeqIdx: index("worker_channel_receipts_run_instance_worker_seq_idx").on(
+      t.runId,
+      t.instanceId,
+      t.workerSeq
+    ),
+    workerSeqCheck: check("worker_channel_receipts_worker_seq_check", sql`${t.workerSeq} > 0`),
   })
 );
 
@@ -623,6 +700,8 @@ export type AcceptanceCriterion = typeof acceptanceCriteria.$inferSelect;
 export type Attachment = typeof attachments.$inferSelect;
 export type AgentSession = typeof agentSessions.$inferSelect;
 export type RunnerInstance = typeof runnerInstances.$inferSelect;
+export type WorkerChannelCommand = typeof workerChannelCommands.$inferSelect;
+export type WorkerChannelReceipt = typeof workerChannelReceipts.$inferSelect;
 export type AgentEvent = typeof agentEvents.$inferSelect;
 export type AgentMessage = typeof agentMessages.$inferSelect;
 export type ChannelThread = typeof channelThreads.$inferSelect;
