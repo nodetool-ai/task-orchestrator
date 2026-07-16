@@ -26,6 +26,7 @@ import {
   executeChannelTool,
   executeToolInvoke,
   reserveToolInvoke,
+  sweepOrphanedToolInvokes,
   type ToolChannelIO,
 } from "../lib/worker-channel/tool-invoke";
 import type { OrchestratorTool } from "../lib/orchestrator-tools";
@@ -349,6 +350,105 @@ describe("control-plane tool.invoke handling (plan section 15)", () => {
     expect(reserved.duplicate).toBe(true);
     expect((reserved.replay as CommandRow).id).toBe(commands[0].id);
     expect(counter).toBe(1);
+  });
+
+  it("re-executes a redelivered invocation whose receipt has no result command (BUG 1a)", async () => {
+    const runId = await newRun();
+    // First delivery: the receipt is reserved and its worker seq acked, but the
+    // result is NEVER produced — simulating a crash/throw between the receipt
+    // commit and persistToolResultCommand. Nothing runs the tool yet.
+    const io = makeIO();
+    const frame = invokeFrame(runId, "counter", {});
+    const first = await reserveToolInvoke(frame, io);
+    expect(first.duplicate).toBe(false);
+    expect(counter).toBe(0);
+
+    // The worker redelivers the same envelope (its outbox never saw the ack). The
+    // receipt short-circuits as a duplicate, but with NO linked result command, so
+    // the caller must re-execute rather than drop it (which would hang the agent).
+    const io2 = makeIO();
+    const dup = invokeFrame(runId, "counter", {}, { id: frame.id, seq: frame.seq, callId: frame.payload.callId });
+    const reserved = await reserveToolInvoke(dup, io2);
+    expect(reserved.duplicate).toBe(true);
+    expect(reserved.replay).toBeUndefined();
+    expect(reserved.reexecute).toBe(true);
+
+    await executeToolInvoke(dup, io2);
+    expect(counter).toBe(1);
+    const results = toolResultFrames(io2);
+    expect(results).toHaveLength(1);
+    expect(resultOf(results[0]).result.content[0].text).toBe("count=1");
+    expect((results[0] as { replyTo?: string }).replyTo).toBe(frame.id);
+    const commands = await db
+      .select()
+      .from(workerChannelCommands)
+      .where(and(eq(workerChannelCommands.runId, runId), eq(workerChannelCommands.type, "tool.result")));
+    expect(commands).toHaveLength(1);
+  });
+
+  it("sweeps an orphaned tool.invoke receipt on reconnect and re-executes it (BUG 1b)", async () => {
+    const runId = await newRun();
+    // A stranded invocation: receipt committed + acked, result never produced, and
+    // the worker will not replay it (it was acked). The durable invoke payload on
+    // the receipt is the only surviving copy of the arguments.
+    const io = makeIO();
+    const frame = invokeFrame(runId, "counter", {});
+    await reserveToolInvoke(frame, io);
+    expect(counter).toBe(0);
+
+    // The reconnect sweep finds the orphan and re-executes it, delivering the
+    // result over the fresh connection.
+    const io2 = makeIO();
+    await sweepOrphanedToolInvokes(runId, instanceId, io2);
+    expect(counter).toBe(1);
+    const results = toolResultFrames(io2);
+    expect(results).toHaveLength(1);
+    expect((results[0] as { replyTo?: string }).replyTo).toBe(frame.id);
+    const commands = await db
+      .select()
+      .from(workerChannelCommands)
+      .where(and(eq(workerChannelCommands.runId, runId), eq(workerChannelCommands.type, "tool.result")));
+    expect(commands).toHaveLength(1);
+
+    // Idempotent: the receipt is now linked to its result command, so a second
+    // sweep finds no orphan and re-runs nothing.
+    const io3 = makeIO();
+    await sweepOrphanedToolInvokes(runId, instanceId, io3);
+    expect(counter).toBe(1);
+    expect(toolResultFrames(io3)).toHaveLength(0);
+  });
+
+  it("does not double-execute an invocation already in flight in this process", async () => {
+    const runId = await newRun();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let runs = 0;
+    registry.set(
+      "slow",
+      tool("slow", async () => {
+        runs += 1;
+        await gate;
+        return { content: [{ type: "text", text: "done" }] };
+      })
+    );
+    const io = makeIO();
+    const frame = invokeFrame(runId, "slow", {});
+    await reserveToolInvoke(frame, io);
+
+    // First execution starts and blocks on the gate. A redelivery arrives while it
+    // is still in flight: the in-flight guard makes the second call a no-op, so the
+    // tool body runs exactly once.
+    const p1 = executeToolInvoke(frame, io);
+    await new Promise((r) => setTimeout(r, 20));
+    const io2 = makeIO();
+    await executeToolInvoke(frame, io2);
+    expect(runs).toBe(1);
+    expect(toolResultFrames(io2)).toHaveLength(0);
+
+    release();
+    await p1;
+    expect(runs).toBe(1);
+    expect(toolResultFrames(io)).toHaveLength(1);
   });
 
   it("routes spawn, memory, and PR-mutating tools through the same path", async () => {

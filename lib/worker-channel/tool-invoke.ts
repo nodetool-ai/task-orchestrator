@@ -34,6 +34,7 @@ import {
   applyWorkerEvent,
   getCommand,
   getRunStartPolicy,
+  listOrphanedToolInvokes,
   persistCommand,
   persistToolResultCommand,
   type CommandRow,
@@ -165,7 +166,24 @@ export interface ReserveOutcome {
   /** For a duplicate whose result was already produced: the exact command to
    *  replay (rule 7). Undefined for a fresh invocation or an in-flight one. */
   replay?: CommandRow;
+  /** A duplicate whose receipt committed but whose tool.result was NEVER produced
+   *  (`result_command_id` is null). The invocation was received and acked, then its
+   *  result was lost to a crash or a throw — the caller must RE-EXECUTE it or the
+   *  agent's tool call hangs forever (BUG 1a). Distinct from a duplicate-with-result
+   *  (replay only) and from a fresh invocation (execute for the first time). */
+  reexecute?: boolean;
 }
+
+/**
+ * Envelope ids whose {@link executeToolInvoke} is currently running in THIS
+ * process. The redelivery re-exec path (BUG 1a) and the reconnect sweep (BUG 1b)
+ * both may target an invocation whose first execution is still producing its
+ * result here; this Set lets them skip it so the tool's side effect is not run a
+ * second time in-process. `persistToolResultCommand` additionally dedupes across
+ * processes by `invokeEventId`, so a cross-process race is safe too — this only
+ * trims the common same-process double-run.
+ */
+const inFlightInvocations = new Set<string>();
 
 /**
  * Record the invocation receipt and acknowledge its worker sequence (rule 3).
@@ -186,7 +204,16 @@ export async function reserveToolInvoke(
       const command = await getCommand(applied.resultCommandId);
       if (command && command.controllerEpoch === io.epoch) replay = command;
     }
-    return { duplicate: true, throughSeq: applied.lastAcceptedWorkerSeq, replay };
+    // No linked result command means the result was never produced: re-execute
+    // (BUG 1a). When a result exists under an older epoch (replay left undefined by
+    // the epoch check above), do NOT re-execute — the persisted result is delivered
+    // by the pending-command replay after rebasePendingCommands.
+    return {
+      duplicate: true,
+      throughSeq: applied.lastAcceptedWorkerSeq,
+      replay,
+      reexecute: !applied.resultCommandId,
+    };
   }
   return { duplicate: false, throughSeq: applied.lastAcceptedWorkerSeq };
 }
@@ -199,6 +226,19 @@ export async function reserveToolInvoke(
  * command replay (matched to the worker's waiter by callId).
  */
 export async function executeToolInvoke(frame: ToolInvokeEnvelope, io: ToolChannelIO): Promise<void> {
+  // In-process re-entrancy guard: a live redelivery (BUG 1a) or the reconnect
+  // sweep (BUG 1b) may target an invocation whose first execution is still in
+  // flight here. Skip it — the running execution persists the one tool.result.
+  if (inFlightInvocations.has(frame.id)) return;
+  inFlightInvocations.add(frame.id);
+  try {
+    await executeToolInvokeInner(frame, io);
+  } finally {
+    inFlightInvocations.delete(frame.id);
+  }
+}
+
+async function executeToolInvokeInner(frame: ToolInvokeEnvelope, io: ToolChannelIO): Promise<void> {
   const payload = frame.payload as ToolInvoke;
 
   const result = await executeChannelTool(frame.runId, frame.instanceId, payload, {
@@ -230,4 +270,46 @@ export async function executeToolInvoke(frame: ToolInvokeEnvelope, io: ToolChann
     payload: result,
   });
   if (command.controllerEpoch === io.epoch && io.connected) io.send(commandFrame(command, frame.id));
+}
+
+/**
+ * Recover tool invocations stranded by a control-plane crash (BUG 1b). If the
+ * process dies (or `persistToolResultCommand`/`executeChannelTool` throws) after
+ * the receipt commits and its worker sequence is acked but before a `tool.result`
+ * is produced, nothing retries it: the worker never replays an already-acked
+ * invocation, and on redelivery the receipt short-circuits as a duplicate. Such an
+ * invocation would leave the agent's tool call hung forever.
+ *
+ * Run this once on a FRESH connect, after pending commands are replayed. It finds
+ * each orphaned receipt (result_command_id null) with a durable invoke payload,
+ * reconstructs the envelope, and re-executes it. Safe to run concurrently with a
+ * live redelivery: {@link executeToolInvoke}'s in-flight Set skips an id already
+ * running here, and `persistToolResultCommand` dedupes across processes — so a
+ * result is persisted exactly once and the tool never double-runs in-process. It
+ * is fire-and-forget (never blocks the receive loop) and idempotent: a second pass
+ * finds nothing, because the first linked each receipt to its result command.
+ */
+export async function sweepOrphanedToolInvokes(
+  runId: number,
+  instanceId: string,
+  io: ToolChannelIO
+): Promise<void> {
+  const orphans = await listOrphanedToolInvokes(runId, instanceId);
+  for (const orphan of orphans) {
+    const frame: ToolInvokeEnvelope = {
+      v: 1,
+      type: "tool.invoke",
+      id: orphan.id,
+      runId: orphan.runId,
+      instanceId: orphan.instanceId,
+      // The result command is persisted under io.epoch (the current controller
+      // epoch), not the epoch the invocation was first emitted under. sentAt is
+      // diagnostic only.
+      controllerEpoch: io.epoch,
+      seq: orphan.seq,
+      sentAt: new Date().toISOString(),
+      payload: orphan.payload as ToolInvoke,
+    } as ToolInvokeEnvelope;
+    await executeToolInvoke(frame, io).catch(() => undefined);
+  }
 }

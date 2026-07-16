@@ -48,7 +48,7 @@ import {
   type WorkerEvent,
   type WireFrame,
 } from "./protocol";
-import { executeToolInvoke, reserveToolInvoke, type ToolChannelIO } from "./tool-invoke";
+import { executeToolInvoke, reserveToolInvoke, sweepOrphanedToolInvokes, type ToolChannelIO } from "./tool-invoke";
 
 export type { WorkerEventHandler };
 
@@ -239,6 +239,13 @@ export class ControllerConnection {
       // any outgoing blob so a reconnect resumes from the receiver's cursor.
       await this.blobs.rebind(this.controlBlobIO());
       this.startPings();
+      // Recover tool invocations stranded by a control-plane crash after their
+      // receipt committed and was acked but before a tool.result persisted (BUG
+      // 1b). The worker will not replay an already-acked invocation, so this sweep
+      // is the only thing that unhangs the agent's call. Fire-and-forget so it
+      // never blocks the receive loop; it is idempotent and guarded against
+      // double-running a concurrently live redelivery.
+      void sweepOrphanedToolInvokes(this.runId, this.instanceId, this.toolIO()).catch(() => undefined);
     } catch (error) {
       if (this.socket === socket) this.socket = undefined;
       socket.terminate();
@@ -435,6 +442,12 @@ export class ControllerConnection {
       const outcome = await reserveToolInvoke(frame as ToolInvokeEnvelope, this.toolIO());
       if (outcome.duplicate) {
         if (outcome.replay) this.sendCommandRow(outcome.replay, frame.id);
+        // A redelivered invocation whose receipt committed but whose result was
+        // never produced (the control plane acked it, then crashed/threw before
+        // persisting tool.result): re-execute so the agent's call is not stranded
+        // (BUG 1a). The in-flight guard + persistToolResultCommand dedupe make a
+        // double result/side effect impossible in-process.
+        else if (outcome.reexecute) void executeToolInvoke(frame as ToolInvokeEnvelope, this.toolIO()).catch(() => undefined);
         return;
       }
       void executeToolInvoke(frame as ToolInvokeEnvelope, this.toolIO()).catch(() => undefined);

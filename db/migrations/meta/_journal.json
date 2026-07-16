@@ -127,6 +127,13 @@
       "when": 1784151341000,
       "tag": "0017_worker_channels",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1784237741000,
+      "tag": "0018_tool_invoke_payload",
+      "breakpoints": true
     }
   ]
 }

@@ -859,6 +859,50 @@ export async function persistToolResultCommand(input: {
   });
 }
 
+/** A tool.invoke whose receipt committed but whose tool.result never did. */
+export type OrphanedToolInvoke = {
+  id: string;
+  runId: number;
+  instanceId: string;
+  controllerEpoch: number;
+  seq: number;
+  payload: unknown;
+};
+
+/**
+ * Tool invocations stranded by a control-plane crash (BUG 1b): receipts for
+ * `run/instance` whose `result_command_id` is still NULL and that carry a durable
+ * `invoke_payload`. The reconnect sweep re-executes each so the agent's tool call
+ * is not hung forever — the worker will not replay an already-acked invocation, so
+ * nothing else retries it. Scoped to the reconnecting channel's run+instance.
+ */
+export async function listOrphanedToolInvokes(
+  runId: number,
+  instanceId: string
+): Promise<OrphanedToolInvoke[]> {
+  const result = await queryRows(
+    db,
+    drizzleSql`
+      SELECT id, run_id, instance_id, controller_epoch, worker_seq, invoke_payload
+      FROM worker_channel_receipts
+      WHERE run_id = ${runId}
+        AND instance_id = ${instanceId}
+        AND type = 'tool.invoke'
+        AND result_command_id IS NULL
+        AND invoke_payload IS NOT NULL
+      ORDER BY worker_seq ASC
+    `
+  );
+  return result.map((row) => ({
+    id: String(row.id),
+    runId: numberValue(row.run_id, "run_id"),
+    instanceId: String(row.instance_id),
+    controllerEpoch: numberValue(row.controller_epoch, "controller_epoch"),
+    seq: numberValue(row.worker_seq, "worker_seq"),
+    payload: jsonValue(row.invoke_payload),
+  }));
+}
+
 export async function ackCommandsThrough(
   runId: number,
   instanceId: string,
@@ -958,13 +1002,24 @@ export async function applyWorkerEvent(frame: WorkerEventFrame, handler: WorkerE
             Promise<WorkerEventHandlerResult> | WorkerEventHandlerResult)(frame);
     const resultCommandId = handlerResultCommandId(handlerResult);
 
+    // Persist the raw payload ONLY for tool.invoke receipts. The reconnect sweep
+    // (BUG 1b) re-executes an orphaned invocation — one whose receipt committed and
+    // was acked, but whose tool.result was lost to a crash before it persisted —
+    // and the worker never replays an already-acked event, so the control plane is
+    // the only place the arguments still exist. Other event types keep the
+    // hash-only receipt (transcript payloads can be up to 1 MiB).
+    const invokePayload =
+      frame.type === "tool.invoke"
+        ? drizzleSql`${JSON.stringify(frame.payload)}::jsonb`
+        : drizzleSql`NULL`;
+
     await tx.execute(
       drizzleSql`
         INSERT INTO worker_channel_receipts
-          (id, run_id, instance_id, worker_seq, controller_epoch, type, payload_sha256, result_command_id)
+          (id, run_id, instance_id, worker_seq, controller_epoch, type, payload_sha256, result_command_id, invoke_payload)
         VALUES
           (${frame.id}, ${frame.runId}, ${frame.instanceId}, ${frame.seq}, ${frame.controllerEpoch},
-           ${frame.type}, ${payloadHash}, ${resultCommandId})
+           ${frame.type}, ${payloadHash}, ${resultCommandId}, ${invokePayload})
       `
     );
 

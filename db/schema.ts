@@ -429,6 +429,10 @@ export const workerChannelReceipts = pgTable(
     type: text("type").notNull(),
     payloadSha256: text("payload_sha256").notNull(),
     resultCommandId: uuid("result_command_id").references(() => workerChannelCommands.id),
+    // Raw payload of a tool.invoke receipt only (NULL for every other event type).
+    // The reconnect sweep re-executes an orphaned invocation from this; the worker
+    // never replays an already-acked event, so this is the sole surviving copy.
+    invokePayload: jsonb("invoke_payload"),
     appliedAt: ts("applied_at").notNull().defaultNow(),
   },
   (t) => ({
