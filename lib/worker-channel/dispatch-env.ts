@@ -58,3 +58,11 @@ export function workerChannelDispatchEnv(
     TASK_ORCH_WORKER_CHANNEL_ENDPOINT: listenEndpoint,
   };
 }
+
+/** Deterministic `run.start` command id for an instance. The 32 hex characters
+ * of `wi_<hex>` become a UUID, so a reconnect (or an idempotent re-send) reuses
+ * the same durable command instead of building a second snapshot. */
+export function runStartCommandId(instanceId: string): string {
+  const hex = instanceId.replace(/^wi_/, "");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}

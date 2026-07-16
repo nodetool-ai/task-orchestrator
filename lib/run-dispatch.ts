@@ -37,6 +37,7 @@ import { isTerminalStatus } from "./types";
 import { workerDispatchEnv } from "./worker/token";
 import { newChannelInstanceId } from "./worker-channel/credential";
 import {
+  persistCommand,
   reserveChannelIdentity,
   setChannelEndpoint,
 } from "./worker-channel/repository";
@@ -45,8 +46,10 @@ import {
   localDialEndpoint,
   localListenEndpoint,
   localSocketPath,
+  runStartCommandId,
   workerChannelDispatchEnv,
 } from "./worker-channel/dispatch-env";
+import { buildRunStart } from "./worker-channel/snapshot";
 
 // Spawns the worker for a run and returns a truthy "pid" on success or null on
 // failure. May be async (the Docker API is): dispatchRun awaits it.
@@ -662,10 +665,11 @@ export async function dispatchRun(
           return finish(await failSpawn(runId, outcome.scope, "runner started without a worker channel endpoint"));
         }
         await setChannelEndpoint(runId, channel.instanceId, ref.channelEndpoint);
-        // Connect off the dispatch path: the worker is still booting its
-        // listener, and dispatch must not block on the controller handshake.
-        void connectRun(runId).catch((err) =>
-          console.error(`Worker channel connect failed for run ${runId}:`, err)
+        // Connect and push the authoritative start snapshot off the dispatch
+        // path: the worker is still booting its listener, and dispatch must not
+        // block on the controller handshake or the worker's ack.
+        void startChannelForRun(runId, channel.instanceId).catch((err) =>
+          console.error(`Worker channel start failed for run ${runId}:`, err)
         );
       }
       handle = ref.handle;
@@ -748,6 +752,26 @@ export async function provisionLocalChannel(
     .onConflictDoNothing();
   await reserveChannelIdentity(runId, instanceId, dialEndpoint);
   return { instanceId, listenEndpoint, dialEndpoint, socketPath };
+}
+
+/**
+ * Connect to a freshly dispatched worker and push its authoritative `run.start`
+ * snapshot exactly once. The command id is stable per instance, so a reconnect
+ * replays the same durable command rather than building a second snapshot.
+ */
+export async function startChannelForRun(runId: number, instanceId: string): Promise<void> {
+  const connection = await connectRun(runId);
+  const startId = runStartCommandId(instanceId);
+  const snapshot = await buildRunStart(runId);
+  const row = await persistCommand({
+    runId,
+    instanceId,
+    controllerEpoch: connection.controllerEpoch,
+    type: "run.start",
+    payload: snapshot,
+    id: startId,
+  });
+  await connection.sendPersisted(row);
 }
 
 /**
