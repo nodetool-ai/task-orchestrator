@@ -13,6 +13,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "cli": "tsx cli.ts",
+    "chat": "tsx scripts/worker-chat.ts",
     "task": "tsx cli.ts",
     "pipe": "tsx scripts/pipe.ts",
     "db:generate": "drizzle-kit generate",
