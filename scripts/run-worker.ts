@@ -14,6 +14,7 @@ config({ path: ".env.local" });
 
 import { config as appConfig } from "../lib/config";
 import { driveDispatchedRun } from "../lib/runs";
+import { driveWorkerRun, type WorkerDriverSession } from "../lib/worker-runtime/context";
 import { insideWorker } from "../lib/runner/provider";
 import { startWorkerLogFlusher } from "../lib/runner/worker-log-store";
 import { installProcessSafetyNet } from "../lib/transient-errors";
@@ -64,14 +65,27 @@ async function main() {
   let supervisor: WorkerServer | undefined;
   try {
     if (websocketTransportConfigured()) {
+      // WebSocket transport (plan section 13): the control plane pushes the
+      // authoritative RunStart snapshot and all subsequent input over the
+      // channel. Start the supervisor, wait for that snapshot, build the
+      // worker run context from it, and drive the run without any Postgres or
+      // control-plane HTTP read. The supervisor is closed (drained) in the
+      // finally below.
       supervisor = await startWorkerServer({
         runId,
         instanceId: appConfig.worker.channelInstanceId!,
         credential: appConfig.worker.channelCredential!,
         endpoint: appConfig.worker.channelEndpoint!,
       });
+      const session = supervisor.session;
+      if (!session.waitForStart || !session.commands) {
+        throw new Error("worker supervisor session does not expose the ws run-driver API");
+      }
+      const start = await session.waitForStart();
+      await driveWorkerRun({ start, session: session as WorkerDriverSession });
+    } else {
+      await driveDispatchedRun(runId);
     }
-    await driveDispatchedRun(runId);
     log.info("worker finished", { runId });
   } catch (e) {
     if (e instanceof ProtocolMismatchError) {

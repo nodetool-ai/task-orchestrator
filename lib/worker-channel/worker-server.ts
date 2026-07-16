@@ -35,6 +35,7 @@ import {
   WorkerSessionProtocolError,
   type WorkerHandshakeState,
   type WorkerSessionAttachOptions,
+  type WorkerSessionCommand,
   type WorkerSessionTransport,
 } from "./worker-session";
 
@@ -69,6 +70,8 @@ export interface WorkerSessionLike {
   close(): Promise<void>;
   /** Driver-facing helpers surfaced through {@link WorkerServer.session}. */
   waitForStart?(): Promise<RunStart>;
+  /** Ordered controller-command iterator consumed by the ws run driver (section 13). */
+  commands?(): AsyncIterable<WorkerSessionCommand>;
 }
 
 export interface WorkerServerConfig {

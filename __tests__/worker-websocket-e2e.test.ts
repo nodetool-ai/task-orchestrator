@@ -28,17 +28,15 @@ import { connectRun, disconnectRun } from "../lib/worker-channel/registry";
 import { sendCommand } from "../lib/worker-channel/registry";
 import type { RunStart, ToolCallResult } from "../lib/worker-channel/protocol";
 
-// The driver refactor (section 13) has not landed: `driveWorkerRun` does not
-// exist yet. It is the entry point this suite is written against (plan
-// section 13.1), and its absence is exactly why these tests fail today. The
-// import is deferred to first use (rather than static, top-level) so that a
-// missing module fails only the individual WS_E2E=1 test cases below, not
-// module resolution for the whole suite when WS_E2E is unset and this
-// `describe` block is skipped.
+// The run driver entry point this suite is written against (plan section 13.1).
+// Section 13 landed `lib/worker-runtime/context.ts`, so the module now resolves;
+// the driver consumes the pushed context and input but its write/tool seams are
+// not wired until sections 14/15, so the WS_E2E cases below still fail past this
+// point (not at module resolution). The import stays deferred to first use so
+// that, when WS_E2E is unset and this `describe` block is skipped, it never runs.
 async function driveWorkerRun(context: unknown): Promise<unknown> {
-  // @ts-expect-error -- lib/worker-runtime/context.ts does not exist until section 13.1 lands.
   const mod = await import("../lib/worker-runtime/context");
-  return mod.driveWorkerRun(context);
+  return mod.driveWorkerRun(context as Parameters<typeof mod.driveWorkerRun>[0]);
 }
 
 const instanceId = () => `wi_${randomUUID().replace(/-/g, "").slice(0, 32)}`;
