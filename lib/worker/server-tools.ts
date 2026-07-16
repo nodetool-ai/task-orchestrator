@@ -14,8 +14,8 @@
 // The extension factories register thin wrappers that call
 // transport.callTool(runId, name, params, ctx); in the web-server process the
 // db transport resolves the tool through this registry and runs it in-process,
-// and for an HTTP worker the /api/worker/runs/:id/tools/call endpoint does the
-// same server-side. Tool name collisions across registries are a programmer
+// and for a dispatched worker the channel's tool.invoke command lands here on
+// the control plane. Tool name collisions across registries are a programmer
 // error — names are namespaced by convention (timer__*, events__*, spawn__*,
 // memory_*, planning's verbs) and asserted in tests.
 //

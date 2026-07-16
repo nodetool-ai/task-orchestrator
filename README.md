@@ -110,14 +110,20 @@ The printed block is:
 ```bash
 TASK_ORCH_DETACHED_RUNS=1
 TASK_ORCH_WORKER_IMAGE=task-orchestrator-worker:dev
-TASK_ORCH_WORKER_API_URL=http://host.docker.internal:3000   # worker → host dev server
 TASK_ORCH_CLAUDE_HOME_HOST=/home/you/.claude                # mounted RW so resume survives
 TASK_ORCH_REPO_CACHE_HOST_VOLUME=task-orch-dev-repo-cache   # mirror workers clone from
 ```
 
+> The worker protocol is WebSocket-only (`docs/worker-websocket-protocol.md`);
+> Docker channel provisioning lands in plan section 19, so
+> `TASK_ORCH_WORKER_IMAGE` dispatch fails fast until then. Use a plain local
+> detached run (leave `TASK_ORCH_WORKER_IMAGE` unset) to exercise the WebSocket
+> worker on the host.
+
 `GH_TOKEN` and your agent-backend credentials already in `.env.local` are
 forwarded into each worker container by the server (workers hold no database
-credentials — they speak the HTTP + SSE protocol, `docs/worker-http-api.md`).
+credentials — the control plane dials the worker over the WebSocket channel,
+`docs/worker-websocket-protocol.md`).
 Workers clone from the seeded mirror (`git clone --reference`) into `/work/<id>`
 and push/PR with `GH_TOKEN`; resume re-clones from the mirror, so it survives
 the ephemeral container dying.
@@ -391,23 +397,21 @@ Requires:
 Agents can also inspect their own PR and fetch CI results on demand via the
 `gh_pr` / `gh_ci` tools (`ci_runs`, `ci_logs`, `ci_rerun`, `pr_view`, …).
 
-## Worker HTTP + SSE protocol
+## Worker WebSocket channel
 
-Run workers talk to the orchestrator EXCLUSIVELY over an HTTP + SSE protocol
-(`/api/worker/*`) — **workers have no database access, ever**. Each
-dispatched worker receives the server's worker-reachable base URL
-(`TASK_ORCH_WORKER_API_URL`, falling back to `NEXTAUTH_URL` in dev) plus a
-run-scoped HMAC bearer token; `DATABASE_URL` is never passed, dispatch fails
-loudly if the URL is unconfigured, and a worker process that tries to touch
-Postgres throws at the call site. New user messages and cross-process
-cancels are pushed over an SSE control channel, and every
-orchestrator-state tool an agent can call — the 37 orchestrator tools, the
-event/timer tools, planning gates, child-spawn, persona memory — executes
-server-side via `POST /api/worker/runs/:id/tools/call`. Both ends emit
-structured logs (`TASK_ORCH_LOG_LEVEL=debug`, `TASK_ORCH_LOG_FORMAT=json`)
-so the whole worker ⇄ server conversation is observable. Full protocol,
-endpoint table, and external-worker guide:
-[docs/worker-http-api.md](docs/worker-http-api.md).
+Run workers talk to the orchestrator EXCLUSIVELY over a private WebSocket
+channel — **workers have no database access, ever, and make no outbound
+control-plane request**. The control plane dials each dispatched worker's
+private listener and pushes the authoritative run snapshot, user input, and
+cancels over the socket; `DATABASE_URL` is never passed, and a worker process
+that tries to touch Postgres throws at the call site. Every orchestrator-state
+tool an agent can call — the orchestrator tools, the event/timer tools,
+planning gates, child-spawn, persona memory — executes control-plane-side via
+the channel's `tool.invoke` command. Both ends emit structured logs
+(`TASK_ORCH_LOG_LEVEL=debug`, `TASK_ORCH_LOG_FORMAT=json`) — frame metadata
+only, never payloads or credentials — so the whole worker ⇄ server conversation
+is observable. Full protocol design:
+[docs/worker-websocket-protocol.md](docs/worker-websocket-protocol.md).
 
 ## GitHub webhooks (PR & CI feedback)
 

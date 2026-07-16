@@ -95,12 +95,12 @@ every run in the system regardless of who asked for it. Costs, honestly
 stated:
 
 > **Update (2026-07):** this option was chosen when workers held
-> `DATABASE_URL` and wrote child rows to Postgres directly. The worker-HTTP-API
-> migration since withheld `DATABASE_URL` from workers — `runs.create` inside a
-> worker now goes over `/api/worker/*` with a run-scoped HMAC token (see
-> [worker-http-api.md](./worker-http-api.md)), landing on the *same* server-side
-> dispatch path. The decision stands: the child row still flows through one
-> orchestrator entry point, only the transport under it changed.
+> `DATABASE_URL` and wrote child rows to Postgres directly. The worker migration
+> since withheld `DATABASE_URL` from workers — `runs.create` inside a worker now
+> goes over the worker WebSocket channel's `tool.invoke` command (see
+> [worker-websocket-protocol.md](./worker-websocket-protocol.md)), landing on the
+> *same* control-plane dispatch path. The decision stands: the child row still
+> flows through one orchestrator entry point, only the transport under it changed.
 
 - *Latency*: up to one pump interval (`TASK_ORCH_PENDING_PUMP_MS`, default
   15s) before the child's Machine is even requested, plus Machine boot. For

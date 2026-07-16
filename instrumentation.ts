@@ -62,13 +62,10 @@ export async function register(): Promise<void> {
       // mid-run worker keeps streaming instead of stranding on the dropped socket.
       // No-op off the ws transport. Best-effort — a genuinely dead worker fails to
       // dial and is left to the reaper above.
-      const { config: cfgMod } = await import("./lib/config");
-      if (cfgMod.worker.transport === "ws") {
-        const channelMod = await import("./lib/worker-channel/controller");
-        await channelMod.reconnectActiveChannels().catch((e) => {
-          console.error("[instrumentation] worker channel re-adoption failed:", e);
-        });
-      }
+      const channelMod = await import("./lib/worker-channel/controller");
+      await channelMod.reconnectActiveChannels().catch((e) => {
+        console.error("[instrumentation] worker channel re-adoption failed:", e);
+      });
     } catch (err) {
       console.error("[instrumentation] boot init/reconcile failed:", err);
     }

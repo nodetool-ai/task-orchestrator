@@ -19,7 +19,6 @@ import {
   floatEnv,
   lightweightIsolation,
   runnerProviderKind,
-  workerTransport,
 } from "./config";
 import { isWorkerLive } from "./run-liveness";
 import { runNonce } from "./run-nonce";
@@ -34,7 +33,6 @@ import {
 } from "./runner/provider";
 import { recordDispatch, recordRunnerEvent, timeRunnerPhase } from "./runner/telemetry";
 import { isTerminalStatus } from "./types";
-import { workerDispatchEnv } from "./worker/token";
 import { newChannelInstanceId } from "./worker-channel/credential";
 import {
   persistCommand,
@@ -637,41 +635,39 @@ export async function dispatchRun(
       }
       pid = spawned;
     } else {
-      const useChannel = workerTransport() === "ws";
-      // Until sections 19/20 land, only the local child provisions a private
-      // control-plane-to-worker WebSocket endpoint. Every other provider fails
-      // fast with an explicit unsupported-provider error — never an HTTP fallback.
-      if (useChannel && provider !== "local") {
+      // The worker protocol is WebSocket-only (plan section 18). Only the local
+      // child provisions a private control-plane-to-worker WebSocket endpoint
+      // today; Docker, Fly, and Box dispatch fail fast with an explicit
+      // unsupported-provider error until their provisioning sections (19/20/box)
+      // land — never an HTTP fallback.
+      if (provider !== "local") {
         return finish(await failSpawn(runId, outcome.scope, unsupportedWsProviderMessage(provider)));
       }
-      let channel: LocalChannelProvisioning | undefined;
-      if (useChannel) channel = await provisionLocalChannel(runId);
+      const channel = await provisionLocalChannel(runId);
       const ref = await timeRunnerPhase(
         "runner_create",
         () => getRunnerProvider().create({
           runId,
           scope: outcome.scope,
-          channelInstanceId: channel?.instanceId,
-          channelEndpoint: channel?.dialEndpoint,
+          channelInstanceId: channel.instanceId,
+          channelEndpoint: channel.dialEndpoint,
         }),
         { provider, fields: { runId, scope: outcome.scope } }
       );
       if (!ref) {
         return finish(await failSpawn(runId, outcome.scope, "run worker did not start (spawn returned no pid — worker image/runtime available?)"));
       }
-      if (channel) {
-        // A ws-mode provider must surface a control-plane-dialable endpoint.
-        if (!ref.channelEndpoint) {
-          return finish(await failSpawn(runId, outcome.scope, "runner started without a worker channel endpoint"));
-        }
-        await setChannelEndpoint(runId, channel.instanceId, ref.channelEndpoint);
-        // Connect and push the authoritative start snapshot off the dispatch
-        // path: the worker is still booting its listener, and dispatch must not
-        // block on the controller handshake or the worker's ack.
-        void startChannelForRun(runId, channel.instanceId).catch((err) =>
-          console.error(`Worker channel start failed for run ${runId}:`, err)
-        );
+      // The provider must surface a control-plane-dialable endpoint.
+      if (!ref.channelEndpoint) {
+        return finish(await failSpawn(runId, outcome.scope, "runner started without a worker channel endpoint"));
       }
+      await setChannelEndpoint(runId, channel.instanceId, ref.channelEndpoint);
+      // Connect and push the authoritative start snapshot off the dispatch
+      // path: the worker is still booting its listener, and dispatch must not
+      // block on the controller handshake or the worker's ack.
+      void startChannelForRun(runId, channel.instanceId).catch((err) =>
+        console.error(`Worker channel start failed for run ${runId}:`, err)
+      );
       handle = ref.handle;
     }
   } catch (err) {
@@ -848,16 +844,14 @@ async function pumpTick(): Promise<void> {
   } catch {
     // best-effort
   }
-  // Half 1b (ws transport): detect stale worker channels off channel_last_seen_at
-  // and reconnect a provider-live worker whose socket dropped without an
-  // in-memory supervisor (e.g. a give-up after a long partition). A still-dead
-  // worker's dial fails and its run stays with the heartbeat reaper above.
-  if (workerTransport() === "ws") {
-    try {
-      await reapStaleChannels();
-    } catch {
-      // best-effort
-    }
+  // Half 1b: detect stale worker channels off channel_last_seen_at and reconnect
+  // a provider-live worker whose socket dropped without an in-memory supervisor
+  // (e.g. a give-up after a long partition). A still-dead worker's dial fails and
+  // its run stays with the heartbeat reaper above.
+  try {
+    await reapStaleChannels();
+  } catch {
+    // best-effort
   }
   // Half 2: drain the deferred queue, oldest first. Stop at the first defer (the
   // host is full); the next tick retries.
@@ -957,10 +951,14 @@ export function stopPendingRunPump(): void {
 }
 
 // Worker execution runs in its own process/container so a web-service restart or
-// redeploy cannot signal it. Prefer an ad-hoc Docker container (TASK_ORCH_WORKER_IMAGE
-// set — the compose/prod path); fall back to a plain detached tsx process for dev.
+// redeploy cannot signal it. The worker protocol is WebSocket-only (plan section
+// 18); today only the plain detached tsx process provisions its private channel
+// endpoint. The ad-hoc Docker container path (TASK_ORCH_WORKER_IMAGE) fails fast
+// with the unsupported-provider error until section 19 rebuilds it on the channel.
 export const defaultSpawn = async (runId: number, scope: string, channelInstanceId?: string, channelEndpoint?: string): Promise<number | null> => {
-  if (process.env.TASK_ORCH_WORKER_IMAGE) return dockerSpawn(runId, scope);
+  if (process.env.TASK_ORCH_WORKER_IMAGE) {
+    throw new Error(unsupportedWsProviderMessage("docker"));
+  }
   return detachedSpawn(runId, scope, channelInstanceId, channelEndpoint);
 };
 
@@ -974,11 +972,12 @@ export const defaultSpawn = async (runId: number, scope: string, channelInstance
 export function buildWorkerContainerConfig(runId: number, scope: string): Record<string, unknown> {
   const image = process.env.TASK_ORCH_WORKER_IMAGE!;
   const pass = (k: string) => `${k}=${process.env[k] ?? ""}`;
-  // Worker HTTP protocol (docs/worker-http-api.md): every worker gets a
-  // run-scoped API token and talks to /api/worker over HTTP + SSE. Workers
-  // hold NO database credentials — DATABASE_URL is deliberately absent.
+  // Worker container config skeleton (labels, limits, mounts). The channel
+  // identity and endpoint injection is added by section 19 (Docker provisioning);
+  // until then this path is unreachable — defaultSpawn fails fast on
+  // TASK_ORCH_WORKER_IMAGE. Workers hold NO database credentials — DATABASE_URL is
+  // deliberately absent.
   const env = [
-    ...Object.entries(workerDispatchEnv(runId)).map(([k, v]) => `${k}=${v}`),
     pass("GH_TOKEN"),
     // Agent credentials for BOTH backends: the Claude auth pair plus every pi
     // provider key set on the server, so a worker dispatched with
@@ -1085,26 +1084,24 @@ function spawnLocalRunWorker(
   return child.pid ?? null;
 }
 
-// Dev fallback: a detached `tsx scripts/run-worker.ts <id>` on the host,
-// speaking the worker HTTP protocol against this server (TASK_ORCH_WORKER_API_URL,
-// or NEXTAUTH_URL in dev) with a run-scoped token and NO database credentials —
-// the same contract as the container paths. No restart-survival, but dev
-// doesn't redeploy.
+// Detached `tsx scripts/run-worker.ts <id>` on the host. The worker gets only its
+// private WebSocket channel identity + listen endpoint (no control-plane URL,
+// token, or DATABASE_URL): the control plane dials the worker and pushes the
+// authoritative run snapshot over the socket (plan section 18). No
+// restart-survival, but dev doesn't redeploy.
 function detachedSpawn(
   runId: number,
   _scope: string,
   channelInstanceId?: string,
   listenEndpoint?: string,
 ): number | null {
-  // In ws mode the worker gets only its channel identity + listen endpoint
-  // (no control-plane URL, token, or DATABASE_URL). Otherwise fall back to the
-  // legacy HTTP dispatch env until section 18 deletes it.
+  if (!channelInstanceId || !listenEndpoint) {
+    throw new Error("detached worker spawn requires a provisioned channel identity and listen endpoint");
+  }
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     TASK_ORCH_INSIDE_WORKER: "1",
-    ...(channelInstanceId && listenEndpoint
-      ? workerChannelDispatchEnv(runId, channelInstanceId, listenEndpoint)
-      : workerDispatchEnv(runId)),
+    ...workerChannelDispatchEnv(runId, channelInstanceId, listenEndpoint),
   };
   delete env.DATABASE_URL;
   return spawnLocalRunWorker(runId, { env });

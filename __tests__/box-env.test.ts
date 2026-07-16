@@ -9,8 +9,6 @@ import {
 } from "../lib/runner/box-env";
 
 const KNOBS = [
-  "TASK_ORCH_WORKER_API_URL",
-  "TASK_ORCH_WORKER_API_SECRET",
   "TASK_ORCH_BOX_REPO_PATH",
   "TASK_ORCH_BOX_TEMPLATE_VERSION",
   "TASK_ORCH_INSTANCE_ID",
@@ -30,8 +28,6 @@ afterEach(() => {
 });
 
 function stubBaseEnv(): void {
-  vi.stubEnv("TASK_ORCH_WORKER_API_URL", "https://orchestrator.example.test");
-  vi.stubEnv("TASK_ORCH_WORKER_API_SECRET", "worker-signing-secret");
   vi.stubEnv("TASK_ORCH_BOX_REPO_PATH", "/home/user/repository");
   vi.stubEnv("TASK_ORCH_BOX_TEMPLATE_VERSION", "template-2026-07-14");
   vi.stubEnv("TASK_ORCH_INSTANCE_ID", "staging-a");
@@ -51,7 +47,6 @@ describe("buildBoxWorkerEnv", () => {
     const env = buildBoxWorkerEnv({ runId: 42, repoId: "repo_123" });
 
     expect(env).toMatchObject({
-      TASK_ORCH_WORKER_API_URL: "https://orchestrator.example.test",
       TASK_ORCH_INSIDE_WORKER: "1",
       TASK_ORCH_RUN_ID: "42",
       TASK_ORCH_REPO_ID: "repo_123",
@@ -64,7 +59,10 @@ describe("buildBoxWorkerEnv", () => {
       OPENAI_API_KEY: "sk-agent-key",
       CEREBRAS_API_KEY: "",
     });
-    expect(env.TASK_ORCH_WORKER_TOKEN).toMatch(/^wt1\.42\./);
+    // The worker protocol is WebSocket-only (plan section 18): no run-scoped HTTP
+    // API URL/token is forwarded to a Box worker.
+    expect(env).not.toHaveProperty("TASK_ORCH_WORKER_API_URL");
+    expect(env).not.toHaveProperty("TASK_ORCH_WORKER_TOKEN");
     expect(env).not.toHaveProperty("BOX_API_KEY");
     expect(env).not.toHaveProperty("DATABASE_URL");
     expect(env).not.toHaveProperty("UNRELATED_CONTROL_PLANE_SECRET");

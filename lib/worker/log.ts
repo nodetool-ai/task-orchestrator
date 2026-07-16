@@ -1,8 +1,8 @@
 // lib/worker/log.ts
 //
 // Structured, leveled logging for the worker ⇄ server protocol surfaces (the
-// worker entrypoint, the RunTransport implementations, and the /api/worker
-// routes). One line per entry so `docker logs` / `fly logs` / journald stay
+// worker entrypoint and the control-plane RunTransport implementation). One line
+// per entry so `docker logs` / `fly logs` / journald stay
 // grep-able; TASK_ORCH_LOG_FORMAT=json switches to JSON lines for ingestion
 // into a log pipeline.
 //

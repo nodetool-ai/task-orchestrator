@@ -5,10 +5,10 @@
 // lib/orchestrator-tools.ts so a parallel MCP server can consume the same
 // definitions.
 //
-// Execution routes through the worker RunTransport: in-process against the DB
-// normally, or proxied to the orchestrator's POST /api/worker/runs/:id/tools/call
-// when this process is an HTTP-mode worker — the tool then runs server-side,
-// so external workers expose the full tool surface with no database access.
+// Execution routes to the control plane: in-process against the DB normally, or
+// over the worker channel's tool.invoke command from a dispatched worker — the
+// tool then runs control-plane-side, so workers expose the full tool surface
+// with no database access.
 
 import type { ExtensionFactory, ToolInvoker } from "./types";
 import { ORCHESTRATOR_TOOLS } from "@/lib/orchestrator-tools";

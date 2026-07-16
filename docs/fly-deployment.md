@@ -62,8 +62,8 @@ command.
                           │  1 always-on Machine        │   • migrations on boot
                           └──────┬───────────┬────▲─────┘   • run-lifecycle pumps
                                  │           │    │           • Fly runner monitor
-            DATABASE_URL (6PN)   │           │    │  /api/worker over 6PN
-              (web app ONLY)     │           │    │  (run-scoped HMAC token)
+            DATABASE_URL (6PN)   │           │    │  worker WS channel over 6PN
+              (web app ONLY)     │           │    │  (control plane dials worker)
                                  ▼           ▼    │
                     ┌────────────────┐   ┌────────┴─────────────────────┐
                     │ task-orch…-db  │   │ task-orchestrator-runners     │
@@ -75,13 +75,14 @@ command.
                                          └──────────────────────────────┘
 ```
 
-> **Runner Machines hold no `DATABASE_URL`.** Since the worker-HTTP-API
-> migration (2026-07) the orchestrator withholds Postgres credentials from
-> runner Machines; every read/write a run needs flows through the web app's
-> `/api/worker/*` endpoints, authenticated by a per-run HMAC token minted at
-> dispatch (`lib/runner/fly.ts` `buildFlyWorkerEnv`; the DB guard in
-> `db/index.ts` fails fast if a worker ever reaches Postgres directly). See
-> **[worker-http-api.md](./worker-http-api.md)** for the protocol.
+> **Runner Machines hold no `DATABASE_URL`.** The orchestrator withholds
+> Postgres credentials from runner Machines; every read/write a run needs flows
+> over the private worker WebSocket channel that the control plane dials into the
+> Machine (the DB guard in `db/index.ts` fails fast if a worker ever reaches
+> Postgres directly). Fly channel provisioning lands in plan section 20; until
+> then Fly dispatch fails fast with the unsupported-provider error. See
+> **[worker-websocket-protocol.md](./worker-websocket-protocol.md)** for the
+> protocol.
 
 ### The three apps
 

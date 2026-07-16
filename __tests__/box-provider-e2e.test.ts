@@ -100,8 +100,6 @@ function boxEnv() {
   vi.stubEnv("TASK_ORCH_BOX_TEMPLATE_ID", "bx_template");
   vi.stubEnv("TASK_ORCH_BOX_REPO_PATH", "/home/user/repository");
   vi.stubEnv("TASK_ORCH_BOX_POLL_MS", "0");
-  vi.stubEnv("TASK_ORCH_WORKER_API_URL", "https://orchestrator.example.test");
-  vi.stubEnv("TASK_ORCH_WORKER_API_SECRET", "worker-signing-secret");
   vi.stubEnv("DATABASE_URL", "postgres://must-not-leak");
 }
 
@@ -115,6 +113,12 @@ async function runWithClaim() {
 
 afterEach(() => vi.unstubAllEnvs());
 
+// The worker protocol is WebSocket-only (plan section 18) and Box has no private
+// control-plane-to-worker ingress, so validateBoxConfig() — invoked by
+// BoxRunnerProvider.create() — now rejects Box unconditionally. The create/resume
+// flow tests below exercise Box client plumbing (fork noEnv, checkpoint, capacity)
+// that Box's future private-ingress section will re-enable; they are skipped until
+// then rather than deleted so that work can revive them.
 describe("Box provider fake-client flow", () => {
   it("uses syntactically valid shell for detached worker bootstrap", () => {
     const parsed = spawnSync("sh", ["-n", "-c", WORKER_BOOTSTRAP_COMMAND], { encoding: "utf8" });
@@ -125,7 +129,7 @@ describe("Box provider fake-client flow", () => {
     expect(WORKER_BOOTSTRAP_COMMAND).not.toContain("printenv");
   });
 
-  it("forks a template with noEnv and a hygienic explicit worker environment", async () => {
+  it.skip("forks a template with noEnv and a hygienic explicit worker environment", async () => {
     boxEnv();
     const fake = fakeBox();
     const { run, scope } = await runWithClaim();
@@ -146,7 +150,7 @@ describe("Box provider fake-client flow", () => {
     expect(fake.calls).toContain("command:bootstrap-log");
   });
 
-  it("checkpoints, resumes the same Box, and uses noEnv on resume", async () => {
+  it.skip("checkpoints, resumes the same Box, and uses noEnv on resume", async () => {
     boxEnv();
     const fake = fakeBox();
     const { run, scope } = await runWithClaim();
@@ -162,7 +166,7 @@ describe("Box provider fake-client flow", () => {
     expect(mapping).toMatchObject({ boxId: first!.handle, snapshotId: `snap_${first!.handle}`, state: "running" });
   });
 
-  it("defers capacity and preserves a mapped Box for recoverable or missing remote state", async () => {
+  it.skip("defers capacity and preserves a mapped Box for recoverable or missing remote state", async () => {
     boxEnv();
     const fake = fakeBox();
     fake.setLimit({ canStart: false, activeBoxes: 2, maxActiveBoxes: 2 });
@@ -183,7 +187,7 @@ describe("Box provider fake-client flow", () => {
     expect(fake.calls.some((call) => call.startsWith("remove:"))).toBe(false);
   });
 
-  it("uses checkpointing—not deletion—for a mapped cancellation fallback", async () => {
+  it.skip("uses checkpointing—not deletion—for a mapped cancellation fallback", async () => {
     boxEnv();
     const fake = fakeBox();
     const { run, scope } = await runWithClaim();

@@ -105,37 +105,6 @@ describe("releaseClaim re-dispatch gate", () => {
   });
 });
 
-describe("HTTP-only worker enforcement", () => {
-  it("runTransport refuses a worker process without worker API credentials", async () => {
-    const { runTransport, __resetRunTransportForTests } = await import("../lib/worker");
-    const saved = {
-      inside: process.env.TASK_ORCH_INSIDE_WORKER,
-      url: process.env.TASK_ORCH_WORKER_API_URL,
-      token: process.env.TASK_ORCH_WORKER_TOKEN,
-      allow: process.env.TASK_ORCH_WORKER_ALLOW_DB,
-    };
-    __resetRunTransportForTests();
-    process.env.TASK_ORCH_INSIDE_WORKER = "1";
-    delete process.env.TASK_ORCH_WORKER_API_URL;
-    delete process.env.TASK_ORCH_WORKER_TOKEN;
-    delete process.env.TASK_ORCH_WORKER_ALLOW_DB;
-    try {
-      expect(() => runTransport()).toThrow(/Direct-Postgres workers are no longer supported/);
-    } finally {
-      for (const [k, v] of [
-        ["TASK_ORCH_INSIDE_WORKER", saved.inside],
-        ["TASK_ORCH_WORKER_API_URL", saved.url],
-        ["TASK_ORCH_WORKER_TOKEN", saved.token],
-        ["TASK_ORCH_WORKER_ALLOW_DB", saved.allow],
-      ] as const) {
-        if (v == null) delete process.env[k];
-        else process.env[k] = v;
-      }
-      __resetRunTransportForTests();
-    }
-  });
-});
-
 describe("reviveDates", () => {
   it("revives known timestamp keys and leaves agent-authored jsonb alone", () => {
     const iso = "2026-07-06T10:00:00.000Z";

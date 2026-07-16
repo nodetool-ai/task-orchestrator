@@ -47,9 +47,6 @@ const KEYS = [
   "TASK_ORCH_BOX_READY_TIMEOUT_MS",
   "TASK_ORCH_BOX_RETENTION_MS",
   "TASK_ORCH_BOX_MAX_ACTIVE",
-  "TASK_ORCH_WORKER_API_URL",
-  "TASK_ORCH_WORKER_API_SECRET",
-  "TASK_ORCH_WORKER_TRANSPORT",
   "AUTH_SECRET",
 ] as const;
 const saved: Record<string, string | undefined> = {};
@@ -237,22 +234,19 @@ describe("snapshot() — frozen plain-value dump", () => {
 });
 
 describe("Box configuration", () => {
-  function selectBoxWithRequiredValues() {
-    set("TASK_ORCH_RUNNER", "box");
-    set("BOX_API_KEY", "box-api-key-secret");
-    set("TASK_ORCH_BOX_TEMPLATE_ID", "bx_template_123");
-    set("TASK_ORCH_WORKER_API_URL", "https://orchestrator.example.test");
-    set("TASK_ORCH_WORKER_API_SECRET", "worker-signing-secret");
-  }
-
   it("is inert when Box is not selected", () => {
     set("TASK_ORCH_RUNNER", "local");
     expect(() => validateBoxConfig()).not.toThrow();
   });
 
-  it("rejects the WebSocket transport with the unsupported-provider message", () => {
-    selectBoxWithRequiredValues();
-    set("TASK_ORCH_WORKER_TRANSPORT", "ws");
+  it("always rejects Box with the unsupported-provider message (websocket-only worker protocol)", () => {
+    // The worker protocol is WebSocket-only (plan section 18) and Box has no
+    // private control-plane-to-worker ingress, so Box is rejected regardless of
+    // any other configuration until its provider supplies a private inbound
+    // endpoint.
+    set("TASK_ORCH_RUNNER", "box");
+    set("BOX_API_KEY", "box-api-key-secret");
+    set("TASK_ORCH_BOX_TEMPLATE_ID", "bx_template_123");
     expect(() => validateBoxConfig()).toThrow(
       /Box runners do not yet expose a private control-plane-to-worker WebSocket endpoint\./
     );
@@ -270,34 +264,6 @@ describe("Box configuration", () => {
     expect(config.box.repoPath).toBe("/home/user/repository");
     set("TASK_ORCH_BOX_REPO_PATH", "/home/user/other-repository");
     expect(config.box.repoPath).toBe("/home/user/other-repository");
-  });
-
-  it("reports every required value with actionable names when Box is selected", () => {
-    set("TASK_ORCH_RUNNER", "box");
-    set("TASK_ORCH_WORKER_API_URL", undefined);
-    set("TASK_ORCH_WORKER_API_SECRET", undefined);
-    set("AUTH_SECRET", undefined);
-    expect(() => validateBoxConfig()).toThrow(/BOX_API_KEY/);
-    expect(() => validateBoxConfig()).toThrow(/TASK_ORCH_BOX_TEMPLATE_ID/);
-    expect(() => validateBoxConfig()).toThrow(/TASK_ORCH_WORKER_API_URL/);
-    expect(() => validateBoxConfig()).toThrow(/TASK_ORCH_WORKER_API_SECRET or AUTH_SECRET/);
-  });
-
-  it("validates Box identifiers and non-negative integer settings", () => {
-    selectBoxWithRequiredValues();
-    set("TASK_ORCH_BOX_TEMPLATE_ID", "not-a-box-id");
-    set("TASK_ORCH_BOX_POLL_MS", "-1");
-    set("TASK_ORCH_BOX_MAX_ACTIVE", "1.5");
-    expect(() => validateBoxConfig()).toThrow(/TASK_ORCH_BOX_TEMPLATE_ID must be a Box ID/);
-    expect(() => validateBoxConfig()).toThrow(/TASK_ORCH_BOX_POLL_MS must be a non-negative integer/);
-    expect(() => validateBoxConfig()).toThrow(/TASK_ORCH_BOX_MAX_ACTIVE must be a non-negative integer/);
-  });
-
-  it("accepts the existing AUTH_SECRET fallback for worker-token signing", () => {
-    selectBoxWithRequiredValues();
-    set("TASK_ORCH_WORKER_API_SECRET", undefined);
-    set("AUTH_SECRET", "auth-secret");
-    expect(() => validateBoxConfig()).not.toThrow();
   });
 
   it("redacts the Box API key from snapshots", () => {

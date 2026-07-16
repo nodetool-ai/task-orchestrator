@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1
 # Task Orchestrator run worker. Spawned ad-hoc (one container per run) by the
 # server via the Docker socket. Runs a single agent turn, checks out/pushes to
-# GitHub directly, and talks to the orchestrator over the worker HTTP + SSE
-# protocol (docs/worker-http-api.md) with a run-scoped bearer token — workers
-# hold no database credentials.
+# GitHub directly, and talks to the orchestrator over the worker WebSocket
+# channel (docs/worker-websocket-protocol.md) — the control plane dials the
+# worker's private listener and pushes the run; workers hold no database
+# credentials and make no outbound control-plane request.
 #   docker run --rm ... task-orchestrator-worker:latest <runId>
 
 FROM node:24-bookworm-slim

@@ -39,14 +39,6 @@ const KEEP_FOR_GIT = new Set(["GH_TOKEN", "GITHUB_TOKEN"]);
 //     the web server itself (TASK_ORCH_RUNNER unset/local) — there, bash
 //     subprocesses would otherwise inherit the whole server process env,
 //     including the session-signing secret and the webhook HMAC secret.
-//   - TASK_ORCH_WORKER_TOKEN: the run-scoped bearer token an HTTP-mode worker
-//     receives (workerDispatchEnv in lib/worker/token.ts) to authenticate to
-//     /api/worker/*. The worker process itself needs it, but agent bash tool
-//     calls inherit the worker's env, so an untrusted/prompt-injected repo
-//     could `printenv TASK_ORCH_WORKER_TOKEN` and abuse the run's lifecycle
-//     endpoints for the token's (multi-day) lifetime. Strip it from bash. Note
-//     TASK_ORCH_WORKER_API_URL is deliberately NOT scrubbed — it's the server
-//     origin, not a credential; the token alone is what authorizes the API.
 //   - TASK_ORCH_WORKER_CHANNEL_CREDENTIAL / _ENDPOINT / _INSTANCE_ID: the
 //     websocket supervisor's authentication credential and listener metadata.
 //     These are needed by the supervisor, but must not reach agent/model
@@ -56,7 +48,6 @@ const SERVER_ONLY_SECRETS = [
   "FLY_API_TOKEN",
   "AUTH_SECRET",
   "GITHUB_WEBHOOK_SECRET",
-  "TASK_ORCH_WORKER_TOKEN",
   "TASK_ORCH_WORKER_CHANNEL_CREDENTIAL",
   "TASK_ORCH_WORKER_CHANNEL_ENDPOINT",
   "TASK_ORCH_WORKER_INSTANCE_ID",

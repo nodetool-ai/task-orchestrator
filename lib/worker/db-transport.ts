@@ -1,11 +1,11 @@
 // lib/worker/db-transport.ts
 //
-// The direct-Postgres implementation of RunTransport. This is BOTH:
-//   • the transport a worker uses when it has database access (the default,
-//     exactly the behavior that existed before the transport seam), and
-//   • the single implementation backing the /api/worker/* HTTP routes — the
-//     http transport is a wire mirror of this one, so persistence semantics
-//     live in exactly one place.
+// The direct-Postgres implementation of RunTransport. This is the control
+// plane's own loopback transport: the web server / CLI / tests ARE the
+// orchestrator, so they read and write run state directly through it. Dispatched
+// workers never use it — they run over the WebSocket channel (lib/worker-channel),
+// whose control-plane handlers persist through this same module, keeping
+// persistence semantics in exactly one place.
 //
 // Import discipline: lib/runs.ts calls into this module (via lib/worker), and
 // several methods here delegate back to lib/runs.ts exports (get, applyStatusTx,

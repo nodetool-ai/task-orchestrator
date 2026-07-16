@@ -1,53 +1,29 @@
 // lib/worker/protocol.ts
 //
-// The worker ⇄ orchestrator protocol: one typed interface (RunTransport) for
-// every interaction a run worker has with the orchestrator's state, with two
-// implementations:
+// RunTransport: the typed control-plane persistence interface for run state.
+// The only implementation is db-transport (direct Postgres): the web server /
+// CLI / tests ARE the orchestrator and read/write directly through it.
+// Dispatched workers never construct a transport — they run over the WebSocket
+// channel (lib/worker-channel), whose control-plane handlers persist through the
+// same db-transport, so persistence semantics live in exactly one place.
 //
-//   • db-transport   — direct Postgres, exactly what workers did before this
-//                      seam existed. Default everywhere; the only choice for
-//                      the web-server process itself.
-//   • http-transport — HTTP + SSE against /api/worker/* on the orchestrator.
-//                      Selected inside a worker process when
-//                      TASK_ORCH_WORKER_API_URL + TASK_ORCH_WORKER_TOKEN are
-//                      set. Lets external workers run with NO database access.
-//
-// The /api/worker/* route handlers are thin wrappers over db-transport, so
-// there is exactly one implementation of the persistence semantics; the HTTP
-// implementation is a wire mirror of this interface, endpoint per method (see
-// docs/worker-http-api.md for the endpoint table).
+// This module also carries the shared worker-domain types (row shapes, status
+// guards) used by both the transport and the channel handlers.
 //
 // Design notes:
 //   • heartbeat() doubles as the cancel poll — one round-trip per beat instead
 //     of the old touchHeartbeat + isCancelRequested query pair.
-//   • subscribeInput() abstracts "a new user message arrived": Postgres
-//     LISTEN 'run_input' in db mode, the /control SSE channel in http mode.
+//   • subscribeInput() abstracts "a new user message arrived" (Postgres LISTEN
+//     'run_input').
 //   • applyStatus() carries the CAS guard by NAME (WireStatusGuard), because a
 //     drizzle SQL fragment can't cross a process boundary. The two named
 //     guards are the only ones worker code paths use.
 //   • releaseClaim() is a single high-level op (release + stranded-message
-//     check + conditional re-dispatch) because in http mode the re-dispatch
-//     MUST happen on the server — the worker can't spawn siblings.
+//     check + conditional re-dispatch).
 
 import type { MessageRow, RunRow } from "../runs";
 import type { SdkContentBlock } from "../sdk-message";
 import type { PlanFull, RepositoryRow, SessionStatus, TaskFull, TaskState } from "../types";
-
-/**
- * Wire-protocol major version, sent as `X-Worker-Protocol` on every worker
- * request and checked server-side. The token prefix (`wt1`) versions only the
- * TOKEN; this versions the message SHAPES. Bump on a BREAKING change to any
- * request/response body or endpoint semantics — additive changes (a new
- * optional field, a new endpoint) do NOT bump. See docs/worker-http-api.md
- * (§ Versioning & rolling deploys) for the mismatch policy: a long-lived worker
- * that outlives a server redeploy to an incompatible version gets a 409, exits
- * nonzero (worker suicide), and the reaper re-dispatches the run on a fresh
- * worker built from the new image.
- */
-export const WORKER_PROTOCOL_VERSION = 1;
-
-/** The request header carrying WORKER_PROTOCOL_VERSION. */
-export const WORKER_PROTOCOL_HEADER = "x-worker-protocol";
 
 /** The personas table row shape repo.getPersona returns (NOT the code-defined
  *  lib/personas Persona — DB personas carry nullable/denormalized fields). */

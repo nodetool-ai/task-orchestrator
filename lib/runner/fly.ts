@@ -11,7 +11,6 @@ import { isTerminalStatus, type SessionStatus } from "../types";
 import { isWakeIntentFresh, isWorkerClaimLive, nextLifecycleAction } from "./lifecycle";
 import { nestedDispatchMode } from "./provider";
 import { recordRunnerEvent, timeRunnerPhase } from "./telemetry";
-import { workerDispatchEnv } from "../worker/token";
 import type { CreateRunnerInput, RunnerProvider, RunnerRef, RunnerState } from "./provider";
 import { FlyApiError, type FlyClient, type FlyMachine, type FlyMachineConfig, type FlyVolume, makeFlyClient } from "./fly-client";
 
@@ -316,11 +315,11 @@ export function buildFlyWorkerEnv(
   runId: number,
   opts: { prewarmDir?: string } = {}
 ): Record<string, string> {
-  // Worker HTTP protocol (docs/worker-http-api.md): every Machine gets a
-  // run-scoped API token and talks to /api/worker over HTTP + SSE. Workers
-  // hold NO database credentials — DATABASE_URL is deliberately absent.
+  // The worker protocol is WebSocket-only (plan section 18); Fly channel identity
+  // injection is added by section 20 (Fly provisioning) — until then Fly dispatch
+  // fails fast with the unsupported-provider error. Workers hold NO database
+  // credentials — DATABASE_URL is deliberately absent.
   return compactEnv({
-    ...workerDispatchEnv(runId),
     // Set only when this run's volume was forked from the prewarm seed, so the
     // baked deps live at PREWARM_MOUNT_DIR. lib/prewarm.ts existsSync-guards it,
     // and compactEnv drops it when undefined (no seed → cold install).

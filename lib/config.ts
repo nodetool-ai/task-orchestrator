@@ -76,13 +76,6 @@ function strEnv(key: string, dflt?: string): string | undefined {
 export type RunnerProviderKind = "local" | "fly" | "box";
 export type NestedDispatchMode = "isolate" | "inline";
 export type LightweightIsolation = "child" | "inprocess";
-export type WorkerTransport = "http" | "ws";
-
-/** Temporary migration switch. HTTP remains the default until the websocket
- * compatibility driver has replaced the legacy worker API. */
-export function workerTransport(): WorkerTransport {
-  return process.env.TASK_ORCH_WORKER_TRANSPORT === "ws" ? "ws" : "http";
-}
 
 /**
  * How the lightweight tier (pi `<chat>` / pi `<execute>`, i.e. placement
@@ -213,15 +206,6 @@ export const config = Object.freeze({
     get nestedDispatch(): NestedDispatchMode {
       return nestedDispatchMode();
     },
-    get apiUrl(): string | undefined {
-      return strEnv("TASK_ORCH_WORKER_API_URL");
-    },
-    get apiToken(): string | undefined {
-      return strEnv("TASK_ORCH_WORKER_TOKEN");
-    },
-    get transport(): WorkerTransport {
-      return workerTransport();
-    },
     get channelInstanceId(): string | undefined {
       return strEnv("TASK_ORCH_WORKER_INSTANCE_ID");
     },
@@ -242,10 +226,6 @@ export const config = Object.freeze({
     /** Verbose channel-frame logging (TASK_ORCH_LOG_LEVEL=debug). */
     get debugLog(): boolean {
       return strEnv("TASK_ORCH_LOG_LEVEL")?.toLowerCase() === "debug";
-    },
-    /** HMAC secret the orchestrator signs run-scoped worker tokens with. */
-    get apiSecret(): string | undefined {
-      return strEnv("TASK_ORCH_WORKER_API_SECRET");
     },
     /** Existing checkout supplied by a managed runner snapshot (for example Box). */
     get runnerRepoPath(): string | undefined {
@@ -463,15 +443,6 @@ export const config = Object.freeze({
   }),
 });
 
-const BOX_ID_RE = /^bx_[A-Za-z0-9][A-Za-z0-9_-]*$/;
-const BOX_NON_NEGATIVE_INTEGER_KEYS = [
-  "TASK_ORCH_BOX_IDLE_STOP_MS",
-  "TASK_ORCH_BOX_POLL_MS",
-  "TASK_ORCH_BOX_READY_TIMEOUT_MS",
-  "TASK_ORCH_BOX_RETENTION_MS",
-  "TASK_ORCH_BOX_MAX_ACTIVE",
-] as const;
-
 /**
  * Validate the Box-only deployment settings before a provider forks a Box.
  * This intentionally reads the live registry and has no SDK or network side
@@ -481,49 +452,14 @@ const BOX_NON_NEGATIVE_INTEGER_KEYS = [
 export function validateBoxConfig(): void {
   if (runnerProviderKind() !== "box") return;
 
-  // Box has no private control-plane-to-worker WebSocket ingress yet, so the
-  // channel transport cannot be provisioned for it (plan section 10.3). Reject
-  // explicitly rather than silently falling back to another transport.
-  if (workerTransport() === "ws") {
-    throw new Error(
-      "Box runners do not yet expose a private control-plane-to-worker WebSocket endpoint."
-    );
-  }
-
-  const errors: string[] = [];
-  if (!config.box.apiKey) errors.push("BOX_API_KEY is required when TASK_ORCH_RUNNER=box");
-  if (!config.box.templateId) {
-    errors.push("TASK_ORCH_BOX_TEMPLATE_ID is required when TASK_ORCH_RUNNER=box");
-  } else if (!BOX_ID_RE.test(config.box.templateId)) {
-    errors.push("TASK_ORCH_BOX_TEMPLATE_ID must be a Box ID beginning with bx_");
-  }
-  if (!config.worker.apiUrl) {
-    errors.push("TASK_ORCH_WORKER_API_URL is required when TASK_ORCH_RUNNER=box");
-  }
-  if (!config.worker.apiSecret && !strEnv("AUTH_SECRET")) {
-    errors.push(
-      "TASK_ORCH_WORKER_API_SECRET or AUTH_SECRET is required to sign worker tokens when TASK_ORCH_RUNNER=box"
-    );
-  }
-
-  const baseUrl = config.box.baseUrl;
-  try {
-    const url = new URL(baseUrl);
-    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("unsupported protocol");
-  } catch {
-    errors.push("TASK_ORCH_BOX_BASE_URL must be a valid http(s) URL");
-  }
-
-  for (const key of BOX_NON_NEGATIVE_INTEGER_KEYS) {
-    const raw = process.env[key];
-    if (raw == null || raw === "") continue;
-    const value = Number(raw);
-    if (!Number.isSafeInteger(value) || value < 0) {
-      errors.push(`${key} must be a non-negative integer`);
-    }
-  }
-
-  if (errors.length > 0) throw new Error(`Invalid Box configuration: ${errors.join("; ")}`);
+  // Box has no private control-plane-to-worker WebSocket ingress, so the channel
+  // transport cannot be provisioned for it. The worker protocol is WebSocket-only
+  // (plan section 18); Box stays rejected until its provider supplies a private
+  // inbound endpoint. Reject explicitly rather than falling back to any other
+  // transport.
+  throw new Error(
+    "Box runners do not yet expose a private control-plane-to-worker WebSocket endpoint."
+  );
 }
 
 /**

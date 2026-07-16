@@ -52,7 +52,6 @@ export function workerChannelDispatchEnv(
   listenEndpoint: string,
 ): Record<string, string> {
   return {
-    TASK_ORCH_WORKER_TRANSPORT: "ws",
     TASK_ORCH_WORKER_INSTANCE_ID: instanceId,
     TASK_ORCH_WORKER_CHANNEL_CREDENTIAL: mintChannelCredential(runId, instanceId),
     TASK_ORCH_WORKER_CHANNEL_ENDPOINT: listenEndpoint,

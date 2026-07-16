@@ -5,8 +5,12 @@ control plane: it owns the database, scheduling, worker tokens, agent backend,
 and task state. A Box supplies one run's machine and its persistent filesystem
 snapshot.
 
-This guide is for operators. It assumes the server's external worker protocol
-is already configured; see [worker HTTP + SSE](worker-http-api.md).
+This guide is for operators. The worker protocol is WebSocket-only
+([worker-websocket-protocol.md](worker-websocket-protocol.md)); the control
+plane dials each worker's private listener. **Box has no private
+control-plane-to-worker ingress, so Box dispatch is currently rejected with an
+unsupported-provider error until its ingress section lands** — this guide
+describes the intended Box operation once that ships.
 
 ## Configuration registry
 
@@ -25,14 +29,13 @@ provider forks with `noEnv: true`, so account/dashboard environment and secret
 files are never inherited by a run.
 
 Each fork receives only the run-scoped worker environment: the worker API URL,
-a short-lived worker token, run and repository identifiers, selected model and
-Git credentials, and the repository/session paths it needs. In particular,
-workers receive neither `BOX_API_KEY` nor `DATABASE_URL`.
+a run-scoped channel identity + credential, run and repository identifiers,
+selected model and Git credentials, and the repository/session paths it needs.
+In particular, workers receive neither `BOX_API_KEY` nor `DATABASE_URL`, and
+make no outbound control-plane request.
 
-`TASK_ORCH_WORKER_API_URL` must be reachable from the Box, not merely from a
-browser or the control-plane host. Worker tokens use
-`TASK_ORCH_WORKER_API_SECRET`, falling back to `AUTH_SECRET`; configure one of
-them before enabling Box.
+The channel credential is derived from `TASK_ORCH_WORKER_CHANNEL_SECRET`,
+falling back to `AUTH_SECRET`; configure one of them before enabling Box.
 
 ## Template lifecycle
 
@@ -122,7 +125,7 @@ Regularly review Box inventory alongside `runner_instances`:
 | Run remains `pending` | Check account capacity, `TASK_ORCH_BOX_MAX_ACTIVE`, and rate-limit telemetry. Pending capacity retries are expected; do not manually fork another Box. |
 | Immediate authentication/billing failure | Verify the control-plane `BOX_API_KEY` and Box account setup. Do not copy the key into a Box to diagnose it. |
 | Fork never becomes ready | Check the template ID/version, Box state, worker-compatible manifest, and `TASK_ORCH_BOX_READY_TIMEOUT_MS`. Keep the recorded Box for diagnosis; stop it if safe rather than deleting it. |
-| Worker cannot contact the server | Verify `TASK_ORCH_WORKER_API_URL` from the Box network and the token-signing secret. The worker must use HTTP/SSE, never direct database access. |
+| Control plane cannot reach the worker | Verify the Box exposes its private WebSocket listener on the control-plane-dialable endpoint and the channel-signing secret is set. The worker never opens outbound connections and never touches the database directly. |
 | Stop does not checkpoint | Inspect `lastSnapshotStatus`, `snapshotCompletedAt`, and the latest snapshot. A stale or failed snapshot is not a completed checkpoint; leave the Box available for retry. |
 | Resume fails after a long pause | Check token expiry/rotation. The recovery path is a replacement fork of the archived run Box with fresh explicit environment, not a new template fork. |
 | Unexpected active cost | Check for an active worker claim or wake intent, then the idle-stop grace. Do not delete a Box that may contain uncheckpointed work. |

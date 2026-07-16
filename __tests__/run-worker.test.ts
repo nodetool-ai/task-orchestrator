@@ -72,7 +72,6 @@ describe("workerChannelDispatchEnv (local ws worker)", () => {
     const env = workerChannelDispatchEnv(7, instanceId, listen);
 
     expect(env).toMatchObject({
-      TASK_ORCH_WORKER_TRANSPORT: "ws",
       TASK_ORCH_WORKER_INSTANCE_ID: instanceId,
       TASK_ORCH_WORKER_CHANNEL_ENDPOINT: listen,
     });

@@ -17,12 +17,14 @@ primary_region = "ams"
 
 [env]
   # Route agent runs onto archived/resumable Box sandboxes. BOX_API_KEY is a
-  # Fly secret; worker tokens use the existing AUTH_SECRET fallback.
+  # Fly secret. NOTE: the worker protocol is WebSocket-only (plan section 18) and
+  # Box has no private control-plane-to-worker ingress, so Box dispatch is
+  # rejected until its ingress section lands; the worker channel credential is
+  # derived from AUTH_SECRET (TASK_ORCH_WORKER_CHANNEL_SECRET override).
   TASK_ORCH_RUNNER = "box"
   TASK_ORCH_BOX_TEMPLATE_ID = "bx_htkmny98"
   TASK_ORCH_BOX_REPO_PATH = "/home/user/nodetool"
   TASK_ORCH_BOX_MAX_ACTIVE = "1"
-  TASK_ORCH_WORKER_API_URL = "https://task-orchestrator.fly.dev"
   # Run each agent turn in its own Machine, never in this web process, so a
   # redeploy/restart of the server never kills an in-flight run.
   TASK_ORCH_DETACHED_RUNS = "1"

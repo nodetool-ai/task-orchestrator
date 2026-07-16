@@ -78,8 +78,9 @@ async function readFileTail(filePath: string, maxBytes: number): Promise<string 
 
 /**
  * Read `filePath` and ship its tail into agent_runs.worker_log for `runId`,
- * via the worker transport (direct Postgres, or POST /api/worker/runs/:id/log
- * for an HTTP-mode worker). Returns true on a successful write, false on any
+ * via the worker transport (direct Postgres on the control plane, or the
+ * channel's log command from a dispatched worker). Returns true on a successful
+ * write, false on any
  * failure (missing/unreadable file, write error). A log-flush failure must
  * NEVER break the run — every error is swallowed (logged) so the caller can
  * keep driving.

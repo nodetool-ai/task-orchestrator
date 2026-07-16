@@ -119,13 +119,12 @@ import {
 // would otherwise produce.
 import * as runDispatch from "./run-dispatch";
 import { runNonce } from "./run-nonce";
-// The worker ⇄ orchestrator transport seam (lib/worker): every interaction a
-// run worker has with orchestrator state goes through runTransport(), so the
-// same code drives a turn against Postgres directly (db transport — the
-// default, and the only mode for this web-server process) or against the
-// /api/worker HTTP + SSE protocol (external workers with no DB access).
+// The control-plane transport seam (lib/worker): every interaction the web
+// server / CLI has with run state goes through runTransport(), which is always
+// the db transport (this process IS the orchestrator). Dispatched workers never
+// construct a transport — they run over the WebSocket channel (lib/worker-channel).
 // The import is cycle-safe: lib/worker/index only pulls types + the logger at
-// module init and loads the transport implementations lazily.
+// module init and loads the db transport implementation lazily.
 import { contentText, runTransport } from "./worker";
 
 // Inject this module's helpers into run-dispatch (see the comment above). `get`,

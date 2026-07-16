@@ -45,7 +45,7 @@ const PG_SCHEMA = config.db.pgSchema;
 // A single lazily-CREATED and lazily-connecting postgres.js client, reused
 // across HMR / module reloads via globals. Creation is deferred to first use
 // (behind the proxies below) so that a process which never touches the DB —
-// an HTTP-mode worker speaking the /api/worker protocol — can run WITHOUT
+// a worker speaking the WebSocket channel protocol — can run WITHOUT
 // DATABASE_URL. Any accidental direct DB access in such a worker then fails
 // loudly at the exact call site with an actionable message instead of at
 // import time. Migrations + seeding run out-of-band via initDb() (boot / test
@@ -99,15 +99,14 @@ function ensureClient(): Client {
   if (!globalThis.__tasksPg) {
     if (insideWorker() && !dbAllowedInWorker()) {
       // HARD REQUIREMENT: workers never talk to Postgres — all orchestrator
-      // state flows through the worker HTTP protocol (lib/worker). Any code
-      // path that lands here from a worker has not been routed through the
-      // transport and is a bug. (TASK_ORCH_WORKER_ALLOW_DB=1 is a test-only
-      // escape hatch for suites that simulate a worker env in the
-      // orchestrator process.)
+      // state flows over the worker WebSocket channel. Any code path that lands
+      // here from a worker has not been routed through the channel and is a bug.
+      // (TASK_ORCH_WORKER_ALLOW_DB=1 is a test-only escape hatch for suites that
+      // simulate a worker env in the orchestrator process.)
       throw new Error(
         "Direct database access attempted inside a run worker " +
           "(TASK_ORCH_INSIDE_WORKER=1). Workers must go through the worker " +
-          "transport (lib/worker) — see docs/worker-http-api.md."
+          "channel — see docs/worker-websocket-protocol.md."
       );
     }
     globalThis.__tasksPg = createClient();

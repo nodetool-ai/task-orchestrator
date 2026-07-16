@@ -4,7 +4,6 @@
 
 import { AGENT_CREDENTIAL_ENV_KEYS, agentCredentialEnv } from "../agent-backend/provider-env";
 import { config, nestedDispatchMode, type NestedDispatchMode } from "../config";
-import { workerDispatchEnv } from "../worker/token";
 
 /** Limits documented by the Box fork API. */
 export const BOX_ENV_MAX_VARIABLES = 100;
@@ -67,7 +66,6 @@ export function validateBoxWorkerEnv(env: Readonly<Record<string, string>>): voi
  * DATABASE_URL cannot cross the control-plane boundary.
  */
 export function buildBoxWorkerEnv(input: BoxWorkerEnvInput): Record<string, string> {
-  const worker = workerDispatchEnv(input.runId);
   const repoPath = requiredString(input.repoPath ?? config.box.repoPath, "TASK_ORCH_BOX_REPO_PATH");
   const repoId = requiredString(input.repoId, "repoId");
   const instanceId = input.instanceId ?? config.deployment.instanceId ?? "default";
@@ -76,8 +74,6 @@ export function buildBoxWorkerEnv(input: BoxWorkerEnvInput): Record<string, stri
   // This is intentionally an allowlist. Do not replace it with a process.env
   // spread: Box templates may have account credentials or dashboard secrets.
   const env: Record<string, string> = {
-    TASK_ORCH_WORKER_API_URL: worker.TASK_ORCH_WORKER_API_URL,
-    TASK_ORCH_WORKER_TOKEN: worker.TASK_ORCH_WORKER_TOKEN,
     TASK_ORCH_INSIDE_WORKER: "1",
     TASK_ORCH_RUN_ID: String(input.runId),
     TASK_ORCH_REPO_ID: repoId,

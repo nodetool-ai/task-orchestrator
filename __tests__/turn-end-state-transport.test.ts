@@ -2,9 +2,9 @@
 //
 // Regression for the run-76 incident: readTurnEndState() ran at the end of
 // EVERY worker turn (runExecute, and the shared implement/review/chat path) and
-// read agent_runs directly via `db`. HTTP-mode workers hold no DB access, so
-// that direct read tripped db/index.ts's guard and failed the turn at the
-// finish line with "Direct database access attempted inside a run worker".
+// read agent_runs directly via `db`. Workers hold no DB access, so that direct
+// read tripped db/index.ts's guard and failed the turn at the finish line with
+// "Direct database access attempted inside a run worker".
 //
 // The read must go through the RunTransport (getRun) like every other worker
 // interaction with orchestrator state. This test pins that routing: it spies

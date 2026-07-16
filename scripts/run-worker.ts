@@ -13,14 +13,11 @@ import { config } from "dotenv";
 config({ path: ".env.local" });
 
 import { config as appConfig } from "../lib/config";
-import { driveDispatchedRun } from "../lib/runs";
 import { driveWorkerRun, type WorkerDriverSession } from "../lib/worker-runtime/context";
 import { insideWorker } from "../lib/runner/provider";
 import { startWorkerLogFlusher } from "../lib/runner/worker-log-store";
 import { installProcessSafetyNet } from "../lib/transient-errors";
-import { httpTransportConfigured, websocketTransportConfigured } from "../lib/worker";
 import { startWorkerServer, type WorkerServer } from "../lib/worker-channel/worker-server";
-import { ProtocolMismatchError } from "../lib/worker/http-transport";
 import { createLogger } from "../lib/worker/log";
 
 const log = createLogger("run-worker");
@@ -37,11 +34,7 @@ async function main() {
     process.exit(2);
   }
 
-  log.info("worker starting", {
-    runId,
-    transport: websocketTransportConfigured() ? "ws" : httpTransportConfigured() ? "http" : "db",
-    pid: process.pid,
-  });
+  log.info("worker starting", { runId, transport: "ws", pid: process.pid });
 
   // Ship the worker's runner.log off the ephemeral Fly volume into Postgres so
   // its debugging history survives the Machine + volume being destroyed. The
@@ -61,46 +54,40 @@ async function main() {
     }
   }
 
+  const instanceId = appConfig.worker.channelInstanceId;
+  const credential = appConfig.worker.channelCredential;
+  const endpoint = appConfig.worker.channelEndpoint;
+  if (!instanceId || !credential || !endpoint) {
+    // The worker protocol is WebSocket-only (plan section 18). Dispatch injects
+    // the channel identity, credential, and listen endpoint; without them the
+    // worker has no way to reach the control plane and must fail fast rather
+    // than fall back to Postgres or an HTTP API that no longer exists.
+    console.error(
+      "[run-worker] missing worker channel configuration " +
+        "(TASK_ORCH_WORKER_INSTANCE_ID / TASK_ORCH_WORKER_CHANNEL_CREDENTIAL / " +
+        "TASK_ORCH_WORKER_CHANNEL_ENDPOINT). Dispatch must inject the channel identity."
+    );
+    process.exit(2);
+  }
+
   let exitCode = 0;
   let supervisor: WorkerServer | undefined;
   try {
-    if (websocketTransportConfigured()) {
-      // WebSocket transport (plan section 13): the control plane pushes the
-      // authoritative RunStart snapshot and all subsequent input over the
-      // channel. Start the supervisor, wait for that snapshot, build the
-      // worker run context from it, and drive the run without any Postgres or
-      // control-plane HTTP read. The supervisor is closed (drained) in the
-      // finally below.
-      supervisor = await startWorkerServer({
-        runId,
-        instanceId: appConfig.worker.channelInstanceId!,
-        credential: appConfig.worker.channelCredential!,
-        endpoint: appConfig.worker.channelEndpoint!,
-      });
-      const session = supervisor.session;
-      if (!session.waitForStart || !session.commands) {
-        throw new Error("worker supervisor session does not expose the ws run-driver API");
-      }
-      const start = await session.waitForStart();
-      await driveWorkerRun({ start, session: session as WorkerDriverSession });
-    } else {
-      await driveDispatchedRun(runId);
+    // WebSocket transport (plan section 13): the control plane pushes the
+    // authoritative RunStart snapshot and all subsequent input over the channel.
+    // Start the supervisor, wait for that snapshot, build the worker run context
+    // from it, and drive the run without any Postgres or control-plane HTTP read.
+    // The supervisor is closed (drained) in the finally below.
+    supervisor = await startWorkerServer({ runId, instanceId, credential, endpoint });
+    const session = supervisor.session;
+    if (!session.waitForStart || !session.commands) {
+      throw new Error("worker supervisor session does not expose the ws run-driver API");
     }
+    const start = await session.waitForStart();
+    await driveWorkerRun({ start, session: session as WorkerDriverSession });
     log.info("worker finished", { runId });
   } catch (e) {
-    if (e instanceof ProtocolMismatchError) {
-      // The server redeployed with an incompatible worker protocol. Exiting
-      // nonzero kills this Machine; the stale-lease reaper then re-dispatches
-      // the run onto a fresh worker built from the new image — the system
-      // already handles this exactly like any other worker death.
-      log.error("worker protocol mismatch — exiting for reaper re-dispatch", {
-        runId,
-        server: e.serverVersion,
-        client: e.clientVersion,
-      });
-    } else {
-      log.error("worker fatal", { runId, error: e instanceof Error ? (e.stack ?? e.message) : String(e) });
-    }
+    log.error("worker fatal", { runId, error: e instanceof Error ? (e.stack ?? e.message) : String(e) });
     exitCode = 1;
   } finally {
     await supervisor?.close().catch(() => {});

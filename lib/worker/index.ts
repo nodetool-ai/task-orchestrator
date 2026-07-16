@@ -1,99 +1,38 @@
 // lib/worker/index.ts
 //
-// Transport selection for the worker ⇄ orchestrator protocol.
+// RunTransport selection for control-plane code.
 //
-//   • Web-server / CLI / tests: always the db transport (they ARE the
-//     orchestrator; the HTTP API is a loopback there, not a simplification).
-//   • Worker process (TASK_ORCH_INSIDE_WORKER=1): the http transport,
-//     REQUIRED. Workers speak HTTP + SSE against /api/worker and hold no
-//     database access at all — dispatch injects TASK_ORCH_WORKER_API_URL +
-//     TASK_ORCH_WORKER_TOKEN and withholds DATABASE_URL. A worker booted
-//     without those fails fast here rather than limping along on Postgres.
-//     (TASK_ORCH_WORKER_ALLOW_DB=1 is a test-only escape hatch for suites
-//     that simulate a worker's env inside the orchestrator process; it is
-//     unsupported for real deployments.)
+// The worker ⇄ orchestrator protocol is WebSocket-only (plan section 18): a
+// dispatched worker process runs `driveWorkerRun` against its private channel
+// and never constructs a RunTransport. The db transport that remains here is the
+// control plane's own loopback implementation — the web server, CLI, and tests
+// ARE the orchestrator, so they read/write run state directly through it.
 //
-// The implementations are loaded lazily so that importing lib/runs.ts (which
-// calls runTransport() in many code paths) never forms an import cycle, and so
-// an http-mode worker doesn't touch the db module at selection time.
+// The implementation is loaded lazily so that importing lib/runs.ts (which calls
+// runTransport() in many code paths) never forms an import cycle.
 
-import { config } from "../config";
-import { createLogger } from "./log";
 import type { RunTransport } from "./protocol";
 
 export type { RunTransport } from "./protocol";
 export * from "./protocol";
 
-const log = createLogger("worker-transport");
-
-function insideWorkerProcess(): boolean {
-  return config.worker.inside;
-}
-
-/** True when this process should (and can) speak the worker HTTP protocol. */
-export function httpTransportConfigured(): boolean {
-  return insideWorkerProcess() && config.worker.transport === "http" && !!config.worker.apiUrl && !!config.worker.apiToken;
-}
-
-/** True when the supervisor has everything needed to expose its private WS
- * listener. The run driver remains on the legacy HTTP adapter during the
- * compatibility migration, but this prevents accidental credential fallback. */
-export function websocketTransportConfigured(): boolean {
-  return insideWorkerProcess() && config.worker.transport === "ws" &&
-    !!config.worker.channelInstanceId && !!config.worker.channelCredential && !!config.worker.channelEndpoint;
-}
-
-/** Test-only escape hatch (see the module docstring). */
-function dbAllowedInWorker(): boolean {
-  return config.worker.allowDb;
-}
-
 let cached: Promise<RunTransport> | null = null;
 
 /**
- * The process-wide RunTransport. Memoized after the first call; the selection
- * inputs are boot env vars, so they cannot change mid-process.
- *
- * HARD REQUIREMENT: a worker process without HTTP credentials throws here
- * (synchronously, un-memoized) — workers must not fall back to Postgres.
+ * The process-wide RunTransport: always the control-plane db transport. Memoized
+ * after the first call.
  */
 export function runTransport(): Promise<RunTransport> {
   if (!cached) {
-    if (insideWorkerProcess() && config.worker.transport === "http" && !httpTransportConfigured() && !dbAllowedInWorker()) {
-      throw new Error(
-        "This process is a run worker (TASK_ORCH_INSIDE_WORKER=1) without worker " +
-          "API credentials. Workers speak the HTTP protocol only — dispatch must " +
-          "inject TASK_ORCH_WORKER_API_URL + TASK_ORCH_WORKER_TOKEN (set " +
-          "TASK_ORCH_WORKER_API_URL, or NEXTAUTH_URL as a fallback, on the " +
-          "server). Direct-Postgres workers are no longer supported. See " +
-          "docs/worker-http-api.md."
-      );
-    }
     cached = (async () => {
-      if (httpTransportConfigured()) {
-        const { createHttpTransport } = await import("./http-transport");
-        const t = createHttpTransport({
-          baseUrl: config.worker.apiUrl!,
-          token: config.worker.apiToken!,
-        });
-        log.info("worker transport selected", { kind: "http", baseUrl: config.worker.apiUrl });
-        return t;
-      }
-      // The websocket supervisor is started by scripts/run-worker.  The driver
-      // still uses the in-process compatibility seam until its semantic event
-      // migration lands; never silently select the HTTP transport in ws mode.
-      if (insideWorkerProcess() && config.worker.transport === "ws" && !dbAllowedInWorker()) {
-        throw new Error("WebSocket worker transport requires the websocket compatibility driver; no HTTP fallback is permitted.");
-      }
       const { dbTransport } = await import("./db-transport");
-      if (insideWorkerProcess()) log.debug("worker transport selected", { kind: "db" });
       return dbTransport;
     })();
   }
   return cached;
 }
 
-/** Test hook: clear the memoized transport (env-driven selection re-runs). */
+/** Test hook: clear the memoized transport. */
 export function __resetRunTransportForTests(): void {
   cached = null;
 }

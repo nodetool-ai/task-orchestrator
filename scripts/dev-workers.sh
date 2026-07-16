@@ -135,10 +135,13 @@ PORT="${SERVER_PORT:-3000}"
 cat <<EOF
 
 ============================ add to .env.local ============================
-# Docker workers for local dev (see scripts/dev-workers.sh)
+# Docker workers for local dev (see scripts/dev-workers.sh).
+# NOTE: the worker protocol is WebSocket-only (plan section 18); Docker channel
+# provisioning lands in section 19. Until then TASK_ORCH_WORKER_IMAGE dispatch
+# fails fast — use a plain local detached run (leave TASK_ORCH_WORKER_IMAGE
+# unset) to exercise the WebSocket worker on the host.
 TASK_ORCH_DETACHED_RUNS=1
 TASK_ORCH_WORKER_IMAGE=$IMAGE
-TASK_ORCH_WORKER_API_URL=http://host.docker.internal:$PORT
 TASK_ORCH_CLAUDE_HOME_HOST=$CLAUDE_HOME_HOST
 TASK_ORCH_REPO_CACHE_HOST_VOLUME=$VOLUME
 # (GH_TOKEN + your agent backend creds are already in .env.local — the server

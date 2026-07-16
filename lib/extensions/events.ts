@@ -8,10 +8,10 @@
 //
 // EXECUTION MODEL: the tool definitions live in EVENT_TOOLS (server-executable
 // registry entries, resolved by lib/worker/server-tools). The extension
-// factory registers thin wrappers that route through the worker transport —
-// in-process on the orchestrator, POST /api/worker/runs/:id/tools/call from an
-// HTTP worker. Workers hold no database access (hard requirement), so nothing
-// in the execute bodies may run worker-side.
+// factory registers thin wrappers that route to the control plane — in-process
+// on the orchestrator, or over the worker channel's tool.invoke command from a
+// dispatched worker. Workers hold no database access (hard requirement), so
+// nothing in the execute bodies may run worker-side.
 //
 // CONTRACT WITH lib/runs.ts (the turn-end handler): tools registered here
 // NEVER set agent_runs.status directly. They write mutable columns only
