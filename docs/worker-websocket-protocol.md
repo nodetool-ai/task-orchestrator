@@ -365,7 +365,12 @@ each direction's catalogue; only the chunk frames are binary and unsequenced
 
 1. reply to `blob.open` — `nextChunk` is `0` for a fresh blob, or the persisted
    resume cursor for a partial blob re-opened after reconnect;
-2. periodic cursor persistence is receiver-internal; it is not echoed per chunk;
+2. periodic window ack — after durably persisting roughly half of
+   `maxInFlightBytes` of new chunk bytes, the receiver echoes `blob.accepted`
+   with `complete: false` and its current `nextChunk`. This releases the
+   sender's in-flight budget so its pump can advance. It is a coarse window ack,
+   not a per-chunk echo, and it is what makes chunk bytes count toward the ack
+   window (see Blob transfer below);
 3. after the final chunk, the receiver verifies declared size and SHA-256 and
    sends `blob.accepted` with `complete: true` (or `blob.rejected` with a
    reason; a digest mismatch is a protocol violation and also closes with
