@@ -12,6 +12,9 @@ describe("SECRET_ENV_DENYLIST", () => {
     expect(SECRET_ENV_DENYLIST).toContain("FLY_API_TOKEN");
     expect(SECRET_ENV_DENYLIST).toContain("AUTH_SECRET");
     expect(SECRET_ENV_DENYLIST).toContain("GITHUB_WEBHOOK_SECRET");
+    expect(SECRET_ENV_DENYLIST).toContain("TASK_ORCH_WORKER_CHANNEL_CREDENTIAL");
+    expect(SECRET_ENV_DENYLIST).toContain("TASK_ORCH_WORKER_CHANNEL_ENDPOINT");
+    expect(SECRET_ENV_DENYLIST).toContain("TASK_ORCH_WORKER_INSTANCE_ID");
   });
 
   it("includes model-provider credentials", () => {
@@ -43,6 +46,9 @@ describe("scrubEnv", () => {
       DATABASE_URL: "postgres://leak",
       ANTHROPIC_API_KEY: "sk-ant-leak",
       CODEX_ACCESS_TOKEN: "codex-leak",
+      TASK_ORCH_WORKER_CHANNEL_CREDENTIAL: "channel-credential-leak",
+      TASK_ORCH_WORKER_CHANNEL_ENDPOINT: "channel-endpoint-leak",
+      TASK_ORCH_WORKER_INSTANCE_ID: "instance-id-leak",
       GH_TOKEN: "gh-keep",
       GITHUB_TOKEN: "ghtok-keep",
     };
@@ -54,6 +60,25 @@ describe("scrubEnv", () => {
     expect(result.DATABASE_URL).toBeUndefined();
     expect(result.ANTHROPIC_API_KEY).toBeUndefined();
     expect(result.CODEX_ACCESS_TOKEN).toBeUndefined();
+    expect(result.TASK_ORCH_WORKER_CHANNEL_CREDENTIAL).toBeUndefined();
+    expect(result.TASK_ORCH_WORKER_CHANNEL_ENDPOINT).toBeUndefined();
+    expect(result.TASK_ORCH_WORKER_INSTANCE_ID).toBeUndefined();
+  });
+
+  it("keeps supervisor worker-channel values available on the caller env", () => {
+    const supervisorEnv = {
+      TASK_ORCH_WORKER_CHANNEL_CREDENTIAL: "channel-credential",
+      TASK_ORCH_WORKER_CHANNEL_ENDPOINT: "ws://127.0.0.1:7777/worker/channel",
+      TASK_ORCH_WORKER_INSTANCE_ID: "instance-id",
+    };
+
+    scrubEnv(supervisorEnv);
+
+    expect(supervisorEnv.TASK_ORCH_WORKER_CHANNEL_CREDENTIAL).toBe("channel-credential");
+    expect(supervisorEnv.TASK_ORCH_WORKER_CHANNEL_ENDPOINT).toBe(
+      "ws://127.0.0.1:7777/worker/channel"
+    );
+    expect(supervisorEnv.TASK_ORCH_WORKER_INSTANCE_ID).toBe("instance-id");
   });
 
   it("does not mutate the input", () => {
@@ -94,10 +119,16 @@ describe("scrubClaudeCliEnv", () => {
       DATABASE_URL: "postgres://leak",
       OPENAI_API_KEY: "sk-openai-leak",
       FLY_API_TOKEN: "fly-leak",
+      TASK_ORCH_WORKER_CHANNEL_CREDENTIAL: "channel-credential-leak",
+      TASK_ORCH_WORKER_CHANNEL_ENDPOINT: "channel-endpoint-leak",
+      TASK_ORCH_WORKER_INSTANCE_ID: "instance-id-leak",
     });
     expect(result.DATABASE_URL).toBeUndefined();
     expect(result.OPENAI_API_KEY).toBeUndefined();
     expect(result.FLY_API_TOKEN).toBeUndefined();
+    expect(result.TASK_ORCH_WORKER_CHANNEL_CREDENTIAL).toBeUndefined();
+    expect(result.TASK_ORCH_WORKER_CHANNEL_ENDPOINT).toBeUndefined();
+    expect(result.TASK_ORCH_WORKER_INSTANCE_ID).toBeUndefined();
   });
 
   it("keeps PATH, HOME, and GH_TOKEN", () => {

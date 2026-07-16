@@ -47,12 +47,19 @@ const KEEP_FOR_GIT = new Set(["GH_TOKEN", "GITHUB_TOKEN"]);
 //     endpoints for the token's (multi-day) lifetime. Strip it from bash. Note
 //     TASK_ORCH_WORKER_API_URL is deliberately NOT scrubbed — it's the server
 //     origin, not a credential; the token alone is what authorizes the API.
+//   - TASK_ORCH_WORKER_CHANNEL_CREDENTIAL / _ENDPOINT / _INSTANCE_ID: the
+//     websocket supervisor's authentication credential and listener metadata.
+//     These are needed by the supervisor, but must not reach agent/model
+//     subprocesses or any child process launched by agent code.
 const SERVER_ONLY_SECRETS = [
   "DATABASE_URL",
   "FLY_API_TOKEN",
   "AUTH_SECRET",
   "GITHUB_WEBHOOK_SECRET",
   "TASK_ORCH_WORKER_TOKEN",
+  "TASK_ORCH_WORKER_CHANNEL_CREDENTIAL",
+  "TASK_ORCH_WORKER_CHANNEL_ENDPOINT",
+  "TASK_ORCH_WORKER_INSTANCE_ID",
 ];
 
 /**

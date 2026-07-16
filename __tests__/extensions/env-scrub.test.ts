@@ -35,16 +35,30 @@ describe("envScrubFactory", () => {
     envScrubFactory(r.reg);
     const mutated = r.fireToolCall({
       toolName: "bash",
-      input: { command: "printenv DATABASE_URL; printenv GH_TOKEN" },
+      input: {
+        command:
+          "printenv DATABASE_URL; printenv TASK_ORCH_WORKER_CHANNEL_CREDENTIAL; printenv TASK_ORCH_WORKER_CHANNEL_ENDPOINT; printenv TASK_ORCH_WORKER_INSTANCE_ID; printenv GH_TOKEN",
+      },
     }) as { input: { command: string } };
 
     const stdout = execFileSync("bash", ["-c", mutated.input.command], {
-      env: { ...process.env, PATH: process.env.PATH, DATABASE_URL: "leak-me", GH_TOKEN: "keep-me" },
+      env: {
+        ...process.env,
+        PATH: process.env.PATH,
+        DATABASE_URL: "leak-me",
+        TASK_ORCH_WORKER_CHANNEL_CREDENTIAL: "channel-credential-leak",
+        TASK_ORCH_WORKER_CHANNEL_ENDPOINT: "channel-endpoint-leak",
+        TASK_ORCH_WORKER_INSTANCE_ID: "instance-id-leak",
+        GH_TOKEN: "keep-me",
+      },
       encoding: "utf8",
     });
 
     expect(stdout).toContain("keep-me");
     expect(stdout).not.toContain("leak-me");
+    expect(stdout).not.toContain("channel-credential-leak");
+    expect(stdout).not.toContain("channel-endpoint-leak");
+    expect(stdout).not.toContain("instance-id-leak");
   });
 
   it("real end-to-end: a child process spawned from the mutated command also lacks the secret", () => {
@@ -52,16 +66,30 @@ describe("envScrubFactory", () => {
     envScrubFactory(r.reg);
     const mutated = r.fireToolCall({
       toolName: "bash",
-      input: { command: "bash -c 'printenv DATABASE_URL; printenv GH_TOKEN'" },
+      input: {
+        command:
+          "bash -c 'printenv DATABASE_URL; printenv TASK_ORCH_WORKER_CHANNEL_CREDENTIAL; printenv TASK_ORCH_WORKER_CHANNEL_ENDPOINT; printenv TASK_ORCH_WORKER_INSTANCE_ID; printenv GH_TOKEN'",
+      },
     }) as { input: { command: string } };
 
     const stdout = execFileSync("bash", ["-c", mutated.input.command], {
-      env: { ...process.env, PATH: process.env.PATH, DATABASE_URL: "leak-me", GH_TOKEN: "keep-me" },
+      env: {
+        ...process.env,
+        PATH: process.env.PATH,
+        DATABASE_URL: "leak-me",
+        TASK_ORCH_WORKER_CHANNEL_CREDENTIAL: "channel-credential-leak",
+        TASK_ORCH_WORKER_CHANNEL_ENDPOINT: "channel-endpoint-leak",
+        TASK_ORCH_WORKER_INSTANCE_ID: "instance-id-leak",
+        GH_TOKEN: "keep-me",
+      },
       encoding: "utf8",
     });
 
     expect(stdout).toContain("keep-me");
     expect(stdout).not.toContain("leak-me");
+    expect(stdout).not.toContain("channel-credential-leak");
+    expect(stdout).not.toContain("channel-endpoint-leak");
+    expect(stdout).not.toContain("instance-id-leak");
   });
 
   it("covers every denylisted name in the emitted prefix", async () => {
