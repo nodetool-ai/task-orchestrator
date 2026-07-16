@@ -52,6 +52,16 @@ import { executeToolInvoke, reserveToolInvoke, type ToolChannelIO } from "./tool
 
 export type { WorkerEventHandler };
 
+/** WebSocket ping cadence. A test seam shrinks it so the missed-pong liveness
+ * check (two intervals) fires in milliseconds instead of tens of seconds. */
+let heartbeatIntervalMs = DEFAULT_HEARTBEAT_MS;
+export function __setHeartbeatIntervalForTests(ms: number): void {
+  heartbeatIntervalMs = ms;
+}
+export function __resetHeartbeatIntervalForTests(): void {
+  heartbeatIntervalMs = DEFAULT_HEARTBEAT_MS;
+}
+
 export interface ControllerConnectionOptions {
   runId: number;
   instanceId: string;
@@ -115,8 +125,12 @@ export class ControllerConnection {
   private epoch = 0;
   private stopped = false;
   private pingTimer?: NodeJS.Timeout;
+  /** Consecutive ping ticks with no intervening pong; reset by the pong handler. */
+  private missedPongs = 0;
+  /** In-flight {@link connect} attempt so concurrent dials share one handshake. */
+  private connecting?: Promise<void>;
   private serial: Promise<void> = Promise.resolve();
-  private ackWaiters = new Map<number, Array<() => void>>();
+  private ackWaiters = new Map<number, Array<{ resolve: () => void; reject: (error: Error) => void }>>();
   private readonly blobs: BlobCoordinator;
 
   constructor(options: ControllerConnectionOptions) {
@@ -157,6 +171,19 @@ export class ControllerConnection {
 
   async connect(): Promise<void> {
     if (this.stopped) throw new Error("controller connection is shut down");
+    // Re-entrancy guard: a reconnect backoff timer (attemptReconnect) and
+    // reapStaleChannels/connectRun can all dial this same object concurrently.
+    // Without a guard, whichever handshake resolves LAST overwrites this.socket /
+    // this.epoch — possibly with the losing socket — and orphans the live one.
+    // Subsequent callers await and share the one in-flight attempt.
+    if (this.connecting) return this.connecting;
+    this.connecting = this.connectInner().finally(() => {
+      this.connecting = undefined;
+    });
+    return this.connecting;
+  }
+
+  private async connectInner(): Promise<void> {
     const lease = await acquireControllerLease(this.runId, this.controllerId, new Date());
     this.epoch = lease.epoch;
     const credential = mintChannelCredential(this.runId, this.instanceId);
@@ -178,6 +205,15 @@ export class ControllerConnection {
         socket.close(CLOSE_CODE_PROTOCOL_MISMATCH, "protocol mismatch");
         throw new ControllerProtocolError("worker does not support protocol v1", CLOSE_CODE_PROTOCOL_MISMATCH, false);
       }
+      // Attach the persistent listeners BEFORE sending accept and the post-accept
+      // DB awaits below. The worker replays its spooled events the instant it sees
+      // channel.accept; a listener attached only after markChannelConnected /
+      // rebasePendingCommands / blobs.rebind would let `ws` emit those replayed
+      // frames to no listener — silently dropping them until a later reconnect.
+      // captureFirstFrame already consumed the hello with a one-shot listener, and
+      // the worker sends nothing between hello and our accept, so this persistent
+      // listener never double-processes a frame.
+      this.attachSocketHandlers(socket);
       const lastAcceptedWorkerSeq = await getLastAcceptedWorkerSeq(this.runId, this.instanceId);
       // channel.accept is a handshake frame ({v,type,seq,payload}), not an
       // envelope: the codec validates it strictly, so it must not carry the
@@ -202,20 +238,6 @@ export class ControllerConnection {
       // Bind the shared coordinator to THIS connection's transport and re-announce
       // any outgoing blob so a reconnect resumes from the receiver's cursor.
       await this.blobs.rebind(this.controlBlobIO());
-      socket.on("message", (data, isBinary) =>
-        this.enqueue(() => (isBinary ? this.receiveBinary(data) : this.receive(raw(data)))),
-      );
-      socket.on("pong", () => this.enqueue(() => this.touch()));
-      socket.on("close", (code: number) => {
-        this.stopPings();
-        // An intentional disconnect() flips `stopped` first; anything else is an
-        // unexpected drop the registry may reconnect within the grace window.
-        if (!this.stopped && this.socket === socket) {
-          this.socket = undefined;
-          this.onClose?.({ code });
-        }
-      });
-      socket.on("error", () => undefined);
       this.startPings();
     } catch (error) {
       if (this.socket === socket) this.socket = undefined;
@@ -225,15 +247,39 @@ export class ControllerConnection {
     }
   }
 
+  /** Attach the persistent message/pong/close/error listeners for one socket.
+   * Called during the handshake, before the post-accept awaits, so no replayed
+   * worker frame is dropped (see {@link connectInner}). */
+  private attachSocketHandlers(socket: WebSocket): void {
+    socket.on("message", (data, isBinary) =>
+      this.enqueue(() => (isBinary ? this.receiveBinary(data) : this.receive(raw(data)))),
+    );
+    socket.on("pong", () => {
+      // A pong proves the peer is live: reset the missed-pong liveness counter.
+      this.missedPongs = 0;
+      this.enqueue(() => this.touch());
+    });
+    socket.on("close", (code: number) => {
+      this.stopPings();
+      // An intentional disconnect() flips `stopped` first; anything else is an
+      // unexpected drop the registry may reconnect within the grace window.
+      if (!this.stopped && this.socket === socket) {
+        this.socket = undefined;
+        this.onClose?.({ code });
+      }
+    });
+    socket.on("error", () => undefined);
+  }
+
   async sendPersisted(command: CommandRow): Promise<void> {
     if (command.controllerEpoch !== this.epoch) return;
     if (this.connected) this.sendCommandRow(command);
   }
 
   waitForAck(seq: number): Promise<void> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const current = this.ackWaiters.get(seq) ?? [];
-      current.push(resolve);
+      current.push({ resolve, reject });
       this.ackWaiters.set(seq, current);
     });
   }
@@ -254,9 +300,31 @@ export class ControllerConnection {
     const socket = this.socket;
     this.socket = undefined;
     if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "controller shutdown");
-    for (const waiters of this.ackWaiters.values()) for (const resolve of waiters) resolve();
+    // Ack waiters RESOLVE on an intentional disconnect: the command is a durable
+    // row, so the next process (hot deploy) or reconnect replays it — consistent
+    // with sendCommand's not-connected early return, which also reports success
+    // on the strength of the durable row.
+    for (const waiters of this.ackWaiters.values()) for (const waiter of waiters) waiter.resolve();
     this.ackWaiters.clear();
     if (release && this.epoch) await releaseControllerLease(this.runId, this.controllerId, this.epoch);
+  }
+
+  /** Abandon the connection when the reconnect grace is exhausted. Unlike
+   * {@link disconnect}, this REJECTS in-flight ack waiters: no reconnect will
+   * replay their commands from here (the run is being handed to the reaper), so a
+   * sendCommand awaiting confirmation must observe a failure rather than a silent
+   * false success for a command this channel never delivered. */
+  async abandon(): Promise<void> {
+    this.stopped = true;
+    this.stopPings();
+    const socket = this.socket;
+    this.socket = undefined;
+    if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "controller abandoned");
+    const error = new ControllerAbandonedError(
+      `worker channel for run ${this.runId} was abandoned after the reconnect grace expired`,
+    );
+    for (const waiters of this.ackWaiters.values()) for (const waiter of waiters) waiter.reject(error);
+    this.ackWaiters.clear();
   }
 
   /** Attach the message listener immediately so no worker-first frame is lost
@@ -331,14 +399,24 @@ export class ControllerConnection {
     if (this.stopped) return;
     const frame = decodeFrame(data);
     assertEnvelopeScope(frame, this.runId, this.instanceId);
-    if (frame.controllerEpoch !== this.epoch) throw new ControllerProtocolError("stale worker epoch", CLOSE_CODE_STALE_CONTROLLER_EPOCH, false);
+    // Every inbound frame is worker-authored (events + transport acks); the
+    // control plane never receives commands. A replayed worker event retains the
+    // epoch it was first emitted under, and acquireControllerLease bumps the epoch
+    // on any reconnect where the prior lease is not live — so a spooled event can
+    // legitimately arrive stamped with an epoch BELOW the current one. Fencing is
+    // only for commands sent *to* the worker (protocol: "Handshake and fencing");
+    // here the instance-id scope check above and applyWorkerEvent's seq-based
+    // dedupe guard correctness. Reject only an epoch AHEAD of ours — a worker can
+    // never have seen a controller epoch we have not issued, so that is a genuine
+    // protocol violation.
+    if (frame.controllerEpoch > this.epoch) throw new ControllerProtocolError("worker epoch ahead of controller", CLOSE_CODE_STALE_CONTROLLER_EPOCH, false);
     await this.touch();
     if (isTransportFrame(frame)) {
       if (frame.type === "channel.ack") {
         const through = frame.payload.throughSeq;
         await ackCommandsThrough(this.runId, this.instanceId, this.epoch, through, new Date());
         for (const [seq, waiters] of [...this.ackWaiters]) if (seq <= through) {
-          this.ackWaiters.delete(seq); for (const resolve of waiters) resolve();
+          this.ackWaiters.delete(seq); for (const waiter of waiters) waiter.resolve();
         }
       }
       return;
@@ -458,14 +536,29 @@ export class ControllerConnection {
 
   private startPings(): void {
     this.stopPings();
+    this.missedPongs = 0;
     this.pingTimer = setInterval(() => {
-      if (!this.connected) return;
-      this.socket!.ping();
+      const socket = this.socket;
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      // Liveness: a half-open TCP socket keeps readyState OPEN indefinitely. With
+      // an unconditional lease renewal the run would stall invisibly while the
+      // lease stayed fresh and the reaper never fired. Count ping ticks with no
+      // intervening pong (the 'pong' handler resets the counter); after two missed
+      // intervals terminate the socket so its 'close' fires onClose and the
+      // registry reconnect path takes over.
+      if (this.missedPongs >= 2) {
+        socket.terminate();
+        return;
+      }
+      this.missedPongs += 1;
+      socket.ping();
+      // Renew the lease only while the channel is still live (within the pong
+      // window) — never for a socket we are about to declare unhealthy.
       this.enqueue(async () => {
         const ok = await renewControllerLease(this.runId, this.controllerId, this.epoch, new Date());
         if (!ok) throw new ControllerProtocolError("controller lease lost", CLOSE_CODE_STALE_CONTROLLER_EPOCH, false);
       });
-    }, DEFAULT_HEARTBEAT_MS);
+    }, heartbeatIntervalMs);
     this.pingTimer.unref?.();
   }
 
@@ -474,4 +567,11 @@ export class ControllerConnection {
 
 export class ControllerProtocolError extends Error {
   constructor(message: string, readonly closeCode: number, readonly retryable: boolean) { super(message); this.name = "ControllerProtocolError"; }
+}
+
+/** Raised into in-flight sendCommand callers when a channel is abandoned after
+ * the reconnect grace expires — the command was persisted but not delivered on
+ * this channel, so success must not be reported. */
+export class ControllerAbandonedError extends Error {
+  constructor(message: string) { super(message); this.name = "ControllerAbandonedError"; }
 }

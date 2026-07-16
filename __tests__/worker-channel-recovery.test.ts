@@ -15,6 +15,7 @@ import { and, eq } from "drizzle-orm";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import WebSocket from "ws";
 import { db } from "../db";
 import { agentSessions, runnerInstances, workerChannelCommands } from "../db/schema";
 import { create } from "../lib/runs";
@@ -39,7 +40,18 @@ import {
   __setReconnectTimingForTests,
   getConnection,
 } from "../lib/worker-channel/registry";
-import { startWorkerServer, type WorkerServer } from "../lib/worker-channel/worker-server";
+import {
+  ControllerAbandonedError,
+  ControllerConnection,
+  __resetHeartbeatIntervalForTests,
+  __setHeartbeatIntervalForTests,
+} from "../lib/worker-channel/connection";
+import { handleWorkerEvent } from "../lib/worker-channel/event-handler";
+import {
+  startWorkerServer,
+  type WorkerServer,
+  type WorkerSessionLike,
+} from "../lib/worker-channel/worker-server";
 
 const SECRET = "channel-recovery-secret";
 
@@ -116,6 +128,7 @@ afterEach(async () => {
   runIds = [];
   vi.restoreAllMocks();
   __resetReconnectTimingForTests();
+  __resetHeartbeatIntervalForTests();
   delete process.env.TASK_ORCH_WORKER_CHANNEL_SECRET;
 });
 
@@ -295,5 +308,173 @@ describe("worker channel recovery (plan section 17)", () => {
     // touch also advances the shared heartbeat.
     expect(await touchChannel(runId, channel.instanceId, "replica-a", a.epoch, new Date("2026-07-16T00:01:05Z"))).toBe(false);
     expect(await touchChannel(runId, channel.instanceId, "replica-b", b.epoch, new Date("2026-07-16T00:01:05Z"))).toBe(true);
+  });
+
+  // Fix 1 (CRITICAL): epoch fencing must NOT reject a replayed worker event. The
+  // worker stamps events with the epoch at emit time and replays them verbatim
+  // from its durable outbox; a reconnect bumps the controller epoch, so the
+  // replayed event legitimately carries an epoch below the current one. It must
+  // be applied, not rejected with 4409.
+  it("applies a replayed worker event stamped with an older controller epoch", async () => {
+    const { runId, channel } = await provisionRun("running");
+    const root = await newRoot();
+    const server = await bootServer(runId, channel.instanceId, channel.listenEndpoint, root);
+
+    // Connect under epoch N, then stand the controller down (releases the lease)
+    // so the next connect bumps the epoch. The worker stays alive in its grace.
+    const first = await connectRun(runId);
+    const firstEpoch = first.controllerEpoch;
+    await disconnectRun(runId);
+
+    // The worker emits while no controller is attached: the event is spooled with
+    // the OLD epoch and left UNACKED (no receipt persisted yet).
+    const emitted = await server.emit("run.phase", { phase: "running" });
+    expect(emitted.controllerEpoch).toBe(firstEpoch);
+    expect(await getLastAcceptedWorkerSeq(runId, channel.instanceId)).toBe(0);
+
+    // Reconnect: the epoch bumps, and the worker replays the old-epoch event right
+    // after channel.accept. Pre-fix this looped forever on close code 4409; now it
+    // is accepted and a receipt lands.
+    const second = await connectRun(runId);
+    expect(second.controllerEpoch).toBeGreaterThan(firstEpoch);
+    await waitFor(async () => (await getLastAcceptedWorkerSeq(runId, channel.instanceId)) >= 1);
+    expect(getConnection(runId)?.connected).toBe(true);
+  });
+
+  // Fix 5 (MODERATE): frames the worker replays during the post-accept handshake
+  // awaits must not be dropped. Spool several events while detached and assert
+  // every one lands after reconnect (the persistent listener is attached before
+  // markChannelConnected/rebase/blobs.rebind now).
+  it("does not drop worker frames replayed during the handshake window", async () => {
+    const { runId, channel } = await provisionRun("running");
+    const root = await newRoot();
+    const server = await bootServer(runId, channel.instanceId, channel.listenEndpoint, root);
+
+    await connectRun(runId);
+    await disconnectRun(runId);
+
+    // Three spooled, unacked events all replay immediately after the next accept.
+    await server.emit("run.phase", { phase: "running" });
+    await server.emit("agent.event", { event: { kind: "checkpoint" } });
+    await server.emit("run.phase", { phase: "pushing" });
+    expect(await getLastAcceptedWorkerSeq(runId, channel.instanceId)).toBe(0);
+
+    await connectRun(runId);
+    // All three are applied — none silently dropped in the handshake window.
+    await waitFor(async () => (await getLastAcceptedWorkerSeq(runId, channel.instanceId)) >= 3);
+    expect(getConnection(runId)?.connected).toBe(true);
+  });
+
+  // Fix 2 (CRITICAL): concurrent connect() must not build two sockets. The
+  // in-flight guard makes later callers share the one attempt, so racing dials
+  // (attemptReconnect timer + connectRun/reapStaleChannels) can never orphan the
+  // live socket with a losing one.
+  it("collapses concurrent connect() calls into one live socket", async () => {
+    const { runId, channel } = await provisionRun("running");
+    const server = await bootServer(runId, channel.instanceId, channel.listenEndpoint, await newRoot());
+    const identity = await getChannelIdentity(runId);
+    if (!identity) throw new Error("missing channel identity");
+
+    let socketCount = 0;
+    const createSocket = (url: string, protocols: string[], opts: WebSocket.ClientOptions) => {
+      socketCount += 1;
+      return new WebSocket(url, protocols, opts);
+    };
+    const connection = new ControllerConnection({
+      runId,
+      instanceId: identity.instanceId,
+      endpoint: identity.endpoint,
+      controllerId: "wc_connect_race",
+      onEvent: handleWorkerEvent,
+      createSocket,
+    });
+
+    // Two overlapping dials on the same object; the guard shares one handshake so
+    // only one socket is ever built (pre-fix both ran and one orphaned the other).
+    await Promise.all([connection.connect(), connection.connect()]);
+    expect(socketCount).toBe(1);
+    expect(connection.connected).toBe(true);
+
+    // The single surviving connection is functional: a worker event lands a receipt.
+    await server.emit("run.phase", { phase: "running" });
+    await waitFor(async () => (await getLastAcceptedWorkerSeq(runId, channel.instanceId)) >= 1);
+    await connection.disconnect().catch(() => undefined);
+  });
+
+  // Fix 3 (MAJOR): an in-flight sendCommand must SETTLE when the grace expires,
+  // never hang. The worker session here never acks, so the ack waiter can only be
+  // settled by the abandon path — which rejects it with ControllerAbandonedError.
+  it("settles an in-flight sendCommand when the reconnect grace expires", async () => {
+    const { runId, channel } = await provisionRun("running");
+    const silentSession: WorkerSessionLike = {
+      attach: async () => {},
+      receive: async () => {}, // never acknowledges the command
+      emit: async () => ({}) as never,
+      handshakeState: () => ({ lastControllerEpoch: 0, lastAckedControlSeq: 0, nextWorkerSeq: 1 }),
+      abort: () => {},
+      close: async () => {},
+    };
+    const server = await bootServer(runId, channel.instanceId, channel.listenEndpoint, await newRoot(), {
+      session: silentSession,
+    });
+    await connectRun(runId);
+
+    let outcome: "pending" | "resolved" | "rejected" = "pending";
+    let error: unknown;
+    const inFlight = sendCommand(runId, "run.cancel", { reason: "stop", requestId: "r", deadline: null }).then(
+      () => { outcome = "resolved"; },
+      (caught) => { outcome = "rejected"; error = caught; },
+    );
+
+    // Once the command row exists, the connection was connected: the ack waiter is
+    // registered and the command was sent. Now drop the worker so it can never be
+    // reconnected and the grace lapses.
+    await waitFor(async () => (await commandRows(runId, "run.cancel")).length > 0);
+    await server.close();
+
+    await waitFor(() => outcome !== "pending", 4000);
+    await inFlight;
+    expect(outcome).toBe("rejected");
+    expect(error).toBeInstanceOf(ControllerAbandonedError);
+  });
+
+  // Fix 4 (MAJOR): a half-open socket that swallows pongs keeps readyState OPEN
+  // forever. After two missed intervals the controller must terminate it so the
+  // registry's reconnect path takes over.
+  it("terminates a socket that stops answering pongs", async () => {
+    const { runId, channel } = await provisionRun("running");
+    await bootServer(runId, channel.instanceId, channel.listenEndpoint, await newRoot());
+    const identity = await getChannelIdentity(runId);
+    if (!identity) throw new Error("missing channel identity");
+
+    __setHeartbeatIntervalForTests(30);
+    // Suppress the 'pong' event on the control socket so the peer's auto-pong
+    // never resets the missed-pong counter — a half-open socket in every respect
+    // that matters to the liveness check.
+    const createSocket = (url: string, protocols: string[], opts: WebSocket.ClientOptions) => {
+      const socket = new WebSocket(url, protocols, opts);
+      const on = socket.on.bind(socket);
+      (socket as unknown as { on: WebSocket["on"] }).on = ((event: string, listener: (...args: unknown[]) => void) =>
+        event === "pong" ? socket : on(event as never, listener as never)) as WebSocket["on"];
+      return socket;
+    };
+
+    let closedCode: number | undefined;
+    const connection = new ControllerConnection({
+      runId,
+      instanceId: identity.instanceId,
+      endpoint: identity.endpoint,
+      controllerId: "wc_pong_test",
+      onEvent: handleWorkerEvent,
+      onClose: (info) => { closedCode = info.code; },
+      createSocket,
+    });
+    await connection.connect();
+    expect(connection.connected).toBe(true);
+
+    await waitFor(() => closedCode !== undefined, 4000);
+    expect(connection.connected).toBe(false);
+    void channel;
+    await connection.disconnect().catch(() => undefined);
   });
 });

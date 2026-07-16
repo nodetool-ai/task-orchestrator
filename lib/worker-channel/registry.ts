@@ -91,6 +91,16 @@ export async function connectRun(
   const existing = registry().supervisors.get(runId);
   if (existing) {
     existing.stopped = false;
+    // Cancel any pending reconnect backoff and clear the grace so this connect and
+    // the attemptReconnect timer do not dial the same connection concurrently — a
+    // losing socket from the other dial could otherwise orphan the live one. The
+    // connect() re-entrancy guard also collapses concurrent dials, but clearing
+    // the timer keeps a stale backoff from firing after we reconnect here.
+    existing.graceDeadline = undefined;
+    if (existing.reconnectTimer) {
+      clearTimeout(existing.reconnectTimer);
+      existing.reconnectTimer = undefined;
+    }
     if (!existing.connection.connected) await existing.connection.connect();
     return existing.connection;
   }
@@ -152,6 +162,13 @@ async function attemptReconnect(supervisor: Supervisor): Promise<void> {
   if (supervisor.stopped) return;
   // Give up if this supervisor was already replaced by a fresh connectRun.
   if (registry().supervisors.get(supervisor.runId) !== supervisor) return;
+  // A concurrent connectRun/reapStaleChannels may already have reconnected this
+  // supervisor while the backoff timer was pending; do not dial a second socket
+  // on top of the live one.
+  if (supervisor.connection.connected) {
+    supervisor.graceDeadline = undefined;
+    return;
+  }
   try {
     await supervisor.connection.connect();
     supervisor.graceDeadline = undefined; // reconnected within grace
@@ -175,10 +192,15 @@ async function attemptReconnect(supervisor: Supervisor): Promise<void> {
       scheduleReconnect(supervisor);
       return;
     }
-    // Grace exhausted: drop the channel and let the heartbeat reaper act. The
+    // Grace exhausted: abandon the channel and let the heartbeat reaper act. The
     // run's heartbeat has gone stale (channel activity stopped bumping it), so
-    // reconcileOrphanedRuns applies the re-dispatch/idle/fail policy.
+    // reconcileOrphanedRuns applies the re-dispatch/idle/fail policy. abandon()
+    // REJECTS any in-flight sendCommand ack waiters — no reconnect will replay
+    // those commands from here, so their callers must not hang forever nor observe
+    // a false success (they would otherwise never settle: the durable row is not a
+    // delivery guarantee once this supervisor is gone).
     supervisor.stopped = true;
+    await supervisor.connection.abandon().catch(() => undefined);
     registry().supervisors.delete(supervisor.runId);
     registry().blobs.delete(supervisor.runId);
   }
