@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { sql as drizzleSql, type SQL } from "drizzle-orm";
 import type { PgTransaction } from "drizzle-orm/pg-core";
@@ -84,6 +85,34 @@ export type ApplyResult = {
   /** More concise alias for the same cursor. */
   contiguousSeq: number;
 };
+
+/** A live-bus emission deferred until the enclosing worker-event transaction
+ * commits (BUG 2). */
+type PostCommitEmission = () => void;
+
+/** Per-transaction sink for live-bus emissions. `applyWorkerEvent` runs its whole
+ * db.transaction inside this store; `event-handler.ts`'s `emitLive` registers
+ * through {@link afterWorkerEventCommit}, and the emissions flush only AFTER the
+ * transaction resolves (never on rollback). AsyncLocalStorage keeps this
+ * re-entrancy-safe across concurrent per-run transactions — a module-level array
+ * would let two interleaving applyWorkerEvent calls clobber each other's sink. */
+const postCommitEmissions = new AsyncLocalStorage<PostCommitEmission[]>();
+
+/**
+ * Queue a live-bus emission to run after the current worker-event transaction
+ * commits. Returns true when an enclosing `applyWorkerEvent` transaction is
+ * active (the emission was deferred); false when there is none (the caller must
+ * emit immediately — e.g. a direct projection or a unit test). This is the seam
+ * that fixes BUG 2: emitting from inside `applyWorkerEvent`'s open transaction —
+ * even via a cached dynamic import's microtask — fires before COMMIT, so an SSE
+ * client that re-fetches on the pushed event can read pre-commit state.
+ */
+export function afterWorkerEventCommit(emit: PostCommitEmission): boolean {
+  const store = postCommitEmissions.getStore();
+  if (!store) return false;
+  store.push(emit);
+  return true;
+}
 
 export class WorkerChannelRepositoryError extends Error {
   readonly code: string;
@@ -946,8 +975,10 @@ export async function applyWorkerEvent(frame: WorkerEventFrame, handler: WorkerE
     });
   }
   const payloadHash = canonicalPayloadSha256(frame.payload);
+  const emissions: PostCommitEmission[] = [];
 
-  return db.transaction(async (tx) => {
+  return postCommitEmissions.run(emissions, async () => {
+    const result = await db.transaction(async (tx) => {
     await lockChannel(tx, frame.runId, frame.instanceId);
     await lockRunner(tx, frame.runId);
 
@@ -1030,5 +1061,17 @@ export async function applyWorkerEvent(frame: WorkerEventFrame, handler: WorkerE
       lastAcceptedWorkerSeq: nextCursor,
       contiguousSeq: nextCursor,
     };
+    });
+    // Reached only when db.transaction resolves (a rollback rejects and skips
+    // this): the effect is now durable, so flush the deferred live-bus emissions.
+    // A client reacting to one of these events re-fetches committed state (BUG 2).
+    for (const emit of emissions) {
+      try {
+        emit();
+      } catch {
+        /* live bus is best-effort */
+      }
+    }
+    return result;
   });
 }

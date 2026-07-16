@@ -28,7 +28,12 @@ import {
   type SessionStatus,
 } from "../run-state";
 import { WORKER_LOG_MAX_CHARS } from "../runner/worker-log-store";
-import { persistCommandTx, type WorkerChannelTransaction, type WorkerEventFrame } from "./repository";
+import {
+  afterWorkerEventCommit,
+  persistCommandTx,
+  type WorkerChannelTransaction,
+  type WorkerEventFrame,
+} from "./repository";
 import type {
   AgentEvent,
   RunCancelled,
@@ -57,11 +62,19 @@ const PHASE_STATUS: Record<string, SessionStatus> = {
 const MAX_ERROR_CHARS = 8 * 1024;
 
 /** Best-effort live-bus mirror for connected SSE browser clients. Loaded lazily
- * and never awaited inside the transaction — a missing bus is a no-op. */
+ * and DEFERRED until the enclosing worker-event transaction commits (BUG 2): these
+ * handlers run inside applyWorkerEvent's open db.transaction, and emitting
+ * synchronously — even via a cached dynamic import's microtask — fires before
+ * COMMIT, so an SSE client that re-fetches on the pushed event can read pre-commit
+ * state. afterWorkerEventCommit queues the emission to flush post-commit; outside a
+ * transaction (a direct projection or a unit test) it returns false and we emit
+ * immediately. A missing run bus is still a no-op. */
 function emitLive(runId: number, type: string, payload: unknown): void {
-  void import("../runs")
-    .then((runs) => runs.emitRunEvent(runId, type, payload))
-    .catch(() => undefined);
+  const emit = () =>
+    void import("../runs")
+      .then((runs) => runs.emitRunEvent(runId, type, payload))
+      .catch(() => undefined);
+  if (!afterWorkerEventCommit(emit)) emit();
 }
 
 function usageColumns(usage: UsageSnapshot | undefined): Record<string, unknown> {

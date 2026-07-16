@@ -16,6 +16,7 @@
 //     deadlocking against the transaction it already runs inside.
 
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { db } from "../db";
@@ -72,6 +73,15 @@ function makeFrame(
 
 async function apply(frame: WorkerEvent) {
   return applyWorkerEvent(frame, handleWorkerEvent);
+}
+
+async function waitForCond(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error("condition not met within timeout");
 }
 
 async function runStatus(runId: number): Promise<string> {
@@ -296,6 +306,48 @@ describe("run.cancelled", () => {
     expect(await statusEvents(runId, "cancelled")).toBe(1);
     const cmds = await commits(runId);
     expect(cmds[0].payload).toMatchObject({ status: "cancelled", accepted: true });
+  });
+});
+
+// ── BUG 2: live SSE emissions must observe committed state ────────────────────
+
+describe("live emission ordering", () => {
+  it("fires the live status event only after the terminal transaction commits", async () => {
+    const runId = await newRun();
+    await db.update(agentSessions).set({ status: "running" }).where(eq(agentSessions.id, runId));
+
+    // Register a live run bus (the SSE subscription surface) so emitRunEvent is not
+    // a no-op, then subscribe as an SSE client that re-fetches the run row when the
+    // pushed "status" event arrives.
+    const runsMod = await import("../lib/runs");
+    const bus = new EventEmitter();
+    const runners = (globalThis as unknown as { __runRunners: Map<number, { abort: AbortController; bus: EventEmitter }> })
+      .__runRunners;
+    runners.set(runId, { abort: new AbortController(), bus });
+
+    let observedStatus: string | null = null;
+    const unsub = runsMod.subscribe(runId, (event) => {
+      if ((event as { type?: string }).type !== "status") return;
+      // A separate query: on the old code (emit inside the open transaction) this
+      // reads the last committed value "running"; with the fix it reads "completed"
+      // because the emission is flushed only after COMMIT.
+      void db
+        .select({ status: agentSessions.status })
+        .from(agentSessions)
+        .where(eq(agentSessions.id, runId))
+        .then((rows) => {
+          observedStatus = rows[0]!.status;
+        });
+    });
+
+    try {
+      await apply(makeFrame(runId, "run.finished", { result: { ok: true } }));
+      await waitForCond(() => observedStatus !== null);
+      expect(observedStatus).toBe("completed");
+    } finally {
+      unsub();
+      runners.delete(runId);
+    }
   });
 });
 
