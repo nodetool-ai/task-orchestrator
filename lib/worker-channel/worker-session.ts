@@ -402,6 +402,35 @@ export class WorkerSession {
     if (!this.abortSignal.aborted) this.abortController.abort(reason);
   }
 
+  /**
+   * Resolve once the controller's cumulative ack covers `seq` — i.e. the
+   * control plane has durably APPLIED every event up to and including it.
+   * Emit is spool-durable but fire-and-forget; a driver that must observe its
+   * effect (the chat-exit idle landing) awaits the ack. Resolves immediately
+   * on a closed session: no further acks can arrive, and the durable spool +
+   * the control plane's disconnect handling own delivery from there.
+   */
+  waitForAck(seq: number): Promise<void> {
+    if (this.lastAckThrough >= seq || this.closed) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.ackWaiters.push({ seq, resolve });
+    });
+  }
+
+  private lastAckThrough = 0;
+  private ackWaiters: Array<{ seq: number; resolve: () => void }> = [];
+
+  private settleAckWaiters(throughSeq: number): void {
+    if (throughSeq > this.lastAckThrough) this.lastAckThrough = throughSeq;
+    if (this.ackWaiters.length === 0) return;
+    const still: Array<{ seq: number; resolve: () => void }> = [];
+    for (const waiter of this.ackWaiters) {
+      if (waiter.seq <= this.lastAckThrough) waiter.resolve();
+      else still.push(waiter);
+    }
+    this.ackWaiters = still;
+  }
+
   /** Receive either a command or a transport acknowledgement from a controller. */
   receive(frame: WireFrame): Promise<void> {
     if (isTransportFrame(frame)) return this.handleTransportFrame(frame);
@@ -567,6 +596,9 @@ export class WorkerSession {
     this.commitWaiters.clear();
     for (const waiter of this.toolWaiters.values()) waiter.reject(error);
     this.toolWaiters.clear();
+    // Ack waiters RESOLVE (not reject) on close: the event is spool-durable and
+    // the control plane's disconnect handling owns delivery from here.
+    for (const waiter of this.ackWaiters.splice(0)) waiter.resolve();
 
     const active = this.active;
     this.active = undefined;
@@ -716,6 +748,7 @@ export class WorkerSession {
     if (frame.controllerEpoch !== this.controllerEpoch) throw this.staleEpoch(frame.controllerEpoch);
     if (frame.type === "channel.ack") {
       await this.outbox.ackThrough((frame.payload as ChannelAck).throughSeq);
+      this.settleAckWaiters((frame.payload as ChannelAck).throughSeq);
       return;
     }
     const expected = (frame.payload as ChannelNack).expectedSeq;

@@ -49,6 +49,9 @@ import type {
 const PHASE_STATUS: Record<string, SessionStatus> = {
   preparing: "preparing",
   running: "running",
+  // Clean chat-loop exit: the run returns to resumable-idle (the legacy
+  // releaseClaim(..., idle) chat-exit landing). Never a lease status.
+  idle: "idle",
 };
 
 const MAX_ERROR_CHARS = 8 * 1024;

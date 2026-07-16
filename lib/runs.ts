@@ -1577,6 +1577,14 @@ export async function cancel(id: number): Promise<RunRow> {
     set: { completedAt: new Date(), cancelRequested: 1 },
     guard: notInArray(agentSessions.status, TERMINAL_STATUSES),
   });
+  // Worker-channel cancel bridge (section 8.4): a channel worker neither polls
+  // the DB nor sees this process's AbortController — push run.cancel so its
+  // in-flight model turn aborts now rather than at provider hard-stop.
+  void bridgeToChannel(id, "run.cancel", {
+    reason: "user cancel",
+    requestId: `00000000-0000-4000-8000-${String(id).padStart(12, "0")}`,
+    deadline: null,
+  } as Record<string, unknown>);
   // Event system (§6.6): mirror the cancel as a CONTROL-class inbox row — the
   // model can never claim/swallow it; enforcement stays platform-side (the
   // heartbeat poll aborts and then markControlInjected acknowledges the row).
@@ -4512,12 +4520,46 @@ export async function loadPostgresContextMessages(runId: number): Promise<
 // Persistence helpers
 // ──────────────────────────────────────────────────────────
 
+/**
+ * Worker-channel input/cancel bridge (protocol plan section 8.4): when THIS
+ * control plane holds a live channel to the run's worker, convert a durable DB
+ * intent (new user message, cancel request) into the corresponding channel
+ * command. Fire-and-forget by design — the durable row is the source of truth,
+ * and a worker without a live channel is recovered by redispatch/reaper. The
+ * worker's OrderedInputQueue dedupes by message id, so a message that also
+ * reaches the worker via a start-snapshot replay is a benign duplicate.
+ */
+async function bridgeToChannel(
+  runId: number,
+  type: "run.input" | "run.cancel",
+  payload: unknown,
+  commandId?: string
+): Promise<void> {
+  try {
+    const registry = await import("./worker-channel/registry");
+    if (!registry.getConnection(runId)) return;
+    await registry.sendCommand(runId, type, payload, commandId);
+  } catch {
+    // Channel racing shutdown/replacement: the durable intent still lands via
+    // snapshot replay or redispatch. Never let the bridge break the caller.
+  }
+}
+
 async function persistMessage(
   runId: number,
   role: MessageRow["role"],
   content: SdkContentBlock[]
 ): Promise<MessageRow> {
-  return (await runTransport()).appendMessage(runId, role, content);
+  const row = await (await runTransport()).appendMessage(runId, role, content);
+  if (role === "user") {
+    void bridgeToChannel(
+      runId,
+      "run.input",
+      { messages: [{ id: row.id, role: "user", content }] },
+      `00000000-0000-4000-8000-${String(row.id).padStart(12, "0")}`
+    );
+  }
+  return row;
 }
 
 async function setStatus(runId: number, status: SessionStatus) {

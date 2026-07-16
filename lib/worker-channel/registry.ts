@@ -156,6 +156,12 @@ async function attemptReconnect(supervisor: Supervisor): Promise<void> {
     await supervisor.connection.connect();
     supervisor.graceDeadline = undefined; // reconnected within grace
   } catch (error) {
+    // Reconnect failures must be visible: a silent dial loop is
+    // indistinguishable from a healthy idle channel in the logs.
+    console.error(
+      `worker-channel: reconnect attempt failed for run ${supervisor.runId}:`,
+      error instanceof Error ? error.message : error
+    );
     if (error instanceof ControllerProtocolError && error.closeCode === CLOSE_CODE_PROTOCOL_MISMATCH) {
       // The worker speaks an incompatible protocol: replace it with the current
       // image rather than burning the reconnect grace on a hopeless dial.
@@ -251,7 +257,15 @@ export async function reconnectActiveChannels(): Promise<number> {
   let reconnected = 0;
   for (const channel of channels) {
     try {
-      await connectRun(channel.runId);
+      // startChannelForRun (not a bare connectRun): an adopted channel whose
+      // dispatch died before persisting `run.start` would otherwise sit
+      // connected-but-idle forever — channel liveness keeps bumping the
+      // heartbeat, so the reaper never rescues it. The start command id is
+      // stable per instance and persistCommand is idempotent, so for an
+      // already-started worker this replays the existing snapshot, never
+      // builds a second one.
+      const runDispatch = await import("../run-dispatch");
+      await runDispatch.startChannelForRun(channel.runId, channel.instanceId);
       reconnected++;
     } catch {
       // Worker unreachable (dead process / socket gone): the heartbeat reaper

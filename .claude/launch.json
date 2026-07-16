@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dev",
+      "runtimeExecutable": "env",
+      "runtimeArgs": ["TASK_ORCH_WORKER_IMAGE=", "npm", "run", "dev"],
+      "port": 3000
+    }
+  ]
+}

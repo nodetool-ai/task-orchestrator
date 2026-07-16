@@ -35,6 +35,7 @@ import { getBackend } from "../agent-backend";
 import type { RunTurnArgs } from "../agent-backend/types";
 import type { RunEnvelope } from "../pi-event-mapper";
 import { config } from "../config";
+import { parseProviderQualifiedModel } from "../model-id";
 import { coerceRunStatus, isTerminalStatus, type SessionStatus } from "../run-state";
 
 /**
@@ -59,6 +60,11 @@ export interface WorkerDriverSession {
   ): Promise<{ id: string }>;
   /** Invoke a tool over the channel and await the control-plane result (section 15). */
   invokeTool?(tool: string, args: unknown, callId: string): Promise<ToolCallResult>;
+  /** Resolve once the controller's cumulative ack covers the given worker seq —
+   *  i.e. the control plane durably applied the event. Used where the driver
+   *  must OBSERVE an event's effect before returning (the chat-exit idle
+   *  landing); plain emits stay fire-and-forget. */
+  waitForAck?(seq: number): Promise<void>;
   /** Await the control plane's terminal commit decision for a finish event. */
   waitForCommit?(finishEventId: string): Promise<RunCommit>;
   /** Aborts when the control plane cancels the run or the controller disconnects. */
@@ -328,8 +334,10 @@ async function runModelTurn(
   };
 
   const backend = await getBackend((runField(run, "backend") as string | null | undefined) ?? null);
-  const resolvedModel = (runField(run, "model") as string | undefined) ?? config.agent.model ?? "";
-  const resolvedProvider = (runField(run, "provider") as string | undefined) ?? "";
+  // The run row stores the picker's "provider/model-id" form; backends expect
+  // it split (a bare id defaults to anthropic) — same rule as lib/runs.ts.
+  const rawModel = (runField(run, "model") as string | undefined) ?? config.agent.model ?? "";
+  const { provider: resolvedProvider, id: resolvedModel } = parseProviderQualifiedModel(rawModel);
 
   // Real provider/model/cwd/extension resolution mirrors lib/runs.ts's `append`
   // and is ported minimally here (temporary duplication that dies in §18). Tool
@@ -339,7 +347,14 @@ async function runModelTurn(
     abortSignal?: AbortSignal;
     invokeTool?: (tool: string, args: unknown, callId: string) => Promise<ToolCallResult>;
   } = {
-    cwd: (runField(run, "worktreePath") as string | undefined) ?? process.cwd(),
+    // Turn cwd: the run's prepared checkout when one exists, else the resolved
+    // repository's working copy from the snapshot. Never fall back to
+    // process.cwd() — a local worker's cwd is the ORCHESTRATOR checkout, and an
+    // agent turned loose there is exploring the wrong codebase.
+    cwd:
+      (runField(run, "worktreePath") as string | undefined) ??
+      (typeof context.repository?.localPath === "string" ? context.repository.localPath : undefined) ??
+      process.cwd(),
     model: { provider: resolvedProvider, id: resolvedModel },
     thinkingLevel: (runField(run, "thinkingLevel") as RunTurnArgs["thinkingLevel"]) ?? undefined,
     extensions: [],
@@ -410,6 +425,12 @@ export async function driveWorkerRun(
   if (runGoal(context.run) === "<chat>") {
     await driveChatRun(context, inputDriven);
   } else {
+    // The control plane claims the run into "preparing" at dispatch time; this
+    // is the channel-native equivalent of the legacy setStatus("running") call
+    // (lib/runs.ts) — the driver has its snapshot and is about to run a turn.
+    // The terminal outcome (run.finished/failed/cancelled) supersedes it.
+    // Fire-and-forget: order is preserved by the session's serial send queue.
+    void context.session.emit("run.phase", { phase: "running" }).catch(() => undefined);
     await driveSingleTurn(context);
   }
 }
@@ -494,6 +515,17 @@ async function driveChatRun(context: WorkerRunContext, inputDriven: boolean): Pr
   });
 
   try {
+    // Chat lifecycle bracket: 'running' while turns execute, restored to the
+    // resumable 'idle' on clean exit below — the channel-native equivalent of
+    // the legacy chat loop's setStatus("running") + releaseClaim(..., idle).
+    // Fire-and-forget: the session's serial send queue preserves event order,
+    // and awaiting here would only widen the window in which a racing
+    // run.cancel is classified as "before the turn" instead of mid-turn.
+    void session.emit("run.phase", { phase: "running" }).catch(() => undefined);
+    // Never START a turn on an already-aborted session — a backend that
+    // subscribes to the abort event after the fact would hang forever, and a
+    // real model process would be spawned only to be torn down.
+    if (session.abortSignal?.aborted) throw new Error("run cancelled before first turn");
     const seed = unprocessedUserMessages(context.transcript);
     if (seed.length > 0) {
       for (const m of seed) {
@@ -548,6 +580,15 @@ async function driveChatRun(context: WorkerRunContext, inputDriven: boolean): Pr
   // A cancel that landed after the turn(s) completed still owes a run.cancelled.
   if (session.abortSignal?.aborted) {
     await emitCancelled(context, inputLoop.cancelRequestId());
+    return;
+  }
+  // Clean chat exit: the run stays resumable — land it back on 'idle' exactly
+  // as the legacy releaseClaim(..., idle) chat-exit path did. Await the
+  // controller's ack so the landing is observable before the drive returns
+  // (emit alone is only spool-durable).
+  const idlePhase = (await session.emit("run.phase", { phase: "idle" })) as { id: string; seq?: number };
+  if (session.waitForAck && typeof idlePhase.seq === "number") {
+    await session.waitForAck(idlePhase.seq);
   }
 }
 
@@ -580,6 +621,9 @@ async function driveSingleTurn(context: WorkerRunContext): Promise<void> {
 
   let turn: TurnResult;
   try {
+    // Same pre-check as the chat path: a session aborted before the turn
+    // starts must short-circuit to run.cancelled, never invoke the backend.
+    if (session.abortSignal?.aborted) throw new Error("run cancelled before turn");
     turn = await runModelTurn(context, prompt);
   } catch (err) {
     if (session.abortSignal?.aborted) {

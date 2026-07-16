@@ -35,6 +35,7 @@ import { recordDispatch, recordRunnerEvent, timeRunnerPhase } from "./runner/tel
 import { isTerminalStatus } from "./types";
 import { newChannelInstanceId } from "./worker-channel/credential";
 import {
+  getCommand,
   persistCommand,
   reserveChannelIdentity,
   setChannelEndpoint,
@@ -819,9 +820,43 @@ export async function provisionLocalChannel(
  * snapshot exactly once. The command id is stable per instance, so a reconnect
  * replays the same durable command rather than building a second snapshot.
  */
+// Boot backoff (plan section 8.2): a freshly spawned worker takes a moment to
+// bind its listener, so the first dial commonly races it (ENOENT on the unix
+// socket, ECONNREFUSED on tcp). Retry connection-level failures on the fixed
+// ladder until the boot deadline; never retry protocol/auth/scope rejections
+// (ControllerProtocolError with retryable=false).
+const BOOT_BACKOFF_MS = [250, 500, 1000, 2000, 5000] as const;
+const BOOT_DEADLINE_MS = 60_000;
+
+async function connectWithBootBackoff(runId: number) {
+  const deadline = Date.now() + BOOT_DEADLINE_MS;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await connectRun(runId);
+    } catch (err) {
+      const nonRetryable =
+        typeof err === "object" && err !== null && "retryable" in err &&
+        (err as { retryable?: boolean }).retryable === false;
+      if (nonRetryable || Date.now() >= deadline) throw err;
+      const delay = BOOT_BACKOFF_MS[Math.min(attempt, BOOT_BACKOFF_MS.length - 1)];
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+}
+
 export async function startChannelForRun(runId: number, instanceId: string): Promise<void> {
-  const connection = await connectRun(runId);
+  const connection = await connectWithBootBackoff(runId);
   const startId = runStartCommandId(instanceId);
+  // Idempotent by REPLAY, not by rebuild: once a snapshot is persisted for
+  // this instance it is the authoritative one — a later call (startup channel
+  // adoption, a repeated dispatch) must resend that exact command. Building a
+  // fresh snapshot here would change the payload under the stable id and trip
+  // the COMMAND_ID_MISMATCH guard.
+  const existing = await getCommand(startId);
+  if (existing) {
+    await connection.sendPersisted(existing);
+    return;
+  }
   const snapshot = await buildRunStart(runId);
   const row = await persistCommand({
     runId,
@@ -1033,7 +1068,10 @@ export const defaultSpawn = async (
   }
   const pid = detachedSpawn(runId, scope, channelInstanceId, channelEndpoint);
   if (pid == null || !channelEndpoint) return null;
-  return { pid, channelEndpoint };
+  // `channelEndpoint` arrives in the LISTEN form (`unix:<path>`) for the worker
+  // process env; the caller persists the RETURNED endpoint as what the
+  // controller dials, so hand back the ws+unix dial form.
+  return { pid, channelEndpoint: localDialEndpoint(channelEndpoint.replace(/^unix:/, "")) };
 };
 
 // One worker container per run, launched via the mounted Docker socket. The
@@ -1266,6 +1304,15 @@ function detachedSpawn(
     TASK_ORCH_INSIDE_WORKER: "1",
     ...workerChannelDispatchEnv(runId, channelInstanceId, listenEndpoint),
   };
+  // The durable outbox spool lives at $SESSION_ROOT/channel (plan section 6)
+  // and is scoped to one run+instance. Fly workers get SESSION_ROOT from their
+  // volume; a local detached worker must NOT fall back to a shared cwd — two
+  // instances would collide on <cwd>/channel/state.json ("outbox state scope
+  // mismatch"). Give each instance its own root; a restart of the SAME
+  // instance finds its spool and replays.
+  if (!env.SESSION_ROOT) {
+    env.SESSION_ROOT = join(process.cwd(), ".worker-sessions", channelInstanceId);
+  }
   delete env.DATABASE_URL;
   return spawnLocalRunWorker(runId, { env });
 }

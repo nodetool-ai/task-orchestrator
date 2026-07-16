@@ -18,3 +18,5 @@ cloudflared.local.yml
 .env.test
 .env.docker
 .pi/
+.worker-sessions/
+.worker-sockets/

@@ -26,6 +26,14 @@ const nextConfig = {
     // The Claude Agent SDK bundles a native CLI binary; same bundling hazard as
     // the pi packages, so keep it external too.
     "@anthropic-ai/claude-agent-sdk",
+    // The worker-channel controller dials workers with `ws`. Bundled by
+    // webpack, ws half-detects its optional native addons (bufferutil,
+    // utf-8-validate) and the controller's first masked client->server frame
+    // crashes with "bufferUtil.mask is not a function". Keep the trio external
+    // so ws resolves them (or their JS fallbacks) from node_modules at runtime.
+    "ws",
+    "bufferutil",
+    "utf-8-validate",
   ],
   // Baseline security header applied to every response. `nosniff` stops the
   // browser from MIME-sniffing a response past its declared Content-Type — a

@@ -1244,3 +1244,72 @@ control-plane restarts, and induced network/process failures that are not
 appropriate for an unattended execution agent to trigger against real
 infrastructure. **Pending for the user** to execute per the checklist in
 section 21 and append results here.
+
+### Section 21 scenario 1 (local detached run) — 2026-07-16, live smoke test
+
+Scenario 1 was executed live against the dev server (repository
+`R-chess-analyzer` → /Users/mg/dev/chess-analyzer, backend `claude`, model
+`anthropic/claude-sonnet-5`, local unix-socket channel workers). It surfaced
+and fixed EIGHT defects the automated suites had masked (each verified by a
+before/after live run; all suites green after: 1432 passed, 1 pre-existing
+placement-routing failure unrelated — see above):
+
+1. `defaultSpawn` echoed the LISTEN endpoint (`unix:<path>`) back to dispatch,
+   which persisted it as the DIAL endpoint — every local `connectRun` failed
+   ("URL's protocol must be ws/wss/ws+unix"). The e2e harness had the same
+   bug and was fixed harness-side earlier, masking the production path. Fixed
+   in `defaultSpawn` (returns the `ws+unix://` dial form).
+2. Local detached workers shared `<cwd>/channel` as the spool root (Fly sets
+   SESSION_ROOT; local never did) — the second-ever worker died with "worker
+   outbox state scope mismatch". Fixed: per-instance
+   `SESSION_ROOT=<cwd>/.worker-sessions/<instanceId>` in `detachedSpawn`.
+3. No boot backoff on the dispatch connect (plan 8.2 mandated 250..5000 ms):
+   the controller dialed once before the worker bound its socket and gave up.
+   Added `connectWithBootBackoff` (ladder + 60 s deadline; protocol/auth
+   rejections not retried).
+4. `next dev`/webpack bundled `ws`, half-detecting its optional native addons:
+   the controller's first masked client→server frame crashed with
+   "bufferUtil.mask is not a function" (receiving hello worked — only sends
+   mask). Fixed via `serverExternalPackages`: ws, bufferutil, utf-8-validate.
+5. Startup channel adoption (`reconnectActiveChannels`) reconnected but never
+   ensured `run.start`, leaving an adopted run connected-but-idle forever
+   while channel liveness kept the reaper away. `startChannelForRun` is now
+   replay-idempotent (existing command resent verbatim, never rebuilt) and is
+   what adoption calls. Reconnect-loop failures are now logged (were silent).
+6. The ws turn passed the raw "provider/model-id" string as the SDK model id
+   ("anthropic/claude-sonnet-5" → SDK error). Fixed with
+   `parseProviderQualifiedModel`, same rule as lib/runs.ts.
+7. The ws turn's cwd fell back to `process.cwd()` (the ORCHESTRATOR checkout)
+   instead of the run's resolved repository — the agent explored the wrong
+   codebase. Fixed: worktreePath → repository.localPath → cwd.
+8. The section 8.4 input/cancel bridges were never wired into the product
+   paths (the e2e called `sendCommand` directly): a live cancel landed in the
+   DB but the channel worker kept running. Wired `bridgeToChannel` into
+   `persistMessage` (user rows → `run.input`, deterministic command id, worker
+   OrderedInputQueue dedupes) and `runs.cancel` (→ `run.cancel`).
+
+Also added while validating: chat runs now bracket their lifecycle over the
+channel (`run.phase` "running" on entry — fire-and-forget, order preserved by
+the session's serial send queue — and an ack-awaited "idle" landing on clean
+exit, restoring the legacy releaseClaim-idle semantics); `WorkerSession`
+gained `waitForAck(seq)` (controller acks only after durable apply); turns are
+never STARTED on an already-aborted session.
+
+Verified live after the fixes (runs on the dev server, `taskorch` DB):
+- run 10: question → streamed SSE answer summarizing the chess-analyzer repo
+  (in-process append path — by design; browser surfaces unchanged).
+- run 12: worker-channel cancel — `run.cancel` command acked, worker emitted
+  `run.cancelled`, control plane landed `cancelled` + `run.commit`, worker
+  process exited. Command log: run.start:acked, run.cancel:acked, run.commit.
+- runs 7/9/11/13: full channel streams (transcript.append/agent.event
+  receipts, status preparing→running→completed), tool output proving the
+  agent operated in /Users/mg/dev/chess-analyzer.
+
+Known gaps observed, deliberately NOT changed here (pre-existing semantics):
+- A free-form `goal` on a non-worktree run never reaches the prompt — the ws
+  driver falls back to a resume prompt (legacy create() only folds prompts in
+  for worktree/review/execute shapes). Follow-up work item.
+- POST /api/runs/[id]/messages rejects while a worker holds a live lease
+  ("already in flight") without persisting — so the run.input bridge fires
+  only where messages actually persist (chat loops, idle resume). Matches
+  legacy behavior.
