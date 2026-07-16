@@ -78,4 +78,27 @@ describe("makeFlyClient", () => {
     const fly = makeFlyClient({ fetchImpl: fetchMock as unknown as typeof fetch, appName: "app", apiToken: "tok" });
     await expect(fly.listMachines()).rejects.toThrow(/timed out/);
   });
+
+  // Plan section 20 (Fly provisioning): the worker channel dial endpoint is
+  // derived from the Machine's private 6PN IPv6, so the client must surface it.
+  it("parses private_ip off a machine response into privateIp", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ id: "m1", state: "created", region: "ams", private_ip: "fdaa:0:1:a:1::1" }),
+        { status: 200 }
+      )
+    );
+    const fly = makeFlyClient({ fetchImpl: fetchMock as unknown as typeof fetch, appName: "app", apiToken: "tok" });
+    const machine = await fly.getMachine("m1");
+    expect(machine?.privateIp).toBe("fdaa:0:1:a:1::1");
+  });
+
+  it("leaves privateIp undefined when the response omits it", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ id: "m1", state: "created", region: "ams" }), { status: 200 })
+    );
+    const fly = makeFlyClient({ fetchImpl: fetchMock as unknown as typeof fetch, appName: "app", apiToken: "tok" });
+    const machine = await fly.getMachine("m1");
+    expect(machine?.privateIp).toBeUndefined();
+  });
 });

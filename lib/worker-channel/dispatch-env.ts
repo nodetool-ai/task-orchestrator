@@ -60,6 +60,25 @@ export function dockerDialEndpoint(host: string): string {
   return `ws://${host}:${DOCKER_CHANNEL_PORT}${CHANNEL_PATH}`;
 }
 
+// ── Fly worker endpoints (plan section 20) ──────────────────────────────────
+// A Fly Machine binds the same fixed TCP port (8787, plan section 2) as
+// Docker, but the control plane dials it over the Machine's private 6PN
+// IPv6 address rather than a container name — never a public service/IP.
+
+/** Endpoint the Fly worker Machine binds. Same fixed-port convention as
+ *  Docker; kept as its own named export so a future divergence doesn't force
+ *  callers to reach for `dockerListenEndpoint`. */
+export function flyListenEndpoint(): string {
+  return dockerListenEndpoint();
+}
+
+/** Endpoint the control plane stores and dials for a Fly worker: the fixed
+ *  channel port on the Machine's private 6PN IPv6 address, bracketed per URL
+ *  convention for a literal IPv6 host. */
+export function flyChannelDialEndpoint(privateIp: string): string {
+  return `ws://[${privateIp}]:${DOCKER_CHANNEL_PORT}${CHANNEL_PATH}`;
+}
+
 /**
  * WebSocket-only supervisor environment. It intentionally contains no
  * control-plane URL, API token, or database credential — the worker learns

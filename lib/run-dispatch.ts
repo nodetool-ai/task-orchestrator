@@ -43,6 +43,7 @@ import { connectRun, reapStaleChannels } from "./worker-channel/controller";
 import {
   dockerDialEndpoint,
   dockerListenEndpoint,
+  flyListenEndpoint,
   localDialEndpoint,
   localListenEndpoint,
   localSocketPath,
@@ -636,16 +637,11 @@ export async function dispatchRun(
         return finish(await failSpawn(runId, outcome.scope, "lightweight child did not start (spawn returned no pid — node/tsx runtime available?)"));
       }
       pid = spawned;
-    } else {
+    } else if (provider === "local") {
       // The worker protocol is WebSocket-only (plan section 18). The "local"
       // runner kind covers both the plain detached tsx process and the Docker
       // worker container (plan section 19) — LocalRunnerProvider.create picks
-      // between them on TASK_ORCH_WORKER_IMAGE. Fly and Box dispatch still fail
-      // fast with an explicit unsupported-provider error until their
-      // provisioning sections (20/box) land — never an HTTP fallback.
-      if (provider !== "local") {
-        return finish(await failSpawn(runId, outcome.scope, unsupportedWsProviderMessage(provider)));
-      }
+      // between them on TASK_ORCH_WORKER_IMAGE.
       const channel = await provisionLocalChannel(runId);
       const ref = await timeRunnerPhase(
         "runner_create",
@@ -672,6 +668,41 @@ export async function dispatchRun(
         console.error(`Worker channel start failed for run ${runId}:`, err)
       );
       handle = ref.handle;
+    } else if (provider === "fly") {
+      // Fly channel provisioning (plan section 20): reserve the instance
+      // id/credential, let FlyRunnerProvider.create/resume build the Machine
+      // with the channel env and resolve its private 6PN endpoint, then store
+      // it and push the run.start snapshot exactly like the local/docker
+      // paths above.
+      const channel = await provisionFlyChannel(runId);
+      const ref = await timeRunnerPhase(
+        "runner_create",
+        () => getRunnerProvider().create({
+          runId,
+          scope: outcome.scope,
+          channelInstanceId: channel.instanceId,
+          channelEndpoint: channel.listenEndpoint,
+        }),
+        { provider, fields: { runId, scope: outcome.scope } }
+      );
+      if (!ref) {
+        return finish(await failSpawn(runId, outcome.scope, "run worker did not start (spawn returned no pid — worker image/runtime available?)"));
+      }
+      // Success means a private, control-plane-dialable channel endpoint was
+      // resolved — never merely that the Machine reports state "started".
+      if (!ref.channelEndpoint) {
+        return finish(await failSpawn(runId, outcome.scope, "runner started without a worker channel endpoint"));
+      }
+      await setChannelEndpoint(runId, ref.channelInstanceId ?? channel.instanceId, ref.channelEndpoint);
+      void startChannelForRun(runId, ref.channelInstanceId ?? channel.instanceId).catch((err) =>
+        console.error(`Worker channel start failed for run ${runId}:`, err)
+      );
+      handle = ref.handle;
+    } else {
+      // Box dispatch still fails fast with an explicit unsupported-provider
+      // error until its provider supplies private inbound endpoint discovery
+      // — never an HTTP fallback.
+      return finish(await failSpawn(runId, outcome.scope, unsupportedWsProviderMessage(provider)));
     }
   } catch (err) {
     return finish(await failSpawn(runId, outcome.scope, `run worker failed to spawn: ${err instanceof Error ? err.message : String(err)}`));
@@ -717,14 +748,44 @@ export interface LocalChannelProvisioning {
 }
 
 /** The exact unsupported-provider message for a provider whose ws provisioning
- *  section has not landed (Fly: 20, Box: pending private ingress). Docker
- *  provisioning landed in plan section 19 — see dockerSpawn. */
+ *  section has not landed (Box: pending private ingress). Docker provisioning
+ *  landed in plan section 19 (see dockerSpawn); Fly landed in section 20 (see
+ *  provisionFlyChannel). */
 export function unsupportedWsProviderMessage(provider: string): string {
   const section: Record<string, string> = {
-    fly: "Fly runner WebSocket provisioning is not implemented yet (see plan section 20).",
     box: "Box runners do not yet expose a private control-plane-to-worker WebSocket endpoint.",
   };
   return section[provider] ?? `Runner provider '${provider}' does not expose a private control-plane-to-worker WebSocket endpoint.`;
+}
+
+/** Endpoints a Fly ws-mode dispatch reserves for one worker instance (plan
+ *  section 20). Unlike the local path the dial endpoint isn't known until the
+ *  Machine exists and its private 6PN IPv6 is resolved — FlyRunnerProvider
+ *  resolves and persists the real `ws://[<ip>]:8787/worker/channel` endpoint
+ *  via `setChannelEndpoint` once the Machine is up (see the fly branch of
+ *  dispatchRun). Resume-identity rule: a run that already has a channel
+ *  instance id on record (its volume survived) reuses it; a run provisioned
+ *  for the first time mints a fresh one. */
+export async function provisionFlyChannel(
+  runId: number,
+): Promise<{ instanceId: string; listenEndpoint: string }> {
+  const [existing] = await db
+    .select({ channelInstanceId: runnerInstances.channelInstanceId })
+    .from(runnerInstances)
+    .where(eq(runnerInstances.runId, runId));
+  const instanceId = existing?.channelInstanceId || newChannelInstanceId();
+  const listenEndpoint = flyListenEndpoint();
+  // Fly dispatch has no runner_instances row of its own until FlyRunnerProvider
+  // creates one; seed a stub so the channel identity has somewhere to live,
+  // exactly like provisionLocalChannel does for the local path.
+  await db
+    .insert(runnerInstances)
+    .values({ runId, provider: "fly", state: "starting" })
+    .onConflictDoNothing();
+  // Reserve with a placeholder — the real dial endpoint isn't known until the
+  // Machine's private IP resolves; setChannelEndpoint corrects it below.
+  await reserveChannelIdentity(runId, instanceId, `pending:fly:${instanceId}`);
+  return { instanceId, listenEndpoint };
 }
 
 /**

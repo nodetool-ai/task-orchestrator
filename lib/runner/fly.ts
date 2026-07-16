@@ -13,6 +13,8 @@ import { nestedDispatchMode } from "./provider";
 import { recordRunnerEvent, timeRunnerPhase } from "./telemetry";
 import type { CreateRunnerInput, RunnerProvider, RunnerRef, RunnerState } from "./provider";
 import { FlyApiError, type FlyClient, type FlyMachine, type FlyMachineConfig, type FlyVolume, makeFlyClient } from "./fly-client";
+import { newChannelInstanceId } from "../worker-channel/credential";
+import { flyChannelDialEndpoint, flyListenEndpoint, workerChannelDispatchEnv } from "../worker-channel/dispatch-env";
 
 const DEFAULT_REGION = "ams";
 // Measured default: a repo checkout + npm cache footprint fits comfortably in
@@ -313,12 +315,16 @@ async function emitRunnerEvent(runId: number, type: string, payload: Record<stri
 
 export function buildFlyWorkerEnv(
   runId: number,
-  opts: { prewarmDir?: string } = {}
+  opts: { prewarmDir?: string; channelInstanceId?: string; channelListenEndpoint?: string } = {}
 ): Record<string, string> {
-  // The worker protocol is WebSocket-only (plan section 18); Fly channel identity
-  // injection is added by section 20 (Fly provisioning) — until then Fly dispatch
-  // fails fast with the unsupported-provider error. Workers hold NO database
-  // credentials — DATABASE_URL is deliberately absent.
+  // The worker protocol is WebSocket-only (plan section 18). Workers hold NO
+  // database credentials — DATABASE_URL is deliberately absent. The channel
+  // instance id/credential/listen-endpoint (plan section 20) are injected only
+  // when the caller supplies both — buildFlyMachineConfig always does.
+  const channelEnv =
+    opts.channelInstanceId && opts.channelListenEndpoint
+      ? workerChannelDispatchEnv(runId, opts.channelInstanceId, opts.channelListenEndpoint)
+      : {};
   return compactEnv({
     // Set only when this run's volume was forked from the prewarm seed, so the
     // baked deps live at PREWARM_MOUNT_DIR. lib/prewarm.ts existsSync-guards it,
@@ -349,6 +355,7 @@ export function buildFlyWorkerEnv(
     // undefined). Safe when the dir is missing: containerCheckoutAt guards with
     // existsSync before using the mirror.
     REPO_CACHE_DIR: envValue("TASK_ORCH_REPO_CACHE_DIR") ?? "/opt/repo-cache",
+    ...channelEnv,
   });
 }
 
@@ -375,7 +382,7 @@ function assertValidSharedMachineResources(cpus: number, memoryMb: number): void
 export function buildFlyMachineConfig(
   runId: number,
   volumeId: string,
-  opts: { prewarmDir?: string } = {}
+  opts: { prewarmDir?: string; channelInstanceId?: string; channelListenEndpoint?: string } = {}
 ): FlyMachineConfig {
   // Default bumped from 2→4 vCPU alongside the existing 4096MB memory default:
   // 4 vCPU supports up to 8192MB, matching the memory ceiling operators reach
@@ -435,6 +442,21 @@ export class FlyRunnerProvider implements RunnerProvider {
     }
   }
 
+  /**
+   * Resolve a Machine's private 6PN IPv6 address — from the API response
+   * already in hand, or (when the create/get response didn't carry it yet) a
+   * follow-up machine lookup. Never returns a public address; throws rather
+   * than fall back to one, since a channel dial endpoint must stay private
+   * (plan section 20 / section 23 stop condition: a provider that cannot
+   * produce a private control-plane-dialable endpoint).
+   */
+  private async resolvePrivateIp(machine: FlyMachine): Promise<string> {
+    if (machine.privateIp) return machine.privateIp;
+    const refreshed = await this.flyClient.getMachine(machine.id);
+    if (refreshed?.privateIp) return refreshed.privateIp;
+    throw new Error(`Fly machine ${machine.id} did not report a private 6PN IPv6 address`);
+  }
+
   async create(input: CreateRunnerInput): Promise<RunnerRef | null> {
     const existing = await this.getInstance(input.runId);
     if (existing?.volumeId) return this.resume(input.runId, input.scope);
@@ -447,6 +469,12 @@ export class FlyRunnerProvider implements RunnerProvider {
     // with the configured size + cold install (unchanged path).
     const seed = await this.resolvePrewarmSeed(region);
     const prewarmDir = seed ? PREWARM_MOUNT_DIR : undefined;
+    // Resume-identity rule (plan section 20): reuse the channel instance id the
+    // caller reserved (run-dispatch's provisionFlyChannel) or one already on
+    // record for this run; mint a fresh one only when neither exists (a
+    // provider test calling create() directly with no prior reservation).
+    const channelInstanceId = input.channelInstanceId ?? existing?.channelInstanceId ?? newChannelInstanceId();
+    const channelListenEndpoint = flyListenEndpoint();
     let volume: FlyVolume | null = null;
     let machine: FlyMachine | null = null;
     try {
@@ -468,10 +496,20 @@ export class FlyRunnerProvider implements RunnerProvider {
           this.flyClient.createMachine({
             name: input.scope,
             region,
-            config: buildFlyMachineConfig(input.runId, volume!.id, { prewarmDir }),
+            config: buildFlyMachineConfig(input.runId, volume!.id, {
+              prewarmDir,
+              channelInstanceId,
+              channelListenEndpoint,
+            }),
           }),
         { provider: "fly", fields: { runId: input.runId, region, scope: input.scope } }
       );
+      // Service-less private listener only: no public Fly service/IP is ever
+      // created for the worker channel, and success below means the channel
+      // handshake resolved a private endpoint — not merely that Fly accepted
+      // the create call.
+      const privateIp = await this.resolvePrivateIp(machine);
+      const channelEndpoint = flyChannelDialEndpoint(privateIp);
 
       await db
         .insert(runnerInstances)
@@ -484,6 +522,8 @@ export class FlyRunnerProvider implements RunnerProvider {
           region: machine.region || volume.region || region,
           state: "starting",
           lastStartedAt: new Date(),
+          channelInstanceId,
+          channelEndpoint,
         })
         .onConflictDoUpdate({
           target: runnerInstances.runId,
@@ -495,6 +535,8 @@ export class FlyRunnerProvider implements RunnerProvider {
             region: machine.region || volume.region || region,
             state: "starting",
             lastStartedAt: new Date(),
+            channelInstanceId,
+            channelEndpoint,
           },
         });
       await emitRunnerEvent(input.runId, "runner_created", {
@@ -502,7 +544,7 @@ export class FlyRunnerProvider implements RunnerProvider {
         volumeId: volume.id,
         region: machine.region || volume.region || region,
       });
-      return { runId: input.runId, handle: machine.id, provider: "fly" };
+      return { runId: input.runId, handle: machine.id, provider: "fly", channelInstanceId, channelEndpoint };
     } catch (err) {
       console.error("[FlyRunnerProvider] create failed:", err);
       if (machine?.id) await this.flyClient.destroyMachine(machine.id, { force: true }).catch(() => {});
@@ -563,23 +605,33 @@ export class FlyRunnerProvider implements RunnerProvider {
             await this.flyClient.destroyMachine(machine.id, { force: true }).catch(() => {});
           }
           if (started) {
+            // Resume-identity rule: reuse the channel instance id already on
+            // record for this volume — only create() mints a fresh one.
+            const channelInstanceId = instance.channelInstanceId ?? newChannelInstanceId();
+            const channelEndpoint = flyChannelDialEndpoint(await this.resolvePrivateIp(machine));
             await this.updateInstance(runId, {
               machineId: machine.id,
               state: "starting",
               lastStartedAt: now,
               region: machine.region || region,
+              channelInstanceId,
+              channelEndpoint,
             });
             await emitRunnerEvent(runId, "runner_resumed", { machineId: machine.id, state });
-            return { runId, handle: machine.id, provider: "fly" };
+            return { runId, handle: machine.id, provider: "fly", channelInstanceId, channelEndpoint };
           }
         } else if (state !== "gone") {
+          const channelInstanceId = instance.channelInstanceId ?? newChannelInstanceId();
+          const channelEndpoint = flyChannelDialEndpoint(await this.resolvePrivateIp(machine));
           await this.updateInstance(runId, {
             machineId: machine.id,
             state,
             lastStartedAt: state === "running" ? now : instance.lastStartedAt,
             region: machine.region || region,
+            channelInstanceId,
+            channelEndpoint,
           });
-          return { runId, handle: machine.id, provider: "fly" };
+          return { runId, handle: machine.id, provider: "fly", channelInstanceId, channelEndpoint };
         }
       }
     }
@@ -590,6 +642,11 @@ export class FlyRunnerProvider implements RunnerProvider {
       // Same boot window as the warm start above: the fresh machine runs before
       // its worker heartbeats, so the wake intent must already be on the row.
       await this.updateInstance(runId, { wakeRequestedAt: now });
+      // Resume-identity rule: the volume (session/transcript) survives a cold
+      // recover, so the channel instance id/credential stay the same even
+      // though the Machine itself is replaced.
+      const channelInstanceId = instance.channelInstanceId ?? newChannelInstanceId();
+      const channelListenEndpoint = flyListenEndpoint();
       const machine = await timeRunnerPhase(
         "fly_machine_cold_recover_create",
         () =>
@@ -600,22 +657,29 @@ export class FlyRunnerProvider implements RunnerProvider {
             // PREWARM_MOUNT_DIR, so the recovered machine must point PREWARM_DIR
             // there to boot warm. lib/prewarm.ts existsSync-guards it, so a non-
             // forked (cold-install) volume that lacks the dir is unaffected.
-            config: buildFlyMachineConfig(runId, volumeId, { prewarmDir: PREWARM_MOUNT_DIR }),
+            config: buildFlyMachineConfig(runId, volumeId, {
+              prewarmDir: PREWARM_MOUNT_DIR,
+              channelInstanceId,
+              channelListenEndpoint,
+            }),
           }),
         { provider: "fly", fields: { runId, region, scope } }
       );
+      const channelEndpoint = flyChannelDialEndpoint(await this.resolvePrivateIp(machine));
       await this.updateInstance(runId, {
         machineId: machine.id,
         state: "starting",
         lastStartedAt: now,
         region: machine.region || region,
+        channelInstanceId,
+        channelEndpoint,
       });
       await emitRunnerEvent(runId, "runner_cold_recovered", {
         machineId: machine.id,
         volumeId: instance.volumeId,
         region: machine.region || region,
       });
-      return { runId, handle: machine.id, provider: "fly" };
+      return { runId, handle: machine.id, provider: "fly", channelInstanceId, channelEndpoint };
     } catch (err) {
       // The volume itself may be gone too (e.g. destroyed alongside a stale
       // machine) — clear the mapping so the next create() provisions an

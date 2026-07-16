@@ -23,6 +23,10 @@ export interface FlyMachine {
   name?: string;
   /** Exit code of a stopped one-shot machine, when Fly reports it. */
   exitCode?: number;
+  /** Private 6PN IPv6 address (Fly's `private_ip`), when the API response
+   *  carries it. Used to derive the worker channel dial endpoint (plan
+   *  section 20) — never a public address. */
+  privateIp?: string;
 }
 
 export interface FlyVolume {
@@ -102,6 +106,7 @@ function machineFromJson(result: any): FlyMachine {
     region: String(result.region ?? ""),
   };
   if (result.name != null) machine.name = String(result.name);
+  if (result.private_ip != null) machine.privateIp = String(result.private_ip);
   // Best-effort exit code for a stopped one-shot machine (seed job). Fly reports
   // it on the most recent "exit" event; absent on running machines.
   const exit = Array.isArray(result.events)

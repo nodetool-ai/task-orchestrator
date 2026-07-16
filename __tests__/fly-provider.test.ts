@@ -58,7 +58,7 @@ function fakeFlyClient(calls: string[] = [], opts: FakeOptions = {}): FlyClient 
       }
       machineSeq += 1;
       const id = machineSeq === 1 ? "m1" : `m${machineSeq}`;
-      const machine = { id, state: "created", region: input.region };
+      const machine = { id, state: "created", region: input.region, privateIp: `fdaa:0:1:a:${machineSeq}::1` };
       machines.set(id, machine);
       calls.push(`createMachineVolume:${volumeId}`);
       calls.push(`prewarmDir:${input.config.env?.PREWARM_DIR ?? "none"}`);
@@ -229,7 +229,7 @@ describe("FlyRunnerProvider", () => {
       state: "suspended",
     });
     const provider = new FlyRunnerProvider(
-      fakeFlyClient(calls, { getMachine: { id: "m1", state: "suspended", region: "ams" } })
+      fakeFlyClient(calls, { getMachine: { id: "m1", state: "suspended", region: "ams", privateIp: "fdaa:0:1:a:1::1" } })
     );
 
     const ref = await provider.resume(run.id);
@@ -253,7 +253,7 @@ describe("FlyRunnerProvider", () => {
       state: "suspended",
     });
     const provider = new FlyRunnerProvider(
-      fakeFlyClient(calls, { getMachine: { id: "m1", state: "suspended", region: "ams" } })
+      fakeFlyClient(calls, { getMachine: { id: "m1", state: "suspended", region: "ams", privateIp: "fdaa:0:1:a:1::1" } })
     );
 
     const before = Date.now();
@@ -279,7 +279,7 @@ describe("FlyRunnerProvider", () => {
     });
     const provider = new FlyRunnerProvider(
       fakeFlyClient(calls, {
-        getMachine: { id: "m1", state: "suspended", region: "ams" },
+        getMachine: { id: "m1", state: "suspended", region: "ams", privateIp: "fdaa:0:1:a:1::1" },
         startMachine409s: new Map([["m1", 1]]),
       })
     );
@@ -797,5 +797,135 @@ describe("FlyRunnerProvider", () => {
     expect(calls).toContain(`destroyVolume:${volumeId}`);
     const [session] = await db.select().from(agentSessions).where(eq(agentSessions.id, run.id));
     expect(session.sdkSessionId).toBeNull();
+  });
+
+  // Plan section 20 (Fly provisioning): the ws channel replaces the old
+  // unsupported-provider rejection.
+  describe("worker channel provisioning", () => {
+    it("create() stores a private ws://[6pn-ip]:8787/worker/channel endpoint", async () => {
+      const calls: string[] = [];
+      const provider = new FlyRunnerProvider(fakeFlyClient(calls));
+      const run = await create({ goal: "<implement>", defer: true });
+
+      const ref = await provider.create({
+        runId: run.id,
+        scope: `run-${run.id}-x`,
+        channelInstanceId: "wi_" + "a".repeat(32),
+      });
+
+      expect(ref?.channelInstanceId).toBe("wi_" + "a".repeat(32));
+      expect(ref?.channelEndpoint).toBe("ws://[fdaa:0:1:a:1::1]:8787/worker/channel");
+      const [row] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+      expect(row.channelInstanceId).toBe(ref!.channelInstanceId);
+      expect(row.channelEndpoint).toBe(ref!.channelEndpoint);
+      // No public Fly service/IP is ever created for the channel.
+      expect(calls).not.toContain("allocatePublicIp");
+    });
+
+    it("create() injects the channel instance id/credential/listen endpoint into the Machine env", async () => {
+      vi.stubEnv("TASK_ORCH_WORKER_CHANNEL_SECRET", "test-secret");
+      const calls: string[] = [];
+      let capturedEnv: Record<string, string> | undefined;
+      const client = fakeFlyClient(calls);
+      const wrapped: FlyClient = {
+        ...client,
+        async createMachine(input) {
+          capturedEnv = input.config.env;
+          return client.createMachine(input);
+        },
+      };
+      const provider = new FlyRunnerProvider(wrapped);
+      const run = await create({ goal: "<implement>", defer: true });
+
+      await provider.create({ runId: run.id, scope: `run-${run.id}-x`, channelInstanceId: "wi_" + "b".repeat(32) });
+
+      expect(capturedEnv?.TASK_ORCH_WORKER_INSTANCE_ID).toBe("wi_" + "b".repeat(32));
+      expect(capturedEnv?.TASK_ORCH_WORKER_CHANNEL_ENDPOINT).toBe("tcp:0.0.0.0:8787");
+      expect(capturedEnv?.TASK_ORCH_WORKER_CHANNEL_CREDENTIAL).toBeTruthy();
+    });
+
+    it("create() fails when the Machine reports no private IP anywhere", async () => {
+      const calls: string[] = [];
+      const client = fakeFlyClient(calls, { getMachine: { id: "m1", state: "created", region: "ams" } });
+      // createMachine's default fake always stamps a privateIp; strip it here so
+      // both the create response AND the follow-up getMachine lookup come back
+      // without one, exercising the "no private endpoint anywhere" failure.
+      const wrapped: FlyClient = {
+        ...client,
+        async createMachine(input) {
+          const machine = await client.createMachine(input);
+          return { ...machine, privateIp: undefined };
+        },
+      };
+      const provider = new FlyRunnerProvider(wrapped);
+      const run = await create({ goal: "<implement>", defer: true });
+
+      await expect(provider.create({ runId: run.id, scope: `run-${run.id}-x` })).rejects.toThrow(
+        /private 6PN IPv6/
+      );
+    });
+
+    it("resume() reuses the channel instance id already on record (resume-identity rule)", async () => {
+      const calls: string[] = [];
+      const run = await create({ goal: "<implement>", defer: true });
+      await db.insert(runnerInstances).values({
+        runId: run.id,
+        machineId: "m1",
+        volumeId: "v1",
+        region: "ams",
+        state: "suspended",
+        channelInstanceId: "wi_" + "c".repeat(32),
+      });
+      const provider = new FlyRunnerProvider(
+        fakeFlyClient(calls, {
+          getMachine: { id: "m1", state: "suspended", region: "ams", privateIp: "fdaa:0:1:a:1::1" },
+        })
+      );
+
+      const ref = await provider.resume(run.id);
+
+      expect(ref?.channelInstanceId).toBe("wi_" + "c".repeat(32));
+      expect(ref?.channelEndpoint).toBe("ws://[fdaa:0:1:a:1::1]:8787/worker/channel");
+    });
+
+    it("resume() cold-recover keeps the channel instance id but re-resolves the endpoint on the new Machine", async () => {
+      const calls: string[] = [];
+      const run = await create({ goal: "<implement>", defer: true });
+      await db.insert(runnerInstances).values({
+        runId: run.id,
+        machineId: "m-old",
+        volumeId: "v-stable",
+        region: "ams",
+        state: "gone",
+        channelInstanceId: "wi_" + "d".repeat(32),
+        channelEndpoint: "ws://[stale::ip]:8787/worker/channel",
+      });
+      const provider = new FlyRunnerProvider(fakeFlyClient(calls, { getMachine: null }));
+
+      const ref = await provider.resume(run.id);
+
+      expect(ref?.channelInstanceId).toBe("wi_" + "d".repeat(32));
+      expect(ref?.channelEndpoint).not.toBe("ws://[stale::ip]:8787/worker/channel");
+      expect(ref?.channelEndpoint).toMatch(/^ws:\/\/\[.+\]:8787\/worker\/channel$/);
+    });
+  });
+
+  describe("dispatchRun fly channel provisioning", () => {
+    it("routes provider 'fly' into channel provisioning instead of the unsupported-provider rejection", async () => {
+      vi.stubEnv("TASK_ORCH_RUNNER", "fly");
+      vi.stubEnv("TASK_ORCH_FLY_APP", "test-app");
+      vi.stubEnv("FLY_API_TOKEN", "tok");
+      const run = await create({ goal: "<implement>", defer: true });
+
+      const result = await dispatchRun(run.id);
+
+      // No live Fly credentials in this unit-test environment, so the real
+      // fetch-backed FlyClient fails the Machines API call — but it must fail
+      // AFTER attempting real provisioning, never with the unsupported-provider
+      // message this section replaces.
+      expect(result).toBe("spawn-failed");
+      const failed = await get(run.id);
+      expect(failed?.error).not.toMatch(/does not expose a private control-plane-to-worker WebSocket endpoint/);
+    });
   });
 });
