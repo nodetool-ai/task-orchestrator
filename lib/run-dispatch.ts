@@ -41,7 +41,7 @@ import {
   reserveChannelIdentity,
   setChannelEndpoint,
 } from "./worker-channel/repository";
-import { connectRun } from "./worker-channel/controller";
+import { connectRun, reapStaleChannels } from "./worker-channel/controller";
 import {
   localDialEndpoint,
   localListenEndpoint,
@@ -847,6 +847,17 @@ async function pumpTick(): Promise<void> {
     await runs().reconcileOrphanedRuns();
   } catch {
     // best-effort
+  }
+  // Half 1b (ws transport): detect stale worker channels off channel_last_seen_at
+  // and reconnect a provider-live worker whose socket dropped without an
+  // in-memory supervisor (e.g. a give-up after a long partition). A still-dead
+  // worker's dial fails and its run stays with the heartbeat reaper above.
+  if (workerTransport() === "ws") {
+    try {
+      await reapStaleChannels();
+    } catch {
+      // best-effort
+    }
   }
   // Half 2: drain the deferred queue, oldest first. Stop at the first defer (the
   // host is full); the next tick retries.

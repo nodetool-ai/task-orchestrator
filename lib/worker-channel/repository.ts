@@ -339,6 +339,122 @@ export async function getChannelIdentity(
   return { instanceId: String(row.channel_instance_id), endpoint: String(row.channel_endpoint) };
 }
 
+/** One reconnectable channel: a runner instance that still has a dial identity
+ * for a run that has not reached a terminal status. */
+export type ChannelInstanceRow = {
+  runId: number;
+  instanceId: string;
+  endpoint: string;
+  status: string;
+  workerScope: string | null;
+  channelLastSeenAt: Date | null;
+};
+
+function channelInstanceRow(row: RawRow): ChannelInstanceRow {
+  return {
+    runId: numberValue(row.run_id, "run_id"),
+    instanceId: String(row.channel_instance_id),
+    endpoint: String(row.channel_endpoint),
+    status: String(row.status),
+    workerScope: row.worker_scope == null ? null : String(row.worker_scope),
+    channelLastSeenAt: nullableDateValue(row.channel_last_seen_at, "channel_last_seen_at"),
+  };
+}
+
+/**
+ * Active worker channels a freshly booted (or hot-deployed) controller must
+ * re-adopt: every runner instance that still carries a dial identity for a run
+ * that has not reached a terminal status. The startup scan connects to each.
+ */
+export async function listReconnectableChannels(): Promise<ChannelInstanceRow[]> {
+  const result = await queryRows(
+    db,
+    drizzleSql`
+      SELECT ri.run_id, ri.channel_instance_id, ri.channel_endpoint,
+             ri.channel_last_seen_at, r.status, r.worker_scope
+      FROM runner_instances ri
+      JOIN agent_runs r ON r.id = ri.run_id
+      WHERE ri.channel_instance_id IS NOT NULL
+        AND ri.channel_endpoint IS NOT NULL
+        AND r.status NOT IN ('completed', 'failed', 'cancelled', 'closed')
+    `
+  );
+  return result.map(channelInstanceRow);
+}
+
+/**
+ * Channels whose worker has gone silent past `staleBefore`: a run in a lease
+ * status (turn in flight) whose channel_last_seen_at is null or older than the
+ * cutoff. Stale detection keys off channel_last_seen_at — the channel's own
+ * liveness clock — not a worker-issued heartbeat request.
+ */
+export async function listStaleChannelRuns(staleBefore: Date): Promise<ChannelInstanceRow[]> {
+  const at = asDate(staleBefore, "staleBefore");
+  const result = await queryRows(
+    db,
+    drizzleSql`
+      SELECT ri.run_id, ri.channel_instance_id, ri.channel_endpoint,
+             ri.channel_last_seen_at, r.status, r.worker_scope
+      FROM runner_instances ri
+      JOIN agent_runs r ON r.id = ri.run_id
+      WHERE ri.channel_instance_id IS NOT NULL
+        AND ri.channel_endpoint IS NOT NULL
+        AND r.status IN ('running', 'preparing')
+        AND (ri.channel_last_seen_at IS NULL OR ri.channel_last_seen_at < ${ts(at)})
+    `
+  );
+  return result.map(channelInstanceRow);
+}
+
+/**
+ * Abandon a worker instance so the run can be re-dispatched onto a fresh one
+ * (protocol-mismatch replacement). Clears the worker claim, heartbeat, controller
+ * lease, and the stale channel identity/endpoint so a new dispatch's
+ * reserveChannelIdentity can claim the row. Leaves the run's status untouched —
+ * dispatchRun re-claims it.
+ */
+export async function releaseChannelForReplacement(runId: number): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx.execute(
+      drizzleSql`
+        UPDATE agent_runs
+        SET worker_scope = NULL, worker_pid = NULL, heartbeat_at = NULL
+        WHERE id = ${runId}
+      `
+    );
+    await tx.execute(
+      drizzleSql`
+        UPDATE runner_instances
+        SET channel_instance_id = NULL, channel_endpoint = NULL,
+            channel_connected_at = NULL, channel_last_seen_at = NULL,
+            controller_id = NULL, controller_lease_expires_at = NULL
+        WHERE run_id = ${runId}
+      `
+    );
+  });
+}
+
+/** Clear a run's worker claim and controller lease as part of terminal channel
+ * teardown. Idempotent; leaves status untouched (the terminal landing owns it). */
+export async function clearChannelClaim(runId: number): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx.execute(
+      drizzleSql`
+        UPDATE agent_runs
+        SET worker_scope = NULL, worker_pid = NULL
+        WHERE id = ${runId}
+      `
+    );
+    await tx.execute(
+      drizzleSql`
+        UPDATE runner_instances
+        SET controller_id = NULL, controller_lease_expires_at = NULL
+        WHERE run_id = ${runId}
+      `
+    );
+  });
+}
+
 export async function acquireControllerLease(
   runId: number,
   controllerId: string,
@@ -423,15 +539,23 @@ export async function releaseControllerLease(runId: number, controllerId: string
 
 export async function markChannelConnected(runId: number, instanceId: string, now: Date): Promise<void> {
   const at = asDate(now, "now");
-  const updated = await queryRows(
-    db,
-    drizzleSql`
-      UPDATE runner_instances
-      SET channel_connected_at = ${ts(at)}, channel_last_seen_at = ${ts(at)}
-      WHERE run_id = ${runId} AND channel_instance_id = ${instanceId}
-      RETURNING run_id
-    `
-  );
+  // Channel activity is the sole liveness signal after the HTTP heartbeat is
+  // gone: bump both channel_last_seen_at (the channel-stale clock) and the run's
+  // heartbeat_at (the shared orphan-reaper clock) in ONE transaction so the two
+  // never diverge.
+  const updated = await db.transaction(async (tx) => {
+    const affected = await queryRows(
+      tx,
+      drizzleSql`
+        UPDATE runner_instances
+        SET channel_connected_at = ${ts(at)}, channel_last_seen_at = ${ts(at)}
+        WHERE run_id = ${runId} AND channel_instance_id = ${instanceId}
+        RETURNING run_id
+      `
+    );
+    if (affected.length) await stampRunHeartbeatTx(tx, runId, at);
+    return affected;
+  });
   if (!updated.length) {
     throw new WorkerChannelRepositoryError(
       `Worker instance ${instanceId} is not registered for run ${runId}`,
@@ -450,20 +574,42 @@ export async function touchChannel(
 ): Promise<boolean> {
   const at = asDate(now, "now");
   const expiresAt = new Date(at.getTime() + LEASE_MS);
-  const updated = await queryRows(
-    db,
+  // Renew the channel-stale clock, the controller lease, and the run heartbeat
+  // together. Both timestamps advance atomically so the reaper's channel-stale
+  // check (channel_last_seen_at) and the shared orphan reaper (heartbeat_at)
+  // agree about liveness.
+  return db.transaction(async (tx) => {
+    const updated = await queryRows(
+      tx,
+      drizzleSql`
+        UPDATE runner_instances
+        SET channel_last_seen_at = ${ts(at)}, controller_lease_expires_at = ${ts(expiresAt)}
+        WHERE run_id = ${runId}
+          AND channel_instance_id = ${instanceId}
+          AND controller_id = ${controllerId}
+          AND controller_epoch = ${epoch}
+          AND controller_lease_expires_at > ${ts(at)}
+        RETURNING run_id
+      `
+    );
+    if (!updated.length) return false;
+    await stampRunHeartbeatTx(tx, runId, at);
+    return true;
+  });
+}
+
+/** Advance a run's shared heartbeat_at from channel activity, but only while it
+ * is still in a live (non-terminal) status — a terminal run's liveness must not
+ * be resurrected by a late channel frame. */
+async function stampRunHeartbeatTx(tx: SqlExecutor, runId: number, at: Date): Promise<void> {
+  await tx.execute(
     drizzleSql`
-      UPDATE runner_instances
-      SET channel_last_seen_at = ${ts(at)}, controller_lease_expires_at = ${ts(expiresAt)}
-      WHERE run_id = ${runId}
-        AND channel_instance_id = ${instanceId}
-        AND controller_id = ${controllerId}
-        AND controller_epoch = ${epoch}
-        AND controller_lease_expires_at > ${ts(at)}
-      RETURNING run_id
+      UPDATE agent_runs
+      SET heartbeat_at = ${ts(at)}
+      WHERE id = ${runId}
+        AND status NOT IN ('completed', 'failed', 'cancelled', 'closed')
     `
   );
-  return updated.length > 0;
 }
 
 /** Core command insert shared by the standalone and tx-scoped variants. The

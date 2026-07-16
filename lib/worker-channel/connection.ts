@@ -58,6 +58,12 @@ export interface ControllerConnectionOptions {
   endpoint: string;
   controllerId: string;
   onEvent?: WorkerEventHandler;
+  /** Fired when the socket closes without an intentional {@link disconnect}. The
+   * registry uses it to drive the bounded reconnect grace. */
+  onClose?: (info: { code: number }) => void;
+  /** Fired once, after the authoritative run.commit for a terminal outcome has
+   * been delivered, so the registry can stop the provider and clear the claim. */
+  onTerminal?: (info: { status: string }) => void;
   /** Dependency injection for socket-level tests. */
   createSocket?: (endpoint: string, protocols: string[], options: WebSocket.ClientOptions) => WebSocket;
   /** A per-run blob coordinator that outlives individual connections so a
@@ -65,6 +71,15 @@ export interface ControllerConnectionOptions {
    * over the shared on-disk blob store. */
   blobs?: BlobCoordinator;
 }
+
+/** Worker events that carry a terminal outcome. Their run.commit reply is the
+ * signal for the registry to tear the channel down. */
+const TERMINAL_EVENT_STATUS: Record<string, string> = {
+  "run.finished": "completed",
+  "run.failed": "failed",
+  "run.cancelled": "cancelled",
+};
+const TERMINAL_EVENT_TYPES = new Set(Object.keys(TERMINAL_EVENT_STATUS));
 
 /** WebSocket close reasons are capped at 123 UTF-8 bytes. */
 function safeCloseReason(reason: string): string {
@@ -93,6 +108,8 @@ export class ControllerConnection {
   readonly endpoint: string;
   readonly controllerId: string;
   private readonly onEvent: WorkerEventHandler;
+  private readonly onClose?: (info: { code: number }) => void;
+  private readonly onTerminal?: (info: { status: string }) => void;
   private readonly createSocket: NonNullable<ControllerConnectionOptions["createSocket"]>;
   private socket?: WebSocket;
   private epoch = 0;
@@ -108,6 +125,8 @@ export class ControllerConnection {
     this.endpoint = options.endpoint;
     this.controllerId = options.controllerId;
     this.onEvent = options.onEvent ?? (() => undefined);
+    this.onClose = options.onClose;
+    this.onTerminal = options.onTerminal;
     this.createSocket = options.createSocket ?? ((url, protocols, socketOptions) => new WebSocket(url, protocols, socketOptions));
     // Blob store is anchored per run+instance so a fresh connection after a
     // reconnect resumes a partial transfer from the durable receiver cursor. The
@@ -187,7 +206,15 @@ export class ControllerConnection {
         this.enqueue(() => (isBinary ? this.receiveBinary(data) : this.receive(raw(data)))),
       );
       socket.on("pong", () => this.enqueue(() => this.touch()));
-      socket.on("close", () => this.stopPings());
+      socket.on("close", (code: number) => {
+        this.stopPings();
+        // An intentional disconnect() flips `stopped` first; anything else is an
+        // unexpected drop the registry may reconnect within the grace window.
+        if (!this.stopped && this.socket === socket) {
+          this.socket = undefined;
+          this.onClose?.({ code });
+        }
+      });
       socket.on("error", () => undefined);
       this.startPings();
     } catch (error) {
@@ -209,6 +236,16 @@ export class ControllerConnection {
       current.push(resolve);
       this.ackWaiters.set(seq, current);
     });
+  }
+
+  /** Stand the connection down WITHOUT force-closing the socket: stop pings and
+   * flip `stopped` so an unexpected-close handler will not reconnect. Used for
+   * terminal teardown, where the worker closes its own side cleanly after it
+   * receives the authoritative run.commit — closing first here would race that
+   * commit off the wire. */
+  neutralize(): void {
+    this.stopped = true;
+    this.stopPings();
   }
 
   async disconnect(release = true): Promise<void> {
@@ -334,6 +371,13 @@ export class ControllerConnection {
     if (result.resultCommandId) {
       const command = await getCommand(result.resultCommandId);
       if (command && command.controllerEpoch === this.epoch) this.sendCommandRow(command, frame.id);
+      // run.finished/failed/cancelled land a terminal outcome and enqueue the
+      // authoritative run.commit above. Once it is on the wire, the registry can
+      // stop the provider and clear the controller lease / worker claim.
+      if (TERMINAL_EVENT_TYPES.has(frame.type)) {
+        const status = TERMINAL_EVENT_STATUS[frame.type];
+        this.onTerminal?.({ status });
+      }
     }
     this.send(this.frame("channel.ack", { throughSeq: result.lastAcceptedWorkerSeq }) as WireFrame);
   }

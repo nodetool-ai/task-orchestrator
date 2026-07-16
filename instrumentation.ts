@@ -55,6 +55,20 @@ export async function register(): Promise<void> {
       // within seconds instead of the 5-minute heartbeat timeout. The pump's
       // per-tick provider sweep covers anything this subscription/poll misses.
       providerMod.getRunnerProvider().startMonitor();
+      // Re-adopt every active worker WebSocket channel. On the ws transport a
+      // fresh boot (or hot deploy) has no in-memory connections: scan the runner
+      // instances that still carry a dial identity for a non-terminal run,
+      // acquire each controller lease, and reconnect to its stored endpoint so a
+      // mid-run worker keeps streaming instead of stranding on the dropped socket.
+      // No-op off the ws transport. Best-effort — a genuinely dead worker fails to
+      // dial and is left to the reaper above.
+      const { config: cfgMod } = await import("./lib/config");
+      if (cfgMod.worker.transport === "ws") {
+        const channelMod = await import("./lib/worker-channel/controller");
+        await channelMod.reconnectActiveChannels().catch((e) => {
+          console.error("[instrumentation] worker channel re-adoption failed:", e);
+        });
+      }
     } catch (err) {
       console.error("[instrumentation] boot init/reconcile failed:", err);
     }

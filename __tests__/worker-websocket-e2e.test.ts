@@ -166,6 +166,46 @@ describe("worker websocket e2e", () => {
     });
   });
 
+  describe("mid-run controller reconnect", () => {
+    it("survives a control-plane disconnect and drains a follow-up over the new connection", async () => {
+      const run = await create({ goal: "<chat>", defer: true });
+      await db.insert(agentMessages).values({
+        runId: run.id,
+        role: "user",
+        content: JSON.stringify([{ type: "text", text: "hi" }]),
+        createdAt: new Date(),
+      });
+      vi.spyOn(backend, "getBackend").mockResolvedValue(fakeChatBackend("first"));
+
+      const { server } = await bootWorkerChannel(run.id);
+      try {
+        // Capture the pushed snapshot, then simulate the control plane dropping
+        // (deploy/restart) while the worker keeps running and reconnecting to the
+        // same live worker endpoint before the turn is driven.
+        const start = (await server.session.waitForStart!()) as RunStart;
+        await disconnectRun(run.id);
+        const reconnected = await connectRun(run.id);
+        expect(reconnected.connected).toBe(true);
+
+        const drive = (driveWorkerRun as any)({ start, session: server.session } as any);
+
+        // A follow-up pushed over the NEW connection still drains into a turn.
+        await sendCommand(run.id, "run.input", {
+          messages: [{ id: 1, role: "user", content: [{ type: "text", text: "follow-up" }] }],
+        });
+
+        await drive;
+
+        const msgs = await listMessages(run.id);
+        expect(msgs.filter((m) => m.role === "user").length).toBeGreaterThanOrEqual(1);
+        expect(msgs.some((m) => m.role === "agent")).toBe(true);
+      } finally {
+        await disconnectRun(run.id);
+        await server.close();
+      }
+    });
+  });
+
   describe("implement run", () => {
     it("round-trips a tool call over the channel and lands terminal completed status", async () => {
       const run = await create({ goal: "<implement>", defer: true });

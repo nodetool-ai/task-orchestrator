@@ -97,6 +97,9 @@ export interface WorkerServerConfig {
   acceptTimeoutMs?: number;
   disconnectGraceMs?: number;
   maxInFlightBytes?: number;
+  /** Override the protocol range advertised in `channel.hello`. Tests use it to
+   * force a protocol mismatch; production always advertises the current major. */
+  helloProtocol?: { min: number; max: number };
   /** Inject a session (tests, or a driver that owns the session lifecycle). */
   session?: WorkerSessionLike;
 }
@@ -429,7 +432,7 @@ class WorkerServerImpl implements WorkerServer {
   private async sendHello(connection: ControllerConnection): Promise<void> {
     const state = this.session.handshakeState();
     const hello: ChannelHello = {
-      protocol: { min: WORKER_CHANNEL_PROTOCOL, max: WORKER_CHANNEL_PROTOCOL },
+      protocol: this.config.helloProtocol ?? { min: WORKER_CHANNEL_PROTOCOL, max: WORKER_CHANNEL_PROTOCOL },
       workerBuild: this.config.workerBuild ?? appConfig.worker.build ?? DEFAULT_WORKER_BUILD,
       capabilities: this.config.capabilities ?? ["durable-spool"],
       lastControllerEpoch: state.lastControllerEpoch,
