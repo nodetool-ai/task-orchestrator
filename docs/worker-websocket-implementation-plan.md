@@ -1313,3 +1313,44 @@ Known gaps observed, deliberately NOT changed here (pre-existing semantics):
   ("already in flight") without persisting — so the run.input bridge fires
   only where messages actually persist (chat loops, idle resume). Matches
   legacy behavior.
+
+### Plan-executor live test (runs 14–20) — 2026-07-16
+
+Executed a plan-executor flow live (plan P-chess-audit, two READ-ONLY audit
+tasks on R-chess-analyzer; executor + implementor personas set to
+backend=claude, anthropic/claude-sonnet-5). Two more §13/§15 port gaps found
+and fixed (commit follows):
+
+9. Goal-specific prompt synthesis was missing from the ws driver — every
+   non-chat run got a bare resume prompt (the legacy driveDispatchedRun goal
+   branches were never ported). Fixed control-plane-side: buildRunStart now
+   synthesizes `RunStart.kickoffPrompt` on fresh starts (<execute> → the
+   buildExecutePrompt scaffold, <implement> → buildImplementPrompt, free-form
+   goal → verbatim); the worker leads with it and appends the persisted user
+   backlog as operator instructions.
+10. The ws turn mounted NO tool extensions (`extensions: []`) — agents had
+   only backend built-ins, so run 15's executor audited via Claude Code's
+   native subagents and reported "no plan-tracking tool exists". Fixed:
+   ProfileContext gained `invoke` (the §15 channel invoker built from the
+   run.start catalogue) and `repoRemote` (snapshot-resolved, so gh_pr
+   profiles never touch a transport worker-side); the ws driver resolves the
+   run's tools profile + always-on extensions with them.
+
+Verified live after the fixes:
+- run 16: executor drove the plan itself over 19 channel tool.invoke calls —
+  task_orch get_plan/get_task/transition_task/check_criterion/add_note/
+  transition_plan; tasks todo→in_progress→passing→merged, plan → done,
+  notes with accurate architecture/test-inventory findings, repo untouched.
+- run 18: executor DELEGATED via spawn__spawn_agent — children 19/20 each
+  dispatched as their own unix-socket channel workers (three concurrent
+  channels), performed read-only audits in /Users/mg/dev/chess-analyzer, and
+  reported via report_result. `git status --porcelain` empty throughout.
+
+Observed agent-behavior gaps (not channel defects, left open):
+- The executor tends to prefer the backend's native subagent tool over
+  spawn__spawn_agent unless steered, and ended its turn "completed" instead
+  of parking to await children — so child results were not consumed into
+  task transitions in run 18. Persona-prompt/park-flow tuning, and possibly
+  making driveSingleTurn honor a park intent, are follow-up work.
+- Spawned implementor children lack task_orch__add_note in their catalogue
+  (report_result only) — executor-side bookkeeping is the intended flow.

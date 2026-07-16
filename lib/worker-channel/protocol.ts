@@ -102,6 +102,14 @@ export interface RunStart {
   memoryContext: string;
   pendingInput: MessageSnapshot[];
   policy: RunPolicy;
+  /**
+   * Goal-synthesized kickoff prompt for a FRESH start (mode "start" only):
+   * the execute-plan scaffold, the implement-task prompt, or a free-form goal
+   * verbatim. The worker never rebuilds prompts from reads — this is the
+   * control plane's authoritative synthesis, replayed stably with the
+   * snapshot. Absent on resume (the backend session carries prior context).
+   */
+  kickoffPrompt?: string;
 }
 
 export interface RunInput {

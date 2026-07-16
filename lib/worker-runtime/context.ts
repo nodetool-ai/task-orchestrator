@@ -36,6 +36,7 @@ import type { RunTurnArgs } from "../agent-backend/types";
 import type { RunEnvelope } from "../pi-event-mapper";
 import { config } from "../config";
 import { parseProviderQualifiedModel } from "../model-id";
+import { buildWorkerToolInvoker } from "./tools";
 import { coerceRunStatus, isTerminalStatus, type SessionStatus } from "../run-state";
 
 /**
@@ -339,25 +340,52 @@ async function runModelTurn(
   const rawModel = (runField(run, "model") as string | undefined) ?? config.agent.model ?? "";
   const { provider: resolvedProvider, id: resolvedModel } = parseProviderQualifiedModel(rawModel);
 
-  // Real provider/model/cwd/extension resolution mirrors lib/runs.ts's `append`
-  // and is ported minimally here (temporary duplication that dies in §18). Tool
-  // and persona extension wiring lands with plan section 15; on this path the
-  // backend's tool calls flow over the channel through `session.invokeTool`.
+  // Tool extensions (plan section 15): mount the run's tools profile with the
+  // CHANNEL invoker, so task_orch__*/spawn__*/events__* tools execute on the
+  // control plane via tool.invoke. Without this the agent gets only the
+  // backend's built-ins and cannot orchestrate (no spawn, no task
+  // transitions). The profile registry is shared with the legacy path; the
+  // ws driver supplies invoke + the snapshot-resolved repo remote so no
+  // factory ever touches a transport here.
+  const invoke = session.invokeTool
+    ? buildWorkerToolInvoker(context.start, { invokeTool: (t, a, c) => session.invokeTool!(t, a, c) })
+    : undefined;
+  // Turn cwd: the run's prepared checkout when one exists, else the resolved
+  // repository's working copy from the snapshot. Never fall back to
+  // process.cwd() — a local worker's cwd is the ORCHESTRATOR checkout, and an
+  // agent turned loose there is exploring the wrong codebase.
+  const cwd =
+    (runField(run, "worktreePath") as string | undefined) ??
+    (typeof context.repository?.localPath === "string" ? context.repository.localPath : undefined) ??
+    process.cwd();
+  const profileCtx = {
+    runId: (runField(run, "id") as number) ?? 0,
+    run: run as never,
+    author: runGoal(run) === "<chat>" ? "chat" : "claude-agent",
+    taskId: (runField(run, "taskId") as string | null) ?? null,
+    planId: (runField(run, "planId") as string | null) ?? null,
+    cwd,
+    invoke,
+    repoRemote: (typeof context.repository?.remote === "string" ? context.repository.remote : null),
+  };
+  const { resolveProfiles, alwaysOnExtensions } = await import("../profiles");
+  const profileSpec =
+    (runField(run, "toolsProfile") as string | undefined) ||
+    (context.persona as { toolsProfile?: string }).toolsProfile ||
+    "";
+  const extensions = [
+    ...(profileSpec ? (await resolveProfiles(profileSpec, profileCtx)).factories : []),
+    ...(await alwaysOnExtensions(profileCtx)),
+  ];
+
   const turnArgs: RunTurnArgs & {
     abortSignal?: AbortSignal;
     invokeTool?: (tool: string, args: unknown, callId: string) => Promise<ToolCallResult>;
   } = {
-    // Turn cwd: the run's prepared checkout when one exists, else the resolved
-    // repository's working copy from the snapshot. Never fall back to
-    // process.cwd() — a local worker's cwd is the ORCHESTRATOR checkout, and an
-    // agent turned loose there is exploring the wrong codebase.
-    cwd:
-      (runField(run, "worktreePath") as string | undefined) ??
-      (typeof context.repository?.localPath === "string" ? context.repository.localPath : undefined) ??
-      process.cwd(),
+    cwd,
     model: { provider: resolvedProvider, id: resolvedModel },
     thinkingLevel: (runField(run, "thinkingLevel") as RunTurnArgs["thinkingLevel"]) ?? undefined,
-    extensions: [],
+    extensions,
     resumeToken: sdkSessionId,
     abort,
     prompt,
@@ -613,11 +641,20 @@ async function drainAndProcess(context: WorkerRunContext, queue: OrderedInputQue
  */
 async function driveSingleTurn(context: WorkerRunContext): Promise<void> {
   const { session } = context;
-  const prompt =
-    unprocessedUserMessages(context.transcript)
-      .map((m) => contentText(m.content))
-      .filter(Boolean)
-      .join("\n\n") || RESUME_PROMPT;
+  // Fresh starts lead with the control plane's goal-synthesized kickoff
+  // prompt (execute scaffold / implement task prompt / free-form goal); any
+  // persisted user backlog (e.g. an operator initialPrompt) follows it as
+  // steering, mirroring the legacy "operator instructions" ordering.
+  const backlog = unprocessedUserMessages(context.transcript)
+    .map((m) => contentText(m.content))
+    .filter(Boolean);
+  const kickoff = context.start.kickoffPrompt?.trim();
+  const backlogText = backlog.join("\n\n");
+  const prompt = kickoff
+    ? backlogText
+      ? `${kickoff}\n\n## Operator instructions\n\n${backlogText}`
+      : kickoff
+    : backlogText || RESUME_PROMPT;
 
   let turn: TurnResult;
   try {

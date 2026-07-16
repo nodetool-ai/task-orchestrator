@@ -112,6 +112,29 @@ export async function buildRunStart(
     allowedTools(run.toolsProfile || persona.toolsProfile),
   ]);
   const { transcript, pendingInput } = pendingMessages(messages);
+
+  // Goal-synthesized kickoff prompt (fresh starts only — a resume rides the
+  // backend session's prior context plus the inbox digest). This is the
+  // channel-native home of the legacy driveDispatchedRun goal branches:
+  //   <execute>  → the plan-orchestration scaffold (buildExecutePrompt)
+  //   <implement>→ the task prompt (buildImplementPrompt)
+  //   free-form  → the goal text verbatim
+  // An operator initialPrompt is already persisted as the first user message
+  // (launchDetached) and rides `pendingInput`; the worker appends it AFTER
+  // this scaffold, mirroring the legacy "operator instructions" section.
+  let kickoffPrompt: string | undefined;
+  if (resolvedMode === "start") {
+    const goal = run.goal ?? "";
+    if (goal === "<execute>" && plan) {
+      const { buildExecutePrompt } = await import("../run-templates");
+      kickoffPrompt = buildExecutePrompt(plan, await dbTransport.listTasks({ planId: plan.id }));
+    } else if (goal === "<implement>" && task) {
+      const { buildImplementPrompt } = await import("../run-templates");
+      kickoffPrompt = await buildImplementPrompt(task);
+    } else if (goal && !goal.startsWith("<")) {
+      kickoffPrompt = goal;
+    }
+  }
   const deadline = run.budgetMaxSeconds == null
     ? null
     : new Date(run.startedAt.getTime() + run.budgetMaxSeconds * 1000).toISOString();
@@ -134,5 +157,6 @@ export async function buildRunStart(
       maxTurns: run.budgetMaxTurns,
       deadline,
     },
+    ...(kickoffPrompt !== undefined ? { kickoffPrompt } : {}),
   };
 }

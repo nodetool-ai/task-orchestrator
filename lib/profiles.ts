@@ -17,7 +17,7 @@
 // web lookup is broadly useful, read-only, and the tool itself fails closed
 // when BRAVE_SEARCH_API_KEY is not configured.
 
-import type { ExtensionFactory } from "./extensions/types";
+import type { ExtensionFactory, ToolInvoker } from "./extensions/types";
 import type { RunRow } from "./runs";
 
 export interface ProfileContext {
@@ -27,11 +27,29 @@ export interface ProfileContext {
   taskId: string | null;
   planId: string | null;
   cwd: string;
+  /** Tool execution seam (plan section 15). The ws worker path supplies the
+   *  channel invoker (session.invokeTool); absent → extensions fall back to
+   *  the legacy transport-backed invoker (control-plane/in-process runs). */
+  invoke?: ToolInvoker;
+  /** Pre-resolved repository remote for gh_pr profiles. The ws worker cannot
+   *  call runTransport().resolveRepo — the control plane pushed the resolved
+   *  repository in `run.start`, so the driver passes its remote here.
+   *  undefined → resolve via the legacy transport (in-process path). */
+  repoRemote?: string | null;
 }
 
 interface ProfileDef {
   factories: (ctx: ProfileContext) => Array<ExtensionFactory> | Promise<Array<ExtensionFactory>>;
   allowsRepoWrite?: boolean;
+}
+
+/** gh_pr remote: pre-resolved by the ws worker (from the run.start snapshot),
+ *  otherwise looked up via the legacy transport (in-process/control plane). */
+async function resolveRemote(ctx: ProfileContext): Promise<string | null> {
+  if (ctx.repoRemote !== undefined) return ctx.repoRemote;
+  const { runTransport } = await import("@/lib/worker");
+  const repo = await (await runTransport()).resolveRepo(ctx.runId);
+  return repo?.remote ?? null;
 }
 
 const PROFILES: Record<string, ProfileDef> = {
@@ -43,6 +61,7 @@ const PROFILES: Record<string, ProfileDef> = {
         defaultTaskId: ctx.taskId ?? undefined,
         defaultPlanId: ctx.planId ?? undefined,
         runId: ctx.runId,
+        invoke: ctx.invoke,
       })];
     },
   },
@@ -63,17 +82,15 @@ const PROFILES: Record<string, ProfileDef> = {
   gh_pr: {
     factories: async (ctx) => {
       const { ghPrExtension } = await import("./extensions/gh-pr");
-      const { runTransport } = await import("@/lib/worker");
-      const repo = await (await runTransport()).resolveRepo(ctx.runId);
-      return [ghPrExtension({ cwd: ctx.cwd, remote: repo?.remote ?? null, runId: ctx.runId })];
+      const remote = await resolveRemote(ctx);
+      return [ghPrExtension({ cwd: ctx.cwd, remote, runId: ctx.runId })];
     },
   },
   gh_pr_ro: {
     factories: async (ctx) => {
       const { ghPrReadOnlyExtension } = await import("./extensions/gh-pr");
-      const { runTransport } = await import("@/lib/worker");
-      const repo = await (await runTransport()).resolveRepo(ctx.runId);
-      return [ghPrReadOnlyExtension({ cwd: ctx.cwd, remote: repo?.remote ?? null, runId: ctx.runId })];
+      const remote = await resolveRemote(ctx);
+      return [ghPrReadOnlyExtension({ cwd: ctx.cwd, remote, runId: ctx.runId })];
     },
   },
   gh_ci: {
@@ -85,13 +102,13 @@ const PROFILES: Record<string, ProfileDef> = {
   spawn: {
     factories: async (ctx) => {
       const { spawnExtension } = await import("./extensions/spawn");
-      return [spawnExtension({ runId: ctx.runId })];
+      return [spawnExtension({ runId: ctx.runId, invoke: ctx.invoke })];
     },
   },
   planning: {
     factories: async (ctx) => {
       const { planningExtension } = await import("./extensions/planning");
-      return [planningExtension({ runId: ctx.runId, run: ctx.run })];
+      return [planningExtension({ runId: ctx.runId, run: ctx.run, invoke: ctx.invoke })];
     },
   },
 };
@@ -114,7 +131,7 @@ export async function alwaysOnExtensions(ctx: ProfileContext): Promise<Extension
   const { eventsExtension } = await import("./extensions/events");
   const { braveSearchExtension } = await import("./extensions/brave-search");
   return [
-    eventsExtension({ runId: ctx.runId }),
+    eventsExtension({ runId: ctx.runId, invoke: ctx.invoke }),
     braveSearchExtension(),
   ];
 }
