@@ -8,7 +8,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { constants } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { FileHandle } from "node:fs/promises";
 
 /**
@@ -404,6 +404,12 @@ export class WorkerOutbox {
   /** Number of unacknowledged serialized JSONL bytes. */
   bytesInFlight(): number {
     return this.inFlight;
+  }
+
+  /** Session volume root (the parent of the `channel/` directory), used to
+   * anchor the sibling `channel/blobs` blob store. */
+  sessionRoot(): string {
+    return dirname(this.channelPath);
   }
 
   /** The next worker-lifetime sequence, including across restarts. */

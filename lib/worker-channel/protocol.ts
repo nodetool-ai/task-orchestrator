@@ -157,6 +157,42 @@ export interface ChannelDrain {
   reason?: string;
 }
 
+/** Maximum declared blob size (25 MiB), mirrored from lib/worker-channel/blob.ts. */
+export const BLOB_MAX_SIZE_BYTES = 25 * 1024 * 1024;
+
+/** JSON `blob.open`: announces an attachment blob sent as binary chunk frames. */
+export interface BlobOpenMessage {
+  blobId: string;
+  size: number;
+  sha256: string;
+  mimeType: string;
+  purpose: string;
+}
+
+/** JSON `blob.accepted`: acknowledges/resumes/completes a blob transfer. */
+export interface BlobAcceptedMessage {
+  blobId: string;
+  nextChunk: number;
+  complete: boolean;
+}
+
+/** JSON `blob.rejected`: refuses a blob (size, digest, or policy violation). */
+export interface BlobRejectedMessage {
+  blobId: string;
+  reason: string;
+}
+
+/** The blob-reference content block used inside start attachments,
+ * transcript.append image blocks, and image tool payloads. */
+export interface BlobRef {
+  type: "blob";
+  blobId: string;
+  mimeType: string;
+  size: number;
+  sha256: string;
+  purpose: string;
+}
+
 export interface RunReady {
   startId: string;
 }
@@ -274,6 +310,12 @@ export type ToolProgressEnvelope = TypedEnvelope<"tool.progress", ToolProgress>;
 export type ToolResultEnvelope = TypedEnvelope<"tool.result", ToolResult>;
 export type ChannelDrainEnvelope = TypedEnvelope<"channel.drain", ChannelDrain>;
 
+// Blob transfer control messages exist in BOTH direction catalogues: a blob may
+// flow control→worker (run.start attachments) or worker→control (image events).
+export type BlobOpenEnvelope = TypedEnvelope<"blob.open", BlobOpenMessage>;
+export type BlobAcceptedEnvelope = TypedEnvelope<"blob.accepted", BlobAcceptedMessage>;
+export type BlobRejectedEnvelope = TypedEnvelope<"blob.rejected", BlobRejectedMessage>;
+
 export type WorkerCommand =
   | RunStartEnvelope
   | RunInputEnvelope
@@ -283,7 +325,10 @@ export type WorkerCommand =
   | ToolAcceptedEnvelope
   | ToolProgressEnvelope
   | ToolResultEnvelope
-  | ChannelDrainEnvelope;
+  | ChannelDrainEnvelope
+  | BlobOpenEnvelope
+  | BlobAcceptedEnvelope
+  | BlobRejectedEnvelope;
 
 export type RunReadyEnvelope = TypedEnvelope<"run.ready", RunReady>;
 export type RunPhaseEnvelope = TypedEnvelope<"run.phase", RunPhase>;
@@ -306,7 +351,10 @@ export type WorkerEvent =
   | RunFinishedEnvelope
   | RunFailedEnvelope
   | RunCancelledEnvelope
-  | WorkerLogEnvelope;
+  | WorkerLogEnvelope
+  | BlobOpenEnvelope
+  | BlobAcceptedEnvelope
+  | BlobRejectedEnvelope;
 
 export type ChannelAckEnvelope = TypedEnvelope<"channel.ack", ChannelAck>;
 export type ChannelNackEnvelope = TypedEnvelope<"channel.nack", ChannelNack>;
@@ -413,6 +461,22 @@ const payloadSchemas = {
   "tool.progress": z.object({ callId: z.string().min(1), progress: jsonValue, message: z.string().optional() }).passthrough(),
   "tool.result": z.object({ callId: z.string().min(1), result: jsonValue, isError: z.boolean().optional() }).passthrough(),
   "channel.drain": z.object({ reason: z.string().optional() }).passthrough(),
+  "blob.open": z.object({
+    blobId: uuid,
+    size: z.number().int().nonnegative().max(BLOB_MAX_SIZE_BYTES),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/i),
+    mimeType: z.string().min(1),
+    purpose: z.string().min(1).max(64),
+  }).passthrough(),
+  "blob.accepted": z.object({
+    blobId: uuid,
+    nextChunk: nonNegativeInt,
+    complete: z.boolean(),
+  }).passthrough(),
+  "blob.rejected": z.object({
+    blobId: uuid,
+    reason: z.string().min(1),
+  }).passthrough(),
   "run.ready": z.object({ startId: z.string().min(1) }).passthrough(),
   "run.phase": z.object({ phase: z.string().min(1), detail: z.string().optional() }).passthrough(),
   "transcript.append": z.object({ message: messageSchema }).passthrough(),
@@ -460,6 +524,9 @@ const commandSchemas = [
   postHandshakeEnvelope("tool.progress"),
   postHandshakeEnvelope("tool.result"),
   postHandshakeEnvelope("channel.drain"),
+  postHandshakeEnvelope("blob.open"),
+  postHandshakeEnvelope("blob.accepted"),
+  postHandshakeEnvelope("blob.rejected"),
 ] as const;
 
 const eventSchemas = [
@@ -473,6 +540,9 @@ const eventSchemas = [
   postHandshakeEnvelope("run.failed"),
   postHandshakeEnvelope("run.cancelled"),
   postHandshakeEnvelope("worker.log"),
+  postHandshakeEnvelope("blob.open"),
+  postHandshakeEnvelope("blob.accepted"),
+  postHandshakeEnvelope("blob.rejected"),
 ] as const;
 
 const transportSchemas = [transportEnvelope("channel.ack"), transportEnvelope("channel.nack")] as const;

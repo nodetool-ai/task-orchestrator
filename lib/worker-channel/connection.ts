@@ -1,6 +1,16 @@
 import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import WebSocket, { type RawData } from "ws";
-import { assertEnvelopeScope, decodeFrame, encodeFrame, isTransportFrame, isWorkerEvent } from "./codec";
+import {
+  assertEnvelopeScope,
+  decodeFrame,
+  encodeFrame,
+  isBlobControlFrame,
+  isTransportFrame,
+  isWorkerEvent,
+} from "./codec";
+import { BlobCoordinator, collectBlobRefs, type BlobWireIO } from "./blob-transfer";
 import { mintChannelCredential } from "./credential";
 import {
   ackCommandsThrough,
@@ -10,6 +20,7 @@ import {
   getLastAcceptedWorkerSeq,
   listPendingCommands,
   markChannelConnected,
+  persistCommand,
   rebasePendingCommands,
   releaseControllerLease,
   renewControllerLease,
@@ -26,6 +37,10 @@ import {
   DEFAULT_MAX_IN_FLIGHT_BYTES,
   WORKER_CHANNEL_PROTOCOL,
   WORKER_CHANNEL_SUBPROTOCOL,
+  type BlobAcceptedMessage,
+  type BlobOpenMessage,
+  type BlobRejectedMessage,
+  type BlobRef,
   type ChannelHello,
   type ToolInvokeEnvelope,
   type WorkerCommand,
@@ -45,6 +60,15 @@ export interface ControllerConnectionOptions {
   onEvent?: WorkerEventHandler;
   /** Dependency injection for socket-level tests. */
   createSocket?: (endpoint: string, protocols: string[], options: WebSocket.ClientOptions) => WebSocket;
+  /** A per-run blob coordinator that outlives individual connections so a
+   * reconnect resumes the same durable receiver instead of racing a second one
+   * over the shared on-disk blob store. */
+  blobs?: BlobCoordinator;
+}
+
+/** WebSocket close reasons are capped at 123 UTF-8 bytes. */
+function safeCloseReason(reason: string): string {
+  return Buffer.byteLength(reason, "utf8") <= 123 ? reason : reason.slice(0, 100);
 }
 
 function raw(data: RawData): string | ArrayBuffer | Uint8Array {
@@ -76,6 +100,7 @@ export class ControllerConnection {
   private pingTimer?: NodeJS.Timeout;
   private serial: Promise<void> = Promise.resolve();
   private ackWaiters = new Map<number, Array<() => void>>();
+  private readonly blobs: BlobCoordinator;
 
   constructor(options: ControllerConnectionOptions) {
     this.runId = options.runId;
@@ -84,6 +109,28 @@ export class ControllerConnection {
     this.controllerId = options.controllerId;
     this.onEvent = options.onEvent ?? (() => undefined);
     this.createSocket = options.createSocket ?? ((url, protocols, socketOptions) => new WebSocket(url, protocols, socketOptions));
+    // Blob store is anchored per run+instance so a fresh connection after a
+    // reconnect resumes a partial transfer from the durable receiver cursor. The
+    // coordinator is normally supplied by the registry and shared across
+    // reconnects; a standalone connection creates its own.
+    const blobRoot = join(tmpdir(), "task-orchestrator", "channel-blobs", `${this.runId}-${this.instanceId}`);
+    this.blobs = options.blobs ?? new BlobCoordinator(blobRoot, this.controlBlobIO());
+  }
+
+  /** The per-run blob coordinator; the registry keeps it across reconnects. */
+  get blobCoordinator(): BlobCoordinator {
+    return this.blobs;
+  }
+
+  /** Send an attachment blob to the worker (e.g. a run.start attachment) to
+   * completion before the referencing command is delivered. */
+  sendBlob(ref: Omit<BlobRef, "type">, data: Buffer): Promise<void> {
+    return this.blobs.sendBlob(ref, data);
+  }
+
+  /** Path a fully received worker→control blob was renamed to. */
+  blobPath(blobId: string): string {
+    return this.blobs.pathFor(blobId);
   }
 
   get connected(): boolean { return this.socket?.readyState === WebSocket.OPEN; }
@@ -133,7 +180,12 @@ export class ControllerConnection {
       await markChannelConnected(this.runId, this.instanceId, new Date());
       await rebasePendingCommands(this.runId, this.instanceId, lease.epoch);
       for (const command of await listPendingCommands(this.runId, this.instanceId, lease.epoch)) this.sendCommandRow(command);
-      socket.on("message", (data) => this.enqueue(() => this.receive(raw(data))));
+      // Bind the shared coordinator to THIS connection's transport and re-announce
+      // any outgoing blob so a reconnect resumes from the receiver's cursor.
+      await this.blobs.rebind(this.controlBlobIO());
+      socket.on("message", (data, isBinary) =>
+        this.enqueue(() => (isBinary ? this.receiveBinary(data) : this.receive(raw(data)))),
+      );
       socket.on("pong", () => this.enqueue(() => this.touch()));
       socket.on("close", () => this.stopPings());
       socket.on("error", () => undefined);
@@ -223,12 +275,23 @@ export class ControllerConnection {
 
   private enqueue(operation: () => Promise<void>): void {
     this.serial = this.serial.then(operation, operation).catch((error) => {
-      const code = error instanceof ControllerProtocolError ? error.closeCode : CLOSE_CODE_SCOPE_MISMATCH;
-      this.socket?.close(code, error instanceof Error ? error.message : "worker channel failure");
+      const violation = error as { closeCode?: number };
+      const code =
+        typeof violation.closeCode === "number" ? violation.closeCode : CLOSE_CODE_SCOPE_MISMATCH;
+      // A WebSocket close reason must fit in 123 UTF-8 bytes; an over-long blob
+      // digest-mismatch message would otherwise make close() throw and leave the
+      // socket stuck in CLOSING.
+      const reason = safeCloseReason(error instanceof Error ? error.message : "worker channel failure");
+      try {
+        this.socket?.close(code, reason);
+      } catch {
+        this.socket?.terminate();
+      }
     });
   }
 
   private async receive(data: string | ArrayBuffer | Uint8Array): Promise<void> {
+    if (this.stopped) return;
     const frame = decodeFrame(data);
     assertEnvelopeScope(frame, this.runId, this.instanceId);
     if (frame.controllerEpoch !== this.epoch) throw new ControllerProtocolError("stale worker epoch", CLOSE_CODE_STALE_CONTROLLER_EPOCH, false);
@@ -244,6 +307,13 @@ export class ControllerConnection {
       return;
     }
     if (!isWorkerEvent(frame)) throw new ControllerProtocolError("unexpected control-plane frame", CLOSE_CODE_SCOPE_MISMATCH, false);
+    if (isBlobControlFrame(frame)) {
+      await this.handleBlobEvent(frame);
+      return;
+    }
+    // Ordering rule: a worker event that references a blob is a protocol
+    // violation unless that blob has already completed on this side.
+    this.assertBlobRefsComplete(frame.payload);
     if (frame.type === "tool.invoke") {
       // Reserve the receipt and ack the worker sequence IN ORDER (serial), then
       // float the possibly-long tool execution so it never blocks later frames.
@@ -266,6 +336,75 @@ export class ControllerConnection {
       if (command && command.controllerEpoch === this.epoch) this.sendCommandRow(command, frame.id);
     }
     this.send(this.frame("channel.ack", { throughSeq: result.lastAcceptedWorkerSeq }) as WireFrame);
+  }
+
+  /** Route one unsequenced binary blob chunk frame to the blob receiver. */
+  private async receiveBinary(data: RawData): Promise<void> {
+    if (this.stopped) return;
+    const buffer = Buffer.isBuffer(data)
+      ? data
+      : Array.isArray(data)
+        ? Buffer.concat(data)
+        : Buffer.from(data as ArrayBuffer);
+    await this.blobs.onBinary(buffer);
+  }
+
+  /** Apply a sequenced blob-control worker event (receipt + ack) and route it to
+   * the blob coordinator. Routing runs even for a duplicate so a replayed
+   * `blob.open` after a reconnect re-emits its persisted resume cursor. */
+  private async handleBlobEvent(frame: WorkerEvent): Promise<void> {
+    const result = await applyWorkerEvent(frame, this.onEvent);
+    if (frame.type === "blob.open") await this.blobs.onBlobOpen(frame.payload as BlobOpenMessage);
+    else if (frame.type === "blob.accepted") await this.blobs.onBlobAccepted(frame.payload as BlobAcceptedMessage);
+    else if (frame.type === "blob.rejected") this.blobs.onBlobRejected(frame.payload as BlobRejectedMessage);
+    this.send(this.frame("channel.ack", { throughSeq: result.lastAcceptedWorkerSeq }) as WireFrame);
+  }
+
+  private assertBlobRefsComplete(payload: unknown): void {
+    for (const ref of collectBlobRefs(payload)) {
+      if (!this.blobs.isComplete(ref.blobId)) {
+        throw new ControllerProtocolError(
+          `worker referenced incomplete blob ${ref.blobId}`,
+          CLOSE_CODE_SCOPE_MISMATCH,
+          false,
+        );
+      }
+    }
+  }
+
+  private controlBlobIO(): BlobWireIO {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const self = this;
+    return {
+      async sendBlobOpen(message) {
+        await self.enqueueCommand("blob.open", message);
+      },
+      async sendBlobAccepted(message) {
+        await self.enqueueCommand("blob.accepted", message);
+      },
+      async sendBlobRejected(message) {
+        await self.enqueueCommand("blob.rejected", message);
+      },
+      sendBinary(frame) {
+        self.sendBinaryFrame(frame);
+      },
+    };
+  }
+
+  private async enqueueCommand(type: string, payload: unknown): Promise<void> {
+    const row = await persistCommand({
+      runId: this.runId,
+      instanceId: this.instanceId,
+      controllerEpoch: this.epoch,
+      type,
+      payload,
+    });
+    if (row.controllerEpoch === this.epoch && this.connected) this.sendCommandRow(row);
+  }
+
+  private sendBinaryFrame(frame: Buffer): void {
+    if (!this.connected) return;
+    this.socket!.send(frame, { binary: true });
   }
 
   private async touch(): Promise<void> {

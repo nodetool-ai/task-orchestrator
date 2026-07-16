@@ -150,6 +150,15 @@ export function isTransportFrame(frame: WireFrame): frame is TransportFrame {
   return frame.type === "channel.ack" || frame.type === "channel.nack";
 }
 
+/** Blob-control JSON messages exist in both direction catalogues. They are
+ * ordinary sequenced envelopes but are routed to the blob subsystem rather than
+ * the generic command/event handlers, so they get their own predicate. */
+export function isBlobControlFrame(
+  frame: WireFrame,
+): frame is Extract<WireFrame, { type: "blob.open" | "blob.accepted" | "blob.rejected" }> {
+  return frame.type === "blob.open" || frame.type === "blob.accepted" || frame.type === "blob.rejected";
+}
+
 export function isWorkerCommand(frame: WireFrame): frame is WorkerCommand {
   return (
     frame.type === "run.start" ||
@@ -160,7 +169,8 @@ export function isWorkerCommand(frame: WireFrame): frame is WorkerCommand {
     frame.type === "tool.accepted" ||
     frame.type === "tool.progress" ||
     frame.type === "tool.result" ||
-    frame.type === "channel.drain"
+    frame.type === "channel.drain" ||
+    isBlobControlFrame(frame)
   );
 }
 
@@ -175,7 +185,8 @@ export function isWorkerEvent(frame: WireFrame): frame is WorkerEvent {
     frame.type === "run.finished" ||
     frame.type === "run.failed" ||
     frame.type === "run.cancelled" ||
-    frame.type === "worker.log"
+    frame.type === "worker.log" ||
+    isBlobControlFrame(frame)
   );
 }
 

@@ -60,6 +60,8 @@ export interface WorkerSessionLike {
   attach(options: WorkerSessionAttachOptions): Promise<void>;
   /** Route a decoded controller command or transport frame into the session. */
   receive(frame: WireFrame): Promise<void>;
+  /** Route one unsequenced binary blob chunk frame into the session. */
+  receiveBinary?(frame: Buffer): Promise<void>;
   /** Append and stream a worker event; the session assigns its sequence. */
   emit(type: any, payload: any): Promise<WorkerEnvelope>;
   /** Numbers advertised in `channel.hello`. */
@@ -444,7 +446,17 @@ class WorkerServerImpl implements WorkerServer {
 
   private async processMessage(connection: ControllerConnection, data: RawData, isBinary: boolean): Promise<void> {
     if (connection.closed) return;
-    if (isBinary) throw new WorkerChannelProtocolError("Worker channel only accepts JSON text frames", 1002);
+    if (isBinary) {
+      // Binary frames are blob chunk frames (unsequenced). They are only valid on
+      // an accepted controller channel and are routed to the session's blob
+      // receiver, whose bytes count toward the negotiated in-flight window.
+      if (!connection.accepted) {
+        throw new WorkerChannelProtocolError("binary blob chunk before channel.accept", 4408);
+      }
+      const buffer = Buffer.isBuffer(data) ? data : Buffer.from(rawDataToFrameData(data) as Uint8Array);
+      if (this.session.receiveBinary) await this.session.receiveBinary(buffer);
+      return;
+    }
     const frame = decodeFrame(rawDataToFrameData(data));
     if (!connection.accepted) {
       if (frame.type !== "channel.accept") {
@@ -474,6 +486,7 @@ class WorkerServerImpl implements WorkerServer {
 
     const transport: WorkerSessionTransport = {
       send: (frame) => this.queueSend(connection, frame),
+      sendBinary: (data) => this.queueSend(connection, () => this.sendRawBinary(connection, data)),
       close: (code, reason) =>
         this.closeConnection(connection, code ?? CLOSE_CODE_CLEAN_DRAIN, reason ?? "worker session closed", false),
     };
@@ -538,6 +551,13 @@ class WorkerServerImpl implements WorkerServer {
     const encoded = encodeFrame(frame);
     await new Promise<void>((resolve, reject) => {
       connection.socket.send(encoded, (error) => (error ? reject(error) : resolve()));
+    });
+  }
+
+  private async sendRawBinary(connection: ControllerConnection, data: Buffer): Promise<void> {
+    if (connection.closed || connection.socket.readyState !== WebSocket.OPEN) return;
+    await new Promise<void>((resolve, reject) => {
+      connection.socket.send(data, { binary: true }, (error) => (error ? reject(error) : resolve()));
     });
   }
 

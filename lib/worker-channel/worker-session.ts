@@ -27,6 +27,8 @@ import {
   type WireFrame,
 } from "./protocol";
 import { WorkerOutbox } from "./spool";
+import { BlobCoordinator, collectBlobRefs, type BlobWireIO } from "./blob-transfer";
+import type { BlobRef } from "./protocol";
 
 /** The command payloads intentionally exposed to the run driver. */
 export type WorkerSessionCommand = RunInput | RunCancel | RunPark | RunCommit | ToolResult;
@@ -37,6 +39,8 @@ export type WorkerSessionCommand = RunInput | RunCancel | RunPark | RunCommit | 
  */
 export interface WorkerSessionTransport {
   send(frame: WireFrame): Promise<void> | void;
+  /** Send one unsequenced binary blob chunk frame. */
+  sendBinary?(frame: Buffer): Promise<void> | void;
   close?(code?: number, reason?: string): Promise<void> | void;
 }
 
@@ -64,6 +68,9 @@ export interface WorkerSessionOptions {
   disconnectGraceMs?: number;
   /** Useful when a supervisor restores the last fenced epoch from disk. */
   controllerEpoch?: number;
+  /** Session volume root for `channel/blobs`. Defaults to the outbox root. */
+  blobRoot?: string;
+  maxInFlightBytes?: number;
 }
 
 export class WorkerSessionProtocolError extends Error {
@@ -206,6 +213,7 @@ export class WorkerSession {
   private readonly runId: number;
   private readonly instanceId: string;
   private readonly outbox: WorkerOutbox;
+  private readonly blobs: BlobCoordinator;
   private readonly disconnectGraceMs: number;
   private readonly commandsQueue = new AsyncQueue<WorkerSessionCommand>();
   private readonly startWaiters: Array<{
@@ -223,6 +231,8 @@ export class WorkerSession {
   private lastCommandSeq = 0;
   private start?: RunStart;
   private startId?: string;
+  /** Set once run.start is applied AND all referenced blobs have completed. */
+  private startReady = false;
   private commandTail: Promise<void> = Promise.resolve();
   private eventTail: Promise<unknown> = Promise.resolve();
   private sendTail: Promise<void> = Promise.resolve();
@@ -234,6 +244,11 @@ export class WorkerSession {
     if (!/^wi_[a-f0-9]{32}$/.test(options.instanceId)) throw new TypeError("instanceId is invalid");
     this.instanceId = options.instanceId;
     this.outbox = options.outbox;
+    this.blobs = new BlobCoordinator(
+      options.blobRoot ?? options.outbox.sessionRoot(),
+      this.workerBlobIO(),
+      options.maxInFlightBytes,
+    );
     this.disconnectGraceMs = positiveInteger(
       options.disconnectGraceMs ?? DEFAULT_DISCONNECT_GRACE_MS,
       "disconnectGraceMs",
@@ -256,7 +271,7 @@ export class WorkerSession {
     const outbox = await WorkerOutbox.open(options.root, options.runId, options.instanceId, {
       maxInFlightBytes: options.maxInFlightBytes,
     });
-    return new WorkerSession({ ...options, outbox });
+    return new WorkerSession({ ...options, outbox, blobRoot: options.blobRoot ?? options.root });
   }
 
   /** Snapshot the numbers the supervisor advertises in `channel.hello`. */
@@ -269,7 +284,7 @@ export class WorkerSession {
   }
 
   async waitForStart(): Promise<RunStart> {
-    if (this.start) return this.start;
+    if (this.startReady && this.start) return this.start;
     if (this.closed) throw new Error("worker session is closed");
     return new Promise<RunStart>((resolve, reject) => this.startWaiters.push({ resolve, reject }));
   }
@@ -332,6 +347,11 @@ export class WorkerSession {
           await this.send(active.transport, frame as unknown as WireFrame);
         }
       });
+      // Binary blob chunks are not durable and an already-acked `blob.open`
+      // never replays from the outbox. Re-announce every in-flight outgoing blob
+      // so the receiver re-emits its persisted resume cursor and the sender
+      // resumes streaming (protocol: reconnect resume via re-`blob.open`).
+      await this.blobs.rebind(this.workerBlobIO());
     } catch (error) {
       if (this.active === active) this.detachTransport(active.transport);
       throw error;
@@ -387,6 +407,51 @@ export class WorkerSession {
     if (isTransportFrame(frame)) return this.handleTransportFrame(frame);
     if (isWorkerCommand(frame)) return this.acceptCommand(frame);
     throw new WorkerSessionProtocolError("worker session received an invalid frame", 1002);
+  }
+
+  /** Receive one unsequenced binary blob chunk frame from the controller. */
+  receiveBinary(frame: Buffer): Promise<void> {
+    return this.blobs.onBinary(frame);
+  }
+
+  /** Send a blob to `complete` before emitting the message that references it
+   * (the sender-completes-before-referencing ordering rule). */
+  sendBlob(ref: Omit<BlobRef, "type">, data: Buffer): Promise<void> {
+    return this.blobs.sendBlob(ref, data);
+  }
+
+  /** Path a fully received incoming blob was renamed to. */
+  blobPath(blobId: string): string {
+    return this.blobs.pathFor(blobId);
+  }
+
+  private workerBlobIO(): BlobWireIO {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const self = this;
+    return {
+      async sendBlobOpen(message) {
+        await self.emit("blob.open", message);
+      },
+      async sendBlobAccepted(message) {
+        await self.emit("blob.accepted", message);
+      },
+      async sendBlobRejected(message) {
+        await self.emit("blob.rejected", message);
+      },
+      sendBinary(frame) {
+        return self.sendBinaryFrame(frame);
+      },
+    };
+  }
+
+  private async sendBinaryFrame(frame: Buffer): Promise<void> {
+    const active = this.active;
+    if (!active) return;
+    await this.queueSend(async () => {
+      if (this.active !== active) return;
+      const transport = asTransport(active.transport);
+      if (transport.sendBinary) await transport.sendBinary(frame);
+    });
   }
 
   handleFrame(frame: WireFrame): Promise<void> {
@@ -553,7 +618,19 @@ export class WorkerSession {
         if (!this.start) {
           this.start = frame.payload;
           this.startId = frame.id;
-          for (const waiter of this.startWaiters.splice(0)) waiter.resolve(this.start);
+          const refs = this.startBlobRefs(this.start);
+          if (refs.length === 0) {
+            // Common path: no attachments, so run.start applies immediately.
+            this.startReady = true;
+            for (const waiter of this.startWaiters.splice(0)) waiter.resolve(this.start);
+          } else {
+            // Ordering-rule exception: run.start attachments are streamed right
+            // after the command; defer resolving waitForStart (and thus run.ready)
+            // until every referenced blob has completed. Do NOT await here — the
+            // blob.open commands and their binary frames are processed after this
+            // returns, so blocking the command loop would deadlock.
+            void this.resolveStartWhenBlobsReady(this.start, refs);
+          }
         } else if (this.startId !== frame.id) {
           throw new WorkerSessionProtocolError("worker received a second run.start", CLOSE_CODE_SCOPE_MISMATCH);
         }
@@ -568,6 +645,15 @@ export class WorkerSession {
         if (frame.type === "run.commit") this.resolveCommit(frame);
         this.commandsQueue.push(frame.payload);
         return;
+      case "blob.open":
+        await this.blobs.onBlobOpen(frame.payload);
+        return;
+      case "blob.accepted":
+        await this.blobs.onBlobAccepted(frame.payload);
+        return;
+      case "blob.rejected":
+        this.blobs.onBlobRejected(frame.payload);
+        return;
       case "channel.drain":
         return;
       case "tool.accepted":
@@ -576,6 +662,25 @@ export class WorkerSession {
         // through the narrow run-driver command iterator.
         return;
     }
+  }
+
+  private async resolveStartWhenBlobsReady(start: RunStart, refs: BlobRef[]): Promise<void> {
+    try {
+      await Promise.all(refs.map((ref) => this.blobs.awaitIncoming(ref.blobId)));
+    } catch {
+      // A closed session rejects nothing here; waitForStart already handles it.
+    }
+    if (this.closed) return;
+    this.startReady = true;
+    for (const waiter of this.startWaiters.splice(0)) waiter.resolve(start);
+  }
+
+  private startBlobRefs(start: RunStart): BlobRef[] {
+    const refs: BlobRef[] = [];
+    for (const message of [...start.transcript, ...start.pendingInput]) {
+      collectBlobRefs(message.content, refs);
+    }
+    return refs;
   }
 
   private resolveTool(frame: Extract<WorkerCommand, { type: "tool.result" }>): void {
