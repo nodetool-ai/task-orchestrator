@@ -620,15 +620,17 @@ async function driveChatRun(context: WorkerRunContext, inputDriven: boolean): Pr
   }
 }
 
-/** Persist and run a turn for each accepted-but-unconsumed input message. Unlike
- *  the snapshot seed (already persisted), a `run.input` message is appended over
- *  the channel via transcript.append before its turn runs. */
+/** Run a turn for each accepted-but-unconsumed input message. A `run.input`
+ *  message is ALREADY durably persisted by the control plane (persistMessage
+ *  appends the row, then bridges it here carrying that row id), exactly like the
+ *  snapshot seed — so the worker must NOT re-emit transcript.append for it. Doing
+ *  so keyed a second agent_messages row off the fresh envelope id and fired a
+ *  duplicate live "message", showing the user's follow-up twice. Only
+ *  worker-originated agent/tool output (synthetic ids in runModelTurn) is
+ *  appended over the channel. */
 async function drainAndProcess(context: WorkerRunContext, queue: OrderedInputQueue): Promise<void> {
   for (const m of queue.drain()) {
     if (context.session.abortSignal?.aborted) return;
-    await context.session.emit("transcript.append", {
-      message: { id: m.id, role: "user", content: m.content },
-    });
     const t = await runModelTurn(context, contentText(m.content) || RESUME_PROMPT);
     await emitCheckpoint(context, t);
   }

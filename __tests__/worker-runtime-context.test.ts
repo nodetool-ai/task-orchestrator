@@ -239,4 +239,50 @@ describe("driveWorkerRun", () => {
 
     expect(emitted.some((e) => e.type === "run.finished")).toBe(true);
   });
+
+  it("does NOT re-append a run.input user message the control plane already persisted", async () => {
+    // Regression: a chat follow-up is durably appended by persistMessage (one
+    // agent_messages row) and bridged to the worker as run.input carrying that
+    // row id. The worker must run a turn for it but must NOT echo it back via
+    // transcript.append — doing so keyed a SECOND row off the fresh envelope id
+    // and fired a duplicate live "message", showing the user's message twice.
+    // The snapshot seed path already avoids this; drainAndProcess now mirrors it.
+    vi.spyOn(backend, "getBackend").mockResolvedValue(fakeBackend("reply"));
+    const start = makeStart({
+      run: { id: 1, status: "idle", goal: "<chat>" },
+      transcript: [msg(1, "user", "hi"), msg(2, "agent", "hello")],
+      pendingInput: [],
+    });
+    const emitted: Array<{ type: string; payload: any }> = [];
+    // The follow-up already carries its persisted row id (3), exactly as the
+    // control-plane bridge sends it after appendMessage.
+    const followUp: RunInput = { messages: [msg(3, "user", "follow up")] };
+    const session: WorkerDriverSession = {
+      async waitForStart() {
+        return start;
+      },
+      async *commands() {
+        yield followUp as unknown as WorkerSessionCommand;
+      },
+      async emit(type, payload) {
+        emitted.push({ type, payload });
+        return { id: `e${emitted.length}` };
+      },
+    };
+
+    // No start snapshot in the call → input-driven drive (waits for run.input).
+    await driveWorkerRun({ session });
+
+    // The worker never re-appends an already-persisted user message.
+    const userAppends = emitted.filter(
+      (e) => e.type === "transcript.append" && e.payload.message.role === "user"
+    );
+    expect(userAppends).toHaveLength(0);
+    // But the follow-up turn DID run: the kickoff turn plus the follow-up turn
+    // each emit exactly one agent transcript.append (worker-originated output).
+    const agentAppends = emitted.filter(
+      (e) => e.type === "transcript.append" && e.payload.message.role === "agent"
+    );
+    expect(agentAppends).toHaveLength(2);
+  });
 });
