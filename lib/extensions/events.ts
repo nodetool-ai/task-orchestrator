@@ -44,8 +44,8 @@ import {
   type Audience,
 } from "../inbox";
 import type { OrchestratorTool, OrchestratorToolResult } from "../orchestrator-tools";
-import { runTransport } from "@/lib/worker";
-import type { ExtensionFactory } from "./types";
+import { legacyToolInvoker } from "./legacy-invoker";
+import type { ExtensionFactory, ToolInvoker } from "./types";
 import { recordTurnEffect } from "../run-state";
 import type {
   PendingQuestion,
@@ -656,11 +656,14 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
 
 export interface EventsExtensionOptions {
   runId: number;
+  /** Tool execution seam (plan section 15); defaults to the legacy transport. */
+  invoke?: ToolInvoker;
 }
 
 export const eventsExtension =
-  ({ runId }: EventsExtensionOptions): ExtensionFactory =>
+  ({ runId, invoke }: EventsExtensionOptions): ExtensionFactory =>
   (reg) => {
+    const run = invoke ?? legacyToolInvoker(runId, { author: "agent" });
     for (const tool of EVENT_TOOLS) {
       reg.registerTool({
         name: tool.name,
@@ -668,8 +671,7 @@ export const eventsExtension =
         description: tool.description,
         parameters: tool.parameters,
         execute: async (_id, params) => {
-          const transport = await runTransport();
-          const r = await transport.callTool(runId, tool.name, params, { author: "agent" });
+          const r = await run(tool.name, params);
           return { content: r.content, details: undefined, isError: r.isError ?? false };
         },
       });

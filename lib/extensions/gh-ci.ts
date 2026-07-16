@@ -7,9 +7,10 @@
 
 import { Type } from "typebox";
 import { validatePrUrl, type ParsedPrUrl } from "../gh-url";
-import { runTransport } from "@/lib/worker";
+import { legacyRepoRemotes } from "./legacy-invoker";
 import { getOctokit, describeGithubError } from "../github-client";
 import type { ExtensionFactory } from "./types";
+import type { RepoRemotesFn } from "./gh-pr";
 
 const ok = (text: string) =>
   ({ content: [{ type: "text" as const, text }], details: undefined });
@@ -84,21 +85,24 @@ export function trimLog(
 export interface GhCiExtensionOptions {
   /** Retained for API compatibility; GitHub I/O no longer uses a subprocess cwd. */
   cwd?: string;
+  /** Repo-remote lookup seam (plan section 15); defaults to the legacy transport. */
+  listRepoRemotes?: RepoRemotesFn;
 }
 
 /** Failure-ish conclusions that make a job "failed" for --log-failed semantics. */
 const FAILED_CONCLUSIONS = new Set(["failure", "timed_out", "cancelled", "startup_failure", "action_required"]);
 
 export const ghCiExtension =
-  (_opts: GhCiExtensionOptions = {}): ExtensionFactory =>
+  (opts: GhCiExtensionOptions = {}): ExtensionFactory =>
   (reg) => {
+    const listRepoRemotes = opts.listRepoRemotes ?? legacyRepoRemotes();
     async function gate(url: string): Promise<
       | { ok: true; parsed: ParsedPrUrl; matched: { id: string; name: string } }
       | { ok: false; result: ReturnType<typeof errResult> }
     > {
-      // Repo-remote gating reads through the transport so HTTP workers never
-      // touch the repositories table directly.
-      const v = await validatePrUrl(url, async () => (await runTransport()).listRepoRemotes());
+      // Repo-remote gating reads through the injected seam so a ws worker never
+      // touches the repositories table directly.
+      const v = await validatePrUrl(url, listRepoRemotes);
       if ("error" in v) return { ok: false, result: errResult(v.error) };
       return { ok: true, parsed: v.parsed, matched: v.matched };
     }

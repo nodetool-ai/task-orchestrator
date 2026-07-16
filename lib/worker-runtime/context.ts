@@ -349,6 +349,11 @@ async function runModelTurn(
     onEvent,
     // Extra fields the channel turn exposes to the backend (not part of the
     // legacy RunTurnArgs surface): the live cancel signal and the tool router.
+    // The router forwards straight to the channel; the control plane is the
+    // authority on the start policy (plan section 15 rule 2) and rejects any
+    // unauthorized tool. The worker-local catalogue gate lives in
+    // lib/worker-runtime/tools.ts, which decides which tools are REGISTERED to
+    // the backend in the first place (it must not pre-empt a live channel call).
     abortSignal: signal,
     invokeTool: session.invokeTool
       ? (tool, args, callId) => session.invokeTool!(tool, args, callId)
@@ -607,7 +612,11 @@ async function emitCancelled(context: WorkerRunContext, requestId: string): Prom
   const reason = ((context.session.abortSignal as AbortSignal | undefined)?.reason);
   try {
     const fin = await context.session.emit("run.cancelled", {
-      requestId,
+      // A single-turn drive has no command-loop tracking the cancel request id;
+      // the protocol requires a non-empty requestId, and the control plane keys
+      // the terminal landing off the finish-event id (not this value), so a
+      // sentinel is safe when the real request id is unknown.
+      requestId: requestId || "cancel",
       reason: typeof reason === "string" ? reason : undefined,
     });
     await awaitCommit(context.session, fin.id);

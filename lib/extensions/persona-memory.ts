@@ -15,8 +15,8 @@ import { Type } from "typebox";
 import * as repo from "../repo";
 import type { Persona } from "@/lib/personas/types";
 import type { OrchestratorTool, OrchestratorToolResult } from "../orchestrator-tools";
-import { runTransport } from "@/lib/worker";
-import type { ExtensionFactory } from "./types";
+import { legacyToolInvoker } from "./legacy-invoker";
+import type { ExtensionFactory, ToolInvoker } from "./types";
 
 export const MEMORY_SYSTEM_GUIDANCE = `Memory:
 - You can read and write shared long-term memory with memory_search and memory_remember.
@@ -240,9 +240,9 @@ const AGENT_MEMORY_TOOLS = MEMORY_TOOLS.filter((t) => t.name !== "memory__load")
 // ────────────────────────────────────────
 
 export const personaMemoryFactory =
-  (persona: Persona, run: RunLite, _cwd: string): ExtensionFactory =>
+  (persona: Persona, run: RunLite, _cwd: string, invoke?: ToolInvoker): ExtensionFactory =>
   async (reg) => {
-    const transport = await runTransport();
+    const callTool = invoke ?? legacyToolInvoker(run.id, { author: "agent" });
 
     // Compose the memory guidance into the system prompt via the extension seam.
     // Before R3 the lightweight loop hardcoded `persona.systemPrompt + MEMORY_
@@ -259,7 +259,7 @@ export const personaMemoryFactory =
     // ambient notes (and can still read/write via the tools).
     let blocks: Array<{ scope: string; body: string; keywords?: string[] }> = [];
     try {
-      const r = await transport.callTool(run.id, "memory__load", {}, { author: "agent" });
+      const r = await callTool("memory__load", {});
       const text = r.content.find((c) => c.type === "text");
       if (!r.isError && text && text.type === "text") {
         blocks = (JSON.parse(text.text) as { blocks: typeof blocks }).blocks ?? [];
@@ -280,7 +280,7 @@ export const personaMemoryFactory =
         description: tool.description,
         parameters: tool.parameters,
         execute: async (_id: string, params: unknown) => {
-          const r = await transport.callTool(run.id, tool.name, params, { author: "agent" });
+          const r = await callTool(tool.name, params);
           return { content: r.content, details: undefined, isError: r.isError ?? false };
         },
       });

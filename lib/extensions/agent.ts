@@ -10,9 +10,9 @@
 // when this process is an HTTP-mode worker — the tool then runs server-side,
 // so external workers expose the full tool surface with no database access.
 
-import type { ExtensionFactory } from "./types";
+import type { ExtensionFactory, ToolInvoker } from "./types";
 import { ORCHESTRATOR_TOOLS } from "@/lib/orchestrator-tools";
-import { runTransport } from "@/lib/worker";
+import { legacyToolInvoker } from "./legacy-invoker";
 
 export interface OrchestratorExtensionOptions {
   author: string;
@@ -20,11 +20,21 @@ export interface OrchestratorExtensionOptions {
   defaultPlanId?: string;
   /** The run these tools execute inside; passed to spawned children as parent. */
   runId?: number;
+  /** Tool execution seam (plan section 15). Supplied by the ws worker path
+   *  (`session.invokeTool`); defaults to the legacy transport-backed invoker. */
+  invoke?: ToolInvoker;
 }
 
 export const orchestratorExtension =
   (opts: OrchestratorExtensionOptions): ExtensionFactory =>
   (reg) => {
+    const invoke =
+      opts.invoke ??
+      legacyToolInvoker(opts.runId, {
+        author: opts.author,
+        defaultTaskId: opts.defaultTaskId,
+        defaultPlanId: opts.defaultPlanId,
+      });
     for (const tool of ORCHESTRATOR_TOOLS) {
       reg.registerTool({
         name: `task_orch__${tool.name}`,
@@ -32,12 +42,7 @@ export const orchestratorExtension =
         description: tool.description,
         parameters: tool.parameters,
         execute: async (_id, params) => {
-          const transport = await runTransport();
-          const r = await transport.callTool(opts.runId, tool.name, params, {
-            author: opts.author,
-            defaultTaskId: opts.defaultTaskId,
-            defaultPlanId: opts.defaultPlanId,
-          });
+          const r = await invoke(tool.name, params);
           return {
             content: r.content,
             details: undefined,

@@ -443,7 +443,20 @@ export class WorkerSession {
     const result = new Promise<ToolCallResult>((resolve, reject) => {
       waiter = { callId, resolve, reject };
     });
+    // The real handler is the `await result` below, but an abort can reject
+    // `result` while this method is still awaiting `emit` — attach a swallowing
+    // catch so that window never surfaces as an unhandled rejection.
+    result.catch(() => undefined);
     this.toolWaiters.set(callId, waiter);
+    // A run.cancel (or a disconnect-grace expiry) aborts the session; a tool call
+    // in flight when that happens must reject so the model turn awaiting it
+    // unwinds instead of hanging until the control plane eventually replies.
+    const onAbort = () => waiter.reject(new Error("run cancelled before tool result"));
+    if (this.abortSignal.aborted) {
+      this.toolWaiters.delete(callId);
+      throw new Error("run cancelled before tool result");
+    }
+    this.abortSignal.addEventListener("abort", onAbort, { once: true });
     try {
       const invocation = await this.emit("tool.invoke", { tool, arguments: args, callId });
       waiter.invocationId = invocation.id;
@@ -453,6 +466,7 @@ export class WorkerSession {
       waiter.reject(error);
       throw error;
     } finally {
+      this.abortSignal.removeEventListener("abort", onAbort);
       if (this.toolWaiters.get(callId) === waiter) this.toolWaiters.delete(callId);
     }
   }

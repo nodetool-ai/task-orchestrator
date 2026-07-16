@@ -27,11 +27,13 @@ import {
   WORKER_CHANNEL_PROTOCOL,
   WORKER_CHANNEL_SUBPROTOCOL,
   type ChannelHello,
+  type ToolInvokeEnvelope,
   type WorkerCommand,
   type WorkerEnvelope,
   type WorkerEvent,
   type WireFrame,
 } from "./protocol";
+import { executeToolInvoke, reserveToolInvoke, type ToolChannelIO } from "./tool-invoke";
 
 export type { WorkerEventHandler };
 
@@ -188,6 +190,18 @@ export class ControllerConnection {
     return frame.payload as ChannelHello;
   }
 
+  /** The transport seam handed to the tool-invoke handler. Reads `connected`
+   *  and `epoch` live so a disconnect mid-execution is observed. */
+  private toolIO(): ToolChannelIO {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const self = this;
+    return {
+      get epoch() { return self.epoch; },
+      get connected() { return self.connected; },
+      send: (frame) => self.send(frame),
+    };
+  }
+
   private frame<T>(type: string, payload: T): WorkerEnvelope<T> {
     return { v: 1, type, id: randomUUID(), runId: this.runId, instanceId: this.instanceId, controllerEpoch: this.epoch, seq: 0, sentAt: new Date().toISOString(), payload };
   }
@@ -230,6 +244,17 @@ export class ControllerConnection {
       return;
     }
     if (!isWorkerEvent(frame)) throw new ControllerProtocolError("unexpected control-plane frame", CLOSE_CODE_SCOPE_MISMATCH, false);
+    if (frame.type === "tool.invoke") {
+      // Reserve the receipt and ack the worker sequence IN ORDER (serial), then
+      // float the possibly-long tool execution so it never blocks later frames.
+      const outcome = await reserveToolInvoke(frame as ToolInvokeEnvelope, this.toolIO());
+      if (outcome.duplicate) {
+        if (outcome.replay) this.sendCommandRow(outcome.replay, frame.id);
+        return;
+      }
+      void executeToolInvoke(frame as ToolInvokeEnvelope, this.toolIO()).catch(() => undefined);
+      return;
+    }
     const result = await applyWorkerEvent(frame, this.onEvent);
     // A terminal worker event (run.finished/failed/cancelled) makes the handler
     // enqueue an authoritative `run.commit`. Deliver it to the worker replying to

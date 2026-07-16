@@ -27,8 +27,8 @@ import { isTerminalStatus } from "../types";
 import type { SessionStatus } from "../types";
 import { listProfiles } from "../profiles";
 import type { OrchestratorTool, OrchestratorToolResult } from "../orchestrator-tools";
-import { runTransport } from "@/lib/worker";
-import type { ExtensionFactory } from "./types";
+import { legacyToolInvoker } from "./legacy-invoker";
+import type { ExtensionFactory, ToolInvoker } from "./types";
 
 // ────────────────────────────────────────
 // Constants
@@ -784,11 +784,14 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
 
 export interface SpawnExtensionOptions {
   runId: number;
+  /** Tool execution seam (plan section 15); defaults to the legacy transport. */
+  invoke?: ToolInvoker;
 }
 
 export const spawnExtension =
-  ({ runId }: SpawnExtensionOptions): ExtensionFactory =>
+  ({ runId, invoke }: SpawnExtensionOptions): ExtensionFactory =>
   (reg) => {
+    const run = invoke ?? legacyToolInvoker(runId, { author: "agent" });
     for (const tool of SPAWN_TOOLS) {
       reg.registerTool({
         name: tool.name,
@@ -796,8 +799,7 @@ export const spawnExtension =
         description: tool.description,
         parameters: tool.parameters,
         execute: async (_id, params) => {
-          const transport = await runTransport();
-          const r = await transport.callTool(runId, tool.name, params, { author: "agent" });
+          const r = await run(tool.name, params);
           return { content: r.content, details: undefined, isError: r.isError ?? false };
         },
       });

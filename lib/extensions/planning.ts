@@ -28,8 +28,8 @@ import { agentMessages, agentSessions } from "@/db/schema";
 import * as repo from "../repo";
 import type { PlanFull } from "../types";
 import type { OrchestratorTool, OrchestratorToolResult } from "../orchestrator-tools";
-import { runTransport } from "@/lib/worker";
-import type { ExtensionFactory } from "./types";
+import { legacyToolInvoker } from "./legacy-invoker";
+import type { ExtensionFactory, ToolInvoker } from "./types";
 import type { RunRow } from "../runs";
 
 export type PlanningStage = repo.PlanningStage;
@@ -37,6 +37,8 @@ export type PlanningStage = repo.PlanningStage;
 export interface PlanningExtensionOptions {
   runId: number;
   run: RunRow;
+  /** Tool execution seam (plan section 15); defaults to the legacy transport. */
+  invoke?: ToolInvoker;
 }
 
 const ok = (text: string): OrchestratorToolResult => ({
@@ -243,6 +245,7 @@ export const planningExtension =
     // successful gate tool (the server advanced the persisted stage).
     let stage: PlanningStage =
       (opts.run.planningStage as PlanningStage | null) ?? "gathering";
+    const invoke = opts.invoke ?? legacyToolInvoker(opts.runId, { author: "agent" });
 
     for (const tool of PLANNING_TOOLS) {
       reg.registerTool({
@@ -251,8 +254,7 @@ export const planningExtension =
         description: tool.description,
         parameters: tool.parameters,
         execute: async (_id, params) => {
-          const transport = await runTransport();
-          const r = await transport.callTool(opts.runId, tool.name, params, { author: "agent" });
+          const r = await invoke(tool.name, params);
           if (!r.isError) {
             // Mirror the server-side stage transitions for the interceptor.
             if (tool.name === "propose_spec" && stage === "gathering") stage = "spec_review";

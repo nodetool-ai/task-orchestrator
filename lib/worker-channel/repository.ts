@@ -622,6 +622,97 @@ export async function getCommand(id: string): Promise<CommandRow | null> {
   return result[0] ? commandRow(result[0]) : null;
 }
 
+/**
+ * Read the authoritative allowed-tool set from the run's persisted `run.start`
+ * command (plan section 15 rule 2). The start snapshot is the single source of
+ * truth for what the agent may invoke; a `tool.invoke` naming anything outside
+ * this list is rejected before the server tool registry is ever consulted.
+ * Returns null when no `run.start` command has been persisted yet.
+ */
+export async function getRunStartPolicy(
+  runId: number,
+  instanceId: string
+): Promise<{ allowedTools: string[] } | null> {
+  const result = await queryRows(
+    db,
+    drizzleSql`
+      SELECT payload
+      FROM worker_channel_commands
+      WHERE run_id = ${runId} AND instance_id = ${instanceId} AND type = 'run.start'
+      ORDER BY controller_epoch DESC, seq DESC
+      LIMIT 1
+    `
+  );
+  const row = result[0];
+  if (!row) return null;
+  const payload = jsonValue(row.payload) as { policy?: { allowedTools?: unknown } } | null;
+  const allowed = payload?.policy?.allowedTools;
+  return { allowedTools: Array.isArray(allowed) ? allowed.map(String) : [] };
+}
+
+/**
+ * Persist the single `tool.result` command for a `tool.invoke` and link it into
+ * that invocation's receipt, atomically (plan section 15 rules 3, 6, 7, 8).
+ *
+ * Idempotent by the invocation envelope id: if the receipt already carries a
+ * `result_command_id`, the stored command is returned unchanged and the tool is
+ * NEVER re-run — a duplicate invocation replays the exact prior result. The
+ * command insert and the receipt link commit in one transaction so a result is
+ * never exposed without its receipt.
+ */
+export async function persistToolResultCommand(input: {
+  runId: number;
+  instanceId: string;
+  controllerEpoch: number;
+  invokeEventId: string;
+  payload: unknown;
+}): Promise<CommandRow> {
+  if (!Number.isSafeInteger(input.controllerEpoch) || input.controllerEpoch <= 0) {
+    throw new TypeError("controllerEpoch must be a positive integer");
+  }
+  return db.transaction(async (tx) => {
+    await lockChannel(tx, input.runId, input.instanceId);
+    await lockRunner(tx, input.runId);
+
+    const receiptRows = await queryRows(
+      tx,
+      drizzleSql`
+        SELECT result_command_id
+        FROM worker_channel_receipts
+        WHERE id = ${input.invokeEventId}
+      `
+    );
+    const linked = receiptRows[0]?.result_command_id;
+    if (linked != null) {
+      const existing = await queryRows(
+        tx,
+        drizzleSql`
+          SELECT id, run_id, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
+          FROM worker_channel_commands
+          WHERE id = ${String(linked)}
+        `
+      );
+      if (existing.length) return commandRow(existing[0]);
+    }
+
+    const command = await insertCommandCore(tx as unknown as SqlExecutor, {
+      runId: input.runId,
+      instanceId: input.instanceId,
+      controllerEpoch: input.controllerEpoch,
+      type: "tool.result",
+      payload: input.payload,
+    });
+    await tx.execute(
+      drizzleSql`
+        UPDATE worker_channel_receipts
+        SET result_command_id = ${command.id}
+        WHERE id = ${input.invokeEventId}
+      `
+    );
+    return command;
+  });
+}
+
 export async function ackCommandsThrough(
   runId: number,
   instanceId: string,

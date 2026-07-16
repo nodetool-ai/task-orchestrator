@@ -14,13 +14,19 @@ import {
   type ParsedPrUrl,
   type UrlValidation,
 } from "../gh-url";
-import { runTransport } from "@/lib/worker";
+import { legacyPrLock, legacyRepoRemotes } from "./legacy-invoker";
 import {
   getOctokit,
   describeGithubError,
   fetchChecksRollupForRef,
 } from "../github-client";
 import type { BackendRegistrar, ExtensionFactory } from "./types";
+
+/** Seam for the `pr:<url>` cross-run lease (plan section 15). Supplied by the
+ *  caller; defaults to the legacy transport-backed lock. */
+export type PrLockFn = (runId: number, prUrl: string) => Promise<{ ok: boolean; reason?: string }>;
+/** Seam for the deployment repo-remote lookup PR urls are gated on. */
+export type RepoRemotesFn = () => Promise<Array<{ id: string; name: string; remote: string | null }>>;
 
 // Re-export so consumers importing 'lib/extensions/gh-pr' get the URL helpers too.
 export { ownerRepoFromRemote, parsePrUrl, validatePrUrl };
@@ -40,6 +46,10 @@ export interface GhPrExtensionOptions {
    *  §5.2) on mutating tools (merge, approve). Required for ghPrExtension;
    *  unused by ghPrReadOnlyExtension (no merge tool, approve excluded). */
   runId?: number;
+  /** PR-lease seam (plan section 15); defaults to the legacy transport. */
+  acquirePrLock?: PrLockFn;
+  /** Repo-remote lookup seam (plan section 15); defaults to the legacy transport. */
+  listRepoRemotes?: RepoRemotesFn;
 }
 
 interface OwnerRepo {
@@ -70,7 +80,8 @@ function repoFullName(remote: string | null | undefined): string | null {
  */
 async function checkAndAcquirePrLock(
   prUrl: string,
-  runId: number | undefined
+  runId: number | undefined,
+  acquirePrLock: PrLockFn
 ): Promise<{ ok: true } | { ok: false; result: ReturnType<typeof errResult> }> {
   if (runId == null) {
     // No caller identity wired in. This guard is a safety belt against
@@ -85,7 +96,7 @@ async function checkAndAcquirePrLock(
       ),
     };
   }
-  const verdict = await (await runTransport()).acquirePrLock(runId, prUrl);
+  const verdict = await acquirePrLock(runId, prUrl);
   if (!verdict.ok) {
     return {
       ok: false,
@@ -102,11 +113,11 @@ type Gate = (url: string) => Promise<
   | { ok: false; result: ReturnType<typeof errResult> }
 >;
 
-function makeGate(): Gate {
+function makeGate(listRepoRemotes: RepoRemotesFn): Gate {
   return async (url: string) => {
-    // Repo-remote gating reads through the transport so HTTP workers never
-    // touch the repositories table directly.
-    const v = await validatePrUrl(url, async () => (await runTransport()).listRepoRemotes());
+    // Repo-remote gating reads through the injected seam so a ws worker never
+    // touches the repositories table directly.
+    const v = await validatePrUrl(url, listRepoRemotes);
     if ("error" in v) return { ok: false, result: errResult(v.error) };
     return { ok: true, parsed: v.parsed, matched: v.matched };
   };
@@ -412,7 +423,7 @@ function registerReviewTool(
   reg: BackendRegistrar,
   cwd: string | undefined,
   gate: Gate,
-  opts: { allowApprove: boolean; runId?: number }
+  opts: { allowApprove: boolean; runId?: number; acquirePrLock: PrLockFn }
 ) {
   const verdicts = opts.allowApprove
     ? ([Type.Literal("approve"), Type.Literal("comment"), Type.Literal("request_changes")] as const)
@@ -437,7 +448,7 @@ function registerReviewTool(
         return errResult("verdict='approve' is not permitted from this tool set.");
       }
       if (verdict === "approve") {
-        const lock = await checkAndAcquirePrLock(g.parsed.canonical, opts.runId);
+        const lock = await checkAndAcquirePrLock(g.parsed.canonical, opts.runId, opts.acquirePrLock);
         if (!lock.ok) return lock.result;
       }
       if ((verdict === "comment" || verdict === "request_changes") && !body?.trim()) {
@@ -563,7 +574,8 @@ function registerMergeTool(
   reg: BackendRegistrar,
   cwd: string | undefined,
   gate: Gate,
-  runId: number | undefined
+  runId: number | undefined,
+  acquirePrLock: PrLockFn
 ) {
   reg.registerTool({
     name: "gh_pr__pr_merge",
@@ -588,7 +600,7 @@ function registerMergeTool(
     execute: async (_id, { url, method, delete_branch, auto }) => {
       const g = await gate(url);
       if (!g.ok) return g.result;
-      const lock = await checkAndAcquirePrLock(g.parsed.canonical, runId);
+      const lock = await checkAndAcquirePrLock(g.parsed.canonical, runId, acquirePrLock);
       if (!lock.ok) return lock.result;
       const { owner, repo, number } = g.parsed;
       try {
@@ -649,11 +661,12 @@ export const ghPrExtension =
   (reg) => {
     const cwd = opts.cwd;
     const fullName = repoFullName(opts.remote);
-    const gate = makeGate();
+    const acquirePrLock = opts.acquirePrLock ?? legacyPrLock();
+    const gate = makeGate(opts.listRepoRemotes ?? legacyRepoRemotes());
     registerReadTools(reg, cwd, gate, { repoFullName: fullName });
-    registerReviewTool(reg, cwd, gate, { allowApprove: true, runId: opts.runId });
+    registerReviewTool(reg, cwd, gate, { allowApprove: true, runId: opts.runId, acquirePrLock });
     registerCommentTool(reg, cwd, gate);
-    registerMergeTool(reg, cwd, gate, opts.runId);
+    registerMergeTool(reg, cwd, gate, opts.runId, acquirePrLock);
   };
 
 // Read-only tool set: view, diff, review (no 'approve'), comment. No
@@ -665,9 +678,10 @@ export const ghPrReadOnlyExtension =
   (reg) => {
     const cwd = opts.cwd;
     const fullName = repoFullName(opts.remote);
-    const gate = makeGate();
+    const acquirePrLock = opts.acquirePrLock ?? legacyPrLock();
+    const gate = makeGate(opts.listRepoRemotes ?? legacyRepoRemotes());
     registerReadTools(reg, cwd, gate, { repoFullName: fullName });
-    registerReviewTool(reg, cwd, gate, { allowApprove: false, runId: opts.runId });
+    registerReviewTool(reg, cwd, gate, { allowApprove: false, runId: opts.runId, acquirePrLock });
     registerCommentTool(reg, cwd, gate);
   };
 
@@ -678,7 +692,7 @@ export const ghPrStrictReadOnlyExtension =
   (reg) => {
     const cwd = opts.cwd;
     const fullName = repoFullName(opts.remote);
-    const gate = makeGate();
+    const gate = makeGate(opts.listRepoRemotes ?? legacyRepoRemotes());
     registerReadTools(reg, cwd, gate, { repoFullName: fullName });
   };
 

@@ -7,12 +7,9 @@
 // and __tests__/run-worker.test.ts currently guarantee against the HTTP
 // worker transport and the direct-DB driver.
 //
-// It is EXPECTED TO FAIL under WS_E2E=1 right now: the run driver has not
-// been refactored (plan section 13) to consume WorkerSession/connectRun, so
-// nothing pushes RunStart or drains commands over the channel yet. Sections
-// 13-15 turn more of this green; do not weaken any assertion below to paper
-// over that gap. Gated behind WS_E2E so it never runs in the default suite
-// until the switch is safe (see section 22 boundary 13, which ungates it).
+// Sections 13-15 turned this green end to end and section 15 (commit boundary
+// 13) ungated it: it now runs in the default suite. Do not weaken any assertion
+// below — this is the WebSocket acceptance spec that replaced the HTTP/SSE soak.
 
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -94,7 +91,7 @@ function fakeChatBackend(replyText: string) {
   } as any;
 }
 
-describe.runIf(process.env.WS_E2E === "1")("worker websocket e2e", () => {
+describe("worker websocket e2e", () => {
   describe("chat run", () => {
     it("drives an initial turn over the channel with no worker HTTP or DB access", async () => {
       const run = await create({ goal: "<chat>", defer: true });
