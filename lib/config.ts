@@ -76,6 +76,13 @@ function strEnv(key: string, dflt?: string): string | undefined {
 export type RunnerProviderKind = "local" | "fly" | "box";
 export type NestedDispatchMode = "isolate" | "inline";
 export type LightweightIsolation = "child" | "inprocess";
+export type WorkerTransport = "http" | "ws";
+
+/** Temporary migration switch. HTTP remains the default until the websocket
+ * compatibility driver has replaced the legacy worker API. */
+export function workerTransport(): WorkerTransport {
+  return process.env.TASK_ORCH_WORKER_TRANSPORT === "ws" ? "ws" : "http";
+}
 
 /**
  * How the lightweight tier (pi `<chat>` / pi `<execute>`, i.e. placement
@@ -211,6 +218,30 @@ export const config = Object.freeze({
     },
     get apiToken(): string | undefined {
       return strEnv("TASK_ORCH_WORKER_TOKEN");
+    },
+    get transport(): WorkerTransport {
+      return workerTransport();
+    },
+    get channelInstanceId(): string | undefined {
+      return strEnv("TASK_ORCH_WORKER_INSTANCE_ID");
+    },
+    get channelCredential(): string | undefined {
+      return strEnv("TASK_ORCH_WORKER_CHANNEL_CREDENTIAL");
+    },
+    get channelEndpoint(): string | undefined {
+      return strEnv("TASK_ORCH_WORKER_CHANNEL_ENDPOINT");
+    },
+    /** HMAC secret channel instance credentials are derived from (control plane). */
+    get channelSecret(): string | undefined {
+      return strEnv("TASK_ORCH_WORKER_CHANNEL_SECRET");
+    },
+    /** Worker build identifier reported in channel.hello. */
+    get build(): string | undefined {
+      return strEnv("TASK_ORCH_WORKER_BUILD");
+    },
+    /** Verbose channel-frame logging (TASK_ORCH_LOG_LEVEL=debug). */
+    get debugLog(): boolean {
+      return strEnv("TASK_ORCH_LOG_LEVEL")?.toLowerCase() === "debug";
     },
     /** HMAC secret the orchestrator signs run-scoped worker tokens with. */
     get apiSecret(): string | undefined {

@@ -44,7 +44,16 @@ export interface WorkerSessionAttachOptions {
   controllerEpoch: number;
   /** Last worker event sequence durably accepted by the controller. */
   lastAcceptedWorkerSeq?: number;
+  /** Controller-negotiated in-flight budget applied to the durable outbox. */
+  maxInFlightBytes?: number;
   transport: WorkerSessionTransport | ((frame: WireFrame) => Promise<void> | void);
+}
+
+/** Handshake numbers the supervisor advertises in `channel.hello`. */
+export interface WorkerHandshakeState {
+  lastControllerEpoch: number;
+  lastAckedControlSeq: number;
+  nextWorkerSeq: number;
 }
 
 export interface WorkerSessionOptions {
@@ -239,12 +248,24 @@ export class WorkerSession {
 
   private pendingTransport?: WorkerSessionTransport | ((frame: WireFrame) => Promise<void> | void);
 
-  /** Open the durable spool and create a session in one operation. */
+  /** Open the durable spool and create a session in one operation. This is the
+   * single production `WorkerOutbox.open` call site (see plan section 9). */
   static async open(
-    options: Omit<WorkerSessionOptions, "outbox"> & { root: string },
+    options: Omit<WorkerSessionOptions, "outbox"> & { root: string; maxInFlightBytes?: number },
   ): Promise<WorkerSession> {
-    const outbox = await WorkerOutbox.open(options.root, options.runId, options.instanceId);
+    const outbox = await WorkerOutbox.open(options.root, options.runId, options.instanceId, {
+      maxInFlightBytes: options.maxInFlightBytes,
+    });
     return new WorkerSession({ ...options, outbox });
+  }
+
+  /** Snapshot the numbers the supervisor advertises in `channel.hello`. */
+  handshakeState(): WorkerHandshakeState {
+    return {
+      lastControllerEpoch: this.controllerEpoch,
+      lastAckedControlSeq: this.lastCommandSeq,
+      nextWorkerSeq: this.outbox.nextSeq(),
+    };
   }
 
   async waitForStart(): Promise<RunStart> {
@@ -278,9 +299,10 @@ export class WorkerSession {
     const cursor = nonNegativeInteger(options.lastAcceptedWorkerSeq ?? 0, "lastAcceptedWorkerSeq");
     if (this.closed) throw new Error("worker session is closed");
 
+    // Epoch fencing only. Closing the losing socket is a transport duty owned
+    // by the supervisor (plan section 9); the session just stops routing to it.
     if (this.active) {
       if (epoch <= this.active.epoch) throw this.staleEpoch(epoch);
-      await this.closeTransport(this.active.transport, CLOSE_CODE_STALE_CONTROLLER_EPOCH, "controller epoch fenced");
       this.active = undefined;
     } else if (epoch < this.controllerEpoch) {
       throw this.staleEpoch(epoch);
@@ -290,6 +312,9 @@ export class WorkerSession {
       this.controllerEpoch = epoch;
       this.lastCommandSeq = 0;
       this.sequenceFingerprints.clear();
+    }
+    if (options.maxInFlightBytes !== undefined) {
+      this.outbox.setMaxInFlightBytes(options.maxInFlightBytes);
     }
     this.active = { transport: options.transport, epoch };
     if (this.disconnectTimer) {

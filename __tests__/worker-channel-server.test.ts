@@ -107,7 +107,7 @@ async function closed(socket: WebSocket): Promise<number> {
   });
 }
 
-function accept(instanceId: string, epoch: number, cursor = 0, graceMs = 60_000): AcceptFrame {
+function accept(epoch: number, cursor = 0, graceMs = 60_000): AcceptFrame {
   const payload: ChannelAccept = {
     protocol: WORKER_CHANNEL_PROTOCOL,
     controllerEpoch: epoch,
@@ -134,6 +134,34 @@ function envelope(instanceId: string, epoch: number, seq: number, payload: unkno
   } as WorkerCommand;
 }
 
+const startPayload = {
+  mode: "start",
+  run: { id: 71 },
+  task: null,
+  plan: null,
+  persona: { id: "implementor" },
+  repository: { id: "repo" },
+  transcript: [],
+  inboxDigest: null,
+  memoryContext: "",
+  pendingInput: [],
+  policy: { allowedTools: [], maxTurns: null, deadline: null },
+};
+
+/** A minimal injected session that isolates the supervisor's transport duties
+ * from the real session's epoch/replay ownership. */
+function fakeSession(overrides: Partial<WorkerSessionLike> = {}): WorkerSessionLike {
+  return {
+    attach: vi.fn(async () => {}),
+    receive: vi.fn(async () => {}),
+    emit: vi.fn(async () => ({}) as never),
+    handshakeState: () => ({ lastControllerEpoch: 0, lastAckedControlSeq: 0, nextWorkerSeq: 1 }),
+    abort: vi.fn(),
+    close: vi.fn(async () => {}),
+    ...overrides,
+  };
+}
+
 describe("worker WebSocket supervisor", () => {
   it("serves only the exact authenticated upgrade endpoint", async () => {
     const { server, token } = await makeServer();
@@ -157,79 +185,62 @@ describe("worker WebSocket supervisor", () => {
     socket.close();
   });
 
-  it("sends hello, accepts commands, emits durable events, and replays them", async () => {
+  it("forwards controller frames to the session and streams session output to the socket", async () => {
     const { server, token, instanceId } = await makeServer();
     const socket = connect(server, token);
     await openSocket(socket);
     expect((await nextFrame(socket)).type).toBe("channel.hello");
-    socket.send(encodeFrame(accept(instanceId, 1)));
+    socket.send(encodeFrame(accept(1)));
 
-    const command = envelope(instanceId, 1, 1, {
-      mode: "start",
-      run: { id: 71 },
-      task: null,
-      plan: null,
-      persona: { id: "implementor" },
-      repository: { id: "repo" },
-      transcript: [],
-      inboxDigest: null,
-      memoryContext: "",
-      pendingInput: [],
-      policy: { allowedTools: [], maxTurns: null, deadline: null },
-    });
-    socket.send(encodeFrame(command));
+    socket.send(encodeFrame(envelope(instanceId, 1, 1, startPayload)));
+    // The session (not the supervisor) assigns the ack and start resolution.
     expect((await nextFrame(socket)).type).toBe("channel.ack");
     await expect(server.session.waitForStart!()).resolves.toMatchObject({ mode: "start" });
 
     const event = await server.emit("agent.event", { event: { kind: "checkpoint" } });
     expect(event.seq).toBe(1);
-    const received = await nextFrame(socket);
-    expect(received.type).toBe("agent.event");
+    expect((await nextFrame(socket)).type).toBe("agent.event");
     socket.close();
-    await closed(socket);
-
-    const reconnect = connect(server, token);
-    await openSocket(reconnect);
-    expect((await nextFrame(reconnect)).type).toBe("channel.hello");
-    reconnect.send(encodeFrame(accept(instanceId, 2)));
-    expect((await nextFrame(reconnect)).type).toBe("agent.event");
-    reconnect.close();
   });
 
-  it("takes over on a higher epoch and rejects stale competing controllers", async () => {
+  it("admits one controller and fences a superseded or stale competitor", async () => {
     const { server, token, instanceId } = await makeServer();
     const first = connect(server, token);
     await openSocket(first);
     await nextFrame(first);
-    first.send(encodeFrame(accept(instanceId, 1)));
+    first.send(encodeFrame(accept(1)));
 
     const second = connect(server, token);
     await openSocket(second);
     await nextFrame(second);
-    second.send(encodeFrame(accept(instanceId, 2)));
+    second.send(encodeFrame(accept(2)));
     expect(await closed(first)).toBe(4409);
 
     const stale = connect(server, token);
     await openSocket(stale);
     await nextFrame(stale);
-    stale.send(encodeFrame(accept(instanceId, 1)));
+    stale.send(encodeFrame(accept(1)));
     expect((await nextFrame(stale)).type).toBe("channel.reject");
     expect(await closed(stale)).toBe(4409);
+    void instanceId;
     second.close();
   });
 
   it("holds the session through disconnect grace and aborts after expiry", async () => {
     const abort = vi.fn();
-    const session: WorkerSessionLike = { acceptCommand: vi.fn(), abort, close: vi.fn(async () => {}) };
-    const { server, token, instanceId } = await makeServer({ session, disconnectGraceMs: 40 });
+    const session = fakeSession({ abort, close: vi.fn(async () => {}) });
+    const { server, token } = await makeServer({ session, disconnectGraceMs: 40 });
     const socket = connect(server, token);
     await openSocket(socket);
     await nextFrame(socket);
-    socket.send(encodeFrame(accept(instanceId, 1, 0, 40)));
+    socket.send(encodeFrame(accept(1, 0, 40)));
+    // Let the accept land so the session becomes the active controller.
+    await new Promise((resolve) => setTimeout(resolve, 10));
     socket.close();
     await closed(socket);
     await new Promise((resolve) => setTimeout(resolve, 80));
     expect(abort).toHaveBeenCalledWith("worker controller disconnect grace expired");
+    void server;
   });
 
   it("times out handshakes and uses the protocol frame limit", async () => {
@@ -248,11 +259,11 @@ describe("worker WebSocket supervisor", () => {
   });
 
   it("drains with a clean close", async () => {
-    const { server, token, instanceId } = await makeServer();
+    const { server, token } = await makeServer();
     const socket = connect(server, token);
     await openSocket(socket);
     await nextFrame(socket);
-    socket.send(encodeFrame(accept(instanceId, 1)));
+    socket.send(encodeFrame(accept(1)));
     await server.drain("test drain");
     expect(await closed(socket)).toBe(1000);
   });

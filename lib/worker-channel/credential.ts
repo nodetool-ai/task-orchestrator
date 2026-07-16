@@ -1,5 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
+import { config } from "@/lib/config";
+
 const PREFIX = "wc1";
 const INSTANCE_ID_PATTERN = /^wi_[a-f0-9]{32}$/;
 
@@ -17,7 +19,7 @@ export interface ChannelCredentialOptions {
 /** Resolve the channel-only signing secret. It is deliberately not the old
  * worker HTTP API secret: rotating this secret rotates instance credentials. */
 export function channelCredentialSecret(): string {
-  const secret = process.env.TASK_ORCH_WORKER_CHANNEL_SECRET || process.env.AUTH_SECRET;
+  const secret = config.worker.channelSecret || process.env.AUTH_SECRET;
   if (!secret) {
     throw new Error(
       "Worker channel credentials need a signing secret: set TASK_ORCH_WORKER_CHANNEL_SECRET (or AUTH_SECRET)."
