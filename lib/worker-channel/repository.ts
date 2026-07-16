@@ -466,6 +466,72 @@ export async function touchChannel(
   return updated.length > 0;
 }
 
+/** Core command insert shared by the standalone and tx-scoped variants. The
+ * caller must already hold the channel advisory lock and the runner row lock so
+ * that sequence allocation is serialized. */
+async function insertCommandCore(tx: SqlExecutor, input: PersistCommandInput): Promise<CommandRow> {
+  const commandId = input.id ?? randomUUID();
+  const existing = await queryRows(
+    tx,
+    drizzleSql`
+      SELECT id, run_id, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
+      FROM worker_channel_commands
+      WHERE id = ${commandId}
+    `
+  );
+  if (existing.length) {
+    const row = commandRow(existing[0]);
+    if (
+      row.runId !== input.runId ||
+      row.instanceId !== input.instanceId ||
+      row.controllerEpoch !== input.controllerEpoch ||
+      row.type !== input.type ||
+      canonicalJson(row.payload) !== canonicalJson(input.payload)
+    ) {
+      throw new WorkerChannelRepositoryError(
+        `Command ${commandId} was replayed with different contents`,
+        "COMMAND_ID_MISMATCH",
+        { closeCode: 4403 }
+      );
+    }
+    return row;
+  }
+
+  const maxRows = await queryRows(
+    tx,
+    drizzleSql`
+      SELECT COALESCE(MAX(seq), 0) AS max_seq
+      FROM worker_channel_commands
+      WHERE run_id = ${input.runId}
+        AND instance_id = ${input.instanceId}
+        AND controller_epoch = ${input.controllerEpoch}
+    `
+  );
+  const nextSeq = numberValue(maxRows[0]?.max_seq ?? 0, "max_seq") + 1;
+  const seq = input.seq ?? nextSeq;
+  if (!Number.isSafeInteger(seq) || seq <= 0 || seq !== nextSeq) {
+    throw new WorkerChannelRepositoryError(
+      `Command sequence ${seq} is not the next sequence ${nextSeq} for epoch ${input.controllerEpoch}`,
+      "COMMAND_SEQUENCE_CONFLICT"
+    );
+  }
+
+  const createdAt = input.createdAt == null ? new Date() : asDate(input.createdAt, "createdAt");
+  const inserted = await queryRows(
+    tx,
+    drizzleSql`
+      INSERT INTO worker_channel_commands
+        (id, run_id, instance_id, controller_epoch, seq, type, payload, state, created_at)
+      VALUES
+        (${commandId}, ${input.runId}, ${input.instanceId}, ${input.controllerEpoch}, ${seq},
+         ${input.type}, ${JSON.stringify(input.payload)}::jsonb, 'pending', ${ts(createdAt)})
+      RETURNING id, run_id, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
+    `
+  );
+  if (!inserted.length) throw new Error("Postgres did not return the persisted worker command");
+  return commandRow(inserted[0]);
+}
+
 export async function persistCommand(input: PersistCommandInput): Promise<CommandRow> {
   if (!Number.isSafeInteger(input.controllerEpoch) || input.controllerEpoch <= 0) {
     throw new TypeError("controllerEpoch must be a positive integer");
@@ -474,68 +540,27 @@ export async function persistCommand(input: PersistCommandInput): Promise<Comman
   return db.transaction(async (tx) => {
     await lockChannel(tx, input.runId, input.instanceId);
     await lockRunner(tx, input.runId);
-
-    const commandId = input.id ?? randomUUID();
-    const existing = await queryRows(
-      tx,
-      drizzleSql`
-        SELECT id, run_id, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
-        FROM worker_channel_commands
-        WHERE id = ${commandId}
-      `
-    );
-    if (existing.length) {
-      const row = commandRow(existing[0]);
-      if (
-        row.runId !== input.runId ||
-        row.instanceId !== input.instanceId ||
-        row.controllerEpoch !== input.controllerEpoch ||
-        row.type !== input.type ||
-        canonicalJson(row.payload) !== canonicalJson(input.payload)
-      ) {
-        throw new WorkerChannelRepositoryError(
-          `Command ${commandId} was replayed with different contents`,
-          "COMMAND_ID_MISMATCH",
-          { closeCode: 4403 }
-        );
-      }
-      return row;
-    }
-
-    const maxRows = await queryRows(
-      tx,
-      drizzleSql`
-        SELECT COALESCE(MAX(seq), 0) AS max_seq
-        FROM worker_channel_commands
-        WHERE run_id = ${input.runId}
-          AND instance_id = ${input.instanceId}
-          AND controller_epoch = ${input.controllerEpoch}
-      `
-    );
-    const nextSeq = numberValue(maxRows[0]?.max_seq ?? 0, "max_seq") + 1;
-    const seq = input.seq ?? nextSeq;
-    if (!Number.isSafeInteger(seq) || seq <= 0 || seq !== nextSeq) {
-      throw new WorkerChannelRepositoryError(
-        `Command sequence ${seq} is not the next sequence ${nextSeq} for epoch ${input.controllerEpoch}`,
-        "COMMAND_SEQUENCE_CONFLICT"
-      );
-    }
-
-    const createdAt = input.createdAt == null ? new Date() : asDate(input.createdAt, "createdAt");
-    const inserted = await queryRows(
-      tx,
-      drizzleSql`
-        INSERT INTO worker_channel_commands
-          (id, run_id, instance_id, controller_epoch, seq, type, payload, state, created_at)
-        VALUES
-          (${commandId}, ${input.runId}, ${input.instanceId}, ${input.controllerEpoch}, ${seq},
-           ${input.type}, ${JSON.stringify(input.payload)}::jsonb, 'pending', ${ts(createdAt)})
-        RETURNING id, run_id, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
-      `
-    );
-    if (!inserted.length) throw new Error("Postgres did not return the persisted worker command");
-    return commandRow(inserted[0]);
+    return insertCommandCore(tx, input);
   });
+}
+
+/**
+ * Persist a command inside an already-open channel transaction — the variant
+ * used by the worker event handler, which runs inside `applyWorkerEvent`'s
+ * transaction. That transaction already holds the channel advisory lock and the
+ * runner row lock; calling {@link persistCommand} here would open a SECOND
+ * transaction that blocks forever waiting for those same locks (a self
+ * deadlock). This reuses the caller's `tx`, so the command insert and the event
+ * receipt commit atomically as one unit.
+ */
+export async function persistCommandTx(
+  tx: WorkerChannelTransaction,
+  input: PersistCommandInput
+): Promise<CommandRow> {
+  if (!Number.isSafeInteger(input.controllerEpoch) || input.controllerEpoch <= 0) {
+    throw new TypeError("controllerEpoch must be a positive integer");
+  }
+  return insertCommandCore(tx as unknown as SqlExecutor, input);
 }
 
 export async function rebasePendingCommands(

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getChannelIdentity, persistCommand, type CommandRow } from "./repository";
 import { ControllerConnection, type ControllerConnectionOptions, type WorkerEventHandler } from "./connection";
+import { handleWorkerEvent } from "./event-handler";
 
 const REGISTRY = Symbol.for("task-orchestrator.worker-channel.registry");
 type Registry = { controllerId: string; connections: Map<number, ControllerConnection> };
@@ -14,7 +15,7 @@ export async function connectRun(runId: number, options: Omit<Partial<Controller
   if (current) return current;
   const identity = await getChannelIdentity(runId);
   if (!identity) throw new Error(`Run ${runId} has no worker channel endpoint or instance identity`);
-  const connection = new ControllerConnection({ ...options, ...identity, runId, controllerId: registry().controllerId });
+  const connection = new ControllerConnection({ onEvent: handleWorkerEvent, ...options, ...identity, runId, controllerId: registry().controllerId });
   registry().connections.set(runId, connection);
   try { await connection.connect(); return connection; } catch (error) { registry().connections.delete(runId); throw error; }
 }

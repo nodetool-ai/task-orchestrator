@@ -14,6 +14,7 @@ import {
   renewControllerLease,
   touchChannel,
   type CommandRow,
+  type WorkerEventHandler,
 } from "./repository";
 import {
   CLOSE_CODE_PROTOCOL_MISMATCH,
@@ -31,7 +32,7 @@ import {
   type WireFrame,
 } from "./protocol";
 
-export type WorkerEventHandler = (frame: WorkerEvent) => Promise<string | { id?: string; resultCommandId?: string } | void> | string | { id?: string; resultCommandId?: string } | void;
+export type { WorkerEventHandler };
 
 export interface ControllerConnectionOptions {
   runId: number;
