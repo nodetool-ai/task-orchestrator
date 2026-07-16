@@ -26,6 +26,7 @@ import { startWorkerServer, type WorkerServer } from "../lib/worker-channel/work
 import { localDialEndpoint } from "../lib/worker-channel/dispatch-env";
 import { connectRun, disconnectRun } from "../lib/worker-channel/registry";
 import { sendCommand } from "../lib/worker-channel/registry";
+import { startChannelForRun } from "../lib/run-dispatch";
 import type { RunStart, ToolCallResult } from "../lib/worker-channel/protocol";
 
 // The run driver entry point this suite is written against (plan section 13.1).
@@ -61,6 +62,10 @@ async function bootWorkerChannel(runId: number) {
   });
   process.env.TASK_ORCH_WORKER_CHANNEL_SECRET = secret;
   const connection = await connectRun(runId);
+  // Push the authoritative RunStart snapshot exactly as dispatchRun does via
+  // startChannelForRun — the control-plane side of the channel handshake the
+  // worker's waitForStart() awaits.
+  await startChannelForRun(runId, id);
   return { server, connection, instanceId: id };
 }
 

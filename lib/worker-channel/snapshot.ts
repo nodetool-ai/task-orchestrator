@@ -26,7 +26,14 @@ function pendingMessages(messages: Awaited<ReturnType<typeof dbTransport.listMes
     (last, message) => (message.role === "agent" ? Math.max(last, message.id) : last),
     0
   );
-  const pending = messages.filter((message) => message.role === "user" && message.id > lastAgentId);
+  // "pendingInput" is user input that arrived AFTER a prior worker's last reply —
+  // a follow-up to resume from. A fresh run has no agent turn yet, so its initial
+  // user message(s) are the starting transcript, not trailing pending input; keep
+  // them in the transcript so the snapshot carries the run's opening context.
+  const pending =
+    lastAgentId === 0
+      ? []
+      : messages.filter((message) => message.role === "user" && message.id > lastAgentId);
   const firstPendingId = pending[0]?.id;
   const transcriptRows = firstPendingId == null
     ? messages

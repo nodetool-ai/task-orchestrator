@@ -6,6 +6,7 @@ import {
   ackCommandsThrough,
   acquireControllerLease,
   applyWorkerEvent,
+  getCommand,
   getLastAcceptedWorkerSeq,
   listPendingCommands,
   markChannelConnected,
@@ -196,11 +197,12 @@ export class ControllerConnection {
     this.socket!.send(encodeFrame(frame));
   }
 
-  private sendCommandRow(row: CommandRow): void {
+  private sendCommandRow(row: CommandRow, replyTo?: string): void {
     const frame: WorkerCommand = {
       v: 1, type: row.type as WorkerCommand["type"], id: row.id, runId: row.runId,
       instanceId: row.instanceId, controllerEpoch: row.controllerEpoch, seq: row.seq,
       sentAt: row.createdAt.toISOString(), payload: row.payload as never,
+      ...(replyTo ? { replyTo } : {}),
     } as WorkerCommand;
     this.send(frame);
   }
@@ -229,6 +231,15 @@ export class ControllerConnection {
     }
     if (!isWorkerEvent(frame)) throw new ControllerProtocolError("unexpected control-plane frame", CLOSE_CODE_SCOPE_MISMATCH, false);
     const result = await applyWorkerEvent(frame, this.onEvent);
+    // A terminal worker event (run.finished/failed/cancelled) makes the handler
+    // enqueue an authoritative `run.commit`. Deliver it to the worker replying to
+    // this event's id so its `waitForCommit(finishEventId)` resolves — the worker
+    // never lands the terminal status itself; this is the commit that confirms the
+    // control plane did.
+    if (result.resultCommandId) {
+      const command = await getCommand(result.resultCommandId);
+      if (command && command.controllerEpoch === this.epoch) this.sendCommandRow(command, frame.id);
+    }
     this.send(this.frame("channel.ack", { throughSeq: result.lastAcceptedWorkerSeq }) as WireFrame);
   }
 

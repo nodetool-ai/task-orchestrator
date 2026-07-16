@@ -607,6 +607,21 @@ export async function listPendingCommands(
   return listPendingCommandsTx(db, runId, instanceId, epoch);
 }
 
+/** Load a single persisted command by id (control-plane delivery of a command
+ *  enqueued from within the worker-event handler, e.g. `run.commit`). */
+export async function getCommand(id: string): Promise<CommandRow | null> {
+  const result = await queryRows(
+    db,
+    drizzleSql`
+      SELECT id, run_id, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
+      FROM worker_channel_commands
+      WHERE id = ${id}
+      LIMIT 1
+    `
+  );
+  return result[0] ? commandRow(result[0]) : null;
+}
+
 export async function ackCommandsThrough(
   runId: number,
   instanceId: string,

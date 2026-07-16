@@ -4,21 +4,17 @@
 // queue (plan section 13.1 / 13.3). These are the tractable, pure pieces of the
 // ws run driver; they carry no DB or channel I/O and are tested in isolation.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as backend from "../lib/agent-backend";
 import {
   buildWorkerRunContext,
   driveWorkerRun,
   isRunInput,
   OrderedInputQueue,
-  WorkerSeamNotWiredError,
   type WorkerDriverSession,
 } from "../lib/worker-runtime/context";
-import type {
-  MessageSnapshot,
-  RunInput,
-  RunStart,
-  WorkerSessionCommand,
-} from "../lib/worker-channel/protocol";
+import type { MessageSnapshot, RunInput, RunStart } from "../lib/worker-channel/protocol";
+import type { WorkerSessionCommand } from "../lib/worker-channel/worker-session";
 
 function msg(id: number, role: MessageSnapshot["role"], text = `m${id}`): MessageSnapshot {
   return { id, role, content: [{ type: "text", text }] };
@@ -48,7 +44,7 @@ function fakeSession(commands: WorkerSessionCommand[] = []): WorkerDriverSession
       for (const command of commands) yield command;
     },
     async emit() {
-      return undefined;
+      return { id: "e0" };
     },
   };
 }
@@ -167,14 +163,80 @@ describe("isRunInput", () => {
   });
 });
 
+// A session double that records the semantic events the driver emits.
+function recordingSession(commands: WorkerSessionCommand[] = []): {
+  session: WorkerDriverSession;
+  emitted: Array<{ type: string; payload: any }>;
+} {
+  const emitted: Array<{ type: string; payload: any }> = [];
+  const session: WorkerDriverSession = {
+    async *commands() {
+      for (const command of commands) yield command;
+    },
+    async emit(type, payload) {
+      emitted.push({ type, payload });
+      return { id: `e${emitted.length}` };
+    },
+    async waitForCommit() {
+      return { status: "completed" } as any;
+    },
+    abortSignal: new AbortController().signal,
+  };
+  return { session, emitted };
+}
+
+function fakeBackend(text: string) {
+  return {
+    id: "fake",
+    listProviders: () => [],
+    async runTurn(args: any) {
+      args.onEvent({ type: "assistant", message: { content: [{ type: "text", text }] } });
+      args.onEvent({ type: "result", is_error: false, result: "done", usage: {} });
+      return {
+        envelopes: [],
+        summary: "done",
+        resumeToken: "sess-1",
+        turns: 1,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalCostUsd: null,
+      };
+    },
+  } as any;
+}
+
 describe("driveWorkerRun", () => {
-  it("builds context from { start, session }, runs the input loop, and stops at the write seam", async () => {
-    // The write seam is not wired until section 14, so a ws-mode drive reaches
-    // it and fails fast with the explicit seam error rather than reading a
-    // forbidden transport.
-    const session = fakeSession([{ messages: [msg(3, "user", "hi")] } as RunInput]);
-    await expect(driveWorkerRun({ start: makeStart(), session })).rejects.toBeInstanceOf(
-      WorkerSeamNotWiredError
-    );
+  afterEach(() => vi.restoreAllMocks());
+
+  it("drives a chat turn, writing agent content via transcript.append (no terminal event)", async () => {
+    vi.spyOn(backend, "getBackend").mockResolvedValue(fakeBackend("hello"));
+    const { session, emitted } = recordingSession();
+    const start = makeStart({
+      run: { id: 1, status: "idle", goal: "<chat>" },
+      transcript: [msg(1, "user", "hi")],
+      pendingInput: [],
+    });
+
+    await driveWorkerRun({ start, session });
+
+    expect(
+      emitted.some((e) => e.type === "transcript.append" && e.payload.message.role === "agent")
+    ).toBe(true);
+    // A chat turn never lands a terminal outcome — the run stays resumable-idle.
+    expect(emitted.some((e) => e.type === "run.finished")).toBe(false);
+  });
+
+  it("drives a single-turn run to run.finished + commit", async () => {
+    vi.spyOn(backend, "getBackend").mockResolvedValue(fakeBackend("done"));
+    const { session, emitted } = recordingSession();
+    const start = makeStart({
+      run: { id: 2, status: "running", goal: "<implement>" },
+      transcript: [msg(1, "user", "do it")],
+      pendingInput: [],
+    });
+
+    await driveWorkerRun({ start, session });
+
+    expect(emitted.some((e) => e.type === "run.finished")).toBe(true);
   });
 });
