@@ -22,6 +22,7 @@ import {
   ComposerTextarea,
 } from "@/components/chat/composer-parts";
 import { TypingDots } from "@/components/ui/typing-dots";
+import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
 import { formatDateTime } from "@/lib/utils";
 import { isTerminalStatus, type SessionStatus } from "@/lib/types";
@@ -838,6 +839,20 @@ export function RunView({
               }
               return <ThinkingIndicator />;
             })()}
+            {/* A pending run with no live stepper still explains itself: the
+                admission defer reason (capacity, a template build it's waiting
+                behind, account backpressure). Otherwise it reads as hung. */}
+            {status === "pending" &&
+              run.pendingReason &&
+              !(
+                templateBuild != null &&
+                templateBuild.phase !== "ready"
+              ) && (
+                <div className="mx-4 my-2 flex items-center gap-2 rounded-lg border border-border/60 bg-card/40 px-3 py-2.5 text-[11px] text-muted-foreground">
+                  <Spinner className="size-3 text-state-progress" />
+                  <span>{run.pendingReason}</span>
+                </div>
+              )}
             {errorMsg && (
               <pre className="mx-4 my-2 rounded-md border border-state-blocked/40 bg-state-blocked/10 px-3 py-2 text-[11px] leading-5 font-mono whitespace-pre-wrap text-state-blocked overflow-x-auto">
                 {errorMsg}

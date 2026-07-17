@@ -7,12 +7,13 @@
 // `step` events with no prior `building` state, leaving the stepper hidden.
 // Folding the persisted events here gives the run view its initial state so the
 // stepper renders immediately; subsequent events arrive over SSE and advance it.
-import { and, asc, eq, like } from "drizzle-orm";
+import { and, asc, desc, eq, like } from "drizzle-orm";
 import { db } from "../../db";
-import { agentEvents } from "../../db/schema";
+import { agentEvents, boxTemplates } from "../../db/schema";
 import { reduceTemplateBuildEvent, type TemplateBuildState } from "./box-template-events";
 
-export async function loadTemplateBuildState(runId: number): Promise<TemplateBuildState | null> {
+/** Fold one run's own persisted runner_box_template_* events into a state. */
+async function foldEventsFor(runId: number): Promise<TemplateBuildState | null> {
   const rows = await db
     .select()
     .from(agentEvents)
@@ -34,4 +35,30 @@ export async function loadTemplateBuildState(runId: number): Promise<TemplateBui
     state = reduceTemplateBuildEvent(state, { type: row.type, ...payload }, row.createdAt.getTime());
   }
   return state;
+}
+
+/**
+ * The template-build state to seed the run view's stepper. A run gets:
+ *  - its OWN build events when it triggered the build, else
+ *  - the events of the run that IS building the template it's waiting behind
+ *    (single-flight defers every other run behind one builder — spec §4 — so a
+ *    waiter would otherwise show no progress at all).
+ * Returns null for non-box runs and when no build is in flight.
+ */
+export async function loadTemplateBuildState(runId: number): Promise<TemplateBuildState | null> {
+  const own = await foldEventsFor(runId);
+  if (own) return own;
+
+  // Waiter: surface the active build's progress. One live build per worker SHA,
+  // so the latest `building` row is the one every pending box run is behind.
+  const [building] = await db
+    .select({ triggeringRunId: boxTemplates.triggeringRunId })
+    .from(boxTemplates)
+    .where(eq(boxTemplates.state, "building"))
+    .orderBy(desc(boxTemplates.createdAt))
+    .limit(1);
+  if (building?.triggeringRunId != null && building.triggeringRunId !== runId) {
+    return foldEventsFor(building.triggeringRunId);
+  }
+  return null;
 }

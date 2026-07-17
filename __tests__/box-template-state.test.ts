@@ -3,7 +3,7 @@
 // a run opened mid-build renders the stepper without waiting on the SSE tail.
 import { describe, expect, it } from "vitest";
 import { db } from "../db";
-import { agentEvents } from "../db/schema";
+import { agentEvents, boxTemplates } from "../db/schema";
 import { create } from "../lib/runs";
 import { loadTemplateBuildState } from "../lib/runner/box-template-state";
 import { TEMPLATE_BUILD_STEPS, TEMPLATE_EVENT } from "../lib/runner/box-template-events";
@@ -54,6 +54,30 @@ describe("loadTemplateBuildState", () => {
     await emit(run.id, TEMPLATE_EVENT.ready, { templateId: "bx_x", durationMs: 750_000 }, new Date(t0.getTime() + 750_000));
     const state = await loadTemplateBuildState(run.id);
     expect(state).toMatchObject({ phase: "ready", durationMs: 750_000 });
+  });
+
+  it("shows the builder's progress to a run waiting behind the same build", async () => {
+    const builder = await create({ goal: "<implement>", defer: true });
+    const waiter = await create({ goal: "<implement>", defer: true });
+    const t0 = new Date("2026-07-17T20:00:00.000Z");
+    // The builder owns the events and the building box_templates row.
+    await emit(builder.id, TEMPLATE_EVENT.building, {
+      workerSha: "d".repeat(40),
+      reason: "no-template",
+      steps: [...TEMPLATE_BUILD_STEPS],
+      estimatedSeconds: 900,
+    }, t0);
+    await emit(builder.id, TEMPLATE_EVENT.step, { step: "installing-deps", index: 1, total: 7 }, new Date(t0.getTime() + 5000));
+    await db.insert(boxTemplates).values({
+      workerSha: "d".repeat(40),
+      repository: "nodetool-ai/nodetool",
+      state: "building",
+      triggeringRunId: builder.id,
+    });
+
+    // The waiter has no events of its own but still sees the live stepper.
+    const state = await loadTemplateBuildState(waiter.id);
+    expect(state).toMatchObject({ phase: "building", stepIndex: 1 });
   });
 
   it("reflects a failed build with the failing step", async () => {
