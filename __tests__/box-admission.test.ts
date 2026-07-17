@@ -1,6 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BoxClient } from "../lib/runner/box-client";
 import { BoxRunnerProvider, boxAdmissionDecision } from "../lib/runner/box";
+
+afterEach(() => {
+  delete process.env.TASK_ORCH_BOX_TEMPLATE_ID;
+});
 
 describe("Box admission", () => {
   it("defers when the selected account/application capacity is exhausted", () => {
@@ -33,6 +37,9 @@ describe("Box admission", () => {
   });
 
   it("converts rate limits to defer and billing failures to actionable rejection", async () => {
+    // Pin a template so admission's template gate short-circuits and the
+    // account/limits error path under test is reached.
+    process.env.TASK_ORCH_BOX_TEMPLATE_ID = "bx_pinned";
     const rateLimited = new BoxRunnerProvider({ limits: vi.fn().mockRejectedValue(Object.assign(new Error("rate limited"), { response: new Response("", { status: 429 }) })) } as unknown as BoxClient);
     await expect(rateLimited.admit({ runId: 1, reservedActive: 0 })).resolves.toMatchObject({ decision: "defer" });
 

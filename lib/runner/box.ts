@@ -10,6 +10,8 @@ import { buildBoxWorkerEnv } from "./box-env";
 import { makeBoxClient, type BoxClient, type BoxLimits } from "./box-client";
 import { normalizeBoxApiError, serializeBoxApiError } from "./box-errors";
 import { BOX_TEMPLATE_MANIFEST_PATH, parseBoxTemplateManifest } from "./box-template";
+import { resolveBoxTemplate, setTemplateBuildStarter } from "./box-template-registry";
+import { runBoxTemplateBuild } from "./box-template-builder";
 import { waitForBoxCheckpoint, waitForBoxReady } from "./box-waiters";
 import { boxStateToRunnerState } from "./box-waiters";
 import { isWakeIntentFresh, isWorkerClaimLive } from "./lifecycle";
@@ -177,6 +179,13 @@ export class BoxRunnerProvider implements RunnerProvider {
   /** Passing a structural fake keeps provider tests independent of the SDK. */
   constructor(clientOrFactory: BoxClient | (() => BoxClient) = makeBoxClient) {
     this.clientFactory = typeof clientOrFactory === "function" ? clientOrFactory : () => clientOrFactory;
+    // App-managed template builds run in-process, fire-and-forget; the
+    // registry row + lifecycle events carry all observable state.
+    setTemplateBuildStarter((row) => {
+      void runBoxTemplateBuild(this.box(), row).catch((error) => {
+        console.error(`box template build ${row.registryId} crashed:`, error);
+      });
+    });
   }
 
   private box(): BoxClient {
@@ -186,6 +195,16 @@ export class BoxRunnerProvider implements RunnerProvider {
   /** Provider-owned account/capacity gate, called inside dispatch's claim lock. */
   async admit(input: RunnerAdmissionInput): Promise<RunnerAdmission> {
     try {
+      const template = await resolveBoxTemplate({ runId: input.runId });
+      if (template.kind === "building") {
+        return {
+          decision: "defer",
+          reason:
+            template.builderRunId === input.runId
+              ? "Building box template…"
+              : `Waiting for box template build (started by run #${template.builderRunId})`,
+        };
+      }
       return boxAdmissionDecision(await this.box().limits(), input);
     } catch (error) {
       const normalized = await normalizeBoxApiError(error);
@@ -248,9 +267,19 @@ export class BoxRunnerProvider implements RunnerProvider {
       );
     }
 
-    const env = buildBoxWorkerEnv({ runId: input.runId, repoId: run.repoId, channelInstanceId });
-    const templateId = config.box.templateId;
-    if (!templateId) throw new Error("TASK_ORCH_BOX_TEMPLATE_ID is required when TASK_ORCH_RUNNER=box");
+    const template = await resolveBoxTemplate({ runId: input.runId });
+    if (template.kind === "building") {
+      // Admission should have deferred; a direct create() during a build is a
+      // caller bug, and forking without a template is impossible.
+      throw new Error("Box template is still building; the run must remain deferred.");
+    }
+    const templateId = template.boxId;
+    const env = buildBoxWorkerEnv({
+      runId: input.runId,
+      repoId: run.repoId,
+      channelInstanceId,
+      ...(template.kind === "ready" ? { templateVersion: template.workerSha } : {}),
+    });
 
     let boxId: string | undefined;
     try {
