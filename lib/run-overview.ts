@@ -43,6 +43,7 @@ export async function getRunOverview(): Promise<RunIndexRow[]> {
     startedAt: r.startedAt.toISOString(),
     completedAt: r.completedAt?.toISOString() ?? null,
     parkReason: r.parkReason,
+    pendingReason: r.pendingReason,
     pendingEvents: pendingEvents.get(r.id) ?? 0,
   }));
 }

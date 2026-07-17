@@ -75,6 +75,7 @@ export interface RunIndexRow {
   completedAt: string | null;
   /** Why a 'parked' run is parked ('waiting'|'sleeping'|'question'), or null. */
   parkReason: string | null;
+  pendingReason: string | null;
   /** Pending owner-audience inbox events queued for this run (will wake it). */
   pendingEvents: number;
 }

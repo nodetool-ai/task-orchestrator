@@ -53,6 +53,7 @@ function makeRun(overrides: Partial<RunRow> = {}): RunRow {
     attempt: 1,
     result: null,
     parkReason: null,
+    pendingReason: null,
     ...overrides,
   };
 }

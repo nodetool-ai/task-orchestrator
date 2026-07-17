@@ -35,6 +35,7 @@ function row(overrides: Partial<RunIndexRow> & { id: number }): RunIndexRow {
     startedAt: "2026-07-01T10:00:00.000Z",
     completedAt: null,
     parkReason: null,
+    pendingReason: null,
     pendingEvents: 0,
     ...overrides,
   };

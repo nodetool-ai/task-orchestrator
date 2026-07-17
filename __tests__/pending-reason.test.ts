@@ -7,6 +7,7 @@ import { db } from "../db";
 import { agentSessions } from "../db/schema";
 import { create } from "../lib/runs";
 import { dispatchRun } from "../lib/run-dispatch";
+import { getRunOverview } from "../lib/run-overview";
 
 const KNOBS = ["TASK_ORCH_RUNNER", "TASK_ORCH_WORKER_IMAGE"];
 afterEach(() => {
@@ -51,5 +52,18 @@ describe("pending_reason", () => {
     const result = await dispatchRun(run.id, { spawn: vi.fn(() => 1), admit: () => "admit" });
     expect(result).toBe("spawned");
     expect(await pendingReasonOf(run.id)).toBeNull();
+  });
+});
+
+describe("run overview", () => {
+  it("serializes pendingReason onto RunIndexRow", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
+    await db
+      .update(agentSessions)
+      .set({ status: "pending", pendingReason: "Building box template…" })
+      .where(eq(agentSessions.id, run.id));
+    const rows = await getRunOverview();
+    const row = rows.find((r) => r.id === run.id)!;
+    expect(row.pendingReason).toBe("Building box template…");
   });
 });

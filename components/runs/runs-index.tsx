@@ -481,6 +481,9 @@ function EventBadges({ run }: { run: RunIndexRow }) {
       {run.status === "parked" && run.parkReason && (
         <span className="text-[11px] text-state-review">{run.parkReason}</span>
       )}
+      {run.status === "pending" && run.pendingReason && (
+        <span className="text-[11px] text-state-progress">{run.pendingReason}</span>
+      )}
       {run.pendingEvents > 0 && (
         <span
           className="inline-flex items-center gap-1 rounded-md border border-state-progress/30 bg-state-progress/10 px-1.5 py-0.5 text-[11px] text-state-progress tabular-nums"

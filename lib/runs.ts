@@ -334,6 +334,8 @@ export interface RunRow {
   result: unknown | null;
   /** Event system (§6.1): why a 'parked' run is parked ('waiting'|'sleeping'|'question'), or null. */
   parkReason: string | null;
+  /** Why a 'pending' run is pending: the admission defer reason, or null. */
+  pendingReason: string | null;
 }
 
 export interface MessageRow {
@@ -5347,6 +5349,7 @@ export function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     attempt: row.attempt ?? 1,
     result: row.result ?? null,
     parkReason: row.parkReason ?? null,
+    pendingReason: row.pendingReason ?? null,
   };
 }
 
