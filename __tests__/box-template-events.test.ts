@@ -1,0 +1,125 @@
+import { describe, expect, it } from "vitest";
+import {
+  TEMPLATE_BUILD_STEPS,
+  TEMPLATE_EVENT,
+  reduceTemplateBuildEvent,
+  type TemplateBuildState,
+} from "../lib/runner/box-template-events";
+
+const T0 = 1_000_000;
+
+function building(overrides: Record<string, unknown> = {}) {
+  return {
+    type: TEMPLATE_EVENT.building,
+    workerSha: "abc123",
+    reason: "no-template",
+    steps: [...TEMPLATE_BUILD_STEPS],
+    estimatedSeconds: 900,
+    ...overrides,
+  };
+}
+
+describe("reduceTemplateBuildEvent", () => {
+  it("starts a build from a building event", () => {
+    const s = reduceTemplateBuildEvent(null, building(), T0)!;
+    expect(s).toMatchObject({
+      phase: "building",
+      steps: [...TEMPLATE_BUILD_STEPS],
+      stepIndex: -1,
+      startedAt: T0,
+      stepStartedAt: T0,
+      estimatedSeconds: 900,
+    });
+  });
+
+  it("falls back to the default steps and estimate when the payload omits them", () => {
+    const s = reduceTemplateBuildEvent(
+      null,
+      { type: TEMPLATE_EVENT.building, workerSha: "abc123", reason: "sha-drift" },
+      T0
+    )!;
+    expect(s.steps).toEqual([...TEMPLATE_BUILD_STEPS]);
+    expect(s.estimatedSeconds).toBe(900);
+  });
+
+  it("advances on step events and stamps stepStartedAt", () => {
+    let s = reduceTemplateBuildEvent(null, building(), T0);
+    s = reduceTemplateBuildEvent(
+      s,
+      { type: TEMPLATE_EVENT.step, step: "cloning-worker", index: 0, total: 5 },
+      T0 + 1_000
+    );
+    expect(s).toMatchObject({ phase: "building", stepIndex: 0, stepStartedAt: T0 + 1_000 });
+  });
+
+  it("keeps stepIndex monotonic when a stale step replays out of order", () => {
+    let s = reduceTemplateBuildEvent(null, building(), T0);
+    s = reduceTemplateBuildEvent(
+      s,
+      { type: TEMPLATE_EVENT.step, step: "installing-deps", index: 1, total: 5 },
+      T0 + 2_000
+    );
+    const after = reduceTemplateBuildEvent(
+      s,
+      { type: TEMPLATE_EVENT.step, step: "cloning-worker", index: 0, total: 5 },
+      T0 + 3_000
+    )!;
+    expect(after.stepIndex).toBe(1);
+    expect(after.stepStartedAt).toBe(T0 + 2_000); // stale event does not restamp
+  });
+
+  it("ignores a step event with no preceding building event", () => {
+    expect(
+      reduceTemplateBuildEvent(
+        null,
+        { type: TEMPLATE_EVENT.step, step: "cloning-worker", index: 0, total: 5 },
+        T0
+      )
+    ).toBeNull();
+  });
+
+  it("ready is terminal and wins over stale steps", () => {
+    let s = reduceTemplateBuildEvent(null, building(), T0);
+    s = reduceTemplateBuildEvent(
+      s,
+      { type: TEMPLATE_EVENT.ready, templateId: "bx_tpl1", durationMs: 750_000 },
+      T0 + 750_000
+    );
+    expect(s).toMatchObject({ phase: "ready", durationMs: 750_000 });
+    const after = reduceTemplateBuildEvent(
+      s,
+      { type: TEMPLATE_EVENT.step, step: "archiving", index: 4, total: 5 },
+      T0 + 751_000
+    )!;
+    expect(after.phase).toBe("ready");
+  });
+
+  it("failed captures the failing step and error", () => {
+    let s = reduceTemplateBuildEvent(null, building(), T0);
+    s = reduceTemplateBuildEvent(
+      s,
+      { type: TEMPLATE_EVENT.failed, step: "installing-deps", error: "npm ci exited 1" },
+      T0 + 60_000
+    );
+    expect(s).toMatchObject({
+      phase: "failed",
+      failedStep: "installing-deps",
+      error: "npm ci exited 1",
+    });
+  });
+
+  it("a ready replay with no prior state still yields a terminal state", () => {
+    const s = reduceTemplateBuildEvent(
+      null,
+      { type: TEMPLATE_EVENT.ready, templateId: "bx_tpl1", durationMs: 750_000 },
+      T0
+    )!;
+    expect(s.phase).toBe("ready");
+    expect(s.stepIndex).toBe(TEMPLATE_BUILD_STEPS.length - 1);
+  });
+
+  it("returns the input state untouched for unrelated event types", () => {
+    const s = reduceTemplateBuildEvent(null, building(), T0);
+    expect(reduceTemplateBuildEvent(s, { type: "runner_box_forking" }, T0 + 1)).toBe(s);
+  });
+});
