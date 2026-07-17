@@ -48,6 +48,10 @@ const ALLOWLIST = new Set([
   "scripts/reset.ts",
   "scripts/seed-prewarm-volume.ts",
   "scripts/seed.ts",
+  // Dev CLI harness (npm run chat): reads a few TASK_ORCH_* tunables to launch
+  // a worker/chat locally. A script, not runtime code — same category as the
+  // other scripts/*.ts entries above.
+  "scripts/worker-chat.ts",
 ]);
 
 // git grep emits forward-slash paths on every platform, so no normalization.
