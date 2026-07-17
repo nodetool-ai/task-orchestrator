@@ -21,6 +21,10 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 //                         (pass()/workerDispatchEnv) — serialization, not a read.
 //  - lib/runs.ts          long-tail tunables (chat idle, budgets) not yet migrated.
 //  - lib/runner/fly*.ts   fly machine sizing/region long-tail.
+//  - lib/runner/worker-sha.ts  reads TASK_ORCH_WORKER_SHA at build-SHA
+//                         resolution time (a bootstrap concern with its own
+//                         40-char validation), deliberately before/without
+//                         lib/config.
 //  - the rest             single-use reads in feature modules + scripts/.
 // (lib/runner/lifecycle.ts reads its RUNNER_*_MS windows via a dynamic
 //  process.env[key] helper, so the literal-pattern guard never flags it.)
@@ -37,6 +41,7 @@ const ALLOWLIST = new Set([
   "lib/run-dispatch.ts",
   "lib/runner/fly-client.ts",
   "lib/runner/fly.ts",
+  "lib/runner/worker-sha.ts",
   "lib/runs.ts",
   "lib/worker/log.ts",
   "lib/worktree-gc.ts",
