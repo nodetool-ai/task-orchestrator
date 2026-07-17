@@ -162,3 +162,73 @@ export async function emitTemplateBuildLifecycle<T extends { templateId: string 
     throw error;
   }
 }
+
+const STEP_LABELS: Record<string, string> = {
+  "cloning-worker": "Cloning worker repo",
+  "installing-deps": "Installing dependencies",
+  "building-worker": "Building worker",
+  "writing-manifest": "Writing manifest",
+  "archiving": "Archiving snapshot",
+};
+
+export function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+export interface TemplateBuildStepView {
+  step: string;
+  label: string;
+  state: "done" | "active" | "todo" | "failed";
+  elapsedSeconds?: number;
+}
+
+export interface TemplateBuildView {
+  phase: TemplateBuildState["phase"];
+  title: string;
+  expectation: string;
+  elapsedLabel: string;
+  showReassurance: boolean;
+  reassurance: string;
+  steps: TemplateBuildStepView[];
+  readyLabel?: string;
+  error?: string;
+  failureHint: string;
+}
+
+/** Everything the stepper renders, computed here so it is unit-testable
+ *  without a DOM (this repo's vitest runs in node, no jsdom). */
+export function templateBuildView(state: TemplateBuildState, nowMs: number): TemplateBuildView {
+  const steps: TemplateBuildStepView[] = state.steps.map((step, i) => {
+    if (state.phase === "failed" && step === state.failedStep) {
+      return { step, label: STEP_LABELS[step] ?? step, state: "failed" };
+    }
+    const done = state.phase === "ready" || i < state.stepIndex;
+    const active = state.phase === "building" && i === state.stepIndex;
+    return {
+      step,
+      label: STEP_LABELS[step] ?? step,
+      state: done ? "done" : active ? "active" : "todo",
+      ...(active ? { elapsedSeconds: Math.floor((nowMs - state.stepStartedAt) / 1000) } : {}),
+    };
+  });
+
+  return {
+    phase: state.phase,
+    title: "Setting up the box template",
+    expectation:
+      "One-time setup for this worker build — usually 10–15 minutes. Later runs skip this.",
+    elapsedLabel: formatDuration(nowMs - state.startedAt),
+    showReassurance:
+      state.phase === "building" && nowMs - state.startedAt > state.estimatedSeconds * 1000 * 1.5,
+    reassurance: "Still working — dependency installs can be slow on cold caches",
+    steps,
+    ...(state.phase === "ready" && state.durationMs != null
+      ? { readyLabel: `Template ready (${formatDuration(state.durationMs)})` }
+      : {}),
+    ...(state.error ? { error: state.error } : {}),
+    failureHint: "Re-dispatching the run retries the build.",
+  };
+}

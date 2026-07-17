@@ -3,7 +3,9 @@ import {
   TEMPLATE_BUILD_STEPS,
   TEMPLATE_EVENT,
   emitTemplateBuildLifecycle,
+  formatDuration,
   reduceTemplateBuildEvent,
+  templateBuildView,
   type TemplateBuildState,
 } from "../lib/runner/box-template-events";
 
@@ -205,5 +207,65 @@ describe("emitTemplateBuildLifecycle", () => {
         },
       })
     ).rejects.toThrow(/not declared/);
+  });
+});
+
+describe("templateBuildView", () => {
+  const base: TemplateBuildState = {
+    phase: "building",
+    steps: ["cloning-worker", "installing-deps", "building-worker"],
+    stepIndex: 1,
+    startedAt: T0,
+    stepStartedAt: T0 + 120_000,
+    estimatedSeconds: 900,
+  };
+
+  it("labels steps and marks done/active/todo with per-step elapsed", () => {
+    const v = templateBuildView(base, T0 + 180_000);
+    expect(v.title).toBe("Setting up the box template");
+    expect(v.expectation).toBe(
+      "One-time setup for this worker build — usually 10–15 minutes. Later runs skip this."
+    );
+    expect(v.elapsedLabel).toBe("3m 0s");
+    expect(v.steps).toEqual([
+      { step: "cloning-worker", label: "Cloning worker repo", state: "done" },
+      { step: "installing-deps", label: "Installing dependencies", state: "active", elapsedSeconds: 60 },
+      { step: "building-worker", label: "Building worker", state: "todo" },
+    ]);
+    expect(v.showReassurance).toBe(false);
+  });
+
+  it("falls back to the raw step name for unknown steps", () => {
+    const v = templateBuildView({ ...base, steps: ["mystery-step"], stepIndex: 0 }, T0 + 1_000);
+    expect(v.steps[0].label).toBe("mystery-step");
+  });
+
+  it("shows reassurance past 1.5× the estimate", () => {
+    const v = templateBuildView(base, T0 + 900_000 * 1.5 + 1_000);
+    expect(v.showReassurance).toBe(true);
+    expect(v.reassurance).toBe("Still working — dependency installs can be slow on cold caches");
+  });
+
+  it("collapses to a ready label with the build duration", () => {
+    const v = templateBuildView({ ...base, phase: "ready", stepIndex: 2, durationMs: 760_000 }, T0 + 760_000);
+    expect(v.readyLabel).toBe("Template ready (12m 40s)");
+  });
+
+  it("marks the failing step and carries the error and hint", () => {
+    const v = templateBuildView(
+      { ...base, phase: "failed", failedStep: "installing-deps", error: "npm ci exited 1" },
+      T0 + 300_000
+    );
+    expect(v.steps[1].state).toBe("failed");
+    expect(v.error).toBe("npm ci exited 1");
+    expect(v.failureHint).toBe("Re-dispatching the run retries the build.");
+  });
+});
+
+describe("formatDuration", () => {
+  it("formats seconds and minutes", () => {
+    expect(formatDuration(40_000)).toBe("40s");
+    expect(formatDuration(760_000)).toBe("12m 40s");
+    expect(formatDuration(0)).toBe("0s");
   });
 });
