@@ -15,18 +15,33 @@ afterEach(() => {
 
 const ok: BoxCommandResult = { success: true, timedOut: false, exitCode: 0, stdout: "", stderr: "" };
 
-function fakeClient(overrides: Partial<BoxClient> = {}): { client: BoxClient; commands: string[] } {
+// The builder runs each step DETACHED then polls a marker file, so the fake box
+// speaks that protocol: a `setsid` launch → "launched"; a `.rc` probe → the
+// exit code ("0", or "1" for a step whose launch matched `failOn`); a `tail`
+// read → the captured log. Every build command still appears verbatim inside
+// its launch string, so the substring assertions below hold.
+function fakeClient(
+  opts: { failOn?: RegExp; overrides?: Partial<BoxClient> } = {}
+): { client: BoxClient; commands: string[] } {
   const commands: string[] = [];
+  let pendingFail = false;
   const client = {
     create: vi.fn(async () => ({ id: "bx_new_tpl", state: "ready" })),
     get: vi.fn(async () => ({ id: "bx_new_tpl", state: "ready" })),
     command: vi.fn(async (_boxId: string, input: { command: string }) => {
-      commands.push(input.command);
+      const cmd = input.command;
+      commands.push(cmd);
+      if (cmd.includes("setsid")) {
+        pendingFail = opts.failOn ? opts.failOn.test(cmd) : false;
+        return { ...ok, stdout: "launched" };
+      }
+      if (cmd.includes(".rc")) return { ...ok, stdout: pendingFail ? "1" : "0" };
+      if (cmd.includes("tail -c")) return { ...ok, stdout: "npm ci exited 1" };
       return ok;
     }),
     stop: vi.fn(async () => ({ id: "bx_new_tpl" })),
     getLatestBoxSnapshot: vi.fn(async () => ({ id: "snap_1", status: "completed", createdAt: new Date() })),
-    ...overrides,
+    ...opts.overrides,
   } as unknown as BoxClient;
   return { client, commands };
 }
@@ -51,6 +66,8 @@ const waits = {
     box: { id: "bx_new_tpl", state: "archived" },
     snapshot: { id: "snap_1", status: "completed" },
   })),
+  // No-op sleep so the poll loop doesn't wall-clock wait between probes.
+  sleep: async () => {},
 } as never;
 
 describe("runBoxTemplateBuild", () => {
@@ -84,14 +101,9 @@ describe("runBoxTemplateBuild", () => {
   it("marks the row failed, emits failed, and stops the box when a step fails", async () => {
     const sha = "c".repeat(40);
     const { registryId, runId } = await seed(sha);
-    let calls = 0;
-    const { client } = fakeClient({
-      command: vi.fn(async () => {
-        calls += 1;
-        if (calls === 2) return { ...ok, success: false, exitCode: 1, stderr: "npm ci exited 1" };
-        return ok;
-      }) as never,
-    });
+    // The installing-deps step's launch carries `npm ci` in the worker dir; make
+    // its polled exit code non-zero.
+    const { client } = fakeClient({ failOn: /npm ci/ });
 
     await runBoxTemplateBuild(client, { registryId, runId, workerSha: sha }, waits);
 
@@ -107,9 +119,11 @@ describe("runBoxTemplateBuild", () => {
     const sha = "d".repeat(40);
     const { registryId, runId } = await seed(sha);
     const { client } = fakeClient({
-      create: vi.fn(async () => {
-        throw new Error("Box account cannot start another box");
-      }) as never,
+      overrides: {
+        create: vi.fn(async () => {
+          throw new Error("Box account cannot start another box");
+        }) as never,
+      },
     });
     await runBoxTemplateBuild(client, { registryId, runId, workerSha: sha }, waits);
     const [row] = await db.select().from(boxTemplates).where(eq(boxTemplates.id, registryId));
