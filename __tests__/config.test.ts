@@ -255,10 +255,10 @@ describe("Box configuration", () => {
     expect(() => validateBoxConfig()).toThrow(/BOX_API_KEY is required/);
   });
 
-  it("rejects Box without a template id or base box id", () => {
+  it("accepts Box with only an API key (app-managed templates are the default)", () => {
     set("TASK_ORCH_RUNNER", "box");
     set("BOX_API_KEY", "box-api-key-secret");
-    expect(() => validateBoxConfig()).toThrow(/TASK_ORCH_BOX_TEMPLATE_ID|TASK_ORCH_BOX_BASE_ID/);
+    expect(() => validateBoxConfig()).not.toThrow();
   });
 
   it("reads Box settings lazily with the documented defaults", () => {
@@ -289,16 +289,14 @@ describe("box app-managed template config", () => {
     expect(config.box.agentRepoUrl).toBe("https://github.com/nodetool-ai/nodetool.git");
     expect(config.box.agentRepo).toBe("nodetool-ai/nodetool");
     expect(config.box.buildStepTimeoutSeconds).toBe(900);
-    expect(config.box.baseBoxId).toBeUndefined();
   });
 
-  it("validateBoxConfig accepts a base box id instead of a pinned template", () => {
+  it("validateBoxConfig requires only BOX_API_KEY (app-managed is the default)", () => {
     process.env.TASK_ORCH_RUNNER = "box";
-    process.env.BOX_API_KEY = "test-key";
     delete process.env.TASK_ORCH_BOX_TEMPLATE_ID;
-    process.env.TASK_ORCH_BOX_BASE_ID = "bx_base";
-    expect(() => validateBoxConfig()).not.toThrow();
-    delete process.env.TASK_ORCH_BOX_BASE_ID;
-    expect(() => validateBoxConfig()).toThrow(/TASK_ORCH_BOX_TEMPLATE_ID|TASK_ORCH_BOX_BASE_ID/);
+    delete process.env.BOX_API_KEY;
+    expect(() => validateBoxConfig()).toThrow(/BOX_API_KEY/);
+    process.env.BOX_API_KEY = "test-key";
+    expect(() => validateBoxConfig()).not.toThrow(); // no template id or base id needed
   });
 });

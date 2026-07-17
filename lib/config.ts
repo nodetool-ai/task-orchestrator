@@ -405,10 +405,6 @@ export const config = Object.freeze({
     get repoPath(): string | undefined {
       return strEnv("TASK_ORCH_BOX_REPO_PATH");
     },
-    /** Blank base Box the app-managed template build forks from. */
-    get baseBoxId(): string | undefined {
-      return strEnv("TASK_ORCH_BOX_BASE_ID");
-    },
     get workerRepoUrl(): string {
       return strEnv("TASK_ORCH_BOX_WORKER_REPO_URL", "https://github.com/nodetool-ai/task-orchestrator.git");
     },
@@ -480,11 +476,10 @@ export function validateBoxConfig(): void {
   if (!config.box.apiKey) {
     throw new Error("BOX_API_KEY is required when TASK_ORCH_RUNNER=box.");
   }
-  if (!config.box.templateId && !config.box.baseBoxId) {
-    throw new Error(
-      "Either TASK_ORCH_BOX_TEMPLATE_ID (pinned template) or TASK_ORCH_BOX_BASE_ID (app-managed template builds) is required when TASK_ORCH_RUNNER=box."
-    );
-  }
+  // App-managed template provisioning is the default: with no pinned
+  // TASK_ORCH_BOX_TEMPLATE_ID the app builds a template per worker SHA on first
+  // dispatch, starting from a fresh blank box it creates itself. So BOX_API_KEY
+  // is the only hard requirement; a pin is an optional override.
 }
 
 /**
