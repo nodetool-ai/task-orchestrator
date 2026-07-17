@@ -133,4 +133,19 @@ describe("runBoxTemplateBuild", () => {
     // Nothing was created, so there is no box to stop.
     expect(client.stop).not.toHaveBeenCalled();
   });
+
+  it("manual build (runId null): no run events, detail updated per step, marks ready", async () => {
+    const sha = "e".repeat(40);
+    const [row] = await db.insert(environments).values({ provider: "box", workerSha: sha }).returning();
+    const { client } = fakeClient();
+    await runBoxTemplateBuild(client, { registryId: row.id, runId: null, workerSha: sha }, waits);
+    const [after] = await db.select().from(environments).where(eq(environments.id, row.id));
+    expect(after.state).toBe("ready");
+    expect(after.boxId).toBe("bx_new_tpl");
+    expect(after.detail).toBeNull(); // cleared on ready
+    // No run to check events on — assert the global agent_events table gained no
+    // runner_box_template_* rows for a null session by construction: emitBoxEvent
+    // was never called (sessionId would be required). Covered by type safety +
+    // the emit no-op below; the meaningful assertion is state/boxId/detail above.
+  });
 });

@@ -10,7 +10,7 @@ import type { BoxClient } from "./box-client";
 import { emitBoxEvent } from "./box";
 import { BOX_TEMPLATE_MANIFEST_PATH, BOX_TEMPLATE_WORKER_PROTOCOL_VERSION } from "./box-template";
 import { emitTemplateBuildLifecycle } from "./box-template-events";
-import { markEnvironmentFailed, markEnvironmentReady } from "./environments";
+import { markEnvironmentFailed, markEnvironmentReady, setEnvironmentDetail } from "./environments";
 import { waitForBoxCheckpoint, waitForBoxReady } from "./box-waiters";
 
 const BUILD_STEPS = [
@@ -31,7 +31,7 @@ function shq(value: string): string {
 
 export async function runBoxTemplateBuild(
   client: BoxClient,
-  input: { registryId: number; runId: number; workerSha: string },
+  input: { registryId: number; runId: number | null; workerSha: string },
   opts: {
     waitReady?: typeof waitForBoxReady;
     waitCheckpoint?: typeof waitForBoxCheckpoint;
@@ -44,8 +44,11 @@ export async function runBoxTemplateBuild(
   const waitCheckpoint = opts.waitCheckpoint ?? waitForBoxCheckpoint;
   const now = opts.now ?? Date.now;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const emit = (type: string, payload: Record<string, unknown>) =>
-    emitBoxEvent(input.runId, type, payload);
+  // Run-triggered builds stream run events; manual (page-triggered) builds don't.
+  const emit =
+    input.runId != null
+      ? (type: string, payload: Record<string, unknown>) => emitBoxEvent(input.runId as number, type, payload)
+      : async () => {};
   let boxId: string | undefined;
 
   // Each box `command` call has a platform-enforced max duration well under a
@@ -108,6 +111,14 @@ export async function runBoxTemplateBuild(
       reason: "no-template",
       steps: BUILD_STEPS,
       build: async (step) => {
+        // Every step advances the row's `detail` in ADDITION to the run-event
+        // stepper, so a manual (runId-less) build is still observable by
+        // polling the row (the page reads it); run-triggered builds get both.
+        const stepAndDetail = async (name: string): Promise<void> => {
+          await setEnvironmentDetail(input.registryId, name);
+          await step(name);
+        };
+
         // Provision a fresh blank box — no operator-provided base. A blank
         // image ships with git/node/npm; the cloning-worker step verifies that
         // runtime first so a missing tool fails legibly.
@@ -117,25 +128,25 @@ export async function runBoxTemplateBuild(
 
         const repoPath = config.box.repoPath ?? "/home/user/repository";
 
-        await step("cloning-worker");
+        await stepAndDetail("cloning-worker");
         await run(boxId, "cloning-worker",
           `set -eu; command -v git >/dev/null && command -v node >/dev/null && command -v npm >/dev/null || { echo "blank box missing git/node/npm" >&2; exit 127; }; test ! -e ${shq(WORKER_DIR)}; git clone --branch ${shq(config.box.workerRepoRef)} ${shq(config.box.workerRepoUrl)} ${shq(WORKER_DIR)}; cd ${shq(WORKER_DIR)}; git checkout ${input.workerSha}`);
 
-        await step("installing-deps");
+        await stepAndDetail("installing-deps");
         await run(boxId, "installing-deps", `set -eu; cd ${shq(WORKER_DIR)}; npm ci`);
 
-        await step("building-worker");
+        await stepAndDetail("building-worker");
         await run(boxId, "building-worker",
           `set -eu; cd ${shq(WORKER_DIR)}; npm run build:worker; test -s dist/run-worker.js`);
 
-        await step("cloning-agent-repo");
+        await stepAndDetail("cloning-agent-repo");
         await run(boxId, "cloning-agent-repo",
           `set -eu; test ! -e ${shq(repoPath)}; git clone --depth 1 ${shq(config.box.agentRepoUrl)} ${shq(repoPath)}`);
 
-        await step("installing-agent-deps");
+        await stepAndDetail("installing-agent-deps");
         await run(boxId, "installing-agent-deps", `set -eu; cd ${shq(repoPath)}; npm ci`);
 
-        await step("writing-manifest");
+        await stepAndDetail("writing-manifest");
         const manifest = JSON.stringify({
           formatVersion: 1,
           workerBuildSha: input.workerSha,
@@ -146,7 +157,7 @@ export async function runBoxTemplateBuild(
         await run(boxId, "writing-manifest",
           `set -eu; mkdir -p /home/user/.task-orchestrator; printf '%s\\n' ${shq(manifest)} > ${shq(BOX_TEMPLATE_MANIFEST_PATH)}`);
 
-        await step("archiving");
+        await stepAndDetail("archiving");
         const requestedAt = Date.now();
         await client.stop(boxId);
         await waitCheckpoint(client, boxId, requestedAt, { timeoutMs: config.box.readyTimeoutMs * 5 });
