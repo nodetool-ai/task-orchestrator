@@ -54,6 +54,10 @@ interface Props {
   initialMessages: MessageRow[];
   /** Max message/event ids at server render; seeds the read-only SSE tail. */
   initialCursor: { msgId: number; evtId: number };
+  /** Box-template build state folded from persisted events at render, so the
+   *  stepper shows immediately for a run opened mid-build. Null when there's no
+   *  build (non-box runs, or a ready/pinned template). */
+  initialTemplateBuild: TemplateBuildState | null;
   live: boolean;
   userEmail: string | null;
   repositories: SidebarRepo[];
@@ -131,6 +135,7 @@ export function RunView({
   run: initialRun,
   initialMessages,
   initialCursor,
+  initialTemplateBuild,
   live,
   userEmail,
   repositories,
@@ -155,7 +160,7 @@ export function RunView({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [showWorkerLog, setShowWorkerLog] = useState(false);
   const [templateBuild, setTemplateBuild] = useState<TemplateBuildState | null>(
-    null
+    initialTemplateBuild
   );
   const [showInbox, setShowInbox] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
