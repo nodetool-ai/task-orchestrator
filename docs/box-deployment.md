@@ -61,6 +61,30 @@ Changing `TASK_ORCH_BOX_TEMPLATE_ID` affects new runs. Existing runs continue
 from their own archived Box, preserving uncommitted work and agent session
 state.
 
+### App-managed templates
+
+Leave `TASK_ORCH_BOX_TEMPLATE_ID` unset (the default) and the app builds a
+template itself instead of requiring a hand-published one. On the first
+dispatch for a given worker build SHA, `ensureTemplate()` creates a fresh
+blank box and runs it through the build steps in order — `cloning-worker`,
+`installing-deps`, `building-worker`, `cloning-agent-repo`,
+`installing-agent-deps`, `writing-manifest`, `archiving` — recording progress
+in the `box_templates` registry table (also surfaced at `/api/metrics` as
+`task_orch_box_templates`). The build takes roughly 10–15 minutes; the
+triggering run is deferred with live stepper feedback in the run view while
+it completes, and any other run dispatched against the same SHA in the
+meantime is deferred behind the same build. `BOX_API_KEY` alone is enough —
+there is no base box to provision up front. Once a template is `ready`, run
+boxes fork from it directly.
+
+Set `TASK_ORCH_WORKER_SHA` on git-less control-plane deployments where `git
+rev-parse HEAD` is unavailable — otherwise the SHA is read from the server
+checkout automatically. A failed build is recorded as `failed`; the next
+dispatch against that SHA retries the build on the normal pump cadence.
+
+Pinning `TASK_ORCH_BOX_TEMPLATE_ID` disables app-managed builds entirely and
+reverts to the manual publish flow described above.
+
 ## Run and snapshot lifecycle
 
 For a first turn, the control plane forks the stopped template with
