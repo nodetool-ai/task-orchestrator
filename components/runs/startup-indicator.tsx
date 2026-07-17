@@ -1,17 +1,24 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Check, ScrollText } from "lucide-react";
+import { Check, ScrollText, X } from "lucide-react";
 import { Spinner } from "@/components/ui/spinner";
 import { TypingDots } from "@/components/ui/typing-dots";
 import { cn } from "@/lib/utils";
 import type { SessionStatus } from "@/lib/types";
+import {
+  templateBuildView,
+  type TemplateBuildState,
+} from "@/lib/runner/box-template-events";
 
 interface Props {
   /** Persisted placement: 'server' = the in-process lightweight loop (a "light
    *  chat"), 'worker' = a detached container/Machine that has to boot first. */
   runtime: "server" | "worker";
   status: SessionStatus;
+  /** Live template-build state (spec 2026-07-17); non-null only while a box
+   *  template is being built/failed for this run's dispatch. */
+  templateBuild?: TemplateBuildState | null;
   /** Open the worker (boot) log panel — offered for container runs so the user
    *  can see the real container output while it comes up. */
   onShowLog?: () => void;
@@ -48,9 +55,75 @@ function useElapsedSeconds(): number {
   return seconds;
 }
 
-export function StartupIndicator({ runtime, status, onShowLog }: Props) {
+export function StartupIndicator({ runtime, status, templateBuild, onShowLog }: Props) {
   const elapsed = useElapsedSeconds();
   const elapsedLabel = elapsed >= 3 ? `${elapsed}s` : null;
+
+  if (templateBuild && templateBuild.phase !== "ready") {
+    // The 1s elapsed tick above re-renders us every second, so computing the
+    // view with Date.now() at render keeps all timers live.
+    const v = templateBuildView(templateBuild, Date.now());
+    const failed = v.phase === "failed";
+    return (
+      <div className="mx-4 my-2 rounded-lg border border-border/60 bg-card/40 px-3 py-2.5">
+        <div className="flex items-center gap-2 text-[11px] font-medium text-foreground">
+          {failed ? (
+            <X className="size-3 text-state-blocked" />
+          ) : (
+            <Spinner className="size-3 text-state-progress" />
+          )}
+          <span>{v.title}</span>
+          <span className="tabular-nums font-normal text-muted-foreground/70">
+            {v.elapsedLabel}
+          </span>
+        </div>
+        <p className="mt-1 text-[11px] text-muted-foreground/70">{v.expectation}</p>
+
+        <ol className="mt-2 space-y-1">
+          {v.steps.map((step) => (
+            <li
+              key={step.step}
+              className={cn(
+                "flex items-center gap-2 text-[11px]",
+                step.state === "done" && "text-muted-foreground/70",
+                step.state === "active" && "text-foreground",
+                step.state === "failed" && "text-state-blocked",
+                step.state === "todo" && "text-muted-foreground/40"
+              )}
+            >
+              <span className="flex size-3.5 shrink-0 items-center justify-center">
+                {step.state === "done" ? (
+                  <Check className="size-3 text-state-done" />
+                ) : step.state === "active" ? (
+                  <Spinner className="size-3 text-state-progress" />
+                ) : step.state === "failed" ? (
+                  <X className="size-3 text-state-blocked" />
+                ) : (
+                  <span className="size-1.5 rounded-full bg-current" />
+                )}
+              </span>
+              <span>{step.label}</span>
+              {step.elapsedSeconds != null && step.elapsedSeconds >= 3 && (
+                <span className="tabular-nums text-muted-foreground/70">
+                  {step.elapsedSeconds}s
+                </span>
+              )}
+            </li>
+          ))}
+        </ol>
+
+        {v.showReassurance && (
+          <p className="mt-2 text-[11px] text-muted-foreground/70">{v.reassurance}</p>
+        )}
+        {failed && (
+          <div className="mt-2 text-[11px] text-state-blocked">
+            <pre className="whitespace-pre-wrap font-mono">{v.error}</pre>
+            <p className="mt-1 text-muted-foreground/70">{v.failureHint}</p>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   // A light chat has no container to boot, and a worker run whose container is
   // already warm (status past the pending/preparing boot arc) is just waking
@@ -101,6 +174,18 @@ export function StartupIndicator({ runtime, status, onShowLog }: Props) {
           </button>
         )}
       </div>
+
+      {templateBuild?.phase === "ready" && (
+        <div className="mb-1 flex items-center gap-2 text-[11px] text-muted-foreground/70">
+          <span className="flex size-3.5 shrink-0 items-center justify-center">
+            <Check className="size-3 text-state-done" />
+          </span>
+          <span>
+            {templateBuildView(templateBuild, Date.now()).readyLabel ??
+              "Template ready"}
+          </span>
+        </div>
+      )}
 
       <ol className="mt-2 space-y-1">
         {WORKER_STEPS.map((step, i) => {

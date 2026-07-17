@@ -38,6 +38,10 @@ import { StartupIndicator } from "@/components/runs/startup-indicator";
 import { useConfirm } from "@/components/ui/dialog-provider";
 import { WorkerLogPanel } from "@/components/runs/worker-log-panel";
 import { takePendingMessage } from "@/lib/pending-first-message";
+import {
+  reduceTemplateBuildEvent,
+  type TemplateBuildState,
+} from "@/lib/runner/box-template-events";
 
 interface SidebarRepo {
   id: string;
@@ -150,6 +154,9 @@ export function RunView({
   const [awaitingFirstToken, setAwaitingFirstToken] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [showWorkerLog, setShowWorkerLog] = useState(false);
+  const [templateBuild, setTemplateBuild] = useState<TemplateBuildState | null>(
+    null
+  );
   const [showInbox, setShowInbox] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -298,6 +305,11 @@ export function RunView({
   }
 
   function handleSseEvent(event: StreamEventClient) {
+    const raw = event as unknown as Record<string, unknown> & { type: string };
+    if (raw.type.startsWith("runner_box_template_")) {
+      setTemplateBuild((prev) => reduceTemplateBuildEvent(prev, raw, Date.now()));
+      return;
+    }
     if (event.type === "status" && event.status) {
       setRun((r) => ({ ...r, status: event.status! }));
       // Status transitions show up inline as a compact system row so the
@@ -799,20 +811,28 @@ export function RunView({
                 />
               )
             )}
-            {sending &&
-              (awaitingFirstToken ? (
-                <StartupIndicator
-                  runtime={run.runtime}
-                  status={status}
-                  onShowLog={
-                    run.runtime === "worker"
-                      ? () => setShowWorkerLog(true)
-                      : undefined
-                  }
-                />
-              ) : (
-                <ThinkingIndicator />
-              ))}
+            {(() => {
+              const buildVisible =
+                templateBuild != null &&
+                templateBuild.phase !== "ready" &&
+                (status === "pending" || status === "preparing");
+              if (!sending && !buildVisible) return null;
+              if (awaitingFirstToken || buildVisible) {
+                return (
+                  <StartupIndicator
+                    runtime={run.runtime}
+                    status={status}
+                    templateBuild={templateBuild}
+                    onShowLog={
+                      run.runtime === "worker"
+                        ? () => setShowWorkerLog(true)
+                        : undefined
+                    }
+                  />
+                );
+              }
+              return <ThinkingIndicator />;
+            })()}
             {errorMsg && (
               <pre className="mx-4 my-2 rounded-md border border-state-blocked/40 bg-state-blocked/10 px-3 py-2 text-[11px] leading-5 font-mono whitespace-pre-wrap text-state-blocked overflow-x-auto">
                 {errorMsg}
