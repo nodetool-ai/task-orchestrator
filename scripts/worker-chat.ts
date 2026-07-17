@@ -22,10 +22,11 @@
 import { execFile, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { config as loadEnv } from "dotenv";
 import WebSocket, { type RawData } from "ws";
 
@@ -45,11 +46,23 @@ import {
 } from "../lib/worker-channel/protocol";
 import { decodeFrame, encodeFrame, isTransportFrame, isWorkerEvent } from "../lib/worker-channel/codec";
 import { newChannelInstanceId } from "../lib/worker-channel/credential";
-import { localListenEndpoint } from "../lib/worker-channel/dispatch-env";
+import { localListenEndpoint, parseBoxHostUrl } from "../lib/worker-channel/dispatch-env";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // ── arguments ────────────────────────────────────────────────────────────────
+
+/** Everything needed to dial a Box worker's hosted channel, discovered from the
+ *  box id alone (see resolveBoxDial). The box IS the source of truth: its
+ *  systemd unit carries the credential/instance/runId, and `host 8787` mints the
+ *  public WSS URL + `_port_auth` token. */
+interface BoxDial {
+  wsUrl: string;
+  credential: string;
+  instanceId: string;
+  token: string;
+  runId: number;
+}
 
 interface CliArgs {
   model?: string;
@@ -63,6 +76,8 @@ interface CliArgs {
   verbose: boolean;
   docker: boolean;
   image?: string;
+  box?: string;
+  boxDial?: BoxDial;
 }
 
 function usage(): never {
@@ -75,6 +90,9 @@ function usage(): never {
   --cwd <dir>             working directory the agent operates in (default: current dir)
   --run-id <n>            synthetic run id (default: 424242)
   --goal <text>           single-turn mode: run one goal to completion and exit
+  --box <id>              chat with a worker already running inside an ascii.dev Box.
+                          Discovers the credential/instance/runId + hosted WSS URL
+                          from the box itself; auto-resumes it if stopped.
   --docker                run the worker in a Docker container (channel over TCP)
   --image <ref>           worker image (default: TASK_ORCH_WORKER_IMAGE)
   -v, --verbose           show agent events, worker logs, and worker stderr
@@ -103,16 +121,132 @@ function parseArgs(argv: string[]): CliArgs {
       case "--goal": args.goal = next(); break;
       case "--docker": args.docker = true; break;
       case "--image": args.image = next(); break;
+      case "--box": args.box = next(); break;
       case "-v": case "--verbose": args.verbose = true; break;
       case "-h": case "--help": usage();
       default: throw new Error(`unknown flag ${flag} (try --help)`);
     }
   }
   if (!Number.isInteger(args.runId) || args.runId <= 0) throw new Error("--run-id must be a positive integer");
+  if (args.box && args.docker) throw new Error("--box and --docker are mutually exclusive");
   // A Docker worker has its own filesystem; a host --cwd is meaningless there.
   // /work is the image's per-run checkout dir, owned by the `node` user.
   if (args.docker && !args.cwdExplicit) args.cwd = "/work";
   return args;
+}
+
+// ── box discovery + dial ───────────────────────────────────────────────────────
+//
+// A Box worker is a long-lived systemd service (see scripts/box-setup.sh): it
+// drains and exits after each turn, and systemd restarts it fresh — the same
+// spawn-per-turn shape the local/docker paths model, except the process already
+// exists. So --box mode never spawns; it dials the box's hosted WSS channel and
+// hands the socket to the unchanged driveChannel REPL. Everything the control
+// plane needs is discoverable from the box id, so that's the only argument.
+
+const boxBin = (): string => process.env.BOX_BIN ?? join(homedir(), ".ascii", "bin", "box");
+const execFileAsync = promisify(execFile);
+
+async function boxCli(cliArgs: string[]): Promise<string> {
+  const { stdout } = await execFileAsync(boxBin(), cliArgs, { maxBuffer: 32 * 1024 * 1024 });
+  return stdout;
+}
+
+const boxSsh = (id: string, remote: string): Promise<string> => boxCli(["ssh", id, remote]);
+
+/** Pull the channel identity a Box worker was launched with out of its systemd
+ *  unit. Pure so it can be unit-tested without a live box. */
+export function parseWorkerUnitEnv(unit: string): { credential: string; instanceId: string; runId: number } {
+  const credential = unit.match(/TASK_ORCH_WORKER_CHANNEL_CREDENTIAL=(\S+)/)?.[1];
+  const instanceId = unit.match(/TASK_ORCH_WORKER_INSTANCE_ID=(\S+)/)?.[1];
+  const runId = unit.match(/run-worker\.ts\s+(\d+)/)?.[1];
+  if (!credential || !instanceId || !runId) {
+    throw new Error(
+      "task-orch-worker.service is missing the channel credential/instance/runId — " +
+        "is this box provisioned by scripts/box-setup.sh?",
+    );
+  }
+  return { credential, instanceId, runId: Number(runId) };
+}
+
+// A reachable box reports one of these; "stopped" needs a resume, and
+// "resuming"/other transitional states just need polling.
+const BOX_UP_STATES = new Set(["ready", "idle", "running"]);
+
+const boxState = (raw: string): string => {
+  const parsed = JSON.parse(raw) as { state?: string; box?: { state?: string } };
+  return parsed.box?.state ?? parsed.state ?? "unknown";
+};
+
+/** Read the box's state and resume it if it's stopped, then wait until it's up. */
+async function ensureBoxReady(id: string): Promise<void> {
+  const state = boxState(await boxCli(["info", id, "--json"]));
+  if (BOX_UP_STATES.has(state)) return;
+  if (state === "stopped") {
+    console.log(dim(`box ${id} is stopped; resuming…`));
+    await boxCli(["resume", id]);
+  } else {
+    console.log(dim(`box ${id} is ${state}; waiting for it to come up…`));
+  }
+  const deadline = Date.now() + 120_000;
+  for (;;) {
+    if (BOX_UP_STATES.has(boxState(await boxCli(["info", id, "--json"])))) return;
+    if (Date.now() > deadline) throw new Error(`box ${id} did not come up within 120s`);
+    await delay(2_000);
+  }
+}
+
+/** Discover everything needed to dial a Box worker from the box id alone. */
+async function resolveBoxDial(id: string): Promise<BoxDial> {
+  await ensureBoxReady(id);
+
+  const unit = await boxSsh(id, "cat /etc/systemd/system/task-orch-worker.service 2>/dev/null");
+  const { credential, instanceId, runId } = parseWorkerUnitEnv(unit);
+
+  // The worker may still be (re)starting; wait for it to bind the channel port.
+  console.log(dim("waiting for the box worker to listen on :8787…"));
+  const bound = await boxSsh(
+    id,
+    "for i in $(seq 1 30); do ss -ltn 2>/dev/null | grep -q ':8787 ' && { echo up; break; }; sleep 1; done",
+  );
+  if (!/\bup\b/.test(bound)) {
+    throw new Error("box worker never bound :8787 (check `box ssh " + id + " sudo journalctl -u task-orch-worker`)");
+  }
+
+  // `host 8787` registers (or re-returns) the public WSS reverse proxy + token.
+  const hostOut = await boxSsh(id, "/home/user/.ascii/host 8787 --title task-orch-worker-channel 2>&1");
+  const parsed = parseBoxHostUrl(hostOut);
+  if (!parsed) throw new Error(`could not parse a hosted URL from \`host 8787\`: ${truncate(hostOut, 200)}`);
+  const wsUrl = `${parsed.origin.replace(/^http/i, "ws")}/worker/channel`;
+  return { wsUrl, credential, instanceId, token: parsed.token, runId };
+}
+
+/** Dial a Box worker's hosted channel with a bounded boot backoff: after each
+ *  turn the worker exits and systemd restarts it, so the proxy briefly 502s
+ *  until the new process re-binds. The `_token` rides as the proxy's
+ *  `_port_auth` cookie (a `?_token=` query would 302), alongside the worker's
+ *  own bearer credential. */
+async function dialBoxWorker(dial: BoxDial): Promise<WebSocket> {
+  const deadline = Date.now() + 60_000;
+  for (let attempt = 0; ; attempt++) {
+    const sock = new WebSocket(dial.wsUrl, [WORKER_CHANNEL_SUBPROTOCOL], {
+      headers: { Authorization: `Bearer ${dial.credential}`, Cookie: `_port_auth=${dial.token}` },
+      handshakeTimeout: 15_000,
+    });
+    const opened = await new Promise<boolean>((res) => {
+      sock.once("open", () => res(true));
+      sock.once("unexpected-response", () => res(false));
+      sock.once("error", () => res(false));
+    });
+    if (opened) return sock;
+    try {
+      sock.terminate();
+    } catch {
+      /* already closed */
+    }
+    if (Date.now() > deadline) throw new Error(`timed out dialing box worker at ${dial.wsUrl}`);
+    await delay(Math.min(500 * 2 ** attempt, 5_000));
+  }
 }
 
 // ── terminal helpers ─────────────────────────────────────────────────────────
@@ -261,6 +395,18 @@ interface TurnOutcome {
  *  Resolves when the worker's socket closes (clean drain or otherwise). */
 async function runTurn(config: TurnConfig): Promise<TurnOutcome> {
   const { args, state } = config;
+
+  // Box mode: the worker already exists on the box; dial it, drive one turn,
+  // and let it drain+exit (systemd restarts it before the next turn). No child.
+  if (args.boxDial) {
+    try {
+      const socket = await dialBoxWorker(args.boxDial);
+      return await driveChannel(socket, config, args.boxDial.instanceId);
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   const instanceId = newChannelInstanceId();
   const credential = `cli.${randomBytes(24).toString("base64url")}`;
   const containerName = args.docker ? `worker-chat-${process.pid}-${state.turns}` : null;
@@ -627,6 +773,14 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const state = new ChatState();
 
+  if (args.box) {
+    console.log(dim(`resolving box ${args.box}…`));
+    args.boxDial = await resolveBoxDial(args.box);
+    args.runId = args.boxDial.runId; // the box's worker is pinned to this run id
+    if (!args.cwdExplicit) args.cwd = "/home/user/task-orchestrator";
+    console.log(dim(`box worker ready — dialing ${args.boxDial.wsUrl} (runId ${args.runId})`));
+  }
+
   if (args.goal) {
     console.log(dim(`running goal against worker (runId ${args.runId}, cwd ${args.cwd})…`));
     const outcome = await runTurn({ args, state, pendingInput: [] });
@@ -693,7 +847,11 @@ async function main(): Promise<void> {
   rl.close();
 }
 
-main().catch((error) => {
-  console.error(red(error instanceof Error ? (error.stack ?? error.message) : String(error)));
-  process.exit(1);
-});
+// Run only when executed directly (`tsx scripts/worker-chat.ts`), not when a
+// test imports this module for its pure helpers (parseWorkerUnitEnv).
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(red(error instanceof Error ? (error.stack ?? error.message) : String(error)));
+    process.exit(1);
+  });
+}
