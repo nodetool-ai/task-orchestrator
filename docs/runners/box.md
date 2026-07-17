@@ -208,7 +208,8 @@ The trust boundary is strict because a box runs untrusted agent code:
 | `TASK_ORCH_BOX_WORKER_REPO_URL` / `_REF` | task-orchestrator repo / `main` | Worker repo the template build clones. |
 | `TASK_ORCH_BOX_AGENT_REPO_URL` / `TASK_ORCH_BOX_AGENT_REPO` | nodetool repo / `nodetool-ai/nodetool` | Agent repo the template build clones + records. |
 | `TASK_ORCH_BOX_BUILD_STEP_TIMEOUT_S` | `900` | Per-step timeout for template build commands. |
-| `TASK_ORCH_WORKER_SHA` | — | Overrides the worker build SHA on git-less control planes (else `git rev-parse HEAD`). |
+| `TASK_ORCH_WORKER_SHA` | — | Pins the worker build SHA. Otherwise it's resolved from the **remote** worker ref (`git ls-remote <workerRepoUrl> <workerRepoRef>`) so the template is always buildable — the control plane's local HEAD may be unpushed. |
+| `TASK_ORCH_BOX_BUILD_RETRY_COOLDOWN_S` | `120` | Cooldown after a failed template build before another is attempted for the same SHA (prevents a doomed build from burning a Box every pump tick). |
 | `TASK_ORCH_BOX_IDLE_STOP_MS` | `30000` | Grace before checkpointing an idle box. |
 | `TASK_ORCH_BOX_RETENTION_MS` | 30 days | Archived-box retention. |
 | `TASK_ORCH_BOX_MAX_ACTIVE` | `0` (account limit) | Optional app-level cap on active boxes. |

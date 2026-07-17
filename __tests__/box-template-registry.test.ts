@@ -27,6 +27,7 @@ describe("box_templates schema", () => {
 afterEach(() => {
   delete process.env.TASK_ORCH_BOX_TEMPLATE_ID;
   delete process.env.TASK_ORCH_WORKER_SHA;
+  delete process.env.TASK_ORCH_BOX_BUILD_RETRY_COOLDOWN_S;
   setTemplateBuildStarter(null);
 });
 
@@ -91,8 +92,48 @@ describe("resolveBoxTemplate", () => {
     expect(old.state).toBe("superseded");
   });
 
-  it("retries after a failed build with a fresh building row", async () => {
+  it("holds a failed SHA on cooldown instead of rebuilding every tick", async () => {
     process.env.TASK_ORCH_WORKER_SHA = sha(105);
+    process.env.TASK_ORCH_BOX_BUILD_RETRY_COOLDOWN_S = "120";
+    const starter = vi.fn();
+    setTemplateBuildStarter(starter);
+    const run = await create({ goal: "<implement>", defer: true });
+    const b1 = await resolveBoxTemplate({ runId: run.id });
+    if (b1.kind !== "building") throw new Error("expected building");
+    await markTemplateFailed(b1.registryId, "npm ci exited 1");
+
+    // The immediate next dispatch does NOT start a new build — it reports the
+    // cooldown so the run keeps deferring without burning a fresh Box.
+    const b2 = await resolveBoxTemplate({ runId: run.id });
+    expect(b2).toMatchObject({ kind: "cooldown", error: "npm ci exited 1" });
+    expect(starter).toHaveBeenCalledTimes(1); // no second build kicked
+  });
+
+  it("rebuilds a failed SHA once the cooldown has elapsed", async () => {
+    process.env.TASK_ORCH_WORKER_SHA = sha(107);
+    process.env.TASK_ORCH_BOX_BUILD_RETRY_COOLDOWN_S = "120";
+    const starter = vi.fn();
+    setTemplateBuildStarter(starter);
+    const run = await create({ goal: "<implement>", defer: true });
+    const b1 = await resolveBoxTemplate({ runId: run.id });
+    if (b1.kind !== "building") throw new Error("expected building");
+    await markTemplateFailed(b1.registryId, "npm ci exited 1");
+    // Age the failed row past the cooldown window.
+    const { db: dbi } = await import("../db");
+    const { boxTemplates: bt } = await import("../db/schema");
+    await dbi
+      .update(bt)
+      .set({ createdAt: new Date(Date.now() - 121 * 1000) })
+      .where(eq(bt.id, b1.registryId));
+    const b2 = await resolveBoxTemplate({ runId: run.id });
+    expect(b2).toMatchObject({ kind: "building", startedNow: true });
+    expect(b2.kind === "building" && b2.registryId).not.toBe(b1.registryId);
+    expect(starter).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a failed SHA immediately when the cooldown is disabled", async () => {
+    process.env.TASK_ORCH_WORKER_SHA = sha(108);
+    process.env.TASK_ORCH_BOX_BUILD_RETRY_COOLDOWN_S = "0";
     const starter = vi.fn();
     setTemplateBuildStarter(starter);
     const run = await create({ goal: "<implement>", defer: true });
@@ -101,7 +142,6 @@ describe("resolveBoxTemplate", () => {
     await markTemplateFailed(b1.registryId, "npm ci exited 1");
     const b2 = await resolveBoxTemplate({ runId: run.id });
     expect(b2).toMatchObject({ kind: "building", startedNow: true });
-    expect(b2.kind === "building" && b2.registryId).not.toBe(b1.registryId);
     expect(starter).toHaveBeenCalledTimes(2);
   });
 

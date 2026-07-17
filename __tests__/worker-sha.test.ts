@@ -3,6 +3,8 @@ import { resetWorkerShaCache, workerBuildSha } from "../lib/runner/worker-sha";
 
 afterEach(() => {
   delete process.env.TASK_ORCH_WORKER_SHA;
+  delete process.env.TASK_ORCH_BOX_WORKER_REPO_URL;
+  delete process.env.TASK_ORCH_BOX_WORKER_REPO_REF;
   resetWorkerShaCache();
 });
 
@@ -17,22 +19,38 @@ describe("workerBuildSha", () => {
     await expect(workerBuildSha()).rejects.toThrow(/TASK_ORCH_WORKER_SHA/);
   });
 
-  it("falls back to git rev-parse HEAD and caches it", async () => {
-    // The test process runs inside this repository, so git is available.
-    const first = await workerBuildSha();
-    expect(first).toMatch(/^[0-9a-f]{40}$/);
+  it("resolves the tip of the remote worker ref via ls-remote, and caches it", async () => {
+    process.env.TASK_ORCH_BOX_WORKER_REPO_URL = "https://example.com/repo.git";
+    process.env.TASK_ORCH_BOX_WORKER_REPO_REF = "main";
+    const sha = "b".repeat(40);
+    const calls: string[][] = [];
+    const first = await workerBuildSha({
+      exec: async (cmd, args) => {
+        calls.push([cmd, ...args]);
+        return { stdout: `${sha}\trefs/heads/main\n` };
+      },
+    });
+    expect(first).toBe(sha);
+    expect(calls[0]).toEqual(["git", "ls-remote", "https://example.com/repo.git", "main"]);
+
+    // Cached — a second call must not re-exec.
     const second = await workerBuildSha({
       exec: async () => {
         throw new Error("must not re-exec once cached");
       },
     });
-    expect(second).toBe(first);
+    expect(second).toBe(sha);
   });
 
-  it("throws a clear error when git is unavailable and no override is set", async () => {
-    resetWorkerShaCache();
+  it("throws an actionable error when the ref is not on the remote", async () => {
+    await expect(
+      workerBuildSha({ exec: async () => ({ stdout: "" }) })
+    ).rejects.toThrow(/not found on|TASK_ORCH_WORKER_SHA/);
+  });
+
+  it("throws a clear error when git/ls-remote fails", async () => {
     await expect(
       workerBuildSha({ exec: async () => { throw new Error("git: not found"); } })
-    ).rejects.toThrow(/TASK_ORCH_WORKER_SHA/);
+    ).rejects.toThrow(/TASK_ORCH_WORKER_SHA|worker build SHA/);
   });
 });

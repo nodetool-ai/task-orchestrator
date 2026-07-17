@@ -205,6 +205,18 @@ export class BoxRunnerProvider implements RunnerProvider {
               : `Waiting for box template build (started by run #${template.builderRunId})`,
         };
       }
+      if (template.kind === "cooldown") {
+        // A recent build failed; keep deferring without rebuilding until the
+        // cooldown elapses (the pump retries and eventually a fresh build runs,
+        // or TASK_ORCH_MAX_DEFER_MS hard-fails the run). Surface the reason.
+        const detail = (template.error ?? "").split("\n")[0].slice(0, 140);
+        return {
+          decision: "defer",
+          reason: detail
+            ? `Box template build failed, retrying (${detail})`
+            : "Box template build failed; retrying shortly",
+        };
+      }
       return boxAdmissionDecision(await this.box().limits(), input);
     } catch (error) {
       const normalized = await normalizeBoxApiError(error);
@@ -268,10 +280,10 @@ export class BoxRunnerProvider implements RunnerProvider {
     }
 
     const template = await resolveBoxTemplate({ runId: input.runId });
-    if (template.kind === "building") {
-      // Admission should have deferred; a direct create() during a build is a
-      // caller bug, and forking without a template is impossible.
-      throw new Error("Box template is still building; the run must remain deferred.");
+    if (template.kind === "building" || template.kind === "cooldown") {
+      // Admission should have deferred; a direct create() without a ready
+      // template is a caller bug, and forking without one is impossible.
+      throw new Error("Box template is not ready; the run must remain deferred.");
     }
     const templateId = template.boxId;
     const env = buildBoxWorkerEnv({

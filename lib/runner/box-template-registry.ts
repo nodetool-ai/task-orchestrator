@@ -5,7 +5,7 @@
 // ('building','ready') makes the INSERT below a single-flight lock: exactly
 // one dispatch starts a build per worker SHA; the losers observe the winner's
 // row and defer behind it.
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { db } from "../../db";
 import { boxTemplates } from "../../db/schema";
 import { config } from "../config";
@@ -14,7 +14,11 @@ import { workerBuildSha } from "./worker-sha";
 export type TemplateResolution =
   | { kind: "pinned"; boxId: string }
   | { kind: "ready"; boxId: string; workerSha: string }
-  | { kind: "building"; builderRunId: number | null; registryId: number; startedNow: boolean };
+  | { kind: "building"; builderRunId: number | null; registryId: number; startedNow: boolean }
+  /** A recent build for this SHA failed; a retry is on cooldown. The run must
+   *  keep deferring WITHOUT starting another (Box-burning) build until the
+   *  cooldown elapses. */
+  | { kind: "cooldown"; registryId: number; error: string | null; retryAtMs: number };
 
 export type TemplateBuildStarter = (row: {
   registryId: number;
@@ -60,7 +64,27 @@ export async function resolveBoxTemplate(input: { runId: number }): Promise<Temp
       return { kind: "building", builderRunId: live.triggeringRunId, registryId: live.id, startedNow: false };
     }
 
-    // Miss (no live row, or only failed/superseded history): try to claim.
+    // Miss (no live row). Before starting a build, rate-limit: a build that
+    // just failed for this SHA (e.g. an unpushed SHA, a broken repo) would
+    // otherwise be retried — burning a fresh Box each time — every pump tick.
+    // Hold off until the cooldown since the last failure elapses.
+    const cooldownMs = config.box.buildRetryCooldownMs;
+    if (cooldownMs > 0) {
+      const [lastFailed] = await db
+        .select()
+        .from(boxTemplates)
+        .where(and(eq(boxTemplates.workerSha, sha), eq(boxTemplates.state, "failed")))
+        .orderBy(desc(boxTemplates.createdAt))
+        .limit(1);
+      if (lastFailed) {
+        const retryAtMs = lastFailed.createdAt.getTime() + cooldownMs;
+        if (Date.now() < retryAtMs) {
+          return { kind: "cooldown", registryId: lastFailed.id, error: lastFailed.error, retryAtMs };
+        }
+      }
+    }
+
+    // Cooldown elapsed (or none): try to claim a fresh build.
     try {
       const [row] = await db
         .insert(boxTemplates)

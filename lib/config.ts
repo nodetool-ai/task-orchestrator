@@ -421,6 +421,12 @@ export const config = Object.freeze({
     get buildStepTimeoutSeconds(): number {
       return intEnv("TASK_ORCH_BOX_BUILD_STEP_TIMEOUT_S", 900);
     },
+    /** Cooldown after a failed template build before another is attempted for
+     *  the same worker SHA. Without it, a deterministic failure (e.g. an
+     *  unpushed SHA) would rebuild — and burn a fresh Box — every pump tick. */
+    get buildRetryCooldownMs(): number {
+      return intEnv("TASK_ORCH_BOX_BUILD_RETRY_COOLDOWN_S", 120) * 1000;
+    },
     /** Grace before checkpointing an idle Box. */
     get idleStopMs(): number {
       return intEnv("TASK_ORCH_BOX_IDLE_STOP_MS", 30_000);

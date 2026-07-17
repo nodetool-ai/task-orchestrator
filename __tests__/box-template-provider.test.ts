@@ -44,6 +44,24 @@ describe("BoxRunnerProvider template gate", () => {
     });
   });
 
+  it("defers with the failure reason while a failed build is on cooldown", async () => {
+    process.env.TASK_ORCH_WORKER_SHA = "5".repeat(40);
+    await db.insert(boxTemplates).values({
+      workerSha: "5".repeat(40),
+      repository: "nodetool-ai/nodetool",
+      state: "failed",
+      error: "Template build step cloning-worker failed (exit 128): reference is not a tree\nmore",
+    });
+    const provider = new BoxRunnerProvider({ limits: vi.fn(async () => limitsOk) } as unknown as BoxClient);
+    setTemplateBuildStarter(vi.fn());
+    const run = await create({ goal: "<implement>", defer: true });
+    const decision = await provider.admit({ runId: run.id, reservedActive: 0 });
+    expect(decision.decision).toBe("defer");
+    expect(decision.decision === "defer" && decision.reason).toMatch(/failed, retrying/);
+    // Only the first line of the error is surfaced.
+    expect(decision.decision === "defer" && decision.reason).not.toContain("\n");
+  });
+
   it("falls through to the limits probe when the template is ready", async () => {
     process.env.TASK_ORCH_WORKER_SHA = "3".repeat(40);
     await db.insert(boxTemplates).values({
