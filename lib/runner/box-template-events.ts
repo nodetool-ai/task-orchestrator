@@ -107,3 +107,58 @@ function initialTerminalState(nowMs: number): TemplateBuildState {
     estimatedSeconds: TEMPLATE_BUILD_DEFAULT_ESTIMATE_SECONDS,
   };
 }
+
+/**
+ * Drive a template build while emitting the lifecycle contract. The future
+ * ensureTemplate() wraps its build in this with
+ * `emit = (type, payload) => emitBoxEvent(runId, type, payload)`; the contract
+ * (building → step(index/total)… → ready | failed) is enforced here so every
+ * caller emits the exact sequence the run view's reducer expects.
+ *
+ * Emission is awaited but the emitter itself must be non-throwing (emitBoxEvent
+ * already swallows persistence errors); a build failure is emitted as `failed`
+ * and then rethrown so the caller's error handling still runs.
+ */
+export async function emitTemplateBuildLifecycle<T extends { templateId: string }>(opts: {
+  emit: (type: string, payload: Record<string, unknown>) => Promise<void>;
+  workerSha: string;
+  reason: TemplateBuildReason;
+  steps?: readonly string[];
+  estimatedSeconds?: number;
+  now?: () => number;
+  build: (step: (name: string) => Promise<void>) => Promise<T>;
+}): Promise<T> {
+  const steps = opts.steps ?? TEMPLATE_BUILD_STEPS;
+  const now = opts.now ?? Date.now;
+  const startedAt = now();
+  let currentStep: string | undefined;
+
+  await opts.emit(TEMPLATE_EVENT.building, {
+    workerSha: opts.workerSha,
+    reason: opts.reason,
+    steps: [...steps],
+    estimatedSeconds: opts.estimatedSeconds ?? TEMPLATE_BUILD_DEFAULT_ESTIMATE_SECONDS,
+  });
+
+  const step = async (name: string): Promise<void> => {
+    const index = steps.indexOf(name);
+    if (index === -1) throw new Error(`Template build step "${name}" is not declared in steps.`);
+    currentStep = name;
+    await opts.emit(TEMPLATE_EVENT.step, { step: name, index, total: steps.length });
+  };
+
+  try {
+    const result = await opts.build(step);
+    await opts.emit(TEMPLATE_EVENT.ready, {
+      templateId: result.templateId,
+      durationMs: now() - startedAt,
+    });
+    return result;
+  } catch (error) {
+    await opts.emit(TEMPLATE_EVENT.failed, {
+      step: currentStep,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+}

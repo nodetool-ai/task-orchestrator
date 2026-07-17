@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   TEMPLATE_BUILD_STEPS,
   TEMPLATE_EVENT,
+  emitTemplateBuildLifecycle,
   reduceTemplateBuildEvent,
   type TemplateBuildState,
 } from "../lib/runner/box-template-events";
@@ -121,5 +122,88 @@ describe("reduceTemplateBuildEvent", () => {
   it("returns the input state untouched for unrelated event types", () => {
     const s = reduceTemplateBuildEvent(null, building(), T0);
     expect(reduceTemplateBuildEvent(s, { type: "runner_box_forking" }, T0 + 1)).toBe(s);
+  });
+});
+
+describe("emitTemplateBuildLifecycle", () => {
+  function collector() {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    return {
+      events,
+      emit: async (type: string, payload: Record<string, unknown>) => {
+        events.push({ type, payload });
+      },
+    };
+  }
+
+  it("emits building → each step with index/total → ready with templateId and duration", async () => {
+    const c = collector();
+    let t = 0;
+    const result = await emitTemplateBuildLifecycle({
+      emit: c.emit,
+      workerSha: "abc123",
+      reason: "no-template",
+      steps: ["cloning-worker", "installing-deps"],
+      now: () => (t += 1_000),
+      build: async (step) => {
+        await step("cloning-worker");
+        await step("installing-deps");
+        return { templateId: "bx_tpl1" };
+      },
+    });
+
+    expect(result).toEqual({ templateId: "bx_tpl1" });
+    expect(c.events.map((e) => e.type)).toEqual([
+      TEMPLATE_EVENT.building,
+      TEMPLATE_EVENT.step,
+      TEMPLATE_EVENT.step,
+      TEMPLATE_EVENT.ready,
+    ]);
+    expect(c.events[0].payload).toMatchObject({
+      workerSha: "abc123",
+      reason: "no-template",
+      steps: ["cloning-worker", "installing-deps"],
+      estimatedSeconds: 900,
+    });
+    expect(c.events[1].payload).toEqual({ step: "cloning-worker", index: 0, total: 2 });
+    expect(c.events[2].payload).toEqual({ step: "installing-deps", index: 1, total: 2 });
+    expect(c.events[3].payload).toMatchObject({ templateId: "bx_tpl1" });
+    expect(typeof c.events[3].payload.durationMs).toBe("number");
+  });
+
+  it("emits failed with the current step and rethrows on build error", async () => {
+    const c = collector();
+    await expect(
+      emitTemplateBuildLifecycle({
+        emit: c.emit,
+        workerSha: "abc123",
+        reason: "sha-drift",
+        steps: ["cloning-worker", "installing-deps"],
+        build: async (step) => {
+          await step("cloning-worker");
+          await step("installing-deps");
+          throw new Error("npm ci exited 1");
+        },
+      })
+    ).rejects.toThrow("npm ci exited 1");
+    const last = c.events[c.events.length - 1];
+    expect(last.type).toBe(TEMPLATE_EVENT.failed);
+    expect(last.payload).toMatchObject({ step: "installing-deps", error: "npm ci exited 1" });
+  });
+
+  it("rejects a step name not declared in steps", async () => {
+    const c = collector();
+    await expect(
+      emitTemplateBuildLifecycle({
+        emit: c.emit,
+        workerSha: "abc123",
+        reason: "no-template",
+        steps: ["cloning-worker"],
+        build: async (step) => {
+          await step("mystery-step");
+          return { templateId: "bx_tpl1" };
+        },
+      })
+    ).rejects.toThrow(/not declared/);
   });
 });
