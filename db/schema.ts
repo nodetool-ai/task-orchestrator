@@ -575,6 +575,33 @@ export const runTimers = pgTable(
   })
 );
 
+// App-managed Box template registry (docs/superpowers/specs/
+// 2026-07-17-box-app-managed-template-design.md). One live row per worker
+// SHA enforced by a partial unique index — the build single-flight lock.
+export const boxTemplates = pgTable(
+  "box_templates",
+  {
+    id: serial("id").primaryKey(),
+    workerSha: text("worker_sha").notNull(),
+    repository: text("repository").notNull(),
+    // building → ready | failed; ready → superseded when a newer SHA lands.
+    state: text("state").notNull().default("building"),
+    boxId: text("box_id"),
+    // The run whose dispatch started this build — template lifecycle events
+    // are emitted against it.
+    triggeringRunId: integer("triggering_run_id"),
+    error: text("error"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    readyAt: ts("ready_at"),
+  },
+  (t) => ({
+    liveShaIdx: uniqueIndex("box_templates_live_sha_idx")
+      .on(t.workerSha)
+      .where(sql`${t.state} IN ('building', 'ready')`),
+    stateIdx: index("box_templates_state_idx").on(t.state),
+  })
+);
+
 // Flat resource-ownership leases (§5.2): 'pr:<url>' / 'task:<id>' → owning
 // run. Mutation guards are a primary-key lookup, not a subtree walk.
 export const resourceLocks = pgTable("resource_locks", {

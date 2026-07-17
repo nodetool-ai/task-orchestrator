@@ -141,6 +141,13 @@
       "when": 1784648000000,
       "tag": "0019_pending_reason",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1784660000000,
+      "tag": "0020_box_templates",
+      "breakpoints": true
     }
   ]
 }
