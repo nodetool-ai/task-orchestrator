@@ -10,7 +10,7 @@ import type { BoxClient } from "./box-client";
 import { emitBoxEvent } from "./box";
 import { BOX_TEMPLATE_MANIFEST_PATH, BOX_TEMPLATE_WORKER_PROTOCOL_VERSION } from "./box-template";
 import { emitTemplateBuildLifecycle } from "./box-template-events";
-import { markTemplateFailed, markTemplateReady } from "./box-template-registry";
+import { markEnvironmentFailed, markEnvironmentReady } from "./environments";
 import { waitForBoxCheckpoint, waitForBoxReady } from "./box-waiters";
 
 const BUILD_STEPS = [
@@ -151,13 +151,13 @@ export async function runBoxTemplateBuild(
         await client.stop(boxId);
         await waitCheckpoint(client, boxId, requestedAt, { timeoutMs: config.box.readyTimeoutMs * 5 });
 
-        await markTemplateReady(input.registryId, boxId);
+        await markEnvironmentReady(input.registryId, { boxId });
         return { templateId: boxId };
       },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await markTemplateFailed(input.registryId, message);
+    await markEnvironmentFailed(input.registryId, message);
     if (boxId) {
       try {
         await client.stop(boxId);

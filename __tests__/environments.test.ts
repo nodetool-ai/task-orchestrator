@@ -1,25 +1,27 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
-import { boxTemplates } from "../db/schema";
+import { environments } from "../db/schema";
 import {
-  markTemplateFailed,
-  markTemplateReady,
+  listEnvironments,
+  markEnvironmentFailed,
+  markEnvironmentReady,
+  registerConfiguredEnvironments,
   resolveBoxTemplate,
   setTemplateBuildStarter,
-} from "../lib/runner/box-template-registry";
+} from "../lib/runner/environments";
 import { create } from "../lib/runs";
 
-describe("box_templates schema", () => {
-  it("inserts a building row and enforces one live row per sha", async () => {
+describe("environments schema", () => {
+  it("inserts a building row and enforces one live row per provider+sha", async () => {
     const sha = "f".repeat(39) + "1";
     const [row] = await db
-      .insert(boxTemplates)
-      .values({ workerSha: sha, repository: "nodetool-ai/nodetool", triggeringRunId: 1 })
+      .insert(environments)
+      .values({ provider: "box", workerSha: sha, triggeringRunId: 1 })
       .returning();
     expect(row.state).toBe("building");
     await expect(
-      db.insert(boxTemplates).values({ workerSha: sha, repository: "nodetool-ai/nodetool" })
+      db.insert(environments).values({ provider: "box", workerSha: sha })
     ).rejects.toThrow();
   });
 });
@@ -77,7 +79,7 @@ describe("resolveBoxTemplate", () => {
     const run = await create({ goal: "<implement>", defer: true });
     const building = await resolveBoxTemplate({ runId: run.id });
     if (building.kind !== "building") throw new Error("expected building");
-    await markTemplateReady(building.registryId, "bx_tpl_103");
+    await markEnvironmentReady(building.registryId, { boxId: "bx_tpl_103" });
     const r = await resolveBoxTemplate({ runId: run.id });
     expect(r).toMatchObject({ kind: "ready", boxId: "bx_tpl_103", workerSha: sha(103) });
 
@@ -85,10 +87,8 @@ describe("resolveBoxTemplate", () => {
     process.env.TASK_ORCH_WORKER_SHA = sha(104);
     const next = await resolveBoxTemplate({ runId: run.id });
     if (next.kind !== "building") throw new Error("expected building");
-    await markTemplateReady(next.registryId, "bx_tpl_104");
-    const { db: dbi } = await import("../db");
-    const { boxTemplates: bt } = await import("../db/schema");
-    const [old] = await dbi.select().from(bt).where(eq(bt.boxId, "bx_tpl_103"));
+    await markEnvironmentReady(next.registryId, { boxId: "bx_tpl_104" });
+    const [old] = await db.select().from(environments).where(eq(environments.boxId, "bx_tpl_103"));
     expect(old.state).toBe("superseded");
   });
 
@@ -100,7 +100,7 @@ describe("resolveBoxTemplate", () => {
     const run = await create({ goal: "<implement>", defer: true });
     const b1 = await resolveBoxTemplate({ runId: run.id });
     if (b1.kind !== "building") throw new Error("expected building");
-    await markTemplateFailed(b1.registryId, "npm ci exited 1");
+    await markEnvironmentFailed(b1.registryId, "npm ci exited 1");
 
     // The immediate next dispatch does NOT start a new build — it reports the
     // cooldown so the run keeps deferring without burning a fresh Box.
@@ -117,14 +117,12 @@ describe("resolveBoxTemplate", () => {
     const run = await create({ goal: "<implement>", defer: true });
     const b1 = await resolveBoxTemplate({ runId: run.id });
     if (b1.kind !== "building") throw new Error("expected building");
-    await markTemplateFailed(b1.registryId, "npm ci exited 1");
+    await markEnvironmentFailed(b1.registryId, "npm ci exited 1");
     // Age the failed row past the cooldown window.
-    const { db: dbi } = await import("../db");
-    const { boxTemplates: bt } = await import("../db/schema");
-    await dbi
-      .update(bt)
+    await db
+      .update(environments)
       .set({ createdAt: new Date(Date.now() - 121 * 1000) })
-      .where(eq(bt.id, b1.registryId));
+      .where(eq(environments.id, b1.registryId));
     const b2 = await resolveBoxTemplate({ runId: run.id });
     expect(b2).toMatchObject({ kind: "building", startedNow: true });
     expect(b2.kind === "building" && b2.registryId).not.toBe(b1.registryId);
@@ -139,7 +137,7 @@ describe("resolveBoxTemplate", () => {
     const run = await create({ goal: "<implement>", defer: true });
     const b1 = await resolveBoxTemplate({ runId: run.id });
     if (b1.kind !== "building") throw new Error("expected building");
-    await markTemplateFailed(b1.registryId, "npm ci exited 1");
+    await markEnvironmentFailed(b1.registryId, "npm ci exited 1");
     const b2 = await resolveBoxTemplate({ runId: run.id });
     expect(b2).toMatchObject({ kind: "building", startedNow: true });
     expect(starter).toHaveBeenCalledTimes(2);
@@ -153,16 +151,50 @@ describe("resolveBoxTemplate", () => {
     const b1 = await resolveBoxTemplate({ runId: run.id });
     if (b1.kind !== "building") throw new Error("expected building");
     // Age the row past the orphan threshold (2 × 7 × step budget).
-    const { db: dbi } = await import("../db");
-    const { boxTemplates: bt } = await import("../db/schema");
-    await dbi
-      .update(bt)
+    await db
+      .update(environments)
       .set({ createdAt: new Date(Date.now() - 2 * 7 * 900 * 1000 - 60_000) })
-      .where(eq(bt.id, b1.registryId));
+      .where(eq(environments.id, b1.registryId));
     const b2 = await resolveBoxTemplate({ runId: run.id });
     expect(b2).toMatchObject({ kind: "building", startedNow: true });
-    const [orphan] = await dbi.select().from(bt).where(eq(bt.id, b1.registryId));
+    const [orphan] = await db.select().from(environments).where(eq(environments.id, b1.registryId));
     expect(orphan.state).toBe("failed");
     expect(orphan.error).toMatch(/orphan/i);
+  });
+
+  it("provider-scoped single-flight: a docker building row does not block a box build", async () => {
+    process.env.TASK_ORCH_WORKER_SHA = sha(201);
+    setTemplateBuildStarter(vi.fn());
+    await db.insert(environments).values({ provider: "docker", workerSha: sha(201) }); // building
+    const run = await create({ goal: "<implement>", defer: true });
+    const r = await resolveBoxTemplate({ runId: run.id });
+    expect(r).toMatchObject({ kind: "building", startedNow: true });
+  });
+
+  it("registerConfiguredEnvironments upserts docker/fly ready rows idempotently", async () => {
+    process.env.TASK_ORCH_WORKER_SHA = sha(202);
+    process.env.TASK_ORCH_WORKER_IMAGE = "task-orchestrator-worker:test";
+    process.env.FLY_RUNNER_IMAGE = "registry.fly.io/runners:test";
+    try {
+      await registerConfiguredEnvironments();
+      await registerConfiguredEnvironments(); // idempotent
+      const rows = await listEnvironments();
+      const mine = rows.filter((r) => r.workerSha === sha(202) && r.state === "ready");
+      expect(mine.map((r) => r.provider).sort()).toEqual(["docker", "fly"]);
+      expect(mine.find((r) => r.provider === "docker")?.image).toBe("task-orchestrator-worker:test");
+    } finally {
+      delete process.env.TASK_ORCH_WORKER_IMAGE;
+      delete process.env.FLY_RUNNER_IMAGE;
+    }
+  });
+
+  it("markEnvironmentReady supersedes only same-provider ready rows", async () => {
+    const [dockerRow] = await db.insert(environments)
+      .values({ provider: "docker", workerSha: sha(203), state: "ready", image: "img:a", readyAt: new Date() }).returning();
+    const [boxRow] = await db.insert(environments)
+      .values({ provider: "box", workerSha: sha(204) }).returning();
+    await markEnvironmentReady(boxRow.id, { boxId: "bx_tpl" });
+    const [docker] = await db.select().from(environments).where(eq(environments.id, dockerRow.id));
+    expect(docker.state).toBe("ready"); // untouched — different provider
   });
 });

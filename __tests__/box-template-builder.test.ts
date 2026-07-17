@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
-import { agentEvents, boxTemplates } from "../db/schema";
+import { agentEvents, environments } from "../db/schema";
 import type { BoxClient, BoxCommandResult } from "../lib/runner/box-client";
 import { runBoxTemplateBuild } from "../lib/runner/box-template-builder";
 import { create } from "../lib/runs";
@@ -49,8 +49,8 @@ function fakeClient(
 async function seed(sha: string): Promise<{ registryId: number; runId: number }> {
   const run = await create({ goal: "<implement>", defer: true });
   const [row] = await db
-    .insert(boxTemplates)
-    .values({ workerSha: sha, repository: "nodetool-ai/nodetool", triggeringRunId: run.id })
+    .insert(environments)
+    .values({ provider: "box", workerSha: sha, triggeringRunId: run.id })
     .returning();
   return { registryId: row.id, runId: run.id };
 }
@@ -81,7 +81,7 @@ describe("runBoxTemplateBuild", () => {
     // A fresh blank box was created — no base/fork id involved.
     expect(client.create).toHaveBeenCalledWith({ env: {}, noEnv: true });
 
-    const [row] = await db.select().from(boxTemplates).where(eq(boxTemplates.id, registryId));
+    const [row] = await db.select().from(environments).where(eq(environments.id, registryId));
     expect(row).toMatchObject({ state: "ready", boxId: "bx_new_tpl" });
     expect(row.readyAt).not.toBeNull();
 
@@ -107,7 +107,7 @@ describe("runBoxTemplateBuild", () => {
 
     await runBoxTemplateBuild(client, { registryId, runId, workerSha: sha }, waits);
 
-    const [row] = await db.select().from(boxTemplates).where(eq(boxTemplates.id, registryId));
+    const [row] = await db.select().from(environments).where(eq(environments.id, registryId));
     expect(row.state).toBe("failed");
     expect(row.error).toMatch(/installing-deps|npm ci/);
     const types = await eventTypes(runId);
@@ -126,7 +126,7 @@ describe("runBoxTemplateBuild", () => {
       },
     });
     await runBoxTemplateBuild(client, { registryId, runId, workerSha: sha }, waits);
-    const [row] = await db.select().from(boxTemplates).where(eq(boxTemplates.id, registryId));
+    const [row] = await db.select().from(environments).where(eq(environments.id, registryId));
     expect(row.state).toBe("failed");
     expect(row.error).toMatch(/cannot start another box/);
     expect(await eventTypes(runId)).toContain("runner_box_template_failed");

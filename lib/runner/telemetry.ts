@@ -22,7 +22,7 @@ type TelemetryState = {
   phaseDuration: Histogram<string>;
   activeRuns: Gauge<string>;
   runnerInstances: Gauge<string>;
-  boxTemplates: Gauge<string>;
+  environments: Gauge<string>;
 };
 
 declare global {
@@ -95,10 +95,10 @@ function makeState(): TelemetryState {
       labelNames: ["service", "provider", "state"] as const,
       registers: [registry],
     }),
-    boxTemplates: new Gauge({
-      name: "task_orch_box_templates",
-      help: "Current app-managed Box templates by state.",
-      labelNames: ["service", "state"] as const,
+    environments: new Gauge({
+      name: "task_orch_environments",
+      help: "Current environments (execution artifacts) by provider and state.",
+      labelNames: ["service", "provider", "state"] as const,
       registers: [registry],
     }),
   };
@@ -221,16 +221,13 @@ export function setRunnerInstances(
   }
 }
 
-export function setBoxTemplates(
-  rows: Array<{ state: string | null; count: number }>
+export function setEnvironments(
+  rows: Array<{ provider: string | null; state: string | null; count: number }>
 ): void {
-  telemetry().boxTemplates.reset();
+  telemetry().environments.reset();
   for (const row of rows) {
-    telemetry().boxTemplates
-      .labels({
-        service: "task-orchestrator",
-        state: row.state ?? "unknown",
-      })
+    telemetry().environments
+      .labels({ service: "task-orchestrator", provider: row.provider ?? "unknown", state: row.state ?? "unknown" })
       .set(row.count);
   }
 }

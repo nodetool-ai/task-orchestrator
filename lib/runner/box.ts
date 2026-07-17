@@ -10,7 +10,7 @@ import { buildBoxWorkerEnv } from "./box-env";
 import { makeBoxClient, type BoxClient, type BoxLimits } from "./box-client";
 import { normalizeBoxApiError, serializeBoxApiError } from "./box-errors";
 import { BOX_TEMPLATE_MANIFEST_PATH, parseBoxTemplateManifest } from "./box-template";
-import { resolveBoxTemplate, setTemplateBuildStarter } from "./box-template-registry";
+import { resolveBoxTemplate, setTemplateBuildStarter } from "./environments";
 import { runBoxTemplateBuild } from "./box-template-builder";
 import { waitForBoxCheckpoint, waitForBoxReady } from "./box-waiters";
 import { boxStateToRunnerState } from "./box-waiters";
@@ -182,7 +182,10 @@ export class BoxRunnerProvider implements RunnerProvider {
     // App-managed template builds run in-process, fire-and-forget; the
     // registry row + lifecycle events carry all observable state.
     setTemplateBuildStarter((row) => {
-      void runBoxTemplateBuild(this.box(), row).catch((error) => {
+      // Run-triggered builds always carry a runId; manual/page builds bypass the
+      // starter and call runBoxTemplateBuild directly (with runId: null).
+      if (row.runId == null) return;
+      void runBoxTemplateBuild(this.box(), { ...row, runId: row.runId }).catch((error) => {
         console.error(`box template build ${row.registryId} crashed:`, error);
       });
     });

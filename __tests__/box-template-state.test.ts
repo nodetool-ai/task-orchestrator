@@ -3,7 +3,7 @@
 // a run opened mid-build renders the stepper without waiting on the SSE tail.
 import { describe, expect, it } from "vitest";
 import { db } from "../db";
-import { agentEvents, boxTemplates } from "../db/schema";
+import { agentEvents, environments } from "../db/schema";
 import { create } from "../lib/runs";
 import { loadTemplateBuildState } from "../lib/runner/box-template-state";
 import { TEMPLATE_BUILD_STEPS, TEMPLATE_EVENT } from "../lib/runner/box-template-events";
@@ -60,7 +60,7 @@ describe("loadTemplateBuildState", () => {
     const builder = await create({ goal: "<implement>", defer: true });
     const waiter = await create({ goal: "<implement>", defer: true });
     const t0 = new Date("2026-07-17T20:00:00.000Z");
-    // The builder owns the events and the building box_templates row.
+    // The builder owns the events and the building environments row.
     await emit(builder.id, TEMPLATE_EVENT.building, {
       workerSha: "d".repeat(40),
       reason: "no-template",
@@ -68,9 +68,10 @@ describe("loadTemplateBuildState", () => {
       estimatedSeconds: 900,
     }, t0);
     await emit(builder.id, TEMPLATE_EVENT.step, { step: "installing-deps", index: 1, total: 7 }, new Date(t0.getTime() + 5000));
-    await db.insert(boxTemplates).values({
+    await db.insert(environments).values({
+      provider: "box",
       workerSha: "d".repeat(40),
-      repository: "nodetool-ai/nodetool",
+
       state: "building",
       triggeringRunId: builder.id,
     });

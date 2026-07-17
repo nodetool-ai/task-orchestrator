@@ -2,10 +2,10 @@
 // reasons; create() forks from the resolved registry template when unpinned.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db";
-import { boxTemplates } from "../db/schema";
+import { environments } from "../db/schema";
 import type { BoxClient } from "../lib/runner/box-client";
 import { BoxRunnerProvider } from "../lib/runner/box";
-import { setTemplateBuildStarter } from "../lib/runner/box-template-registry";
+import { setTemplateBuildStarter } from "../lib/runner/environments";
 import { create } from "../lib/runs";
 
 const KNOBS = ["TASK_ORCH_RUNNER", "TASK_ORCH_BOX_TEMPLATE_ID", "TASK_ORCH_WORKER_SHA", "TASK_ORCH_BOX_BASE_ID", "BOX_API_KEY"];
@@ -46,9 +46,10 @@ describe("BoxRunnerProvider template gate", () => {
 
   it("defers with the failure reason while a failed build is on cooldown", async () => {
     process.env.TASK_ORCH_WORKER_SHA = "5".repeat(40);
-    await db.insert(boxTemplates).values({
+    await db.insert(environments).values({
+      provider: "box",
       workerSha: "5".repeat(40),
-      repository: "nodetool-ai/nodetool",
+
       state: "failed",
       error: "Template build step cloning-worker failed (exit 128): reference is not a tree\nmore",
     });
@@ -64,9 +65,10 @@ describe("BoxRunnerProvider template gate", () => {
 
   it("falls through to the limits probe when the template is ready", async () => {
     process.env.TASK_ORCH_WORKER_SHA = "3".repeat(40);
-    await db.insert(boxTemplates).values({
+    await db.insert(environments).values({
+      provider: "box",
       workerSha: "3".repeat(40),
-      repository: "nodetool-ai/nodetool",
+
       state: "ready",
       boxId: "bx_ready_tpl",
     });

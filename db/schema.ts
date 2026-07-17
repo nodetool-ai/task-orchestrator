@@ -575,30 +575,37 @@ export const runTimers = pgTable(
   })
 );
 
-// App-managed Box template registry (docs/superpowers/specs/
-// 2026-07-17-box-app-managed-template-design.md). One live row per worker
-// SHA enforced by a partial unique index — the build single-flight lock.
-export const boxTemplates = pgTable(
-  "box_templates",
+// Environments: the execution artifact each runner provider launches from
+// (docker image / fly runner image / box template snapshot), one row per
+// build, versioned by worker SHA. Replaces the box template registry (migration 0021).
+// The partial unique index is the per-provider single-flight build lock.
+export const environments = pgTable(
+  "environments",
   {
     id: serial("id").primaryKey(),
+    // 'docker' | 'fly' | 'box'
+    provider: text("provider").notNull(),
     workerSha: text("worker_sha").notNull(),
-    repository: text("repository").notNull(),
     // building → ready | failed; ready → superseded when a newer SHA lands.
     state: text("state").notNull().default("building"),
+    // Box artifact: the archived template box.
     boxId: text("box_id"),
-    // The run whose dispatch started this build — template lifecycle events
-    // are emitted against it.
-    triggeringRunId: integer("triggering_run_id"),
+    // Docker/fly artifact: image tag / registry ref.
+    image: text("image"),
+    // Current build step — manual (page-triggered) builds are observed by
+    // polling this; run-triggered box builds also stream run events.
+    detail: text("detail"),
     error: text("error"),
+    // Run whose dispatch started a box build; NULL for manual/page builds.
+    triggeringRunId: integer("triggering_run_id"),
     createdAt: ts("created_at").notNull().defaultNow(),
     readyAt: ts("ready_at"),
   },
   (t) => ({
-    liveShaIdx: uniqueIndex("box_templates_live_sha_idx")
-      .on(t.workerSha)
+    liveIdx: uniqueIndex("environments_live_idx")
+      .on(t.provider, t.workerSha)
       .where(sql`${t.state} IN ('building', 'ready')`),
-    stateIdx: index("box_templates_state_idx").on(t.state),
+    stateIdx: index("environments_state_idx").on(t.state),
   })
 );
 

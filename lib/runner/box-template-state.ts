@@ -9,7 +9,7 @@
 // stepper renders immediately; subsequent events arrive over SSE and advance it.
 import { and, asc, desc, eq, like } from "drizzle-orm";
 import { db } from "../../db";
-import { agentEvents, boxTemplates } from "../../db/schema";
+import { agentEvents, environments } from "../../db/schema";
 import { reduceTemplateBuildEvent, type TemplateBuildState } from "./box-template-events";
 
 /** Fold one run's own persisted runner_box_template_* events into a state. */
@@ -52,10 +52,10 @@ export async function loadTemplateBuildState(runId: number): Promise<TemplateBui
   // Waiter: surface the active build's progress. One live build per worker SHA,
   // so the latest `building` row is the one every pending box run is behind.
   const [building] = await db
-    .select({ triggeringRunId: boxTemplates.triggeringRunId })
-    .from(boxTemplates)
-    .where(eq(boxTemplates.state, "building"))
-    .orderBy(desc(boxTemplates.createdAt))
+    .select({ triggeringRunId: environments.triggeringRunId })
+    .from(environments)
+    .where(and(eq(environments.provider, "box"), eq(environments.state, "building")))
+    .orderBy(desc(environments.createdAt))
     .limit(1);
   if (building?.triggeringRunId != null && building.triggeringRunId !== runId) {
     return foldEventsFor(building.triggeringRunId);

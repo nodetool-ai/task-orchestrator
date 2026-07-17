@@ -1,11 +1,11 @@
 import { sql } from "drizzle-orm";
 
-import { agentSessions, boxTemplates, runnerInstances } from "@/db/schema";
+import { agentSessions, environments, runnerInstances } from "@/db/schema";
 import { db } from "@/db";
 import {
   recordMetricsRefreshError,
   setActiveRuns,
-  setBoxTemplates,
+  setEnvironments,
   setRunnerInstances,
   telemetry,
 } from "@/lib/runner/telemetry";
@@ -46,12 +46,16 @@ async function refreshDbBackedGauges(): Promise<void> {
     .from(runnerInstances)
     .groupBy(runnerInstances.provider, runnerInstances.state);
 
-  const templateRows = await db
-    .select({ state: boxTemplates.state, count: sql<number>`count(*)::int` })
-    .from(boxTemplates)
-    .groupBy(boxTemplates.state);
+  const environmentRows = await db
+    .select({
+      provider: environments.provider,
+      state: environments.state,
+      count: sql<number>`count(*)::int`,
+    })
+    .from(environments)
+    .groupBy(environments.provider, environments.state);
 
   setActiveRuns(runRows);
   setRunnerInstances(runnerRows);
-  setBoxTemplates(templateRows);
+  setEnvironments(environmentRows);
 }
