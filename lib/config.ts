@@ -405,6 +405,26 @@ export const config = Object.freeze({
     get repoPath(): string | undefined {
       return strEnv("TASK_ORCH_BOX_REPO_PATH");
     },
+    /** Blank base Box the app-managed template build forks from. */
+    get baseBoxId(): string | undefined {
+      return strEnv("TASK_ORCH_BOX_BASE_ID");
+    },
+    get workerRepoUrl(): string {
+      return strEnv("TASK_ORCH_BOX_WORKER_REPO_URL", "https://github.com/nodetool-ai/task-orchestrator.git");
+    },
+    get workerRepoRef(): string {
+      return strEnv("TASK_ORCH_BOX_WORKER_REPO_REF", "main");
+    },
+    get agentRepoUrl(): string {
+      return strEnv("TASK_ORCH_BOX_AGENT_REPO_URL", "https://github.com/nodetool-ai/nodetool.git");
+    },
+    get agentRepo(): string {
+      return strEnv("TASK_ORCH_BOX_AGENT_REPO", "nodetool-ai/nodetool");
+    },
+    /** Per-step budget for template build commands (npm ci can take minutes). */
+    get buildStepTimeoutSeconds(): number {
+      return intEnv("TASK_ORCH_BOX_BUILD_STEP_TIMEOUT_S", 900);
+    },
     /** Grace before checkpointing an idle Box. */
     get idleStopMs(): number {
       return intEnv("TASK_ORCH_BOX_IDLE_STOP_MS", 30_000);
@@ -460,8 +480,10 @@ export function validateBoxConfig(): void {
   if (!config.box.apiKey) {
     throw new Error("BOX_API_KEY is required when TASK_ORCH_RUNNER=box.");
   }
-  if (!config.box.templateId) {
-    throw new Error("TASK_ORCH_BOX_TEMPLATE_ID is required when TASK_ORCH_RUNNER=box.");
+  if (!config.box.templateId && !config.box.baseBoxId) {
+    throw new Error(
+      "Either TASK_ORCH_BOX_TEMPLATE_ID (pinned template) or TASK_ORCH_BOX_BASE_ID (app-managed template builds) is required when TASK_ORCH_RUNNER=box."
+    );
   }
 }
 
