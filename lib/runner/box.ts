@@ -102,7 +102,7 @@ function parseDetachedPid(stdout: string): number {
   return pid;
 }
 
-async function emitBoxEvent(runId: number, type: string, payload: Record<string, unknown> = {}): Promise<void> {
+export async function emitBoxEvent(runId: number, type: string, payload: Record<string, unknown> = {}): Promise<void> {
   recordRunnerEvent(type, { provider: "box", runId, fields: payload });
   try {
     await db.insert(agentEvents).values({
