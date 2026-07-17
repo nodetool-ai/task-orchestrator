@@ -50,6 +50,12 @@ function fakeBox() {
       calls.push(`fork:${source}`);
       return { id, status: "accepted" };
     },
+    create: async () => {
+      const id = `bx_new_${sequence}_${++next}`;
+      states.set(id, "ready");
+      calls.push(`create:${id}`);
+      return { id, state: "ready" };
+    },
     resume: async (id, input) => {
       calls.push(`resume:${id}:${String(input?.noEnv)}`);
       states.set(id, "ready");

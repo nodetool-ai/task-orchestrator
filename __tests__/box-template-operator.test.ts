@@ -22,6 +22,7 @@ function templateClient(): { client: BoxClient; calls: string[] } {
   const client: BoxClient = {
     limits: async () => ({ canStart: true, activeBoxes: 0, maxActiveBoxes: 1 }),
     boxes: async () => ({ boxes: [] }),
+    create: async () => ({ id: "bx_new", state: "ready" }),
     get: async (id) => {
       calls.push(`get:${id}`);
       if (stopped) {

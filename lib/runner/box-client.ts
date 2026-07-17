@@ -63,6 +63,9 @@ export interface BoxClient {
   get(boxId: string): Promise<BoxInfo>;
   update(boxId: string, input: { name?: string; ttlSeconds?: number | null; subdomain?: string }): Promise<BoxInfo>;
   fork(boxId: string, input: { env: Record<string, string>; noEnv: true }): Promise<BoxAction>;
+  /** Provision a fresh blank box (POST /boxes). Used by app-managed template
+   *  builds, which start from a clean image rather than an operator base box. */
+  create(input: { env: Record<string, string>; noEnv: true }): Promise<BoxInfo>;
   resume(boxId: string, input?: { noEnv?: boolean }): Promise<BoxAction>;
   stop(boxId: string): Promise<BoxAction>;
   remove(boxId: string): Promise<void>;
@@ -79,6 +82,7 @@ export interface BoxSdkApi {
   get(input: { boxId: string }): Promise<unknown>;
   update(input: { boxId: string; updateBoxRequest: unknown }): Promise<unknown>;
   fork(input: { boxId: string; forkRequest: unknown }): Promise<unknown>;
+  create(input: { createBoxRequest: unknown }): Promise<unknown>;
   resume(input: { boxId: string; resumeRequest?: unknown }): Promise<unknown>;
   stop(input: { boxId: string }): Promise<unknown>;
   remove(input: { boxId: string }): Promise<unknown>;
@@ -219,6 +223,10 @@ export function makeBoxClient(options: BoxClientOptions = {}): BoxClient {
 
     async fork(boxId, input): Promise<BoxAction> {
       return actionFromSdk(await api.fork({ boxId, forkRequest: input }));
+    },
+
+    async create(input): Promise<BoxInfo> {
+      return boxFromEnvelope(await api.create({ createBoxRequest: input }));
     },
 
     async resume(boxId, input): Promise<BoxAction> {

@@ -8,6 +8,7 @@ function client(states: string[], snapshotAt?: Date): BoxClient {
     limits: async () => ({ canStart: true, activeBoxes: 0, maxActiveBoxes: 1 }), boxes: async () => ({ boxes: [] }),
     get: async (id) => ({ id, state: states[Math.min(index++, states.length - 1)], lastSnapshotStatus: "completed", snapshotCompletedAt: snapshotAt }),
     update: async (id) => ({ id, state: "ready" }), fork: async () => ({ id: "bx_fork", status: "ok" }),
+    create: async () => ({ id: "bx_new", state: "ready" }),
     resume: async () => ({ id: "bx_1", status: "ok" }), stop: async () => ({ id: "bx_1", status: "ok" }), remove: async () => undefined,
     command: async () => ({ success: true, exitCode: 0, stdout: "", stderr: "", timedOut: false }),
     getLatestBoxSnapshot: async () => ({ id: "snap_1", status: "completed", completedAt: snapshotAt }),

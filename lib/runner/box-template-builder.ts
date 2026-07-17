@@ -1,10 +1,10 @@
 // lib/runner/box-template-builder.ts
 //
-// Executes one app-managed template build inside a forked base Box, mirroring
-// scripts/install-box-template.sh, wrapped in emitTemplateBuildLifecycle so
-// the triggering run's stepper shows live progress. Never throws: every
-// failure is recorded on the registry row and emitted as
-// runner_box_template_failed.
+// Executes one app-managed template build inside a FRESH BLANK box (created via
+// client.create — no operator base box), mirroring scripts/install-box-template.sh,
+// wrapped in emitTemplateBuildLifecycle so the triggering run's stepper shows
+// live progress. Never throws: every failure is recorded on the registry row
+// and emitted as runner_box_template_failed.
 import { config } from "../config";
 import type { BoxClient } from "./box-client";
 import { emitBoxEvent } from "./box";
@@ -62,19 +62,18 @@ export async function runBoxTemplateBuild(
       reason: "no-template",
       steps: BUILD_STEPS,
       build: async (step) => {
-        const baseBoxId = config.box.baseBoxId;
-        if (!baseBoxId) {
-          throw new Error("TASK_ORCH_BOX_BASE_ID is required for app-managed template builds.");
-        }
-        const forked = await client.fork(baseBoxId, { env: {}, noEnv: true });
-        boxId = forked.id;
+        // Provision a fresh blank box — no operator-provided base. A blank
+        // image ships with git/node/npm; the cloning-worker step verifies that
+        // runtime first so a missing tool fails legibly.
+        const blank = await client.create({ env: {}, noEnv: true });
+        boxId = blank.id;
         await waitReady(client, boxId, { timeoutMs: config.box.readyTimeoutMs });
 
         const repoPath = config.box.repoPath ?? "/home/user/repository";
 
         await step("cloning-worker");
         await run(boxId, "cloning-worker",
-          `set -eu; test ! -e ${shq(WORKER_DIR)}; git clone --branch ${shq(config.box.workerRepoRef)} ${shq(config.box.workerRepoUrl)} ${shq(WORKER_DIR)}; cd ${shq(WORKER_DIR)}; git checkout ${input.workerSha}`);
+          `set -eu; command -v git >/dev/null && command -v node >/dev/null && command -v npm >/dev/null || { echo "blank box missing git/node/npm" >&2; exit 127; }; test ! -e ${shq(WORKER_DIR)}; git clone --branch ${shq(config.box.workerRepoRef)} ${shq(config.box.workerRepoUrl)} ${shq(WORKER_DIR)}; cd ${shq(WORKER_DIR)}; git checkout ${input.workerSha}`);
 
         await step("installing-deps");
         await run(boxId, "installing-deps", `set -eu; cd ${shq(WORKER_DIR)}; npm ci`);

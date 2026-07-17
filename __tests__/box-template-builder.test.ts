@@ -7,7 +7,7 @@ import type { BoxClient, BoxCommandResult } from "../lib/runner/box-client";
 import { runBoxTemplateBuild } from "../lib/runner/box-template-builder";
 import { create } from "../lib/runs";
 
-const KNOBS = ["TASK_ORCH_BOX_BASE_ID", "TASK_ORCH_BOX_AGENT_REPO", "TASK_ORCH_WORKER_SHA"];
+const KNOBS = ["TASK_ORCH_BOX_AGENT_REPO", "TASK_ORCH_WORKER_SHA"];
 afterEach(() => {
   for (const k of KNOBS) delete process.env[k];
   vi.restoreAllMocks();
@@ -18,7 +18,7 @@ const ok: BoxCommandResult = { success: true, timedOut: false, exitCode: 0, stdo
 function fakeClient(overrides: Partial<BoxClient> = {}): { client: BoxClient; commands: string[] } {
   const commands: string[] = [];
   const client = {
-    fork: vi.fn(async () => ({ id: "bx_new_tpl" })),
+    create: vi.fn(async () => ({ id: "bx_new_tpl", state: "ready" })),
     get: vi.fn(async () => ({ id: "bx_new_tpl", state: "ready" })),
     command: vi.fn(async (_boxId: string, input: { command: string }) => {
       commands.push(input.command);
@@ -54,13 +54,15 @@ const waits = {
 } as never;
 
 describe("runBoxTemplateBuild", () => {
-  it("builds, archives, marks ready, and emits the full lifecycle", async () => {
-    process.env.TASK_ORCH_BOX_BASE_ID = "bx_base";
+  it("creates a blank box, builds, archives, marks ready, and emits the full lifecycle", async () => {
     const sha = "b".repeat(40);
     const { registryId, runId } = await seed(sha);
     const { client, commands } = fakeClient();
 
     await runBoxTemplateBuild(client, { registryId, runId, workerSha: sha }, waits);
+
+    // A fresh blank box was created — no base/fork id involved.
+    expect(client.create).toHaveBeenCalledWith({ env: {}, noEnv: true });
 
     const [row] = await db.select().from(boxTemplates).where(eq(boxTemplates.id, registryId));
     expect(row).toMatchObject({ state: "ready", boxId: "bx_new_tpl" });
@@ -71,6 +73,8 @@ describe("runBoxTemplateBuild", () => {
     expect(types.filter((t) => t === "runner_box_template_step")).toHaveLength(7);
     expect(types[types.length - 1]).toBe("runner_box_template_ready");
 
+    // The first step verifies the blank-box runtime before cloning.
+    expect(commands.some((c) => c.includes("command -v git") && c.includes("node") && c.includes("npm"))).toBe(true);
     // The worker clone checks out the exact SHA and the manifest embeds it.
     expect(commands.some((c) => c.includes(`git checkout ${sha}`))).toBe(true);
     expect(commands.some((c) => c.includes(`"workerBuildSha":"${sha}"`) || c.includes(`\\"workerBuildSha\\":\\"${sha}\\"`))).toBe(true);
@@ -78,7 +82,6 @@ describe("runBoxTemplateBuild", () => {
   });
 
   it("marks the row failed, emits failed, and stops the box when a step fails", async () => {
-    process.env.TASK_ORCH_BOX_BASE_ID = "bx_base";
     const sha = "c".repeat(40);
     const { registryId, runId } = await seed(sha);
     let calls = 0;
@@ -100,14 +103,20 @@ describe("runBoxTemplateBuild", () => {
     expect(client.stop).toHaveBeenCalled(); // best-effort cleanup
   });
 
-  it("fails cleanly when no base box is configured", async () => {
+  it("fails cleanly when the blank box cannot be created", async () => {
     const sha = "d".repeat(40);
     const { registryId, runId } = await seed(sha);
-    const { client } = fakeClient();
+    const { client } = fakeClient({
+      create: vi.fn(async () => {
+        throw new Error("Box account cannot start another box");
+      }) as never,
+    });
     await runBoxTemplateBuild(client, { registryId, runId, workerSha: sha }, waits);
     const [row] = await db.select().from(boxTemplates).where(eq(boxTemplates.id, registryId));
     expect(row.state).toBe("failed");
-    expect(row.error).toMatch(/TASK_ORCH_BOX_BASE_ID/);
+    expect(row.error).toMatch(/cannot start another box/);
     expect(await eventTypes(runId)).toContain("runner_box_template_failed");
+    // Nothing was created, so there is no box to stop.
+    expect(client.stop).not.toHaveBeenCalled();
   });
 });
