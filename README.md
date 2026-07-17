@@ -27,6 +27,9 @@ single Postgres database.
 
 - **[SCHEMA.md](SCHEMA.md)** — DB schema, state machines, REST surface
 - **[AGENTS.md](AGENTS.md)** — workflow contract for humans and agents
+- **[docs/runners/](docs/runners/README.md)** — how runs actually execute:
+  workers, the control-plane split, and the Local / Fly / Box integrations
+  (start here for architecture)
 - **[docs/fly-deployment.md](docs/fly-deployment.md)** — one-command deploy of the
   whole app (server + agent runners + database) to Fly.io
 - **[docs/box-deployment.md](docs/box-deployment.md)** — configure and operate
