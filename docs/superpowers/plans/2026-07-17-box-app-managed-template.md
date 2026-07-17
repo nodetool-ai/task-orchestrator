@@ -14,8 +14,9 @@
 
 - Defer reason strings (verbatim): `"Building box template…"` (builder run) and `` `Waiting for box template build (started by run #${builderRunId})` `` (other runs).
 - Step names in build order: `cloning-worker`, `installing-deps`, `building-worker`, `cloning-agent-repo`, `installing-agent-deps`, `writing-manifest`, `archiving`.
-- New env keys: `TASK_ORCH_BOX_BASE_ID`, `TASK_ORCH_BOX_WORKER_REPO_URL` (default `https://github.com/nodetool-ai/task-orchestrator.git`), `TASK_ORCH_BOX_WORKER_REPO_REF` (default `main`), `TASK_ORCH_BOX_AGENT_REPO_URL` (default `https://github.com/nodetool-ai/nodetool.git`), `TASK_ORCH_BOX_AGENT_REPO` (default `nodetool-ai/nodetool`), `TASK_ORCH_BOX_BUILD_STEP_TIMEOUT_S` (default `900`), `TASK_ORCH_WORKER_SHA`.
-- A pinned `TASK_ORCH_BOX_TEMPLATE_ID` disables app-managed provisioning entirely (registry untouched).
+- New env keys: `TASK_ORCH_BOX_WORKER_REPO_URL` (default `https://github.com/nodetool-ai/task-orchestrator.git`), `TASK_ORCH_BOX_WORKER_REPO_REF` (default `main`), `TASK_ORCH_BOX_AGENT_REPO_URL` (default `https://github.com/nodetool-ai/nodetool.git`), `TASK_ORCH_BOX_AGENT_REPO` (default `nodetool-ai/nodetool`), `TASK_ORCH_BOX_BUILD_STEP_TIMEOUT_S` (default `900`), `TASK_ORCH_WORKER_SHA`. **No base-box env key** — the build creates its own blank box.
+- App-managed provisioning is the DEFAULT: `BOX_API_KEY` alone enables it. A pinned `TASK_ORCH_BOX_TEMPLATE_ID` disables it entirely (registry untouched).
+- The blank box is created fresh via `BoxClient.create({ env: {}, noEnv: true })` (SDK `POST /boxes`). There is no operator-provided base box anywhere.
 - Never stage/commit the unrelated dirty files: `scripts/worker-chat.ts`, `__tests__/worker-chat-box.test.ts`. (`BOX_TEMPLATE_UI_FEEDBACK_GAP.md` is committed ONLY by Task 7, which owns closing it.)
 - If `git commit` fails with an index.lock error, wait 2s and retry (up to 5×).
 - Tests: `npx vitest run <file>`; typecheck: `npm run typecheck`.
@@ -271,7 +272,7 @@ git commit -m "feat(box-template): box_templates registry table with single-flig
 - Test: `__tests__/config.test.ts` (append) — and check `__tests__/config-guard.test.ts`'s allowlist conventions: new `TASK_ORCH_*` reads inside `lib/config.ts` are the sanctioned location, so no allowlist change should be needed.
 
 **Interfaces:**
-- Produces (Tasks 4, 5 consume): `config.box.baseBoxId`, `.workerRepoUrl`, `.workerRepoRef`, `.agentRepoUrl`, `.agentRepo`, `.buildStepTimeoutSeconds`.
+- Produces (Tasks 4, 5 consume): `config.box.workerRepoUrl`, `.workerRepoRef`, `.agentRepoUrl`, `.agentRepo`, `.buildStepTimeoutSeconds`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -285,17 +286,15 @@ describe("box app-managed template config", () => {
     expect(config.box.agentRepoUrl).toBe("https://github.com/nodetool-ai/nodetool.git");
     expect(config.box.agentRepo).toBe("nodetool-ai/nodetool");
     expect(config.box.buildStepTimeoutSeconds).toBe(900);
-    expect(config.box.baseBoxId).toBeUndefined();
   });
 
-  it("validateBoxConfig accepts a base box id instead of a pinned template", () => {
+  it("validateBoxConfig requires only BOX_API_KEY (app-managed is the default)", () => {
     process.env.TASK_ORCH_RUNNER = "box";
-    process.env.BOX_API_KEY = "test-key";
     delete process.env.TASK_ORCH_BOX_TEMPLATE_ID;
-    process.env.TASK_ORCH_BOX_BASE_ID = "bx_base";
-    expect(() => validateBoxConfig()).not.toThrow();
-    delete process.env.TASK_ORCH_BOX_BASE_ID;
-    expect(() => validateBoxConfig()).toThrow(/TASK_ORCH_BOX_TEMPLATE_ID|TASK_ORCH_BOX_BASE_ID/);
+    delete process.env.BOX_API_KEY;
+    expect(() => validateBoxConfig()).toThrow(/BOX_API_KEY/);
+    process.env.BOX_API_KEY = "test-key";
+    expect(() => validateBoxConfig()).not.toThrow(); // no template id and no base id needed
   });
 });
 ```
@@ -310,10 +309,6 @@ Expected: FAIL — new getters missing.
 In the `box:` block of `lib/config.ts`, after `repoPath`:
 
 ```ts
-    /** Blank base Box the app-managed template build forks from. */
-    get baseBoxId(): string | undefined {
-      return strEnv("TASK_ORCH_BOX_BASE_ID");
-    },
     get workerRepoUrl(): string {
       return strEnv("TASK_ORCH_BOX_WORKER_REPO_URL", "https://github.com/nodetool-ai/task-orchestrator.git");
     },
@@ -332,15 +327,10 @@ In the `box:` block of `lib/config.ts`, after `repoPath`:
     },
 ```
 
-Replace the template-id requirement in `validateBoxConfig()`:
-
-```ts
-  if (!config.box.templateId && !config.box.baseBoxId) {
-    throw new Error(
-      "Either TASK_ORCH_BOX_TEMPLATE_ID (pinned template) or TASK_ORCH_BOX_BASE_ID (app-managed template builds) is required when TASK_ORCH_RUNNER=box."
-    );
-  }
-```
+In `validateBoxConfig()`, DELETE the block that throws when
+`TASK_ORCH_BOX_TEMPLATE_ID` is unset (the `if (!config.box.templateId) throw …`
+lines). App-managed provisioning is the default; the `BOX_API_KEY` check above
+it stays and is now the only hard requirement. A pin remains optional.
 
 - [ ] **Step 4: Run tests + typecheck**
 
@@ -628,17 +618,51 @@ git commit -m "feat(box-template): registry with single-flight resolve and super
 
 ---
 
-### Task 5: Builder — fork, build steps, manifest, archive
+### Task 5: Builder — create blank box, build steps, manifest, archive
 
 **Files:**
 - Create: `lib/runner/box-template-builder.ts`
+- Modify: `lib/runner/box-client.ts` — add a `create` method to the `BoxClient` interface, the `BoxSdkApi` seam, and the production adapter (SDK `POST /boxes`).
 - Modify: `lib/runner/box.ts` — change `async function emitBoxEvent` (~line 105) to `export async function emitBoxEvent` (no other change).
 - Modify: `lib/runner/box-template-events.ts` — add to `STEP_LABELS`: `"cloning-agent-repo": "Cloning agent repo",` and `"installing-agent-deps": "Installing agent dependencies",`.
 - Test: `__tests__/box-template-builder.test.ts`
 
 **Interfaces:**
-- Consumes: `emitTemplateBuildLifecycle` (existing), `waitForBoxReady`/`waitForBoxCheckpoint` (`lib/runner/box-waiters.ts`), `markTemplateReady`/`markTemplateFailed` (T4), `config.box.*` (T3), `BoxClient` (structural), `emitBoxEvent` (export added here), `BOX_TEMPLATE_MANIFEST_PATH`/`BOX_TEMPLATE_WORKER_PROTOCOL_VERSION` (`lib/runner/box-template.ts`).
-- Produces (Task 6 consumes): `runBoxTemplateBuild(client: BoxClient, input: { registryId: number; runId: number; workerSha: string }, opts?: { waitReady?; waitCheckpoint? }): Promise<void>` — never throws (all failures recorded + emitted).
+- Consumes: `emitTemplateBuildLifecycle` (existing), `waitForBoxReady`/`waitForBoxCheckpoint` (`lib/runner/box-waiters.ts`), `markTemplateReady`/`markTemplateFailed` (T4), `config.box.*` (T3), `BoxClient` (structural, now with `create`), `emitBoxEvent` (export added here), `BOX_TEMPLATE_MANIFEST_PATH`/`BOX_TEMPLATE_WORKER_PROTOCOL_VERSION` (`lib/runner/box-template.ts`).
+- Produces:
+  - `BoxClient.create(input: { env: Record<string, string>; noEnv: true }): Promise<BoxInfo>` — a fresh blank box (id from the `POST /boxes` `.box` envelope).
+  - `runBoxTemplateBuild(client: BoxClient, input: { registryId: number; runId: number; workerSha: string }, opts?: { waitReady?; waitCheckpoint? }): Promise<void>` (Task 6 consumes) — never throws (all failures recorded + emitted).
+
+- [ ] **Step 0: Add `create` to the Box client**
+
+In `lib/runner/box-client.ts`:
+
+Add to the `BoxClient` interface (near `fork`):
+
+```ts
+  /** Provision a fresh blank box (POST /boxes). Used by app-managed template
+   *  builds, which start from a clean image rather than an operator base box. */
+  create(input: { env: Record<string, string>; noEnv: true }): Promise<BoxInfo>;
+```
+
+Add to the `BoxSdkApi` seam (near `fork`):
+
+```ts
+  create(input: { createBoxRequest: unknown }): Promise<unknown>;
+```
+
+Add to the production adapter object (near the `fork` implementation) — the
+`POST /boxes` response nests the box under `.box`, so reuse `boxFromEnvelope`:
+
+```ts
+    async create(input): Promise<BoxInfo> {
+      return boxFromEnvelope(await api.create({ createBoxRequest: input }));
+    },
+```
+
+(No dedicated unit test for the mapper here; the builder test exercises it
+through the fake, and `box-client.test.ts` covers the mapper family — add a
+`create` case there only if that file already tests `fork` the same way.)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -652,7 +676,7 @@ import type { BoxClient, BoxCommandResult } from "../lib/runner/box-client";
 import { runBoxTemplateBuild } from "../lib/runner/box-template-builder";
 import { create } from "../lib/runs";
 
-const KNOBS = ["TASK_ORCH_BOX_BASE_ID", "TASK_ORCH_BOX_AGENT_REPO", "TASK_ORCH_WORKER_SHA"];
+const KNOBS = ["TASK_ORCH_BOX_AGENT_REPO", "TASK_ORCH_WORKER_SHA"];
 afterEach(() => {
   for (const k of KNOBS) delete process.env[k];
   vi.restoreAllMocks();
@@ -663,7 +687,7 @@ const ok: BoxCommandResult = { success: true, timedOut: false, exitCode: 0, stdo
 function fakeClient(overrides: Partial<BoxClient> = {}): { client: BoxClient; commands: string[] } {
   const commands: string[] = [];
   const client = {
-    fork: vi.fn(async () => ({ id: "bx_new_tpl" })),
+    create: vi.fn(async () => ({ id: "bx_new_tpl", state: "ready" })),
     get: vi.fn(async () => ({ id: "bx_new_tpl", state: "ready" })),
     command: vi.fn(async (_boxId: string, input: { command: string }) => {
       commands.push(input.command);
@@ -699,13 +723,15 @@ const waits = {
 } as never;
 
 describe("runBoxTemplateBuild", () => {
-  it("builds, archives, marks ready, and emits the full lifecycle", async () => {
-    process.env.TASK_ORCH_BOX_BASE_ID = "bx_base";
+  it("creates a blank box, builds, archives, marks ready, and emits the full lifecycle", async () => {
     const sha = "b".repeat(40);
     const { registryId, runId } = await seed(sha);
     const { client, commands } = fakeClient();
 
     await runBoxTemplateBuild(client, { registryId, runId, workerSha: sha }, waits);
+
+    // A fresh blank box was created — no base/fork id involved.
+    expect(client.create).toHaveBeenCalledWith({ env: {}, noEnv: true });
 
     const [row] = await db.select().from(boxTemplates).where(eq(boxTemplates.id, registryId));
     expect(row).toMatchObject({ state: "ready", boxId: "bx_new_tpl" });
@@ -716,6 +742,8 @@ describe("runBoxTemplateBuild", () => {
     expect(types.filter((t) => t === "runner_box_template_step")).toHaveLength(7);
     expect(types[types.length - 1]).toBe("runner_box_template_ready");
 
+    // The first step verifies the blank-box runtime before cloning.
+    expect(commands.some((c) => c.includes("command -v git") && c.includes("node") && c.includes("npm"))).toBe(true);
     // The worker clone checks out the exact SHA and the manifest embeds it.
     expect(commands.some((c) => c.includes(`git checkout ${sha}`))).toBe(true);
     expect(commands.some((c) => c.includes(`"workerBuildSha":"${sha}"`) || c.includes(`\\"workerBuildSha\\":\\"${sha}\\"`))).toBe(true);
@@ -723,7 +751,6 @@ describe("runBoxTemplateBuild", () => {
   });
 
   it("marks the row failed, emits failed, and stops the box when a step fails", async () => {
-    process.env.TASK_ORCH_BOX_BASE_ID = "bx_base";
     const sha = "c".repeat(40);
     const { registryId, runId } = await seed(sha);
     let calls = 0;
@@ -745,15 +772,21 @@ describe("runBoxTemplateBuild", () => {
     expect(client.stop).toHaveBeenCalled(); // best-effort cleanup
   });
 
-  it("fails cleanly when no base box is configured", async () => {
+  it("fails cleanly when the blank box cannot be created", async () => {
     const sha = "d".repeat(40);
     const { registryId, runId } = await seed(sha);
-    const { client } = fakeClient();
+    const { client } = fakeClient({
+      create: vi.fn(async () => {
+        throw new Error("Box account cannot start another box");
+      }) as never,
+    });
     await runBoxTemplateBuild(client, { registryId, runId, workerSha: sha }, waits);
     const [row] = await db.select().from(boxTemplates).where(eq(boxTemplates.id, registryId));
     expect(row.state).toBe("failed");
-    expect(row.error).toMatch(/TASK_ORCH_BOX_BASE_ID/);
+    expect(row.error).toMatch(/cannot start another box/);
     expect(await eventTypes(runId)).toContain("runner_box_template_failed");
+    // Nothing was created, so there is no box to stop.
+    expect(client.stop).not.toHaveBeenCalled();
   });
 });
 ```
@@ -770,11 +803,11 @@ Export `emitBoxEvent` in `lib/runner/box.ts` and add the two `STEP_LABELS` entri
 ```ts
 // lib/runner/box-template-builder.ts
 //
-// Executes one app-managed template build inside a forked base Box, mirroring
-// scripts/install-box-template.sh, wrapped in emitTemplateBuildLifecycle so
-// the triggering run's stepper shows live progress. Never throws: every
-// failure is recorded on the registry row and emitted as
-// runner_box_template_failed.
+// Executes one app-managed template build inside a FRESH BLANK box (created via
+// client.create — no operator base box), mirroring scripts/install-box-template.sh,
+// wrapped in emitTemplateBuildLifecycle so the triggering run's stepper shows
+// live progress. Never throws: every failure is recorded on the registry row
+// and emitted as runner_box_template_failed.
 import { config } from "../config";
 import type { BoxClient } from "./box-client";
 import { emitBoxEvent } from "./box";
@@ -832,19 +865,18 @@ export async function runBoxTemplateBuild(
       reason: "no-template",
       steps: BUILD_STEPS,
       build: async (step) => {
-        const baseBoxId = config.box.baseBoxId;
-        if (!baseBoxId) {
-          throw new Error("TASK_ORCH_BOX_BASE_ID is required for app-managed template builds.");
-        }
-        const forked = await client.fork(baseBoxId, { env: {}, noEnv: true });
-        boxId = forked.id;
+        // Provision a fresh blank box — no operator-provided base. A blank
+        // image ships with git/node/npm; the cloning-worker step verifies that
+        // runtime first so a missing tool fails legibly.
+        const blank = await client.create({ env: {}, noEnv: true });
+        boxId = blank.id;
         await waitReady(client, boxId, { timeoutMs: config.box.readyTimeoutMs });
 
         const repoPath = config.box.repoPath ?? "/home/user/repository";
 
         await step("cloning-worker");
         await run(boxId, "cloning-worker",
-          `set -eu; test ! -e ${shq(WORKER_DIR)}; git clone --branch ${shq(config.box.workerRepoRef)} ${shq(config.box.workerRepoUrl)} ${shq(WORKER_DIR)}; cd ${shq(WORKER_DIR)}; git checkout ${input.workerSha}`);
+          `set -eu; command -v git >/dev/null && command -v node >/dev/null && command -v npm >/dev/null || { echo "blank box missing git/node/npm" >&2; exit 127; }; test ! -e ${shq(WORKER_DIR)}; git clone --branch ${shq(config.box.workerRepoRef)} ${shq(config.box.workerRepoUrl)} ${shq(WORKER_DIR)}; cd ${shq(WORKER_DIR)}; git checkout ${input.workerSha}`);
 
         await step("installing-deps");
         await run(boxId, "installing-deps", `set -eu; cd ${shq(WORKER_DIR)}; npm ci`);
@@ -902,7 +934,7 @@ Expected: PASS (builder 3 tests; events file unaffected by the label additions).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lib/runner/box-template-builder.ts lib/runner/box.ts lib/runner/box-template-events.ts __tests__/box-template-builder.test.ts
+git add lib/runner/box-template-builder.ts lib/runner/box-client.ts lib/runner/box.ts lib/runner/box-template-events.ts __tests__/box-template-builder.test.ts
 git commit -m "feat(box-template): app-managed template builder over the Box command API"
 ```
 
@@ -935,7 +967,7 @@ import { BoxRunnerProvider } from "../lib/runner/box";
 import { setTemplateBuildStarter } from "../lib/runner/box-template-registry";
 import { create } from "../lib/runs";
 
-const KNOBS = ["TASK_ORCH_RUNNER", "TASK_ORCH_BOX_TEMPLATE_ID", "TASK_ORCH_WORKER_SHA", "TASK_ORCH_BOX_BASE_ID", "BOX_API_KEY"];
+const KNOBS = ["TASK_ORCH_RUNNER", "TASK_ORCH_BOX_TEMPLATE_ID", "TASK_ORCH_WORKER_SHA", "BOX_API_KEY"];
 afterEach(() => {
   for (const k of KNOBS) delete process.env[k];
   setTemplateBuildStarter(null);
@@ -1068,7 +1100,7 @@ and every registration routes through this provider's lazily-created client):
     });
 ```
 
-(Delete the old `const templateId = config.box.templateId; if (!templateId) throw ...` lines; `validateBoxConfig()` at the top of `create()` still enforces pin-or-base — Task 3.)
+(Delete the old `const templateId = config.box.templateId; if (!templateId) throw ...` lines; `validateBoxConfig()` at the top of `create()` still enforces the `BOX_API_KEY` requirement — Task 3.)
 
 - [ ] **Step 4: Run the new + neighboring suites**
 
@@ -1091,7 +1123,7 @@ git commit -m "feat(box-runner): admission template gate and registry-resolved f
 **Files:**
 - Modify: `app/api/metrics/route.ts` (box_templates by state next to the `runner_instances` report, ~line 39)
 - Modify: `.env.example` (Box section, ~line 115)
-- Modify: `.env.local` (swap the template-id requirement for the base-id flow)
+- Modify: `.env.local` (drop the template-id requirement — app-managed is the default)
 - Modify: `docs/box-deployment.md` (app-managed lifecycle section)
 - Modify: `BOX_TEMPLATE_UI_FEEDBACK_GAP.md` (status → closed)
 - Test: `__tests__/metrics-box-templates.test.ts` (only if `app/api/metrics` already has a route test to model after — check `ls __tests__ | grep -i metric`; if none exists, verify via typecheck and skip the route test rather than building a Next request harness)
@@ -1117,11 +1149,11 @@ In the Box section after the `TASK_ORCH_BOX_REPO_PATH` line, add:
 
 ```text
 #
-# App-managed templates: leave TASK_ORCH_BOX_TEMPLATE_ID unset and provide a
-# blank base Box (git/node/npm preinstalled, no credentials) to fork from.
-# The app then builds a template per worker build SHA on first dispatch,
-# with live progress in the run view. A pinned TEMPLATE_ID disables this.
-# TASK_ORCH_BOX_BASE_ID=bx_replace_with_blank_base
+# App-managed templates (DEFAULT): leave TASK_ORCH_BOX_TEMPLATE_ID unset and
+# the app builds a template per worker build SHA on first dispatch, starting
+# from a fresh blank box it creates itself — no base box to provision. BOX_API_KEY
+# alone is enough. Live progress shows in the run view. A pinned TEMPLATE_ID
+# disables app-managed builds. Overrides (all optional):
 # TASK_ORCH_BOX_WORKER_REPO_URL=https://github.com/nodetool-ai/task-orchestrator.git
 # TASK_ORCH_BOX_WORKER_REPO_REF=main
 # TASK_ORCH_BOX_AGENT_REPO_URL=https://github.com/nodetool-ai/nodetool.git
@@ -1132,14 +1164,15 @@ In the Box section after the `TASK_ORCH_BOX_REPO_PATH` line, add:
 
 - [ ] **Step 3: `.env.local`**
 
-Replace the `TASK_ORCH_BOX_TEMPLATE_ID=` / `TASK_ORCH_BOX_TEMPLATE_VERSION=` lines with:
+Remove any `TASK_ORCH_BOX_TEMPLATE_ID=` / `TASK_ORCH_BOX_TEMPLATE_VERSION=` /
+`TASK_ORCH_BOX_BASE_ID=` lines (a prior edit may have added a base-id line —
+delete it). Leave a comment in their place:
 
 ```text
-# App-managed templates: the app builds a template per worker SHA on first
-# dispatch (10–15 min, live progress in the run view). Point this at a blank
-# base Box (git/node/npm, no credentials). Pinning TASK_ORCH_BOX_TEMPLATE_ID
-# instead disables app-managed builds.
-TASK_ORCH_BOX_BASE_ID=
+# App-managed templates are the default: the app builds a template per worker
+# SHA on first dispatch (10–15 min, live progress in the run view), creating a
+# fresh blank box itself. BOX_API_KEY alone is enough — no template/base id.
+# Pin TASK_ORCH_BOX_TEMPLATE_ID only to override with a hand-published template.
 # TASK_ORCH_BOX_TEMPLATE_ID=
 ```
 
@@ -1147,7 +1180,7 @@ Update the comment above `TASK_ORCH_BOX_REPO_PATH=/home/user/nodetool` to note i
 
 - [ ] **Step 4: `docs/box-deployment.md`**
 
-After the "Template lifecycle" heading, insert a short "App-managed templates" subsection: unset pin + `TASK_ORCH_BOX_BASE_ID` → lazy per-SHA build at dispatch (steps, ~10–15 min, stepper feedback, `box_templates` registry + metrics), pin = manual override using the existing publish flow, `TASK_ORCH_WORKER_SHA` for git-less control planes, failed builds retry on the pump cadence.
+After the "Template lifecycle" heading, insert a short "App-managed templates" subsection: unset pin → lazy per-SHA build at dispatch, starting from a blank box the app creates itself (steps, ~10–15 min, stepper feedback, `box_templates` registry + metrics), `BOX_API_KEY` the only requirement, pin = manual override using the existing publish flow, `TASK_ORCH_WORKER_SHA` for git-less control planes, failed builds retry on the pump cadence.
 
 - [ ] **Step 5: Close the gap doc**
 
@@ -1173,4 +1206,4 @@ git commit -m "feat(box-template): metrics surface, env docs, close the feedback
 
 ## Spec coverage self-check
 
-- §1 registry table → T2. §2 worker SHA → T1. §3 resolve/single-flight/supersede/orphan → T4. §4 builder + steps + labels + cleanup → T5. §5 admit gate + create() → T6. §6 config → T3. §7 metrics → T7. §8 docs/env/gap → T7. Error handling: failed rows (T4/T5 tests), orphan flip (T4), SHA-not-pushed surfaces via step-1 failure (T5 failure path). Testing section maps 1:1 to the task test files.
+- §1 registry table → T2. §2 worker SHA → T1. §3 resolve/single-flight/supersede/orphan → T4. §4 builder (blank-box create + `BoxClient.create` + steps + runtime check + labels + cleanup) → T5. §5 admit gate + create() → T6. §6 config (no base-id; `BOX_API_KEY`-only validation) → T3. §7 metrics → T7. §8 docs/env/gap → T7. Error handling: failed rows (T4/T5 tests), orphan flip (T4), blank-box create failure + missing-runtime (T5), SHA-not-pushed via step-1 failure. Testing section maps 1:1 to the task test files.

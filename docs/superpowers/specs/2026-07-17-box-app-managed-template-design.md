@@ -8,11 +8,18 @@
 
 Today the Box template is built out-of-band (`scripts/install-box-template.sh`)
 and pinned via `TASK_ORCH_BOX_TEMPLATE_ID`. The app should own the template
-lifecycle: on a box dispatch, build a template when none matches the current
-worker build SHA, defer the triggering run with live feedback (already built),
-then fork run boxes from the ready template. A pinned
+lifecycle end to end: on a box dispatch, build a template when none matches the
+current worker build SHA, defer the triggering run with live feedback (already
+built), then fork run boxes from the ready template. A pinned
 `TASK_ORCH_BOX_TEMPLATE_ID` remains an explicit override that disables
 app-managed provisioning.
+
+**Zero setup:** the build starts from a **blank box created fresh** via the
+Box API's `POST /boxes` (SDK `create`, request `{ env, noEnv }`) — there is no
+operator-provided base box. `BOX_API_KEY` alone is enough to run app-managed
+mode; a blank box ships with git/node/npm, and the first build step verifies
+that runtime so a missing tool fails legibly in the stepper rather than deep in
+a clone.
 
 ## Shape
 
@@ -87,9 +94,11 @@ gets exported from `lib/runner/box.ts`). Steps (each a `client.command` with
 7. `archiving` — `client.stop(boxId)` + `waitForBoxCheckpoint` (completed
    snapshot required before the row turns ready).
 
-Before step 1 it forks `config.box.baseBoxId` (a plain stopped Box with
-git/node/npm — new required config for app-managed mode) with `env: {}` and
-`noEnv: true`, then `waitForBoxReady`. On any failure: registry row → `failed`
+Before step 1 it creates a **fresh blank box** via `client.create({ env: {},
+noEnv: true })` (new `BoxClient.create` → SDK `POST /boxes`; id read from the
+`box` envelope like `get`), then `waitForBoxReady`. Step 1's command is prefixed
+with a runtime check (`command -v git node npm`) so a blank image lacking a tool
+fails the `cloning-worker` step with a clear message. On any failure: row → `failed`
 with the error, the lifecycle driver has already emitted
 `runner_box_template_failed`, and the box (if forked) is stopped best-effort.
 The two new step names get entries in `STEP_LABELS`
@@ -124,7 +133,6 @@ admission should have deferred). `templateVersion` passed to
 
 New under `config.box` (all inert unless `TASK_ORCH_RUNNER=box`):
 
-- `baseBoxId` — `TASK_ORCH_BOX_BASE_ID` (blank base Box to fork).
 - `workerRepoUrl` — `TASK_ORCH_BOX_WORKER_REPO_URL`, default
   `https://github.com/nodetool-ai/task-orchestrator.git`.
 - `workerRepoRef` — `TASK_ORCH_BOX_WORKER_REPO_REF`, default `main`.
@@ -133,9 +141,10 @@ New under `config.box` (all inert unless `TASK_ORCH_RUNNER=box`):
 - `agentRepo` — `TASK_ORCH_BOX_AGENT_REPO`, default `nodetool-ai/nodetool`.
 - `buildStepTimeoutSeconds` — `TASK_ORCH_BOX_BUILD_STEP_TIMEOUT_S`, default 900.
 
-`validateBoxConfig()`: requires `BOX_API_KEY` plus **either**
-`TASK_ORCH_BOX_TEMPLATE_ID` (pinned) **or** `TASK_ORCH_BOX_BASE_ID`
-(app-managed).
+No base-box config: the build creates its own blank box.
+`validateBoxConfig()` requires only `BOX_API_KEY` (app-managed is the default);
+`TASK_ORCH_BOX_TEMPLATE_ID` stays an optional pin that disables app-managed
+builds.
 
 ### 7. Metrics (gap doc item 4)
 
@@ -145,15 +154,17 @@ existing `runner_instances` report.
 ### 8. Docs / env
 
 - `.env.example` Box section: document the new keys and the pin-vs-managed
-  choice; `.env.local`: switch to `TASK_ORCH_BOX_BASE_ID` (blank) instead of
-  requiring a template id.
+  choice; `.env.local`: drop the template-id requirement entirely — app-managed
+  is the default, so `BOX_API_KEY` alone suffices.
 - `docs/box-deployment.md`: app-managed lifecycle section (pin = override).
 - `BOX_TEMPLATE_UI_FEEDBACK_GAP.md`: status → closed with pointers.
 
 ## Error handling
 
-- Build step failure / timeout / fork failure → row `failed`, `failed` event
-  with step + error (driver), best-effort stop of the partial Box.
+- Build step failure / timeout / blank-box create failure → row `failed`,
+  `failed` event with step + error (driver), best-effort stop of the partial Box.
+- Blank box missing git/node/npm → the `cloning-worker` runtime check fails with
+  a clear "command not found" surfaced in the stepper.
 - Server restart mid-build: the `building` row is orphaned. Staleness guard:
   a `building` row older than 2× the total step budget
   (`7 × buildStepTimeoutSeconds`) is treated as failed by `resolveBoxTemplate`
@@ -171,10 +182,11 @@ All against the structural `BoxClient` fake (the established pattern in
 - registry: pinned short-circuit; ready hit; single-flight insert race (two
   concurrent resolves → one building row, same builder); failed-row retry;
   supersede on ready; orphaned-row staleness flip.
-- builder: happy path emits the full lifecycle + writes ready row with boxId;
-  step failure marks row failed and stops the box; command payloads include
-  the SHA checkout and manifest JSON.
+- builder: happy path creates a blank box, emits the full lifecycle + writes
+  ready row with boxId; step failure marks row failed and stops the box;
+  command payloads include the runtime check, the SHA checkout, and manifest JSON.
+- client: `create` maps `POST /boxes` response `.box.id`.
 - provider admit: three defer shapes + fall-through to limits when ready.
 - create(): forks the resolved registry template when no pin is set.
-- validateBoxConfig: pin-or-base requirement matrix.
+- validateBoxConfig: `BOX_API_KEY` required; no base-id needed.
 - metrics: box_templates rows appear grouped by state.
