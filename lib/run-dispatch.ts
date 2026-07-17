@@ -497,6 +497,7 @@ export async function dispatchRun(
     const gateActive = lightweightChild ? lightweightGateActive() : admissionEnabled();
     if (gateActive) {
       let decision: AdmitDecision;
+      let deferReason: string | null = null;
       if (opts.admit) {
         decision = await opts.admit(runId);
       } else if (lightweightChild) {
@@ -509,6 +510,7 @@ export async function dispatchRun(
           return { kind: "spawn-failed" };
         }
         decision = providerDecision.decision;
+        if (providerDecision.decision === "defer") deferReason = providerDecision.reason ?? null;
       }
       // Deadlock breaker (M1): a plan-executor run occupies a worker slot for
       // its ENTIRE turn (countInFlightWorkers/flyAdmit count it the whole
@@ -558,6 +560,8 @@ export async function dispatchRun(
             status: "pending",
             workerScope: null,
             workerPid: null,
+            // Spec §2: pending is never bare — persist why admission deferred.
+            pendingReason: deferReason ?? "Waiting for runner capacity.",
             ...(stampEpisode ? { heartbeatAt: new Date() } : {}),
           })
           .where(eq(agentSessions.id, runId));
@@ -593,6 +597,7 @@ export async function dispatchRun(
         workerExitCode: null,
         error: null,
         completedAt: null,
+        pendingReason: null,
       })
       .where(
         and(

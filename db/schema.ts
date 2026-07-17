@@ -284,6 +284,10 @@ export const agentSessions = pgTable(
     result: jsonb("result"),
     // Why a `parked` run is parked: 'waiting' | 'sleeping' | 'question'.
     parkReason: text("park_reason"),
+    // Why a 'pending' run is pending: the admission defer reason (template
+    // build, capacity, account backpressure). Written on defer, cleared on
+    // claim. Mirrors parkReason for parked runs.
+    pendingReason: text("pending_reason"),
     // Open ask_parent exchange (§8): { question_id, question, asked_at,
     // deadline, state: 'open'|'answered'|'expired', assumption? }.
     pendingQuestion: jsonb("pending_question"),
