@@ -46,7 +46,7 @@ Box has two distinct flows. Understand them separately.
    ┌─ TEMPLATE lifecycle (once per worker build SHA) ──────────────┐
    │  create blank box → clone worker@sha → npm ci → build worker  │
    │  → clone agent repo → npm ci → write manifest → archive       │
-   │  result: a stopped template box, recorded in box_templates    │
+   │  result: a stopped template box, recorded in environments     │
    └───────────────────────────────────────────────────────────────┘
                              │ fork
                              ▼
@@ -68,7 +68,7 @@ id, the first box dispatch builds a template on demand.
 
 ### How a build runs
 
-`resolveBoxTemplate()` (`lib/runner/box-template-registry.ts`) is consulted on
+`resolveBoxTemplate()` (`lib/runner/environments.ts`) is consulted on
 every box dispatch. It returns one of:
 
 - **pinned** — `TASK_ORCH_BOX_TEMPLATE_ID` is set; app-managed builds are
@@ -78,12 +78,23 @@ every box dispatch. It returns one of:
 - **building** — a build is in progress (this run started it, or another run
   did); the run defers.
 
-Templates are tracked in the **`box_templates`** table. A *partial unique index*
-on `worker_sha` for live (`building`/`ready`) rows is the **single-flight lock**:
+Templates are tracked in the **`environments`** table (rows with
+`provider = 'box'`). A *partial unique index* on `(provider, worker_sha)` for
+live (`building`/`ready`) rows is the **single-flight lock**:
 exactly one build runs per worker SHA, no matter how many runs dispatch at once.
 The losers of the insert race simply observe the winner's row and defer behind
 it. When a new worker SHA produces a new ready template, older ready rows are
 marked `superseded`.
+
+### Environments page
+
+Box templates are one kind of **environment** — the execution artifact a runner
+provider launches from (alongside the docker worker image and the fly runner
+image). The `/environments` page lists all of them, grouped by provider and
+versioned by worker SHA, and can trigger a box template build in-app ("Build
+template" — a manual build with no triggering run, progress polled from the
+`detail` column). The registry is the shared `environments` table (it replaced
+`box_templates` in migration 0021).
 
 ### The build itself
 

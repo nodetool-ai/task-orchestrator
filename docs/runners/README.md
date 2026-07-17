@@ -273,6 +273,16 @@ Rough guidance:
 - **Box** — you want managed remote runs with the least infrastructure: a single
   `BOX_API_KEY`, and the app builds and maintains the run template for you.
 
+## 7. Environments
+
+Whatever the integration, a run launches from an **execution artifact** — a
+Docker worker image, a Fly runner image, or a Box template snapshot — built for
+a specific worker build SHA. These are first-class **environments**: the
+`/environments` page lists them grouped by provider and versioned by SHA, and
+box/docker builds can be triggered in-app (fly images are built out-of-app; the
+page shows the push command). The shared `environments` registry table backs all
+three and replaced the box-only `box_templates` table in migration 0021.
+
 ---
 
 ## Related documents

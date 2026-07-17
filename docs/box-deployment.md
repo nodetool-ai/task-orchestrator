@@ -69,13 +69,18 @@ dispatch for a given worker build SHA, `ensureTemplate()` creates a fresh
 blank box and runs it through the build steps in order — `cloning-worker`,
 `installing-deps`, `building-worker`, `cloning-agent-repo`,
 `installing-agent-deps`, `writing-manifest`, `archiving` — recording progress
-in the `box_templates` registry table (also surfaced at `/api/metrics` as
-`task_orch_box_templates`). The build takes roughly 10–15 minutes; the
-triggering run is deferred with live stepper feedback in the run view while
-it completes, and any other run dispatched against the same SHA in the
-meantime is deferred behind the same build. `BOX_API_KEY` alone is enough —
-there is no base box to provision up front. Once a template is `ready`, run
-boxes fork from it directly.
+in the `environments` registry table (rows with `provider = 'box'`, also
+surfaced at `/api/metrics` as `task_orch_environments`). The build takes
+roughly 10–15 minutes; the triggering run is deferred with live stepper
+feedback in the run view while it completes, and any other run dispatched
+against the same SHA in the meantime is deferred behind the same build.
+`BOX_API_KEY` alone is enough — there is no base box to provision up front.
+Once a template is `ready`, run boxes fork from it directly.
+
+The `/environments` page lists every provider's execution artifact (docker
+image, fly runner image, box template snapshots) versioned by worker SHA, and
+can kick a box template build in-app without waiting for a run to trigger it.
+The `environments` table replaced `box_templates` in migration 0021.
 
 Set `TASK_ORCH_WORKER_SHA` on git-less control-plane deployments where `git
 rev-parse HEAD` is unavailable — otherwise the SHA is read from the server

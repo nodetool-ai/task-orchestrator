@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { LayoutDashboard, ListTodo, Target, Activity, FolderGit2, Users, KeyRound } from "lucide-react";
+import { LayoutDashboard, ListTodo, Target, Activity, Container, FolderGit2, Users, KeyRound } from "lucide-react";
 import { auth } from "@/auth";
 import { SignOutButton } from "./sign-out-button";
 import { MobileNav } from "./mobile-nav";
@@ -10,6 +10,7 @@ const nav = [
   { href: "/plans", label: "Plans", icon: Target },
   { href: "/repositories", label: "Repos", icon: FolderGit2 },
   { href: "/runs", label: "Runs", icon: Activity },
+  { href: "/environments", label: "Environments", icon: Container },
   { href: "/personas", label: "Personas", icon: Users },
   { href: "/tokens", label: "Tokens", icon: KeyRound },
 ];

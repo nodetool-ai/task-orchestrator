@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { Menu, X, LayoutDashboard, ListTodo, Target, Activity, FolderGit2, Users, KeyRound } from "lucide-react";
+import { Menu, X, LayoutDashboard, ListTodo, Target, Activity, Container, FolderGit2, Users, KeyRound } from "lucide-react";
 
 const nav = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -10,6 +10,7 @@ const nav = [
   { href: "/plans", label: "Plans", icon: Target },
   { href: "/repositories", label: "Repos", icon: FolderGit2 },
   { href: "/runs", label: "Runs", icon: Activity },
+  { href: "/environments", label: "Environments", icon: Container },
   { href: "/personas", label: "Personas", icon: Users },
   { href: "/tokens", label: "Tokens", icon: KeyRound },
 ];
