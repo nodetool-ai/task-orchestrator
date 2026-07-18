@@ -1,6 +1,7 @@
 // Can the Claude Agent SDK drive an EXTERNAL claude binary (pathToClaudeCodeExecutable)
 // instead of its bundled 216MB platform package? Proves the box can reuse its
 // preinstalled /usr/local/bin/claude and skip the optional binary dep entirely.
+export {}; // top-level await needs module scope
 const bin = process.argv[2] ?? "/usr/local/bin/claude";
 const { query } = await import("@anthropic-ai/claude-agent-sdk");
 console.log(`[probe] driving SDK against ${bin}`);
