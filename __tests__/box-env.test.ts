@@ -24,6 +24,7 @@ const KNOBS = [
   "CEREBRAS_API_KEY",
   "AUTH_SECRET",
   "TASK_ORCH_WORKER_CHANNEL_SECRET",
+  "TASK_ORCH_BUNDLE_URL",
 ] as const;
 
 afterEach(() => {
@@ -125,6 +126,16 @@ describe("buildBoxWorkerEnv", () => {
     stubBaseEnv();
     const env = buildBoxWorkerEnv({ runId: 42, repoId: "repo_123", channelInstanceId: CHANNEL_INSTANCE_ID });
     expect(env.TASK_ORCH_CLAUDE_BINARY).toBe("/usr/local/bin/claude");
+  });
+
+  it("passes the worker-bundle download URL when configured", () => {
+    stubBaseEnv();
+    process.env.TASK_ORCH_BUNDLE_URL = "https://tasks.example.com/api/worker-bundle";
+    const env = buildBoxWorkerEnv({ runId: 42, repoId: "repo_123", channelInstanceId: CHANNEL_INSTANCE_ID });
+    expect(env.TASK_ORCH_BUNDLE_URL).toBe("https://tasks.example.com/api/worker-bundle");
+    delete process.env.TASK_ORCH_BUNDLE_URL;
+    const bare = buildBoxWorkerEnv({ runId: 42, repoId: "repo_123", channelInstanceId: CHANNEL_INSTANCE_ID });
+    expect(bare.TASK_ORCH_BUNDLE_URL).toBeUndefined();
   });
 });
 

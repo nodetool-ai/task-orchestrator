@@ -104,6 +104,10 @@ export function buildBoxWorkerEnv(input: BoxWorkerEnvInput): Record<string, stri
     ...workerChannelDispatchEnv(input.runId, channelInstanceId, boxListenEndpoint()),
   };
 
+  // Blank provisioning: where this box downloads the worker bundle at launch,
+  // authenticated with its channel credential (spec: box-blank-provision §1).
+  setIfPresent(env, "TASK_ORCH_BUNDLE_URL", config.box.bundleUrl);
+
   // Keep the allowlist coupled to the credential registry.  Iterating the
   // declared keys (instead of spreading agentCredentialEnv()) prevents a
   // future helper addition from silently widening the Box environment.
