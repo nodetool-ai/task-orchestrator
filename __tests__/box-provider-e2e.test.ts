@@ -154,6 +154,10 @@ describe("Box provider fake-client flow", () => {
     expect(WORKER_BOOTSTRAP_COMMAND).toContain("[box-bootstrap] starting");
     expect(WORKER_BOOTSTRAP_COMMAND).toContain("[box-bootstrap] exited-early");
     expect(WORKER_BOOTSTRAP_COMMAND).not.toContain("printenv");
+    // New templates bake only the standalone bundle; old templates keep the
+    // checkout layout. The bootstrap probes new-then-legacy so both launch.
+    expect(WORKER_BOOTSTRAP_COMMAND).toContain('/home/user/worker/run-worker.js');
+    expect(WORKER_BOOTSTRAP_COMMAND).toContain('/home/user/task-orchestrator/dist/run-worker.js');
   });
 
   it("forks a template with noEnv, a hygienic worker environment, and a hosted channel", async () => {

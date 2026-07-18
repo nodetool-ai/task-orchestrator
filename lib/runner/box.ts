@@ -73,7 +73,11 @@ export function boxOrphansForCleanup(
 const WORKER_BOOTSTRAP_COMMAND = [
   'mkdir -p "$SESSION_ROOT/logs"',
   'log="$SESSION_ROOT/logs/runner.log"',
-  'entry="/home/user/task-orchestrator/dist/run-worker.js"',
+  // New-style templates bake the standalone bundle at /home/user/worker;
+  // pre-bundle templates still carry the full checkout. Probe new-then-legacy
+  // so a control-plane deploy never strands an already-archived template.
+  'entry="/home/user/worker/run-worker.js"',
+  'if [ ! -f "$entry" ]; then entry="/home/user/task-orchestrator/dist/run-worker.js"; fi',
   // Do not dump the environment: it contains the signed worker token and may
   // contain agent credentials. The metadata below is sufficient to distinguish
   // a missing/stale template artifact from a failure inside the worker process.
