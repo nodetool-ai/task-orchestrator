@@ -13,13 +13,21 @@
 
 import { join } from "node:path";
 
+import { config } from "../config";
 import { mintChannelCredential } from "./credential";
 
 const CHANNEL_PATH = "/worker/channel";
 
+/** Directory local worker sockets live in — short and cwd-independent (the
+ *  kernel's sun_path cap is ~104-108 bytes; a cwd-derived path overflowed on
+ *  GitHub runners). Override with TASK_ORCH_SOCKET_DIR. */
+export function workerSocketDir(): string {
+  return config.worker.socketDir;
+}
+
 /** Absolute path of a local worker's Unix-domain socket. */
-export function localSocketPath(instanceId: string, cwd: string = process.cwd()): string {
-  return join(cwd, ".worker-sockets", `${instanceId}.sock`);
+export function localSocketPath(instanceId: string, dir: string = workerSocketDir()): string {
+  return join(dir, `${instanceId}.sock`);
 }
 
 /** Endpoint the worker binds (TASK_ORCH_WORKER_CHANNEL_ENDPOINT). */

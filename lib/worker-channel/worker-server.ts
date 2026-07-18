@@ -6,6 +6,7 @@ import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
 
 import { config as appConfig } from "@/lib/config";
+import { localSocketPath } from "./dispatch-env";
 import { decodeFrame, encodeFrame, WorkerChannelProtocolError } from "./codec";
 import {
   CLOSE_CODE_ACKNOWLEDGEMENT_TIMEOUT,
@@ -200,12 +201,12 @@ function parseEndpoint(config: WorkerServerConfig): ListenerAddress {
     // Accept both the listen form `unix:<abs path>` and the URL form
     // `unix://<abs path>`; the control plane dials the separate `ws+unix://` URL.
     const raw = config.socketPath ?? (typeof endpoint === "string" ? endpoint.replace(/^unix:(\/\/)?/, "") : undefined);
-    const socketPath = raw ? decodeURIComponent(raw) : join(process.cwd(), ".worker-sockets", `${config.instanceId}.sock`);
+    const socketPath = raw ? decodeURIComponent(raw) : localSocketPath(config.instanceId);
     return { kind: "unix", socketPath };
   }
   if (typeof endpoint === "object" && endpoint !== null) {
     if (endpoint.transport === "unix" || endpoint.socketPath) {
-      return { kind: "unix", socketPath: endpoint.socketPath ?? join(process.cwd(), ".worker-sockets", `${config.instanceId}.sock`) };
+      return { kind: "unix", socketPath: endpoint.socketPath ?? localSocketPath(config.instanceId) };
     }
     return { kind: "tcp", host: endpoint.host ?? "0.0.0.0", port: endpoint.port ?? 8787 };
   }
@@ -224,7 +225,7 @@ function parseEndpoint(config: WorkerServerConfig): ListenerAddress {
   }
   return {
     kind: "unix",
-    socketPath: join(process.cwd(), ".worker-sockets", `${config.instanceId}.sock`),
+    socketPath: localSocketPath(config.instanceId),
   };
 }
 

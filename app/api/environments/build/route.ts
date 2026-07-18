@@ -1,24 +1,42 @@
-// Kick a manual environment build from the /environments page. Single-flight
-// per (provider, worker SHA) via the environments live index; a manual build
-// deliberately bypasses the failed-build cooldown (an explicit human retry).
+// Kick a manual environment build from the /environments page — or from CI,
+// which warms the box template for a freshly-green main (bearer API token).
+// Single-flight per (provider, worker SHA) via the environments live index; a
+// manual build deliberately bypasses the failed-build cooldown (an explicit
+// human/CI retry).
 import { NextResponse } from "next/server";
 import { and, eq, inArray } from "drizzle-orm";
 import { auth } from "@/auth";
 import { db } from "@/db";
 import { environments } from "@/db/schema";
+import { config } from "@/lib/config";
+import { verifyToken } from "@/lib/api-tokens";
 import { workerBuildSha } from "@/lib/runner/worker-sha";
 import { runBoxTemplateBuild } from "@/lib/runner/box-template-builder";
 import { runDockerImageBuild } from "@/lib/runner/docker-image-build";
 import { makeBoxClient } from "@/lib/runner/box-client";
 
+async function authorized(req: Request): Promise<boolean> {
+  const bearer = req.headers.get("authorization");
+  if (bearer?.startsWith("Bearer ")) {
+    return (await verifyToken(bearer.slice("Bearer ".length).trim())) != null;
+  }
+  return (await auth()) != null;
+}
+
 export async function POST(req: Request): Promise<NextResponse> {
-  const session = await auth();
-  if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!(await authorized(req))) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
 
   const body = (await req.json().catch(() => ({}))) as { provider?: string };
   const provider = body.provider;
   if (provider !== "box" && provider !== "docker") {
     return NextResponse.json({ error: "provider must be 'box' or 'docker' (fly builds are not in-app)" }, { status: 400 });
+  }
+  if (provider === "box" && !config.box.apiKey) {
+    // A CI warm hitting a control plane without Box configured must fail
+    // clearly instead of littering failed environment rows.
+    return NextResponse.json({ error: "BOX_API_KEY is not configured on this deployment." }, { status: 503 });
   }
 
   let sha: string;

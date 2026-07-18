@@ -48,6 +48,7 @@ import {
   localDialEndpoint,
   localListenEndpoint,
   localSocketPath,
+  workerSocketDir,
   runStartCommandId,
   workerChannelDispatchEnv,
 } from "./worker-channel/dispatch-env";
@@ -934,8 +935,7 @@ export async function startChannelForRun(runId: number, instanceId: string): Pro
  * is a socket owned by the current uid AND its run is gone or terminal with no
  * live worker — never one whose worker is still live. Runs each local sweep tick.
  */
-export async function sweepWorkerSockets(cwd: string = process.cwd()): Promise<void> {
-  const dir = join(cwd, ".worker-sockets");
+export async function sweepWorkerSockets(dir: string = workerSocketDir()): Promise<void> {
   let entries: string[];
   try {
     entries = await readdir(dir);

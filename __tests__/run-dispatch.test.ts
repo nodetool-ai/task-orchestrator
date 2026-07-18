@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { db } from "../db";
 import { agentSessions, runnerInstances } from "../db/schema";
 import { create, get } from "../lib/runs";
+import { localSocketPath } from "../lib/worker-channel/dispatch-env";
 import {
   dispatchRun,
   provisionLocalChannel,
@@ -96,7 +97,7 @@ describe("provisionLocalChannel", () => {
     const run = await create({ goal: "<chat>", defer: true });
     const channel = await provisionLocalChannel(run.id);
 
-    const expectedSocket = join(process.cwd(), ".worker-sockets", `${channel.instanceId}.sock`);
+    const expectedSocket = localSocketPath(channel.instanceId);
     expect(channel.instanceId).toMatch(/^wi_[a-f0-9]{32}$/);
     expect(channel.socketPath).toBe(expectedSocket);
     // Worker binds the `unix:` listen form; control plane dials the `ws+unix://` form.
@@ -128,5 +129,19 @@ describe("unsupportedWsProviderMessage", () => {
     expect(unsupportedWsProviderMessage("mystery")).toBe(
       "Runner provider 'mystery' does not expose a private control-plane-to-worker WebSocket endpoint."
     );
+  });
+});
+
+// Red-CI incident (2026-07-17): socket paths derived from process.cwd()
+// exceeded the kernel's ~108-byte sun_path cap on GitHub runners (110 chars →
+// listen EINVAL across the worker-channel suites). The path must be short and
+// cwd-independent.
+describe("worker socket paths", () => {
+  it("fit the kernel sun_path limit and do not depend on cwd", () => {
+    const id = `wi_${"a".repeat(32)}`;
+    const path = localSocketPath(id);
+    expect(path.length).toBeLessThanOrEqual(103);
+    expect(path).not.toContain(process.cwd());
+    expect(path.endsWith(`${id}.sock`)).toBe(true);
   });
 });

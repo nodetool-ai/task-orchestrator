@@ -219,6 +219,16 @@ export const config = Object.freeze({
     get channelSecret(): string | undefined {
       return strEnv("TASK_ORCH_WORKER_CHANNEL_SECRET");
     },
+    /** Directory for local workers' Unix-domain sockets. MUST stay short: the
+     *  kernel caps sun_path at ~104-108 bytes, and a cwd-derived path already
+     *  overflowed on GitHub runners (110 chars → listen EINVAL, the red-CI
+     *  incident of 2026-07-17). Default is /tmp-based and cwd-independent. */
+    get socketDir(): string {
+      const override = strEnv("TASK_ORCH_SOCKET_DIR");
+      if (override) return override;
+      const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+      return `/tmp/task-orch-${uid}`;
+    },
     /** Worker build identifier reported in channel.hello. */
     get build(): string | undefined {
       return strEnv("TASK_ORCH_WORKER_BUILD");
