@@ -67,32 +67,30 @@ run_step "clone Task Orchestrator" \
   "set -eu; test ! -e $(quote "$task_orch_dir"); git clone --depth 1 --branch $(quote "$task_orch_ref") $(quote "$task_orch_url") $(quote "$task_orch_dir")"
 
 run_step "install Task Orchestrator dependencies" \
-  "set -eu; cd $(quote "$task_orch_dir"); npm ci"
+  "set -eu; cd $(quote "$task_orch_dir"); npm ci --omit=optional"
 
-run_step "build Task Orchestrator worker" \
-  "set -eu; cd $(quote "$task_orch_dir"); npm run build:worker; test -s dist/run-worker.js; node dist/run-worker.js >/dev/null 2>&1 || test \$? -eq 2"
+run_step "build Task Orchestrator worker (standalone bundle)" \
+  "set -eu; cd $(quote "$task_orch_dir"); npm run build:worker:standalone; test -s dist/run-worker.standalone.js"
+
+# Record the SHA before pruning deletes the checkout; the manifest step needs it.
+run_step "record worker SHA" \
+  "set -eu; git -C $(quote "$task_orch_dir") rev-parse HEAD > /home/user/.task-orchestrator-worker-sha"
+
+run_step "prune worker checkout" \
+  "set -eu; mkdir -p /home/user/worker; cp $(quote "$task_orch_dir")/dist/run-worker.standalone.js /home/user/worker/run-worker.js; rm -rf $(quote "$task_orch_dir")"
 
 run_step "clone nodetool" \
   "set -eu; test ! -e $(quote "$nodetool_dir"); git clone --depth 1 --branch $(quote "$nodetool_ref") $(quote "$nodetool_url") $(quote "$nodetool_dir")"
 
-run_step "install nodetool dependencies" \
-  "set -eu; cd $(quote "$nodetool_dir"); npm ci"
-
-# The manifest is consumed by the runner before every launch. Its build SHA
-# identifies the worker code, while repositoryPath selects the agent checkout.
 run_step "write template manifest" \
-  "set -eu; mkdir -p /home/user/.task-orchestrator; sha=\$(git -C $(quote "$task_orch_dir") rev-parse HEAD); printf '{\"formatVersion\":1,\"workerBuildSha\":\"%s\",\"workerProtocolVersion\":1,\"repository\":\"nodetool-ai/nodetool\",\"repositoryPath\":\"/home/user/nodetool\"}\\n' \"\$sha\" > /home/user/.task-orchestrator/template.json"
+  "set -eu; mkdir -p /home/user/.task-orchestrator; sha=\$(cat /home/user/.task-orchestrator-worker-sha); rm -f /home/user/.task-orchestrator-worker-sha; printf '{\"formatVersion\":1,\"workerBuildSha\":\"%s\",\"workerProtocolVersion\":1,\"repository\":\"nodetool-ai/nodetool\",\"repositoryPath\":\"/home/user/nodetool\",\"workerEntryPath\":\"/home/user/worker/run-worker.js\"}\\n' \"\$sha\" > /home/user/.task-orchestrator/template.json"
 
-run_step "verify template artifacts" \
-  "set -eu; test -s $(quote "$task_orch_dir/dist/run-worker.js"); test -z \"\$(git -C $(quote "$task_orch_dir") status --porcelain=v1)\"; test -z \"\$(git -C $(quote "$nodetool_dir") status --porcelain=v1)\"; cat /home/user/.task-orchestrator/template.json"
-
-# Smoke-test the Claude Agent SDK native binary the worker will spawn (matching
-# the box's libc, mirroring the SDK's variant selection), then sync so the
-# archive can never seal a binary that doesn't exec (see run 26: archiving a
-# fresh npm ci produced a fork whose claude binary failed to launch). Mirrors
-# the "verifying-worker" step in lib/runner/box-template-builder.ts.
-run_step "verify worker agent binary" \
-  "set -eu; cd $(quote "$task_orch_dir"); arch=\$(uname -m); case \"\$arch\" in x86_64) a=x64 ;; aarch64|arm64) a=arm64 ;; *) echo \"unsupported arch: \$arch\" >&2; exit 1 ;; esac; if [ -e \"/lib/ld-musl-\$arch.so.1\" ]; then v=\"linux-\$a-musl\"; else v=\"linux-\$a\"; fi; bin=\"node_modules/@anthropic-ai/claude-agent-sdk-\$v/claude\"; test -x \"\$bin\" || { echo \"SDK native binary missing: \$bin\" >&2; exit 1; }; \"\$bin\" --version; sync"
+# Mirrors the "verifying-worker" step in lib/runner/box-template-builder.ts:
+# run the bundle ALONE in a scratch dir (exit 2 = its own usage check, the
+# full dependency graph loaded with no node_modules), exec the preinstalled
+# claude binary, then sync so the archive can't seal half-written pages.
+run_step "verify worker bundle and claude binary" \
+  "set -eu; test -s /home/user/worker/run-worker.js; test -z \"\$(git -C $(quote "$nodetool_dir") status --porcelain=v1)\"; cat /home/user/.task-orchestrator/template.json; d=\$(mktemp -d); cp /home/user/worker/run-worker.js \"\$d/run-worker.js\"; cd \"\$d\"; node run-worker.js >/dev/null 2>&1 || rc=\$?; test \"\${rc:-0}\" -eq 2; /usr/local/bin/claude --version; sync"
 
 echo
 echo "Template install complete for ${box_id}."
