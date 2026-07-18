@@ -114,7 +114,7 @@ template builds, zero sha-drift, and per-run repositories.
 | Bundle route abused / credential replay | HMAC is run+instance-scoped; route additionally checks the run exists and is active; 23MB static bytes, no state |
 | Download/clone flake at launch | provision command is detached + polled with tail-on-failure evidence, normal dispatch retry applies; failure is per-run, never a shared cooldown |
 | Server deployed without the bundle | route 503s with the build command; Dockerfile builds it unconditionally |
-| GH_TOKEN in clone URL visible in box process list momentarily | box is single-tenant per run and already holds the token in env; noted, accepted |
+| GH_TOKEN exposure during clone | token never enters the clone URL or argv — it rides a git credential.helper that expands `$GH_TOKEN` from the box env; clone-failure log tails stay token-free |
 | Blank image drifts (loses git/node/claude) | provision command verifies tools first and fails legibly (same guard as the template builder's cloning-worker step) |
 
 ## Out of scope
