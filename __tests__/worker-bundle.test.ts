@@ -4,10 +4,10 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { bundleWorkerSha, locateWorkerBundle, readWorkerBundle } from "../lib/worker-bundle";
+import { bundleWorkerSha, readWorkerBundle } from "../lib/worker-bundle";
 import { config } from "../lib/config";
 
-const KNOBS = ["TASK_ORCH_BOX_PROVISION", "TASK_ORCH_BUNDLE_URL", "AUTH_URL", "TASK_ORCH_BOX_PROVISION_TIMEOUT_S"];
+const KNOBS = ["TASK_ORCH_BOX_PROVISION", "TASK_ORCH_BOX_PROVISION_TIMEOUT_S"];
 let saved: Record<string, string | undefined>;
 let dir: string;
 beforeEach(() => {
@@ -23,26 +23,27 @@ afterEach(() => {
   }
 });
 
-describe("locateWorkerBundle", () => {
+describe("readWorkerBundle", () => {
   it("returns null when the bundle file does not exist", () => {
-    expect(locateWorkerBundle({ path: join(dir, "nope.js") })).toBeNull();
+    expect(readWorkerBundle({ path: join(dir, "nope.js") })).toBeNull();
   });
 
-  it("returns path, size, and sha256 of the bundle", () => {
+  it("returns bytes, size, and sha256 derived from one read", () => {
     const p = join(dir, "run-worker.standalone.js");
     writeFileSync(p, "console.log('w')\n");
     const want = createHash("sha256").update("console.log('w')\n").digest("hex");
-    const got = locateWorkerBundle({ path: p });
-    expect(got).toMatchObject({ path: p, size: 17, sha256: want });
+    const got = readWorkerBundle({ path: p });
+    expect(got).toMatchObject({ size: 17, sha256: want });
+    expect(got!.bytes.toString()).toBe("console.log('w')\n");
   });
 
-  it("recomputes the hash when the file changes", () => {
+  it("reflects file changes immediately (no cache)", () => {
     const p = join(dir, "run-worker.standalone.js");
     writeFileSync(p, "one");
-    const first = locateWorkerBundle({ path: p })!.sha256;
+    const first = readWorkerBundle({ path: p })!.sha256;
     writeFileSync(p, "two");
     utimesSync(p, new Date(Date.now() + 5_000), new Date(Date.now() + 5_000));
-    expect(locateWorkerBundle({ path: p })!.sha256).not.toBe(first);
+    expect(readWorkerBundle({ path: p })!.sha256).not.toBe(first);
   });
 });
 
@@ -91,14 +92,6 @@ describe("box provisioning config", () => {
     expect(config.box.provisionMode).toBe("template");
     process.env.TASK_ORCH_BOX_PROVISION = "wat";
     expect(() => config.box.provisionMode).toThrow(/TASK_ORCH_BOX_PROVISION/);
-  });
-
-  it("derives bundleUrl from AUTH_URL and prefers the explicit override", () => {
-    expect(config.box.bundleUrl).toBeUndefined();
-    process.env.AUTH_URL = "https://tasks.example.com/";
-    expect(config.box.bundleUrl).toBe("https://tasks.example.com/api/worker-bundle");
-    process.env.TASK_ORCH_BUNDLE_URL = "https://cdn.example.com/wb";
-    expect(config.box.bundleUrl).toBe("https://cdn.example.com/wb");
   });
 
   it("defaults provisionTimeoutSeconds to 300", () => {

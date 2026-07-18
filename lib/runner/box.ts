@@ -103,12 +103,13 @@ const WORKER_BOOTSTRAP_COMMAND = [
 /** The blank-box provision script. Env-expanded ON THE BOX ($TASK_ORCH_…,
  *  $GH_TOKEN); the control plane interpolates only repo identity and paths.
  *  Spec: box-blank-provision. */
-/** How the worker bundle lands on a blank box: "pull" curls it from the
- *  control plane (TASK_ORCH_BUNDLE_URL — production, where the server is
- *  box-reachable); "push" means the control plane already uploaded it in
- *  base64 chunks via the box files API (local dev, where localhost isn't),
- *  and the command only reassembles + verifies the interpolated sha. */
-type BundleAcquisition = { kind: "pull" } | { kind: "push"; sha256: string; partCount: number };
+/** The worker bundle lands on a blank box as a chunked base64 upload through
+ *  the box files API (PUT /boxes/:id/files) — the one transport that works
+ *  for every control plane (a localhost dev server is not box-reachable, and
+ *  an HTTP download path would need a public URL + its own auth). The
+ *  provision command reassembles the explicitly-ordered parts and verifies
+ *  the interpolated sha256 of the exact bytes the control plane uploaded. */
+type BundleAcquisition = { sha256: string; partCount: number };
 
 /** Raw bytes per PUT /boxes/:id/files chunk (~8MB base64 in the JSON body). */
 const BUNDLE_UPLOAD_CHUNK_BYTES = 6 * 1024 * 1024;
@@ -147,28 +148,19 @@ function blankProvisionCommand(
     `if [ -n "\${GH_TOKEN:-}" ]; then ` +
     `git -c credential.helper=${shq(CRED_HELPER)} clone --depth 1 "${cloneUrl}" ${shq(repoPath)}; ` +
     `else git clone --depth 1 "${cloneUrl}" ${shq(repoPath)}; fi`;
-  // curl is only a required tool when the bundle is pulled over HTTP.
-  const tools = ["git", "node", ...(bundle.kind === "pull" ? ["curl"] : []), "sha256sum"];
+  const tools = ["git", "node", "sha256sum"];
   const toolCheck =
     tools.map((t) => `command -v ${t} >/dev/null`).join(" && ") +
     ` && test -x ${shq(BOX_CLAUDE_BINARY)} || { echo "blank box missing required tool: ${tools.join(", ")}, or ${BOX_CLAUDE_BINARY}" >&2; exit 127; }`;
 
-  const acquire =
-    bundle.kind === "pull"
-      ? [
-          `curl -fsSL --retry 3 --retry-delay 2 -H "authorization: Bearer $TASK_ORCH_WORKER_CHANNEL_CREDENTIAL" -H "x-run-id: $TASK_ORCH_RUN_ID" -D /tmp/worker-bundle.headers -o /home/user/worker/run-worker.js "$TASK_ORCH_BUNDLE_URL"`,
-          `want=$(tr -d '\\r' < /tmp/worker-bundle.headers | awk 'tolower($1)=="x-bundle-sha256:" {print $2}' | tail -1)`,
-          `got=$(sha256sum /home/user/worker/run-worker.js | awk '{print $1}')`,
-          `[ -n "$want" ] && [ "$want" = "$got" ] || { echo "bundle checksum mismatch (want=$want got=$got)" >&2; exit 1; }`,
-        ]
-      : [
-          // Parts listed explicitly, in upload order — never trust glob order
-          // for byte-level reassembly.
-          `cat ${Array.from({ length: bundle.partCount }, (_, i) => bundleUploadPartPath(i)).join(" ")} > /home/user/worker/run-worker.js`,
-          `rm -rf ${BUNDLE_UPLOAD_DIR}`,
-          `got=$(sha256sum /home/user/worker/run-worker.js | awk '{print $1}')`,
-          `[ "${bundle.sha256}" = "$got" ] || { echo "bundle checksum mismatch after upload (want=${bundle.sha256} got=$got)" >&2; exit 1; }`,
-        ];
+  const acquire = [
+    // Parts listed explicitly, in upload order — never trust glob order
+    // for byte-level reassembly.
+    `cat ${Array.from({ length: bundle.partCount }, (_, i) => bundleUploadPartPath(i)).join(" ")} > /home/user/worker/run-worker.js`,
+    `rm -rf ${BUNDLE_UPLOAD_DIR}`,
+    `got=$(sha256sum /home/user/worker/run-worker.js | awk '{print $1}')`,
+    `[ "${bundle.sha256}" = "$got" ] || { echo "bundle checksum mismatch after upload (want=${bundle.sha256} got=$got)" >&2; exit 1; }`,
+  ];
 
   return [
     `set -eu`,
@@ -496,28 +488,15 @@ export class BoxRunnerProvider implements RunnerProvider {
     const bundleOpts = process.env.TASK_ORCH_BUNDLE_PATH
       ? { path: process.env.TASK_ORCH_BUNDLE_PATH }
       : {};
-    // Bundle transport: pull (box curls the control plane — production) when a
-    // URL resolves; otherwise PUSH the local bundle file through the box files
-    // API. Push is what makes a localhost control plane work: this is the only
-    // box→control-plane connection in the system, and localhost isn't
-    // box-reachable, so without a URL we ship the bytes ourselves.
-    const bundleUrl = config.box.bundleUrl;
-    let pushBundle: { bytes: Buffer; sha256: string } | null = null;
-    if (!bundleUrl) {
-      pushBundle = readWorkerBundle(bundleOpts);
-      if (!pushBundle) {
-        throw new Error(
-          "Blank box provisioning needs a worker bundle. Build one with " +
-            "`npm run build:worker:standalone` (it will be pushed to the box via the " +
-            "files API), or set TASK_ORCH_BUNDLE_URL / AUTH_URL to a box-reachable " +
-            "control plane, or set TASK_ORCH_BOX_PROVISION=template."
-        );
-      }
-      if (typeof box.writeFile !== "function") {
-        throw new Error(
-          "Box client does not support file writes; set TASK_ORCH_BUNDLE_URL so the box can download the bundle instead."
-        );
-      }
+    const pushBundle = readWorkerBundle(bundleOpts);
+    if (!pushBundle) {
+      throw new Error(
+        "Blank box provisioning needs a worker bundle to upload. Build one with " +
+          "`npm run build:worker:standalone`, or set TASK_ORCH_BOX_PROVISION=template."
+      );
+    }
+    if (typeof box.writeFile !== "function") {
+      throw new Error("Box client does not support file writes (writeFile); cannot provision a blank box.");
     }
     const repoRow = await dbTransport.resolveRepo(input.runId);
     const parsedRemote = repoRow ? ownerRepoFromRemote(repoRow.remote ?? null) : null;
@@ -547,7 +526,7 @@ export class BoxRunnerProvider implements RunnerProvider {
       await emitBoxEvent(input.runId, "runner_box_provisioning", {
         mode: "blank",
         workerSha: sha,
-        bundleSource: pushBundle ? "push" : "pull",
+        bundleBytes: pushBundle.bytes.length,
       });
       const created = await box.create({ env, noEnv: true });
       boxId = created.id;
@@ -589,20 +568,17 @@ export class BoxRunnerProvider implements RunnerProvider {
         timeoutMs: config.box.readyTimeoutMs,
         pollMs: config.box.pollMs,
       });
-      let acquisition: BundleAcquisition = { kind: "pull" };
-      if (pushBundle) {
-        let partCount = 0;
-        for (let off = 0; off < pushBundle.bytes.length; off += BUNDLE_UPLOAD_CHUNK_BYTES) {
-          const part = pushBundle.bytes.subarray(off, off + BUNDLE_UPLOAD_CHUNK_BYTES);
-          await box.writeFile!(boxId, {
-            path: bundleUploadPartPath(partCount),
-            content: part.toString("base64"),
-            encoding: "base64",
-          });
-          partCount += 1;
-        }
-        acquisition = { kind: "push", sha256: pushBundle.sha256, partCount };
+      let partCount = 0;
+      for (let off = 0; off < pushBundle.bytes.length; off += BUNDLE_UPLOAD_CHUNK_BYTES) {
+        const part = pushBundle.bytes.subarray(off, off + BUNDLE_UPLOAD_CHUNK_BYTES);
+        await box.writeFile!(boxId, {
+          path: bundleUploadPartPath(partCount),
+          content: part.toString("base64"),
+          encoding: "base64",
+        });
+        partCount += 1;
       }
+      const acquisition: BundleAcquisition = { sha256: pushBundle.sha256, partCount };
       await runDetachedBoxStep(
         box,
         boxId,

@@ -25,58 +25,46 @@ launch: the bundle is 23MB, the clone is ~8s.
 
 ## Design
 
-### 1. The control plane serves its own bundle
+### 1. The control plane uploads its own bundle
 
-New route `GET /api/worker-bundle` serving `dist/run-worker.standalone.js`
-from the server's own deployment.
+The control plane ships `dist/run-worker.standalone.js` in its own deployment
+(`Dockerfile.server` builds it; local dev builds it with
+`npm run build:worker:standalone`) and **uploads it into the box** at
+provision time: base64 chunks of 6MB via the box files API
+(`PUT /boxes/:id/files`, `BoxClient.writeFile`), reassembled on the box from
+an explicitly-ordered part list and verified against the sha256 the control
+plane computed from the exact bytes it uploaded.
 
-- **Why the control plane, not the CI artifact:** the served worker is
-  *version-locked to the server driving it* — no skew window, no GitHub
-  Actions API dance from inside a box, no token-scope roulette with
-  `GH_TOKEN` (artifacts need `actions:read`; clones don't). The CI artifact
-  (`worker-bundle-<sha>`) remains provenance/debugging, not the runtime
-  source.
-- **Auth:** `Authorization: Bearer <channel credential>` + `X-Run-Id`
-  header, verified statelessly via `verifyChannelCredential` — the same
-  HMAC credential the box already holds
-  (`TASK_ORCH_WORKER_CHANNEL_CREDENTIAL`). Run-scoped, no session, no API
-  token in the box.
-- **Integrity/identity headers:** `X-Bundle-Sha256` (verified by the box
-  after download) and `X-Worker-Sha` (`workerBuildSha()`).
-- **Missing file** (dev server that never built the bundle) → 503 naming
-  `npm run build:worker:standalone`.
-- `Dockerfile.server`'s build stage runs `npm run build:worker:standalone`
-  and the runtime stage copies `dist/`.
+- **Why upload, not download:** a download URL was the system's only
+  box→control-plane connection — impossible for a localhost control plane,
+  and it needed its own auth (run-scoped HMAC), an HTTP route, and a
+  URL-configuration story. Upload works identically for every control plane,
+  needs no route and no credential beyond the Box API key the control plane
+  already holds, and keeps the worker version-locked to the server driving
+  it by construction. (An earlier iteration shipped the authed
+  `GET /api/worker-bundle` route + curl pull; it was removed in favor of
+  upload-only.)
+- **Identity:** the manifest's `workerBuildSha` prefers the
+  `dist/run-worker.standalone.js.sha` sidecar baked at build time
+  (`ARG GIT_SHA` in `Dockerfile.server`, git HEAD locally), falling back to
+  `workerBuildSha()`.
+- **Cost:** ~31MB of base64 through the box API per provision (4 chunked
+  PUTs), a few seconds — accepted; provisioning is per-run frequency.
 
-Trade-off, accepted: the box env gains a control-plane URL
-(`TASK_ORCH_BUNDLE_URL`), which `workerChannelDispatchEnv` deliberately
-avoided. The credential it could pair with is run-scoped and
-single-purpose, and the URL is public anyway; the worker still learns
-everything else from the pushed `run.start` snapshot.
-
-**Push fallback (local dev):** the bundle curl is the only box→control-plane
-connection in the system, and a localhost control plane is not box-reachable.
-When no bundle URL resolves, `createBlank` instead **pushes** the local
-`dist/run-worker.standalone.js` into the box in base64 chunks via
-`PUT /boxes/:id/files` (`BoxClient.writeFile`), and the provision command
-reassembles the explicitly-ordered parts and verifies the interpolated
-sha256. No tunnel, no route, no auth needed. Pull remains the production
-path (box pulls at its own pace, no ~31MB JSON bodies through the box API).
-
-**Status**: route, blank provisioning, and the push fallback landed; template mode remains behind `TASK_ORCH_BOX_PROVISION=template`.
+**Status**: upload-only blank provisioning landed; template mode remains behind `TASK_ORCH_BOX_PROVISION=template`.
 
 ### 2. Blank provisioning replaces the template fork
 
 `BoxRunnerProvider.create()` in blank mode:
 
 1. `client.create({ env, noEnv: true })` — same blank image the template
-   builder already uses; `env` = `buildBoxWorkerEnv(...)` plus
-   `TASK_ORCH_BUNDLE_URL`.
+   builder already uses; `env` = `buildBoxWorkerEnv(...)`. Then the chunked
+   bundle upload (§1).
 2. One **provision command** (detached setsid + `.rc` polling, the template
    builder's proven pattern, budget `config.box.provisionTimeoutSeconds`,
    default 300):
-   - `curl` the bundle to `/home/user/worker/run-worker.js`, dump headers,
-     verify `X-Bundle-Sha256` with `sha256sum`;
+   - reassemble the uploaded parts to `/home/user/worker/run-worker.js` and
+     verify the interpolated sha256 with `sha256sum`;
    - `git clone --depth 1` **the run's own repository** (its GitHub remote,
      which admission guarantees) to `TASK_ORCH_RUNNER_REPO_PATH`, using
      `GH_TOKEN` from the box env;
@@ -120,9 +108,8 @@ template builds, zero sha-drift, and per-run repositories.
 
 | risk | mitigation |
 | --- | --- |
-| Bundle route abused / credential replay | HMAC is run+instance-scoped; route additionally checks the run exists and is active; 23MB static bytes, no state |
-| Download/clone flake at launch | provision command is detached + polled with tail-on-failure evidence, normal dispatch retry applies; failure is per-run, never a shared cooldown |
-| Server deployed without the bundle | route 503s with the build command; Dockerfile builds it unconditionally |
+| Upload/clone flake at launch | provision command is detached + polled with tail-on-failure evidence; a failed provision clears the mapping's boxId so retry provisions a fresh box; failure is per-run, never a shared cooldown |
+| Server deployed without the bundle | dispatch fails before any box is created, naming `npm run build:worker:standalone`; Dockerfile builds it unconditionally |
 | GH_TOKEN exposure during clone | token never enters the clone URL or argv — it rides a git credential.helper that expands `$GH_TOKEN` from the box env; clone-failure log tails stay token-free |
 | Blank image drifts (loses git/node/claude) | provision command verifies tools first and fails legibly (same guard as the template builder's cloning-worker step) |
 

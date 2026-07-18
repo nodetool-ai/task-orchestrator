@@ -1,15 +1,17 @@
 // __tests__/box-blank-provision.test.ts
 //
 // Blank provisioning: no template snapshot. create() must CREATE a blank box
-// (never fork), run one detached provision command that downloads the bundle
-// (curl + sha256 verify against the X-Bundle-Sha256 header), clones the RUN'S
-// OWN repo, writes the standard manifest — and then the normal manifest/
-// bootstrap flow proceeds unchanged.
+// (never fork), UPLOAD the worker bundle through the box files API (base64
+// chunks — the only transport that works for every control plane, localhost
+// included), then run one detached provision command that reassembles +
+// sha256-verifies the bundle, clones the RUN'S OWN repo, and writes the
+// standard manifest — after which the normal manifest/bootstrap flow
+// proceeds unchanged.
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 
 import { db } from "../db";
@@ -20,6 +22,18 @@ import { BoxRunnerProvider } from "../lib/runner/box";
 import type { BoxClient } from "../lib/runner/box-client";
 
 const WORKER_SHA = "b".repeat(40);
+
+// Shared bundle fixture every test pushes: 13MB forces multiple upload chunks.
+const BUNDLE_BYTES = Buffer.alloc(13 * 1024 * 1024, 7);
+const BUNDLE_SHA = createHash("sha256").update(BUNDLE_BYTES).digest("hex");
+let bundleDir: string;
+let bundlePath: string;
+beforeAll(() => {
+  bundleDir = mkdtempSync(join(tmpdir(), "blank-push-"));
+  bundlePath = join(bundleDir, "run-worker.standalone.js");
+  writeFileSync(bundlePath, BUNDLE_BYTES);
+});
+afterAll(() => rmSync(bundleDir, { recursive: true, force: true }));
 
 // The manifest the fake box's `cat` of the template path answers with — the
 // same shape the real blank-provision command writes.
@@ -159,7 +173,7 @@ function blankEnv() {
   vi.stubEnv("AUTH_SECRET", "test-channel-secret");
   // TASK_ORCH_BOX_TEMPLATE_ID intentionally unset: blank mode never resolves a
   // template. TASK_ORCH_BOX_PROVISION intentionally unset: blank is the default.
-  vi.stubEnv("TASK_ORCH_BUNDLE_URL", "https://cp.example.com/api/worker-bundle");
+  vi.stubEnv("TASK_ORCH_BUNDLE_PATH", bundlePath);
   vi.stubEnv("TASK_ORCH_WORKER_SHA", WORKER_SHA);
   vi.stubEnv("GH_TOKEN", "ghp_should_never_appear_in_a_command_literal");
 }
@@ -189,15 +203,27 @@ describe("box blank provisioning", () => {
     expect(fake.forkCalled()).toBe(false);
     expect(fake.createdInput()).toMatchObject({ noEnv: true });
     const createdEnv = fake.createdInput()!.env;
-    expect(createdEnv).toHaveProperty("TASK_ORCH_BUNDLE_URL", "https://cp.example.com/api/worker-bundle");
     expect(createdEnv).toHaveProperty("TASK_ORCH_WORKER_CHANNEL_CREDENTIAL");
     expect(typeof createdEnv.TASK_ORCH_WORKER_CHANNEL_CREDENTIAL).toBe("string");
     expect(createdEnv.TASK_ORCH_WORKER_CHANNEL_CREDENTIAL.length).toBeGreaterThan(0);
 
-    const provisionCommand = fake.commands.find(
-      (cmd) => cmd.includes("curl") && cmd.includes("$TASK_ORCH_BUNDLE_URL") && cmd.includes("x-bundle-sha256")
+    // The bundle travels as a chunked, ordered, base64 files-API upload that
+    // reassembles to the exact bytes — never as an HTTP download by the box.
+    expect(fake.writes.length).toBeGreaterThan(1);
+    expect(fake.writes.every((w) => w.encoding === "base64")).toBe(true);
+    expect(fake.writes.map((w) => w.path)).toEqual(
+      fake.writes.map((_, i) => `worker-upload/part-${String(i).padStart(3, "0")}`)
     );
+    const reassembled = Buffer.concat(fake.writes.map((w) => Buffer.from(w.content, "base64")));
+    expect(reassembled.equals(BUNDLE_BYTES)).toBe(true);
+
+    const provisionCommand = fake.commands.find((cmd) => cmd.includes("worker-upload/part-000"));
     expect(provisionCommand).toBeTruthy();
+    // The command verifies the interpolated sha of the exact uploaded bytes
+    // and never references curl or a download URL.
+    expect(provisionCommand).toContain(BUNDLE_SHA);
+    expect(provisionCommand).not.toContain("curl");
+    expect(provisionCommand).not.toContain("TASK_ORCH_BUNDLE_URL");
     expect(provisionCommand).toContain("git clone --depth 1");
     expect(provisionCommand).toContain("github.com/acme/widget");
     expect(provisionCommand).toContain('"workerEntryPath":"/home/user/worker/run-worker.js"');
@@ -229,58 +255,27 @@ describe("box blank provisioning", () => {
     });
   });
 
-  it("pushes the bundle through the box files API when no bundle URL is configured", async () => {
-    // The first box→control-plane connection this system ever needed was the
-    // bundle curl — which a localhost control plane cannot serve. With no URL,
-    // the control plane PUSHES the bundle into the box via PUT /boxes/:id/files
-    // instead, so local dev needs no tunnel.
+  it("uploads via the files API even when a legacy bundle URL is configured", async () => {
+    // The pull path is gone: TASK_ORCH_BUNDLE_URL is a no-op, the box never
+    // downloads anything, and the URL is not handed into the box env.
     blankEnv();
-    vi.stubEnv("TASK_ORCH_BUNDLE_URL", "");
-    vi.stubEnv("AUTH_URL", "");
-    const dir = mkdtempSync(join(tmpdir(), "blank-push-"));
-    try {
-      // 13MB forces multiple upload chunks; the assembled bytes must round-trip.
-      const bundleBytes = Buffer.alloc(13 * 1024 * 1024, 7);
-      const bundlePath = join(dir, "run-worker.standalone.js");
-      writeFileSync(bundlePath, bundleBytes);
-      vi.stubEnv("TASK_ORCH_BUNDLE_PATH", bundlePath);
-      const bundleSha = createHash("sha256").update(bundleBytes).digest("hex");
+    vi.stubEnv("TASK_ORCH_BUNDLE_URL", "https://cp.example.com/api/worker-bundle");
+    const fake = fakeBlankBox();
+    const { run, scope } = await runWithRemote("git@github.com:acme/legacy-url.git");
 
-      const fake = fakeBlankBox();
-      const { run, scope } = await runWithRemote("git@github.com:acme/pushed.git");
+    const ref = await new BoxRunnerProvider(fake.client).create({ runId: run.id, scope });
 
-      const ref = await new BoxRunnerProvider(fake.client).create({ runId: run.id, scope });
-      expect(ref).toMatchObject({ provider: "box" });
-
-      // Chunked, ordered, base64 upload that reassembles to the exact bytes.
-      expect(fake.writes.length).toBeGreaterThan(1);
-      expect(fake.writes.every((w) => w.encoding === "base64")).toBe(true);
-      expect(fake.writes.map((w) => w.path)).toEqual(
-        fake.writes.map((_, i) => `worker-upload/part-${String(i).padStart(3, "0")}`)
-      );
-      const reassembled = Buffer.concat(fake.writes.map((w) => Buffer.from(w.content, "base64")));
-      expect(reassembled.equals(bundleBytes)).toBe(true);
-
-      // The provision command assembles the parts and verifies the interpolated
-      // sha — and never references the (unset) download URL or curl.
-      const provisionCommand = fake.commands.find((cmd) => cmd.includes("worker-upload/part-000"));
-      expect(provisionCommand).toBeTruthy();
-      expect(provisionCommand).toContain(bundleSha);
-      expect(provisionCommand).toContain("/home/user/worker/run-worker.js");
-      expect(provisionCommand).not.toContain("$TASK_ORCH_BUNDLE_URL");
-      expect(fake.createdInput()!.env.TASK_ORCH_BUNDLE_URL).toBeUndefined();
-
-      const [mapping] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
-      expect(mapping).toMatchObject({ provider: "box", state: "running" });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
+    expect(ref).toMatchObject({ provider: "box" });
+    expect(fake.writes.length).toBeGreaterThan(0);
+    expect(fake.createdInput()!.env.TASK_ORCH_BUNDLE_URL).toBeUndefined();
+    for (const cmd of fake.commands) {
+      expect(cmd).not.toContain("curl");
+      expect(cmd).not.toContain("TASK_ORCH_BUNDLE_URL");
     }
   });
 
-  it("fails actionably when neither a bundle URL nor a local bundle exists", async () => {
+  it("fails actionably when no local bundle exists to upload", async () => {
     blankEnv();
-    vi.stubEnv("TASK_ORCH_BUNDLE_URL", "");
-    vi.stubEnv("AUTH_URL", "");
     vi.stubEnv("TASK_ORCH_BUNDLE_PATH", "/nonexistent/run-worker.standalone.js");
     const fake = fakeBlankBox();
     const { run, scope } = await runWithRemote("git@github.com:acme/nobundle.git");

@@ -447,17 +447,7 @@ export const config = Object.freeze({
       if (raw === "blank" || raw === "template") return raw;
       throw new Error(`TASK_ORCH_BOX_PROVISION must be 'blank' or 'template', got '${raw}'.`);
     },
-    /** Where a blank-provisioned box downloads the worker bundle. Explicit
-     *  TASK_ORCH_BUNDLE_URL wins; else derived from AUTH_URL; else undefined
-     *  (blank-mode dispatch fails with an actionable error). */
-    get bundleUrl(): string | undefined {
-      const explicit = strEnv("TASK_ORCH_BUNDLE_URL");
-      if (explicit) return explicit;
-      const base = strEnv("AUTH_URL");
-      if (!base) return undefined;
-      return `${base.replace(/\/+$/, "")}/api/worker-bundle`;
-    },
-    /** Budget for the blank-box provision command (download + clone + manifest). */
+    /** Budget for the blank-box provision command (assemble + clone + manifest). */
     get provisionTimeoutSeconds(): number {
       const value = intEnv("TASK_ORCH_BOX_PROVISION_TIMEOUT_S", 300);
       return value > 0 ? value : 300;
