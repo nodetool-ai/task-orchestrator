@@ -120,6 +120,12 @@ describe("buildBoxWorkerEnv", () => {
       buildBoxWorkerEnv({ runId: 7, repoId: "repo_7", channelInstanceId: "not-a-valid-id" })
     ).toThrow(/invalid channelInstanceId/);
   });
+
+  it("pins the Box's preinstalled Claude Code binary for the worker", () => {
+    stubBaseEnv();
+    const env = buildBoxWorkerEnv({ runId: 42, repoId: "repo_123", channelInstanceId: CHANNEL_INSTANCE_ID });
+    expect(env.TASK_ORCH_CLAUDE_BINARY).toBe("/usr/local/bin/claude");
+  });
 });
 
 describe("validateBoxWorkerEnv", () => {

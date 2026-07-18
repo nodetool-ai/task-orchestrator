@@ -12,6 +12,10 @@ export const BOX_ENV_MAX_VARIABLES = 100;
 export const BOX_ENV_MAX_BYTES = 64 * 1024;
 
 const DEFAULT_SESSION_ROOT = "/home/user/.task-orchestrator/session";
+/** The Box image ships Claude Code preinstalled at this fixed path. The
+ *  worker's Claude backend drives it via pathToClaudeCodeExecutable; the
+ *  template omits the SDK's 251MB bundled binary (`npm ci --omit=optional`). */
+export const BOX_CLAUDE_BINARY = "/usr/local/bin/claude";
 const REDACTED = "[redacted]";
 
 export type BoxWorkerEnvInput = {
@@ -92,6 +96,7 @@ export function buildBoxWorkerEnv(input: BoxWorkerEnvInput): Record<string, stri
     TASK_ORCH_NESTED_DISPATCH: input.nestedDispatch ?? nestedDispatchMode(),
     TASK_ORCH_RUNNER_REPO_PATH: repoPath,
     SESSION_ROOT: input.sessionRoot ?? DEFAULT_SESSION_ROOT,
+    TASK_ORCH_CLAUDE_BINARY: BOX_CLAUDE_BINARY,
     // Worker WebSocket channel identity: the worker binds boxListenEndpoint()
     // (tcp:0.0.0.0:8787) and requires the control plane to present the credential
     // derived from (runId, channelInstanceId). Same env shape the Docker/Fly
