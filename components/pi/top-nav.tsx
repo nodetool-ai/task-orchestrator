@@ -13,6 +13,7 @@ const NAV: { id: string; href: string; label: string; icon: React.ComponentProps
   { id: "plans", href: "/plans", label: "Plans", icon: "plans" },
   { id: "tasks", href: "/tasks", label: "Tasks", icon: "tasks" },
   { id: "runs", href: "/runs", label: "Runs", icon: "chat" },
+  { id: "environments", href: "/environments", label: "Environments", icon: "environments" },
   { id: "settings", href: "/settings", label: "Settings", icon: "settings" },
 ];
 

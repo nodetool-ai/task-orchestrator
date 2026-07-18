@@ -415,7 +415,7 @@ type IconName =
   | "x" | "chev-r" | "chev-l" | "chev-d" | "arrow-up" | "check" | "circle"
   | "circle-filled" | "flame" | "lightning" | "clock" | "edit" | "term" | "code"
   | "diff" | "user" | "folder" | "cmd" | "settings" | "filter" | "plus" | "pi"
-  | "live-dot";
+  | "environments" | "live-dot";
 
 export function Icon({
   name,
@@ -478,6 +478,7 @@ export function Icon({
     case "filter": return <svg {...common}><path d="M3 5h18l-7 9v6l-4-2v-4z" /></svg>;
     case "plus": return <svg {...common}><path d="M12 5v14M5 12h14" /></svg>;
     case "pi": return <svg {...common}><path d="M4 8h16M8 8v9a2 2 0 0 1-2 2M16 8v8c0 1.5.5 3 2 3M11 8c0 4-1.5 9-3 11" strokeWidth={c * 1.05} /></svg>;
+    case "environments": return <svg {...common}><path d="M12 2 3 7l9 5 9-5-9-5z" /><path d="M3 12l9 5 9-5" /><path d="M3 17l9 5 9-5" /></svg>;
     case "live-dot": return (
       <svg width={size} height={size} viewBox="0 0 24 24" style={{ display: "inline-block", verticalAlign: "middle" }}>
         <circle cx="12" cy="12" r="5" fill="currentColor" />
