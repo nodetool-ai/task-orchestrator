@@ -495,26 +495,40 @@ function SidebarRow({
 
 function SidebarPip({ item, active }: { item: LiveSessionItem; active: boolean }) {
   const state = BUCKET_TO_STATE[item.bucket];
+  const attention = ATTENTION_BUCKETS.has(item.bucket);
+  // In collapsed mode a pip is a self-contained icon button, not a row, so the
+  // `pi-attention` left bar doesn't apply — it reads as a clipped card when the
+  // pip is only ~40px wide. Signal attention with a state-tinted fill/border.
+  const stateColor = `var(--s-${item.bucket})`;
   return (
-    <Tooltip content={`${BUCKET_LABEL[item.bucket]}: ${item.title}`} side="bottom">
+    <Tooltip content={`${BUCKET_LABEL[item.bucket]}: ${item.title}`} side="right">
       <Link
         href={`/runs/${item.runDbId}`}
         aria-label={`${BUCKET_LABEL[item.bucket]}: ${item.title}`}
-        className={ringClass(item.bucket)}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        height: 32,
-        borderRadius: 6,
-        border: "1px solid var(--pi-hairline)",
-        background: active ? "var(--pi-surface-2)" : "var(--pi-surface)",
-        textDecoration: "none",
-        color: "var(--pi-fg)",
-        ...ringVar(item.bucket),
-      }}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          height: 34,
+          borderRadius: 8,
+          border: `1px solid ${
+            active
+              ? "var(--pi-hairline-strong)"
+              : attention
+                ? `color-mix(in srgb, ${stateColor} 34%, transparent)`
+                : "var(--pi-hairline)"
+          }`,
+          background: attention
+            ? `color-mix(in srgb, ${stateColor} 12%, var(--pi-surface))`
+            : active
+              ? "var(--pi-surface-2)"
+              : "var(--pi-surface)",
+          textDecoration: "none",
+          color: "var(--pi-fg)",
+          transition: "border-color 120ms, background 120ms",
+        }}
       >
-        <StateIcon state={state} size={13} spin={item.bucket === "running"} />
+        <StateIcon state={state} size={14} spin={item.bucket === "running"} />
       </Link>
     </Tooltip>
   );
@@ -575,7 +589,7 @@ function ChatRow({ item, active }: { item: ChatSidebarItem; active: boolean }) {
 
 function ChatPip({ item, active }: { item: ChatSidebarItem; active: boolean }) {
   return (
-    <Tooltip content={item.title} side="bottom">
+    <Tooltip content={item.title} side="right">
       <Link
         href={`/runs/${item.runDbId}`}
         aria-label={item.title}
@@ -583,15 +597,16 @@ function ChatPip({ item, active }: { item: ChatSidebarItem; active: boolean }) {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          height: 32,
-          borderRadius: 6,
-          border: "1px solid var(--pi-hairline)",
+          height: 34,
+          borderRadius: 8,
+          border: `1px solid ${active ? "var(--pi-hairline-strong)" : "var(--pi-hairline)"}`,
           background: active ? "var(--pi-surface-2)" : "var(--pi-surface)",
           textDecoration: "none",
-          color: "var(--pi-fg)",
+          color: item.running ? "var(--pi-fg)" : "var(--pi-muted)",
+          transition: "border-color 120ms, background 120ms",
         }}
       >
-        <Icon name="chat" size={13} />
+        <Icon name="chat" size={14} />
       </Link>
     </Tooltip>
   );
