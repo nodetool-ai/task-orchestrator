@@ -501,7 +501,7 @@ function SidebarPip({ item, active }: { item: LiveSessionItem; active: boolean }
   // pip is only ~40px wide. Signal attention with a state-tinted fill/border.
   const stateColor = `var(--s-${item.bucket})`;
   return (
-    <Tooltip content={`${BUCKET_LABEL[item.bucket]}: ${item.title}`} side="right">
+    <Tooltip content={`${BUCKET_LABEL[item.bucket]}: ${item.title}`} side="bottom">
       <Link
         href={`/runs/${item.runDbId}`}
         aria-label={`${BUCKET_LABEL[item.bucket]}: ${item.title}`}
@@ -589,7 +589,7 @@ function ChatRow({ item, active }: { item: ChatSidebarItem; active: boolean }) {
 
 function ChatPip({ item, active }: { item: ChatSidebarItem; active: boolean }) {
   return (
-    <Tooltip content={item.title} side="right">
+    <Tooltip content={item.title} side="bottom">
       <Link
         href={`/runs/${item.runDbId}`}
         aria-label={item.title}
