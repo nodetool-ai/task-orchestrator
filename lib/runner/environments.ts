@@ -6,7 +6,7 @@
 // contract and now filters provider='box'. The partial unique index on
 // (provider, worker_sha) WHERE state IN ('building','ready') is the
 // per-provider single-flight lock.
-import { and, desc, eq, inArray, ne } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, lt, ne } from "drizzle-orm";
 import { db } from "../../db";
 import { environments } from "../../db/schema";
 import { config } from "../config";
@@ -105,12 +105,28 @@ export async function markEnvironmentReady(
     .where(eq(environments.id, id))
     .returning();
   if (!row) return;
-  // A newer environment supersedes older ready ones OF THE SAME PROVIDER; the
-  // old artifacts (boxes/images) are left for retention/operators.
+  // Supersede is ordered by id (serial, monotonic with creation) so a build
+  // that finishes LATE cannot clobber a newer one that already went ready.
+  // Two moves, each idempotent, converge to "highest-id ready row wins"
+  // regardless of the order two concurrent builds complete in:
+  //   1. this row supersedes older ready rows of the same provider;
+  //   2. if a NEWER ready row already exists, this row is stale on arrival and
+  //      demotes ITSELF instead of standing as a second ready row.
   await db
     .update(environments)
     .set({ state: "superseded" })
-    .where(and(eq(environments.provider, row.provider), eq(environments.state, "ready"), ne(environments.id, id)));
+    .where(and(eq(environments.provider, row.provider), eq(environments.state, "ready"), lt(environments.id, id)));
+  const [newer] = await db
+    .select({ id: environments.id })
+    .from(environments)
+    .where(and(eq(environments.provider, row.provider), eq(environments.state, "ready"), gt(environments.id, id)))
+    .limit(1);
+  if (newer) {
+    await db
+      .update(environments)
+      .set({ state: "superseded" })
+      .where(and(eq(environments.id, id), eq(environments.state, "ready")));
+  }
 }
 
 export async function markEnvironmentFailed(id: number, error: string): Promise<void> {
@@ -126,9 +142,18 @@ export async function listEnvironments(): Promise<EnvironmentRow[]> {
 }
 
 /**
- * Make configured docker/fly images visible as ready environments without a
+ * Make externally-supplied images visible as ready environments without a
  * build. Idempotent; never throws (the page must render even when the worker
  * SHA can't be resolved, e.g. no network for ls-remote).
+ *
+ * Only fly qualifies: its image is built and pushed out-of-app, so a configured
+ * `FLY_RUNNER_IMAGE` genuinely names a ready artifact. Docker is deliberately
+ * excluded — `TASK_ORCH_WORKER_IMAGE` is the TARGET tag the in-app host build
+ * writes to, not evidence an image already exists. Pre-marking it `ready` would
+ * make the page's "Build image" button 409 forever (a live ready row blocks the
+ * build), so docker becomes ready only after a real build completes. Dispatch
+ * reads the env var directly and never gates on a ready row, so nothing else
+ * depends on docker being pre-registered here.
  */
 export async function registerConfiguredEnvironments(): Promise<void> {
   let sha: string;
@@ -138,7 +163,6 @@ export async function registerConfiguredEnvironments(): Promise<void> {
     return;
   }
   const configured: Array<{ provider: EnvironmentProvider; image: string }> = [];
-  if (config.deployment.workerImage) configured.push({ provider: "docker", image: config.deployment.workerImage });
   const flyImage = process.env.FLY_RUNNER_IMAGE;
   if (flyImage) configured.push({ provider: "fly", image: flyImage });
 

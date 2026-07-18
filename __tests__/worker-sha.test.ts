@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { resetWorkerShaCache, workerBuildSha } from "../lib/runner/worker-sha";
+import { dockerContextSha, resetWorkerShaCache, workerBuildSha } from "../lib/runner/worker-sha";
 
 afterEach(() => {
   delete process.env.TASK_ORCH_WORKER_SHA;
@@ -52,5 +52,34 @@ describe("workerBuildSha", () => {
     await expect(
       workerBuildSha({ exec: async () => { throw new Error("git: not found"); } })
     ).rejects.toThrow(/TASK_ORCH_WORKER_SHA|worker build SHA/);
+  });
+});
+
+describe("dockerContextSha", () => {
+  it("prefers the TASK_ORCH_WORKER_SHA override", async () => {
+    process.env.TASK_ORCH_WORKER_SHA = "c".repeat(40);
+    await expect(
+      dockerContextSha({ exec: async () => { throw new Error("must not exec with override"); } })
+    ).resolves.toBe("c".repeat(40));
+  });
+
+  it("resolves the local build-context HEAD, not the remote ref", async () => {
+    const sha = "d".repeat(40);
+    const calls: string[][] = [];
+    const got = await dockerContextSha({
+      cwd: "/build/ctx",
+      exec: async (cmd, args) => {
+        calls.push([cmd, ...args]);
+        return { stdout: `${sha}\n` };
+      },
+    });
+    expect(got).toBe(sha);
+    expect(calls[0]).toEqual(["git", "-C", "/build/ctx", "rev-parse", "HEAD"]);
+  });
+
+  it("throws an actionable error when the context is not a git checkout", async () => {
+    await expect(
+      dockerContextSha({ exec: async () => { throw new Error("not a git repository"); } })
+    ).rejects.toThrow(/Docker build context SHA|TASK_ORCH_WORKER_SHA/);
   });
 });

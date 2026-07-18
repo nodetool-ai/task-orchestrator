@@ -27,6 +27,20 @@
 // Any file still reading process.env.TASK_ORCH_* directly is tracked by the
 // guard test in __tests__/config-guard.test.ts; that allowlist only shrinks.
 
+import { createHash } from "node:crypto";
+
+/** Short, stable identifier for the database this process is a control plane
+ *  for. Sockets live in a shared /tmp dir keyed only by uid, so two checkouts
+ *  or dev servers pointed at DIFFERENT databases would otherwise collide and
+ *  the socket sweeper (which only knows its own DB) would unlink the other's
+ *  live sockets. Namespacing the dir by the database URL keeps each control
+ *  plane's sockets isolated. Empty when DATABASE_URL is unset (e.g. workers);
+ *  they don't own the dir, so a shared default namespace is harmless. */
+function dbNamespace(): string {
+  const url = process.env.DATABASE_URL ?? "";
+  return createHash("sha1").update(url).digest("hex").slice(0, 10);
+}
+
 /** A flag that defaults OFF: true iff set to something other than "0"/"false"
  *  (case-insensitive). The convention copied across the codebase pre-R6. */
 export function truthy(v: string | undefined | null): boolean {
@@ -222,12 +236,15 @@ export const config = Object.freeze({
     /** Directory for local workers' Unix-domain sockets. MUST stay short: the
      *  kernel caps sun_path at ~104-108 bytes, and a cwd-derived path already
      *  overflowed on GitHub runners (110 chars → listen EINVAL, the red-CI
-     *  incident of 2026-07-17). Default is /tmp-based and cwd-independent. */
+     *  incident of 2026-07-17). Default is /tmp-based and cwd-independent, and
+     *  namespaced by the control plane's database so co-located instances on
+     *  different DBs never share a dir (the sweeper only knows its own DB and
+     *  would otherwise unlink another instance's live sockets). */
     get socketDir(): string {
       const override = strEnv("TASK_ORCH_SOCKET_DIR");
       if (override) return override;
       const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-      return `/tmp/task-orch-${uid}`;
+      return `/tmp/task-orch-${uid}-${dbNamespace()}`;
     },
     /** Worker build identifier reported in channel.hello. */
     get build(): string | undefined {

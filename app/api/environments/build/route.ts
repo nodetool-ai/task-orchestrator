@@ -10,7 +10,7 @@ import { db } from "@/db";
 import { environments } from "@/db/schema";
 import { config } from "@/lib/config";
 import { verifyToken } from "@/lib/api-tokens";
-import { workerBuildSha } from "@/lib/runner/worker-sha";
+import { dockerContextSha, workerBuildSha } from "@/lib/runner/worker-sha";
 import { runBoxTemplateBuild } from "@/lib/runner/box-template-builder";
 import { runDockerImageBuild } from "@/lib/runner/docker-image-build";
 import { makeBoxClient } from "@/lib/runner/box-client";
@@ -39,9 +39,12 @@ export async function POST(req: Request): Promise<NextResponse> {
     return NextResponse.json({ error: "BOX_API_KEY is not configured on this deployment." }, { status: 503 });
   }
 
+  // Box builds clone the pushed remote ref; the docker host build tars the
+  // local checkout. Each artifact's identity is the SHA of what it actually
+  // ships, so the row is keyed by the provider-appropriate resolver.
   let sha: string;
   try {
-    sha = await workerBuildSha();
+    sha = provider === "docker" ? await dockerContextSha() : await workerBuildSha();
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 503 });
   }

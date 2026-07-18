@@ -21,6 +21,15 @@ export async function runDockerImageBuild(
   input: { environmentId: number; image?: string },
   opts: { docker?: DockerBuildApi } = {}
 ): Promise<void> {
+  // Progress writes are serialized onto one chain (never fired-and-forgotten):
+  // an out-of-order write could otherwise land AFTER markEnvironmentReady clears
+  // `detail`, leaving a ready row with stale progress, and a rejected write
+  // would surface as an unhandled rejection. We drain this chain before writing
+  // the final ready/failed state.
+  let detailChain: Promise<void> = Promise.resolve();
+  const pushDetail = (step: string): void => {
+    detailChain = detailChain.then(() => setEnvironmentDetail(input.environmentId, step)).catch(() => {});
+  };
   try {
     const image = input.image ?? config.deployment.workerImage;
     if (!image) {
@@ -29,7 +38,7 @@ export async function runDockerImageBuild(
       );
     }
     const docker = opts.docker ?? (await makeDocker());
-    await setEnvironmentDetail(input.environmentId, "preparing build context");
+    pushDetail("preparing build context");
     // Build context: the repo root. .dockerignore bounds what's sent (it excludes
     // node_modules, .git, .next, data.db, etc.) so the context tar stays small.
     const stream = await docker.buildImage(
@@ -49,13 +58,15 @@ export async function runDockerImageBuild(
           if (evt.error) return; // surfaced by onFinished
           const line = evt.stream?.trim();
           if (line && /^Step \d+\/\d+/.test(line)) {
-            void setEnvironmentDetail(input.environmentId, line.slice(0, 140));
+            pushDetail(line.slice(0, 140));
           }
         }
       );
     });
+    await detailChain; // drain progress writes so none land after `ready`
     await markEnvironmentReady(input.environmentId, { image });
   } catch (error) {
+    await detailChain; // same, before the row goes `failed`
     await markEnvironmentFailed(
       input.environmentId,
       error instanceof Error ? error.message : String(error)
