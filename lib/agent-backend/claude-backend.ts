@@ -14,6 +14,7 @@
 // The Claude SDK (and its native bits) is dynamically imported so it never loads
 // under the pi backend.
 
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mapClaudeMessage } from "./claude-event-mapper";
 import { collectExtensions, composeSystemPrompt, runInterceptors } from "./collect";
@@ -21,6 +22,7 @@ import { createUsageAccumulator } from "./usage";
 import { toZodRawShape } from "./typebox-to-zod";
 import { interceptorToolName, isFileTool } from "../builtin-tools";
 import { scrubClaudeCliEnv } from "./env-scrub";
+import { resolveClaudeBinary } from "./claude-binary";
 import type { AgentBackend, RunTurnArgs, TurnOutcome } from "./types";
 import type { RunEnvelope } from "../pi-event-mapper";
 
@@ -112,8 +114,29 @@ function claudeResumeId(token: string | null): string | undefined {
 export class ClaudeBackend implements AgentBackend {
   readonly id = "claude" as const;
 
+  /** Resolved (and validated) at construction so a broken
+   *  TASK_ORCH_CLAUDE_BINARY fails loud and early, not as the SDK's opaque
+   *  spawn error milliseconds into a run (the run 26/27 failure mode). */
+  private readonly externalClaudeBinary = resolveClaudeBinary();
+  private loggedBinary = false;
+
   async runTurn(args: RunTurnArgs): Promise<TurnOutcome> {
     const { cwd, model, thinkingLevel, extensions, abort, prompt, onEvent } = args;
+
+    // Runs 26/27 cost hours because nothing recorded which claude binary a
+    // worker actually drove. Record it (and its version) once per backend.
+    if (!this.loggedBinary) {
+      this.loggedBinary = true;
+      if (this.externalClaudeBinary) {
+        const bin = this.externalClaudeBinary;
+        execFile(bin, ["--version"], (err, stdout) => {
+          console.error(
+            `[ClaudeBackend] external claude binary ${bin}: ` +
+              (err ? `--version failed: ${err.message}` : String(stdout).trim())
+          );
+        });
+      }
+    }
 
     // Postgres mode (the lightweight in-process loop) is a pi-only capability:
     // it drives @earendil-works/pi-ai directly, which the Claude Agent SDK has no
@@ -256,6 +279,9 @@ export class ClaudeBackend implements AgentBackend {
         prompt,
         options: {
           cwd,
+          ...(this.externalClaudeBinary
+            ? { pathToClaudeCodeExecutable: this.externalClaudeBinary }
+            : {}),
           model: model.id,
           // Persona thinkingLevel maps onto the SDK's effort levels
           // ('low' | 'medium' | 'high'); omitted lets the model default apply.
