@@ -9,9 +9,15 @@ import { config, validateBoxConfig } from "../config";
 import { buildBoxWorkerEnv } from "./box-env";
 import { makeBoxClient, type BoxClient, type BoxLimits } from "./box-client";
 import { normalizeBoxApiError, serializeBoxApiError } from "./box-errors";
-import { BOX_TEMPLATE_MANIFEST_PATH, parseBoxTemplateManifest } from "./box-template";
+import {
+  BOX_TEMPLATE_MANIFEST_PATH,
+  BOX_TEMPLATE_WORKER_PROTOCOL_VERSION,
+  parseBoxTemplateManifest,
+} from "./box-template";
 import { resolveBoxTemplate, setTemplateBuildStarter } from "./environments";
 import { runBoxTemplateBuild } from "./box-template-builder";
+import { runDetachedBoxStep } from "./box-detached";
+import { workerBuildSha } from "./worker-sha";
 import { waitForBoxCheckpoint, waitForBoxReady } from "./box-waiters";
 import { boxStateToRunnerState } from "./box-waiters";
 import { isWakeIntentFresh, isWorkerClaimLive } from "./lifecycle";
@@ -92,6 +98,33 @@ const WORKER_BOOTSTRAP_COMMAND = [
   'if kill -0 "$pid" 2>/dev/null; then printf "%s [box-bootstrap] alive pid=%s\\n" "$(date -Iseconds 2>/dev/null || date)" "$pid" >>"$log"; else wait "$pid"; status=$?; printf "%s [box-bootstrap] exited-early pid=%s status=%s\\n" "$(date -Iseconds 2>/dev/null || date)" "$pid" "$status" >>"$log"; exit "$status"; fi',
   'printf "%s\\n" "$pid"',
 ].join(" && ");
+
+/** The blank-box provision script. Env-expanded ON THE BOX ($TASK_ORCH_…,
+ *  $GH_TOKEN); the control plane interpolates only repo identity and paths.
+ *  Spec: box-blank-provision. */
+function blankProvisionCommand(ownerRepo: string, repoPath: string, workerSha: string): string {
+  const manifest = JSON.stringify({
+    formatVersion: 1,
+    workerBuildSha: workerSha,
+    workerProtocolVersion: BOX_TEMPLATE_WORKER_PROTOCOL_VERSION,
+    repository: ownerRepo,
+    repositoryPath: repoPath,
+    workerEntryPath: "/home/user/worker/run-worker.js",
+  });
+  const shq = (v: string): string => `'${v.replace(/'/g, `'\\''`)}'`;
+  return [
+    `set -eu`,
+    `command -v git >/dev/null && command -v node >/dev/null && command -v curl >/dev/null || { echo "blank box missing git/node/curl" >&2; exit 127; }`,
+    `mkdir -p /home/user/worker /home/user/.task-orchestrator`,
+    `curl -fsS --retry 3 --retry-delay 2 -H "authorization: Bearer $TASK_ORCH_WORKER_CHANNEL_CREDENTIAL" -H "x-run-id: $TASK_ORCH_RUN_ID" -D /tmp/worker-bundle.headers -o /home/user/worker/run-worker.js "$TASK_ORCH_BUNDLE_URL"`,
+    `want=$(tr -d '\\r' < /tmp/worker-bundle.headers | awk 'tolower($1)=="x-bundle-sha256:" {print $2}')`,
+    `got=$(sha256sum /home/user/worker/run-worker.js | awk '{print $1}')`,
+    `[ -n "$want" ] && [ "$want" = "$got" ] || { echo "bundle checksum mismatch (want=$want got=$got)" >&2; exit 1; }`,
+    `test ! -e ${shq(repoPath)}`,
+    `if [ -n "\${GH_TOKEN:-}" ]; then git clone --depth 1 "https://x-access-token:\${GH_TOKEN}@github.com/${ownerRepo}.git" ${shq(repoPath)}; else git clone --depth 1 "https://github.com/${ownerRepo}.git" ${shq(repoPath)}; fi`,
+    `printf '%s\\n' ${shq(manifest)} > ${shq(BOX_TEMPLATE_MANIFEST_PATH)}`,
+  ].join("; ");
+}
 
 const BOOTSTRAP_LOG_TAIL_COMMAND =
   `if [ -f "$SESSION_ROOT/logs/runner.log" ]; then tail -n ${BOOTSTRAP_LOG_TAIL_LINES} ` +
@@ -224,27 +257,32 @@ export class BoxRunnerProvider implements RunnerProvider {
       // fall through to the standard gates
     }
     try {
-      const template = await resolveBoxTemplate({ runId: input.runId });
-      if (template.kind === "building") {
-        return {
-          decision: "defer",
-          reason:
-            template.builderRunId === input.runId
-              ? "Building box template…"
-              : `Waiting for box template build (started by run #${template.builderRunId})`,
-        };
-      }
-      if (template.kind === "cooldown") {
-        // A recent build failed; keep deferring without rebuilding until the
-        // cooldown elapses (the pump retries and eventually a fresh build runs,
-        // or TASK_ORCH_MAX_DEFER_MS hard-fails the run). Surface the reason.
-        const detail = (template.error ?? "").split("\n")[0].slice(0, 140);
-        return {
-          decision: "defer",
-          reason: detail
-            ? `Box template build failed, retrying (${detail})`
-            : "Box template build failed; retrying shortly",
-        };
+      // Template resolution/build state only matters in template mode: blank
+      // provisioning creates its own box per run and never forks a shared
+      // template snapshot, so it must never defer behind one.
+      if (config.box.provisionMode === "template") {
+        const template = await resolveBoxTemplate({ runId: input.runId });
+        if (template.kind === "building") {
+          return {
+            decision: "defer",
+            reason:
+              template.builderRunId === input.runId
+                ? "Building box template…"
+                : `Waiting for box template build (started by run #${template.builderRunId})`,
+          };
+        }
+        if (template.kind === "cooldown") {
+          // A recent build failed; keep deferring without rebuilding until the
+          // cooldown elapses (the pump retries and eventually a fresh build runs,
+          // or TASK_ORCH_MAX_DEFER_MS hard-fails the run). Surface the reason.
+          const detail = (template.error ?? "").split("\n")[0].slice(0, 140);
+          return {
+            decision: "defer",
+            reason: detail
+              ? `Box template build failed, retrying (${detail})`
+              : "Box template build failed; retrying shortly",
+          };
+        }
       }
       return boxAdmissionDecision(await this.box().limits(), input);
     } catch (error) {
@@ -308,6 +346,10 @@ export class BoxRunnerProvider implements RunnerProvider {
       );
     }
 
+    if (config.box.provisionMode === "blank") {
+      return this.createBlank(input, run.repoId, channelInstanceId);
+    }
+
     const template = await resolveBoxTemplate({ runId: input.runId });
     if (template.kind === "building" || template.kind === "cooldown") {
       // Admission should have deferred; a direct create() without a ready
@@ -366,6 +408,93 @@ export class BoxRunnerProvider implements RunnerProvider {
         await this.recordFailure(input.runId, boxId, normalized);
         // Preserve the snapshot for diagnosis/retry; deletion is a retention
         // decision, never a provisioning-error cleanup action.
+        await box.stop(boxId).catch(() => {});
+      }
+      throw error;
+    }
+  }
+
+  /** Blank provisioning (spec: box-blank-provision): create a blank box, run
+   *  ONE detached provision command (bundle download + repo clone + manifest),
+   *  then reuse the normal manifest/bootstrap flow. No template snapshot. */
+  private async createBlank(
+    input: CreateRunnerInput,
+    repoId: string,
+    channelInstanceId: string,
+  ): Promise<RunnerRef | null> {
+    const box = this.box();
+    if (!config.box.bundleUrl) {
+      throw new Error(
+        "Blank box provisioning needs a worker-bundle URL: set TASK_ORCH_BUNDLE_URL " +
+          "(or AUTH_URL), or set TASK_ORCH_BOX_PROVISION=template."
+      );
+    }
+    const repoRow = await dbTransport.resolveRepo(input.runId);
+    const parsedRemote = repoRow ? ownerRepoFromRemote(repoRow.remote ?? null) : null;
+    if (!parsedRemote) {
+      throw new Error(`Run ${input.runId}: repository has no usable GitHub remote to clone.`);
+    }
+    const ownerRepo = `${parsedRemote.owner}/${parsedRemote.repo}`;
+    const repoPath = config.box.repoPath ?? "/home/user/repository";
+    const sha = await workerBuildSha();
+
+    const env = buildBoxWorkerEnv({
+      runId: input.runId,
+      repoId,
+      channelInstanceId,
+      templateVersion: sha,
+      repoPath,
+    });
+
+    let boxId: string | undefined;
+    try {
+      await emitBoxEvent(input.runId, "runner_box_provisioning", { mode: "blank", workerSha: sha });
+      const created = await box.create({ env, noEnv: true });
+      boxId = created.id;
+
+      // Persist before the first readiness poll so timeouts and process crashes
+      // leave an auditable, recoverable mapping rather than an active orphan.
+      await db
+        .insert(runnerInstances)
+        .values({
+          runId: input.runId,
+          provider: "box",
+          boxId,
+          state: "starting",
+          repoPath,
+          lastStartedAt: new Date(),
+          credentialsVersion: 1,
+          lastProviderError: null,
+          channelInstanceId,
+        })
+        .onConflictDoUpdate({
+          target: runnerInstances.runId,
+          set: {
+            provider: "box",
+            boxId,
+            boxTemplateId: null,
+            state: "starting",
+            lastStartedAt: new Date(),
+            credentialsVersion: 1,
+            lastProviderError: null,
+            channelInstanceId,
+          },
+        });
+
+      await box.update(boxId, { name: boxName(input) });
+      await waitForBoxReady(box, boxId, {
+        timeoutMs: config.box.readyTimeoutMs,
+        pollMs: config.box.pollMs,
+      });
+      await runDetachedBoxStep(box, boxId, "provisioning", blankProvisionCommand(ownerRepo, repoPath, sha), {
+        timeoutSeconds: config.box.provisionTimeoutSeconds,
+        pollMs: config.box.pollMs,
+      });
+      return await this.readyAndLaunch(input, boxId, channelInstanceId);
+    } catch (error) {
+      const normalized = await normalizeBoxApiError(error);
+      if (boxId) {
+        await this.recordFailure(input.runId, boxId, normalized);
         await box.stop(boxId).catch(() => {});
       }
       throw error;

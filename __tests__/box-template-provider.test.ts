@@ -1,6 +1,6 @@
 // Spec §5: admission defers behind the template build with run-visible
 // reasons; create() forks from the resolved registry template when unpinned.
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db";
 import { environments } from "../db/schema";
 import type { BoxClient } from "../lib/runner/box-client";
@@ -20,7 +20,19 @@ async function create(input: CreateRunInput) {
   return createRun({ ...input, repoId: repository.id });
 }
 
-const KNOBS = ["TASK_ORCH_RUNNER", "TASK_ORCH_BOX_TEMPLATE_ID", "TASK_ORCH_WORKER_SHA", "TASK_ORCH_BOX_BASE_ID", "BOX_API_KEY"];
+const KNOBS = [
+  "TASK_ORCH_RUNNER",
+  "TASK_ORCH_BOX_TEMPLATE_ID",
+  "TASK_ORCH_WORKER_SHA",
+  "TASK_ORCH_BOX_BASE_ID",
+  "BOX_API_KEY",
+  "TASK_ORCH_BOX_PROVISION",
+];
+// This suite exercises the legacy fork-a-template gate; blank provisioning
+// (the new default) never resolves template state at all.
+beforeEach(() => {
+  process.env.TASK_ORCH_BOX_PROVISION = "template";
+});
 afterEach(() => {
   for (const k of KNOBS) delete process.env[k];
   setTemplateBuildStarter(null);

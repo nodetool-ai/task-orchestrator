@@ -116,6 +116,9 @@ function fakeBox() {
 
 function boxEnv() {
   vi.stubEnv("TASK_ORCH_RUNNER", "box");
+  // Blank provisioning is the new default; this suite exercises the legacy
+  // fork-a-template flow.
+  vi.stubEnv("TASK_ORCH_BOX_PROVISION", "template");
   vi.stubEnv("BOX_API_KEY", "control-plane-only-key");
   vi.stubEnv("TASK_ORCH_BOX_TEMPLATE_ID", "bx_template");
   vi.stubEnv("TASK_ORCH_BOX_REPO_PATH", "/home/user/repository");

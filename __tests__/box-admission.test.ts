@@ -4,6 +4,7 @@ import { repositories } from "../db/schema";
 import type { BoxClient } from "../lib/runner/box-client";
 import { BoxRunnerProvider, boxAdmissionDecision } from "../lib/runner/box";
 import { create } from "../lib/runs";
+import * as repo from "../lib/repo";
 
 afterEach(() => {
   delete process.env.TASK_ORCH_BOX_TEMPLATE_ID;
@@ -74,5 +75,22 @@ describe("Box admission", () => {
 
     const billing = new BoxRunnerProvider({ limits: vi.fn().mockRejectedValue(Object.assign(new Error("billing"), { response: new Response("", { status: 402 }) })) } as unknown as BoxClient);
     await expect(billing.admit({ runId: 999_999, reservedActive: 0 })).resolves.toMatchObject({ decision: "reject", message: expect.stringMatching(/billing/i) });
+  });
+
+  it("blank mode: admits without any template state (no defer on missing template)", async () => {
+    // TASK_ORCH_BOX_PROVISION is intentionally left unset (blank is the
+    // default), and NO environments row is seeded for any worker SHA — under
+    // template mode this run would defer behind "Building box template…".
+    // Blank mode never resolves a template at all, so admission must fall
+    // straight through to the plain capacity check.
+    const repository = await repo.createRepository({
+      name: `box-blank-admit-${Date.now()}-${Math.random()}`,
+      remote: "git@github.com:acme/blank-admit.git",
+    });
+    const run = await create({ goal: "<implement>", defer: true, repoId: repository.id });
+    const limits = vi.fn(async () => ({ canStart: true, activeBoxes: 0, maxActiveBoxes: 10 }));
+    const provider = new BoxRunnerProvider({ limits } as unknown as BoxClient);
+    await expect(provider.admit({ runId: run.id, reservedActive: 0 })).resolves.toEqual({ decision: "admit" });
+    expect(limits).toHaveBeenCalled();
   });
 });
