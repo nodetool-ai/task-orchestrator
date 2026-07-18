@@ -487,9 +487,7 @@ export class BoxRunnerProvider implements RunnerProvider {
     channelInstanceId: string,
   ): Promise<RunnerRef | null> {
     const box = this.box();
-    const bundleOpts = process.env.TASK_ORCH_BUNDLE_PATH
-      ? { path: process.env.TASK_ORCH_BUNDLE_PATH }
-      : {};
+    const bundleOpts = config.box.bundlePath ? { path: config.box.bundlePath } : {};
     const pushBundle = readWorkerBundle(bundleOpts);
     if (!pushBundle) {
       throw new Error(
@@ -511,8 +509,8 @@ export class BoxRunnerProvider implements RunnerProvider {
     // exactly what bytes the box will download, unlike workerBuildSha() (a
     // remote ref tip / env override) which can misdescribe the bundle actually
     // served from this deployed image and needs a git/ls-remote round-trip.
-    // Same TASK_ORCH_BUNDLE_PATH derivation as the route: the manifest must
-    // describe the exact bundle the box receives, not a stale default sidecar.
+    // Same path derivation as the upload above: the manifest must describe
+    // the exact bundle the box receives, not a stale default sidecar.
     const sha = bundleWorkerSha(bundleOpts) ?? (await workerBuildSha());
 
     const env = buildBoxWorkerEnv({

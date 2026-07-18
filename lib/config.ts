@@ -447,6 +447,11 @@ export const config = Object.freeze({
       if (raw === "blank" || raw === "template") return raw;
       throw new Error(`TASK_ORCH_BOX_PROVISION must be 'blank' or 'template', got '${raw}'.`);
     },
+    /** Overrides where the worker bundle to upload is read from (tests point
+     *  it at fixtures). Default: dist/run-worker.standalone.js under cwd. */
+    get bundlePath(): string | undefined {
+      return strEnv("TASK_ORCH_BUNDLE_PATH");
+    },
     /** Budget for the blank-box provision command (assemble + clone + manifest). */
     get provisionTimeoutSeconds(): number {
       const value = intEnv("TASK_ORCH_BOX_PROVISION_TIMEOUT_S", 300);
