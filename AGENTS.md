@@ -3,6 +3,11 @@
 You (human or AI agent) are picking up work from this task system.
 Read [SCHEMA.md](SCHEMA.md) first; this file describes the workflow.
 
+Debugging a failed run, or touching runner/worker/box code? Read
+[docs/agent-caveats.md](docs/agent-caveats.md) first — it records the
+traps that have already cost real debugging time (misleading SDK spawn
+errors, box/fly runner gotchas, worker-channel invariants).
+
 ## Two ways to do a task
 
 1. **Yourself.** Claim it, code it, transition it. The flow below.
