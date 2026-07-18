@@ -8,6 +8,7 @@
 import { config } from "../config";
 import type { BoxClient } from "./box-client";
 import { emitBoxEvent } from "./box";
+import { runDetachedBoxStep } from "./box-detached";
 import { BOX_CLAUDE_BINARY } from "./box-env";
 import { BOX_TEMPLATE_MANIFEST_PATH, BOX_TEMPLATE_WORKER_PROTOCOL_VERSION } from "./box-template";
 import { emitTemplateBuildLifecycle } from "./box-template-events";
@@ -79,49 +80,17 @@ export async function runBoxTemplateBuild(
   // API call brief while the step itself runs as long as it needs.
   const CALL_TIMEOUT_S = 60;
   const run = async (boxIdNow: string, label: string, command: string): Promise<void> => {
-    const base = `/tmp/tmpl-step-${label}`;
-    const inner = `(${command}) > ${base}.log 2>&1; echo $? > ${base}.rc`;
-    // setsid + </dev/null fully detaches the step from the command's shell so it
-    // survives this API call returning; the box VM persists between calls.
-    const launch = `rm -f ${base}.rc ${base}.log; setsid sh -c ${shq(inner)} </dev/null >/dev/null 2>&1 & echo launched`;
-    const started = await client.command(boxIdNow, { command: launch, cwd: ".", timeoutSeconds: CALL_TIMEOUT_S });
-    if (!started.success || started.timedOut || started.exitCode !== 0) {
-      const detail = (started.stderr || started.stdout || "").slice(-500);
-      throw new Error(`Template build step ${label} failed to launch: ${detail}`);
-    }
-
-    const readTail = async (): Promise<string> => {
-      try {
-        const t = await client.command(boxIdNow, {
-          command: `tail -c 2000 ${base}.log 2>/dev/null || true`,
-          cwd: ".",
-          timeoutSeconds: CALL_TIMEOUT_S,
-        });
-        return (t.stdout ?? "").slice(-2_000);
-      } catch {
-        return "(log unavailable)";
-      }
-    };
-
-    const deadline = now() + config.box.buildStepTimeoutSeconds * 1000;
-    for (;;) {
-      await sleep(config.box.pollMs);
-      if (now() > deadline) {
-        throw new Error(`Template build step ${label} timed out after ${config.box.buildStepTimeoutSeconds}s: ${await readTail()}`);
-      }
-      const probe = await client.command(boxIdNow, {
-        command: `if [ -f ${base}.rc ]; then cat ${base}.rc; else echo __running__; fi`,
-        cwd: ".",
-        timeoutSeconds: CALL_TIMEOUT_S,
+    try {
+      await runDetachedBoxStep(client, boxIdNow, label, command, {
+        timeoutSeconds: config.box.buildStepTimeoutSeconds,
+        pollMs: config.box.pollMs,
+        callTimeoutSeconds: CALL_TIMEOUT_S,
+        now,
+        sleep,
       });
-      // A transient probe hiccup (unreachable/timeout) is not fatal — keep polling.
-      if (!probe.success || probe.timedOut) continue;
-      const out = (probe.stdout ?? "").trim();
-      if (out === "" || out === "__running__") continue;
-      const rc = Number.parseInt(out, 10);
-      if (Number.isNaN(rc)) continue;
-      if (rc === 0) return;
-      throw new Error(`Template build step ${label} failed (exit ${rc}): ${await readTail()}`);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      throw new Error(`Template build step ${msg}`);
     }
   };
 
