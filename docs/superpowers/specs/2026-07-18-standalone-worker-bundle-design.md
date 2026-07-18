@@ -194,6 +194,12 @@ Not in scope here. It needs a CI publishing pipeline and a trust/verification
 story for the fetched artifact, and the template-baked bundle already captures
 most of the win.
 
+**Status 2026-07-18:** the publishing half exists — CI's `worker-bundle` job
+(`.github/workflows/ci.yml`) builds the bundle on every code push to `main`,
+smoke-tests it in isolation, and uploads `worker-bundle-<sha>` (bundle +
+sha256 + manifest) as a 90-day workflow artifact. Nothing consumes it yet;
+fetch-at-launch remains open.
+
 ## Rollout
 
 Ordered so each phase is independently valuable and revertible:
