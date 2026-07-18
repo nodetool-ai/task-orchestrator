@@ -211,6 +211,12 @@ describe("box blank provisioning", () => {
     // reassembles to the exact bytes — never as an HTTP download by the box.
     expect(fake.writes.length).toBeGreaterThan(1);
     expect(fake.writes.every((w) => w.encoding === "base64")).toBe(true);
+    // The box files API rejects writes over 5MiB decoded ("File is too large
+    // for write_file (6291456 bytes > 5242880)", run 29). Every chunk must
+    // stay under that platform cap.
+    for (const w of fake.writes) {
+      expect(Buffer.from(w.content, "base64").length).toBeLessThanOrEqual(5_242_880);
+    }
     expect(fake.writes.map((w) => w.path)).toEqual(
       fake.writes.map((_, i) => `worker-upload/part-${String(i).padStart(3, "0")}`)
     );

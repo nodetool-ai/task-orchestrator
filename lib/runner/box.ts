@@ -111,8 +111,10 @@ const WORKER_BOOTSTRAP_COMMAND = [
  *  the interpolated sha256 of the exact bytes the control plane uploaded. */
 type BundleAcquisition = { sha256: string; partCount: number };
 
-/** Raw bytes per PUT /boxes/:id/files chunk (~8MB base64 in the JSON body). */
-const BUNDLE_UPLOAD_CHUNK_BYTES = 6 * 1024 * 1024;
+/** Raw bytes per PUT /boxes/:id/files chunk. The box API rejects writes over
+ *  5MiB decoded ("File is too large for write_file (… > 5242880)", run 29),
+ *  so stay comfortably under it: 4MiB raw ≈ 5.6MB base64 in the JSON body. */
+const BUNDLE_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
 
 const BUNDLE_UPLOAD_DIR = "worker-upload";
 
