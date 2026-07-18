@@ -26,16 +26,18 @@ already cost real time once.
 ## cwd / repository resolution
 
 - `validateCwd()` (lib/runs.ts) exists precisely to catch the misleading
-  SDK spawn error — but the **ws-worker turn driver bypasses it**:
-  `lib/worker-runtime/context.ts` falls back to the snapshot's
-  `repository.localPath`, which is a **control-plane path** (e.g.
-  `/Users/mg/dev/...`) that does not exist inside a box/fly worker.
-  Runs 26/27 failed exactly this way. Any cwd handed to a backend must be
-  validated *inside the worker that will spawn from it*.
+  SDK spawn error. The **ws-worker turn driver now validates cwd too**:
+  `lib/worker-runtime/context.ts` runs it before falling back to the
+  snapshot's `repository.localPath`, so a **control-plane path** (e.g.
+  `/Users/mg/dev/...`) that does not exist inside a box/fly worker is caught
+  before spawn instead of surfacing as a misleading SDK error. Runs 26/27
+  failed the old way. Any cwd handed to a backend must be validated *inside
+  the worker that will spawn from it*.
 - **A repository with no `remote` cannot run on a remote runner** (box/fly):
-  the worker has nothing to clone. Admission does not reject this today —
-  the run burns a full template build and then dies at spawn. Check
-  `repositories.remote` first when a box run fails on a "local" repo.
+  the worker has nothing to clone. Box admission now rejects this before any
+  template work (`lib/runner/box.ts` checks `ownerRepoFromRemote` up front),
+  instead of burning a full template build and dying at spawn. Check
+  `repositories.remote` first when a box run is rejected for a "local" repo.
 - `followUp()` (CI-autofix turns) executes **in the control-plane process**,
   which on deployed servers has no git/SESSION_ROOT → `git worktree add`
   exit 128 / `spawn git ENOENT`, retried every 2 min by the autofix poller.
@@ -62,9 +64,11 @@ already cost real time once.
 - First run with no warm template triggers an **inline template build
   (~11 min)** on the run's critical path (`reason:"no-template"`). CI warms
   templates; local dev may still hit cold builds.
-- The build has a pre-archive `verifying-worker` step (execs the SDK native
-  binary + `sync`) — a template whose binary can't launch fails at build
-  time, not run time.
+- The build has a pre-archive `verifying-worker` step: it runs the
+  standalone bundle alone in a scratch dir (expects exit 2, its own usage
+  check) and execs `/usr/local/bin/claude --version` (the Box's preinstalled
+  binary, not the SDK's native binary), then `sync`s — a template whose
+  worker or claude binary can't launch fails at build time, not run time.
 - Reusable live probes (all `BOX_LIVE_TEST=1`, fork disposables, remove in
   `finally`): `scripts/box-inspect-run26.ts` (template health),
   `scripts/box-inspect-run27-postmortem.ts` (fork a failed box),

@@ -122,6 +122,40 @@ describe("Box template operator", () => {
     expect(calls).toContain("stop:bx_template");
     expect(calls.some((call) => call.includes("status --porcelain=v1"))).toBe(true);
     expect(calls.some((call) => call.includes(".aws/credentials"))).toBe(true);
-    expect(calls.some((call) => call.includes("pgrep -f '[n]ode /home/user/task-orchestrator/dist/run-worker.js'"))).toBe(true);
+    expect(calls.some((call) => call.includes("pgrep -f '[n]ode .*run-worker\\.js'"))).toBe(true);
+    expect(calls.some((call) => call.includes(`test -x '${"/home/user/task-orchestrator/dist/run-worker.js"}'`))).toBe(true);
+  });
+
+  it("validates a bundle-shape template against manifest workerEntryPath instead of the legacy checkout path", async () => {
+    const bundleManifest = JSON.stringify({
+      formatVersion: 1,
+      workerBuildSha: "worker-sha",
+      workerProtocolVersion: 1,
+      repository: "acme/service",
+      repositoryPath: "/home/user/service",
+      workerEntryPath: "/home/user/worker/run-worker.js",
+    });
+    const { client, calls } = templateClient();
+    client.command = async (_id, input) => {
+      calls.push(`command:${input.command}`);
+      if (input.command.startsWith("cat ")) return { success: true, exitCode: 0, stdout: bundleManifest, stderr: "", timedOut: false };
+      if (input.command.includes("node --version")) return { success: true, exitCode: 0, stdout: "v22.14.0\n", stderr: "", timedOut: false };
+      if (input.command.includes("remote get-url")) return { success: true, exitCode: 0, stdout: "git@github.com:acme/service.git\n", stderr: "", timedOut: false };
+      return { success: true, exitCode: 0, stdout: "", stderr: "", timedOut: false };
+    };
+
+    const result = await publishBoxTemplate(client, "bx_template", {
+      pollMs: 0,
+      timeoutMs: 1_000,
+      now: (() => {
+        let now = 15;
+        return () => now++;
+      })(),
+    });
+
+    expect(result.manifest.workerEntryPath).toBe("/home/user/worker/run-worker.js");
+    expect(calls.some((call) => call.includes("test -x '/home/user/worker/run-worker.js'"))).toBe(true);
+    expect(calls.some((call) => call.includes("test -x '/home/user/task-orchestrator/dist/run-worker.js'"))).toBe(false);
+    expect(calls.some((call) => call.includes("pgrep -f '[n]ode .*run-worker\\.js'"))).toBe(true);
   });
 });

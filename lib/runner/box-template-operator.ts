@@ -40,7 +40,11 @@ export type BoxTemplatePublication = BoxTemplateValidation & BoxTemplateRuntimeV
 };
 
 const BOX_ID = /^bx_[A-Za-z0-9][A-Za-z0-9_-]*$/;
-const WORKER_ENTRYPOINT = "/home/user/task-orchestrator/dist/run-worker.js";
+const LEGACY_WORKER_ENTRYPOINT = "/home/user/task-orchestrator/dist/run-worker.js";
+// Bundle-shape templates (manifest `workerEntryPath`) and legacy checkout
+// templates use different worker paths; match either shape generically rather
+// than duplicating both entrypoints in the pgrep pattern.
+const ACTIVE_WORKER_PATTERN = "[n]ode .*run-worker\\.js";
 
 function assertBoxId(boxId: string): void {
   if (!BOX_ID.test(boxId)) throw new Error("Box template id must begin with bx_ and contain only Box ID characters.");
@@ -117,11 +121,12 @@ export async function validateRunningBoxTemplate(
     throw new Error(`Box template manifest repository does not match ${options.expectedRepository}.`);
   }
 
+  const workerEntrypoint = manifest.workerEntryPath ?? LEGACY_WORKER_ENTRYPOINT;
   const nodeVersion = (await checkedCommand(
     client,
     boxId,
     "worker runtime",
-    `test -x ${shellQuote(WORKER_ENTRYPOINT)} && node --version`
+    `test -x ${shellQuote(workerEntrypoint)} && node --version`
   )).trim();
   if (!/^v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(nodeVersion)) {
     throw new Error("Box template Node runtime did not report a valid version.");
@@ -152,7 +157,7 @@ export async function validateRunningBoxTemplate(
     // `[n]ode` matches a real worker command but not this pgrep invocation's
     // own command line. Without it, every validation falsely sees itself as a
     // running worker.
-    `if pgrep -f ${shellQuote(`[n]ode ${WORKER_ENTRYPOINT}`)} >/dev/null; then exit 1; fi`
+    `if pgrep -f ${shellQuote(ACTIVE_WORKER_PATTERN)} >/dev/null; then exit 1; fi`
   );
 
   return { manifest, nodeVersion, origin };

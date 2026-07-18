@@ -15,6 +15,8 @@ export type BoxTemplateManifest = {
   workerProtocolVersion: number;
   repository: string;
   repositoryPath: string;
+  /** Bundle-shape templates bake the worker at a fixed path outside the repo checkout. */
+  workerEntryPath?: string;
 };
 
 function requiredString(value: unknown, field: string): string {
@@ -57,6 +59,7 @@ export function parseBoxTemplateManifest(
     workerProtocolVersion: requiredPositiveInteger(record.workerProtocolVersion, "workerProtocolVersion"),
     repository: requiredString(record.repository, "repository"),
     repositoryPath: requiredString(record.repositoryPath, "repositoryPath"),
+    ...(record.workerEntryPath == null ? {} : { workerEntryPath: requiredString(record.workerEntryPath, "workerEntryPath") }),
   };
 
   if (!/^[^/\s]+\/[^/\s]+$/.test(manifest.repository)) {
@@ -69,6 +72,16 @@ export function parseBoxTemplateManifest(
     normalizedRepositoryPath !== manifest.repositoryPath
   ) {
     throw new Error("Box template manifest: 'repositoryPath' must be an absolute path under /home/user.");
+  }
+  if (manifest.workerEntryPath != null) {
+    const normalizedWorkerEntryPath = path.posix.normalize(manifest.workerEntryPath);
+    if (
+      !path.posix.isAbsolute(manifest.workerEntryPath) ||
+      !normalizedWorkerEntryPath.startsWith("/home/user/") ||
+      normalizedWorkerEntryPath !== manifest.workerEntryPath
+    ) {
+      throw new Error("Box template manifest: 'workerEntryPath' must be an absolute path under /home/user.");
+    }
   }
   const expected = opts.workerProtocolVersion ?? BOX_TEMPLATE_WORKER_PROTOCOL_VERSION;
   if (manifest.workerProtocolVersion !== expected) {

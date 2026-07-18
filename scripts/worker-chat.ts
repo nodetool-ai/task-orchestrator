@@ -777,7 +777,7 @@ async function main(): Promise<void> {
     console.log(dim(`resolving box ${args.box}…`));
     args.boxDial = await resolveBoxDial(args.box);
     args.runId = args.boxDial.runId; // the box's worker is pinned to this run id
-    if (!args.cwdExplicit) args.cwd = "/home/user/task-orchestrator";
+    if (!args.cwdExplicit) args.cwd = "/home/user/nodetool";
     console.log(dim(`box worker ready — dialing ${args.boxDial.wsUrl} (runId ${args.runId})`));
   }
 

@@ -135,7 +135,7 @@ export class ClaudeBackend implements AgentBackend {
       this.loggedBinary = true;
       if (this.externalClaudeBinary) {
         const bin = this.externalClaudeBinary;
-        execFile(bin, ["--version"], (err, stdout) => {
+        execFile(bin, ["--version"], { timeout: 10_000 }, (err, stdout) => {
           console.error(
             `[ClaudeBackend] external claude binary ${bin}: ` +
               (err ? `--version failed: ${err.message}` : String(stdout).trim())

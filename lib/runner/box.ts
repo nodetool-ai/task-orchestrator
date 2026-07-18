@@ -215,7 +215,7 @@ export class BoxRunnerProvider implements RunnerProvider {
         return {
           decision: "reject",
           message:
-            `Repository '${repoRow.name ?? repoRow.id}' has no usable Git remote ` +
+            `Repository '${repoRow.name ?? repoRow.id}' has no usable GitHub remote ` +
             `(local_path '${repoRow.localPath ?? ""}' only exists on the control plane). ` +
             `Box runners clone from the remote — add one, or run this repository on the local provider.`,
         };
