@@ -240,6 +240,11 @@ describe("templateBuildView", () => {
     expect(v.steps[0].label).toBe("mystery-step");
   });
 
+  it("labels the pre-archive verification step", () => {
+    const v = templateBuildView({ ...base, steps: ["verifying-worker"], stepIndex: 0 }, T0 + 1_000);
+    expect(v.steps[0].label).toBe("Verifying worker binary");
+  });
+
   it("shows reassurance past 1.5× the estimate", () => {
     const v = templateBuildView(base, T0 + 900_000 * 1.5 + 1_000);
     expect(v.showReassurance).toBe(true);

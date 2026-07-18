@@ -86,6 +86,14 @@ run_step "write template manifest" \
 run_step "verify template artifacts" \
   "set -eu; test -s $(quote "$task_orch_dir/dist/run-worker.js"); test -z \"\$(git -C $(quote "$task_orch_dir") status --porcelain=v1)\"; test -z \"\$(git -C $(quote "$nodetool_dir") status --porcelain=v1)\"; cat /home/user/.task-orchestrator/template.json"
 
+# Smoke-test the Claude Agent SDK native binary the worker will spawn (matching
+# the box's libc, mirroring the SDK's variant selection), then sync so the
+# archive can never seal a binary that doesn't exec (see run 26: archiving a
+# fresh npm ci produced a fork whose claude binary failed to launch). Mirrors
+# the "verifying-worker" step in lib/runner/box-template-builder.ts.
+run_step "verify worker agent binary" \
+  "set -eu; cd $(quote "$task_orch_dir"); arch=\$(uname -m); case \"\$arch\" in x86_64) a=x64 ;; aarch64|arm64) a=arm64 ;; *) echo \"unsupported arch: \$arch\" >&2; exit 1 ;; esac; if [ -e \"/lib/ld-musl-\$arch.so.1\" ]; then v=\"linux-\$a-musl\"; else v=\"linux-\$a\"; fi; bin=\"node_modules/@anthropic-ai/claude-agent-sdk-\$v/claude\"; test -x \"\$bin\" || { echo \"SDK native binary missing: \$bin\" >&2; exit 1; }; \"\$bin\" --version; sync"
+
 echo
 echo "Template install complete for ${box_id}."
 echo "Review the final manifest, then archive the Box to publish its snapshot."

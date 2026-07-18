@@ -20,10 +20,28 @@ const BUILD_STEPS = [
   "cloning-agent-repo",
   "installing-agent-deps",
   "writing-manifest",
+  "verifying-worker",
   "archiving",
 ] as const;
 
 const WORKER_DIR = "/home/user/task-orchestrator";
+
+/**
+ * Pre-archive smoke test. Run 26 archived a snapshot seconds after `npm ci`
+ * finished writing a 251 MB native binary; a fork of that snapshot got a
+ * claude binary that could not exec, and the run died 23 ms into its first
+ * turn with the SDK's misleading "libc mismatch" error. Exec the exact binary
+ * the worker's Claude backend will spawn (matching the box's libc, mirroring
+ * the SDK's variant selection) and `sync` so the checkpoint can never seal a
+ * binary that doesn't launch.
+ */
+const VERIFY_WORKER_COMMAND =
+  `set -eu; cd ${WORKER_DIR}; ` +
+  `arch=$(uname -m); case "$arch" in x86_64) a=x64 ;; aarch64|arm64) a=arm64 ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac; ` +
+  `if [ -e "/lib/ld-musl-$arch.so.1" ]; then v="linux-$a-musl"; else v="linux-$a"; fi; ` +
+  `bin="node_modules/@anthropic-ai/claude-agent-sdk-$v/claude"; ` +
+  `test -x "$bin" || { echo "SDK native binary missing: $bin" >&2; exit 1; }; ` +
+  `"$bin" --version; sync`;
 
 function shq(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -156,6 +174,9 @@ export async function runBoxTemplateBuild(
         });
         await run(boxId, "writing-manifest",
           `set -eu; mkdir -p /home/user/.task-orchestrator; printf '%s\\n' ${shq(manifest)} > ${shq(BOX_TEMPLATE_MANIFEST_PATH)}`);
+
+        await stepAndDetail("verifying-worker");
+        await run(boxId, "verifying-worker", VERIFY_WORKER_COMMAND);
 
         await stepAndDetail("archiving");
         const requestedAt = Date.now();

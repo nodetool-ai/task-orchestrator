@@ -87,7 +87,7 @@ describe("runBoxTemplateBuild", () => {
 
     const types = await eventTypes(runId);
     expect(types[0]).toBe("runner_box_template_building");
-    expect(types.filter((t) => t === "runner_box_template_step")).toHaveLength(7);
+    expect(types.filter((t) => t === "runner_box_template_step")).toHaveLength(8);
     expect(types[types.length - 1]).toBe("runner_box_template_ready");
 
     // The first step verifies the blank-box runtime before cloning.
@@ -95,7 +95,34 @@ describe("runBoxTemplateBuild", () => {
     // The worker clone checks out the exact SHA and the manifest embeds it.
     expect(commands.some((c) => c.includes(`git checkout ${sha}`))).toBe(true);
     expect(commands.some((c) => c.includes(`"workerBuildSha":"${sha}"`) || c.includes(`\\"workerBuildSha\\":\\"${sha}\\"`))).toBe(true);
+    // Before archiving, the build smoke-tests the Claude Agent SDK's native
+    // binary (the exact artifact whose failure-to-exec killed run 26) and
+    // flushes the filesystem so the checkpoint can't seal half-written pages.
+    const verify = commands.find((c) => c.includes("claude-agent-sdk") && c.includes("--version"));
+    expect(verify).toBeDefined();
+    expect(verify).toContain("sync");
     expect(client.stop).toHaveBeenCalledWith("bx_new_tpl");
+  });
+
+  it("marks the row failed when the pre-archive binary smoke test fails", async () => {
+    const sha = "f".repeat(40);
+    const { registryId, runId } = await seed(sha);
+    // Fail the step whose launch runs the SDK binary's --version probe.
+    const { client } = fakeClient({ failOn: /--version/ });
+
+    await runBoxTemplateBuild(client, { registryId, runId, workerSha: sha }, waits);
+
+    const [row] = await db.select().from(environments).where(eq(environments.id, registryId));
+    expect(row.state).toBe("failed");
+    expect(row.error).toMatch(/verifying-worker/);
+    const types = await eventTypes(runId);
+    expect(types[types.length - 1]).toBe("runner_box_template_failed");
+    // The build never reached the archiving step: no step event for it.
+    const stepPayloads = await db.select().from(agentEvents).where(eq(agentEvents.sessionId, runId));
+    const archived = stepPayloads.some(
+      (r) => r.type === "runner_box_template_step" && JSON.stringify(r.payload).includes("archiving")
+    );
+    expect(archived).toBe(false);
   });
 
   it("marks the row failed, emits failed, and stops the box when a step fails", async () => {

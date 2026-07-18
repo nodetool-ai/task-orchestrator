@@ -170,6 +170,7 @@ const STEP_LABELS: Record<string, string> = {
   "cloning-agent-repo": "Cloning agent repo",
   "installing-agent-deps": "Installing agent dependencies",
   "writing-manifest": "Writing manifest",
+  "verifying-worker": "Verifying worker binary",
   "archiving": "Archiving snapshot",
 };
 
