@@ -5,7 +5,12 @@
 // Unlike `build:worker` (--packages=external, needs a real node_modules at
 // runtime), this bundles EVERY runtime dependency into one file so a Box
 // needs no node_modules for the worker at all.
+import { execSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { build } from "esbuild";
+
+const SHA_RE = /^[0-9a-f]{40}$/;
+const OUTFILE = "dist/run-worker.standalone.js";
 
 // This banner is LOAD-BEARING, not cosmetic. CJS dependencies compiled into
 // the ESM bundle (dotenv and others) call require("fs") at runtime, which an
@@ -29,5 +34,28 @@ await build({
   // this without first splitting the dispatch seam.
   external: ["dockerode"],
   banner: { js: banner },
-  outfile: "dist/run-worker.standalone.js",
+  outfile: OUTFILE,
 });
+
+// Bake the sha next to the bundle so the control plane can identify exactly
+// what bytes this artifact contains without a git/ls-remote round-trip at
+// serve time (spec: box-blank-provision final review #1). Resolution: local
+// git HEAD first (works in a dev checkout), else GIT_SHA (what the Docker
+// build passes in — there is no .git in the docker build context), else skip
+// writing the sidecar file entirely.
+function resolveBuildSha() {
+  try {
+    const sha = execSync("git rev-parse HEAD", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    if (SHA_RE.test(sha)) return sha;
+  } catch {
+    // not a git checkout (e.g. docker build context) — fall through
+  }
+  const envSha = process.env.GIT_SHA?.trim();
+  if (envSha && SHA_RE.test(envSha)) return envSha;
+  return null;
+}
+
+const buildSha = resolveBuildSha();
+if (buildSha) {
+  writeFileSync(`${OUTFILE}.sha`, `${buildSha}\n`);
+}

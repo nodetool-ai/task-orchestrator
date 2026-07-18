@@ -19,7 +19,10 @@ ENV DATABASE_URL=postgres://build:build@localhost:5432/build
 RUN npm run build
 # The standalone worker bundle served by GET /api/worker-bundle to
 # blank-provisioned Box runners. Version-locked to this image by construction.
-RUN npm run build:worker:standalone
+# There is no .git in this build context, so the build script's git-HEAD
+# resolution can't fire here — GIT_SHA is what bakes the sha sidecar file.
+ARG GIT_SHA
+RUN GIT_SHA=$GIT_SHA npm run build:worker:standalone
 
 FROM node:24-bookworm-slim AS runtime
 WORKDIR /app

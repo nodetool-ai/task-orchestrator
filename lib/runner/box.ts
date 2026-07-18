@@ -6,7 +6,8 @@ import { and, eq, isNotNull } from "drizzle-orm";
 import { db } from "@/db";
 import { agentEvents, agentSessions, runnerInstances } from "@/db/schema";
 import { config, validateBoxConfig } from "../config";
-import { buildBoxWorkerEnv } from "./box-env";
+import { buildBoxWorkerEnv, BOX_CLAUDE_BINARY } from "./box-env";
+import { bundleWorkerSha } from "../worker-bundle";
 import { makeBoxClient, type BoxClient, type BoxLimits } from "./box-client";
 import { normalizeBoxApiError, serializeBoxApiError } from "./box-errors";
 import {
@@ -127,13 +128,13 @@ function blankProvisionCommand(ownerRepo: string, repoPath: string, workerSha: s
     `else git clone --depth 1 "${cloneUrl}" ${shq(repoPath)}; fi`;
   return [
     `set -eu`,
-    `command -v git >/dev/null && command -v node >/dev/null && command -v curl >/dev/null && command -v sha256sum >/dev/null || { echo "blank box missing git/node/curl/sha256sum" >&2; exit 127; }`,
+    `command -v git >/dev/null && command -v node >/dev/null && command -v curl >/dev/null && command -v sha256sum >/dev/null && test -x ${shq(BOX_CLAUDE_BINARY)} || { echo "blank box missing required tool: git, node, curl, sha256sum, or ${BOX_CLAUDE_BINARY}" >&2; exit 127; }`,
     `mkdir -p /home/user/worker /home/user/.task-orchestrator`,
-    `curl -fsS --retry 3 --retry-delay 2 -H "authorization: Bearer $TASK_ORCH_WORKER_CHANNEL_CREDENTIAL" -H "x-run-id: $TASK_ORCH_RUN_ID" -D /tmp/worker-bundle.headers -o /home/user/worker/run-worker.js "$TASK_ORCH_BUNDLE_URL"`,
-    `want=$(tr -d '\\r' < /tmp/worker-bundle.headers | awk 'tolower($1)=="x-bundle-sha256:" {print $2}')`,
+    `curl -fsSL --retry 3 --retry-delay 2 -H "authorization: Bearer $TASK_ORCH_WORKER_CHANNEL_CREDENTIAL" -H "x-run-id: $TASK_ORCH_RUN_ID" -D /tmp/worker-bundle.headers -o /home/user/worker/run-worker.js "$TASK_ORCH_BUNDLE_URL"`,
+    `want=$(tr -d '\\r' < /tmp/worker-bundle.headers | awk 'tolower($1)=="x-bundle-sha256:" {print $2}' | tail -1)`,
     `got=$(sha256sum /home/user/worker/run-worker.js | awk '{print $1}')`,
     `[ -n "$want" ] && [ "$want" = "$got" ] || { echo "bundle checksum mismatch (want=$want got=$got)" >&2; exit 1; }`,
-    `test ! -e ${shq(repoPath)}`,
+    `test ! -e ${shq(repoPath)} || { echo "repo path already exists: ${repoPath}" >&2; exit 1; }`,
     cloneCommand,
     `printf '%s\\n' ${shq(manifest)} > ${shq(BOX_TEMPLATE_MANIFEST_PATH)}`,
   ].join("; ");
@@ -142,6 +143,20 @@ function blankProvisionCommand(ownerRepo: string, repoPath: string, workerSha: s
 const BOOTSTRAP_LOG_TAIL_COMMAND =
   `if [ -f "$SESSION_ROOT/logs/runner.log" ]; then tail -n ${BOOTSTRAP_LOG_TAIL_LINES} ` +
   '"$SESSION_ROOT/logs/runner.log"; fi';
+
+// Warn at most once per process when a pinned TASK_ORCH_BOX_TEMPLATE_ID is
+// silently ignored because TASK_ORCH_BOX_PROVISION defaults to "blank".
+let warnedTemplatePinIgnored = false;
+
+function warnIfTemplatePinIgnored(): void {
+  if (warnedTemplatePinIgnored) return;
+  if (!config.box.templateId) return;
+  warnedTemplatePinIgnored = true;
+  console.warn(
+    `Box: TASK_ORCH_BOX_TEMPLATE_ID='${config.box.templateId}' is ignored while TASK_ORCH_BOX_PROVISION=blank ` +
+      "(the default). Set TASK_ORCH_BOX_PROVISION=template to restore the pinned template."
+  );
+}
 
 function boxName(input: CreateRunnerInput): string {
   // input.scope already carries dispatch's collision-resistant run nonce.
@@ -360,6 +375,7 @@ export class BoxRunnerProvider implements RunnerProvider {
     }
 
     if (config.box.provisionMode === "blank") {
+      warnIfTemplatePinIgnored();
       return this.createBlank(input, run.repoId, channelInstanceId);
     }
 
@@ -449,7 +465,11 @@ export class BoxRunnerProvider implements RunnerProvider {
     }
     const ownerRepo = `${parsedRemote.owner}/${parsedRemote.repo}`;
     const repoPath = config.box.repoPath ?? "/home/user/repository";
-    const sha = await workerBuildSha();
+    // Prefer the sha baked next to the bundle at build time: it identifies
+    // exactly what bytes the box will download, unlike workerBuildSha() (a
+    // remote ref tip / env override) which can misdescribe the bundle actually
+    // served from this deployed image and needs a git/ls-remote round-trip.
+    const sha = bundleWorkerSha() ?? (await workerBuildSha());
 
     const env = buildBoxWorkerEnv({
       runId: input.runId,
@@ -495,6 +515,9 @@ export class BoxRunnerProvider implements RunnerProvider {
         });
 
       await box.update(boxId, { name: boxName(input) });
+      // Required: the provision command below needs a live box to run against.
+      // readyAndLaunch() waits again right after this returns, but that second
+      // wait is instant-redundant — the box is already ready by construction.
       await waitForBoxReady(box, boxId, {
         timeoutMs: config.box.readyTimeoutMs,
         pollMs: config.box.pollMs,

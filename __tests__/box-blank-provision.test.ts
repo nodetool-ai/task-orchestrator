@@ -194,6 +194,8 @@ describe("box blank provisioning", () => {
     expect(provisionCommand).toContain('"repository":"acme/widget"');
     // sha256sum joins the git/node/curl preflight.
     expect(provisionCommand).toContain("sha256sum");
+    // The claude binary the run needs must also be preflighted (final review #2).
+    expect(provisionCommand).toMatch(/test -x .*\/usr\/local\/bin\/claude/);
 
     // The literal GH_TOKEN value must never appear in any command text — only
     // the box-shell env reference ($GH_TOKEN) does.
@@ -273,5 +275,26 @@ describe("box blank provisioning", () => {
 
     const [afterRetry] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
     expect(afterRetry).toMatchObject({ boxId: ref?.handle, boxTemplateId: null, state: "running" });
+  });
+
+  it("warns once per process when a pinned template id is ignored in blank mode", async () => {
+    blankEnv();
+    vi.stubEnv("TASK_ORCH_BOX_TEMPLATE_ID", "bx_pinned_but_ignored");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const fake = fakeBlankBox();
+      const { run: runA, scope: scopeA } = await runWithRemote("git@github.com:acme/pin-a.git");
+      await new BoxRunnerProvider(fake.client).create({ runId: runA.id, scope: scopeA });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]?.[0]).toMatch(/TASK_ORCH_BOX_TEMPLATE_ID/);
+      expect(warn.mock.calls[0]?.[0]).toMatch(/TASK_ORCH_BOX_PROVISION=template/);
+
+      // A second run in the same process must not warn again.
+      const { run: runB, scope: scopeB } = await runWithRemote("git@github.com:acme/pin-b.git");
+      await new BoxRunnerProvider(fake.client).create({ runId: runB.id, scope: scopeB });
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

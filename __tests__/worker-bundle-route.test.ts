@@ -77,7 +77,18 @@ describe("GET /api/worker-bundle", () => {
       createHash("sha256").update("bundle-bytes").digest("hex")
     );
     expect(res.headers.get("x-worker-sha")).toBe("a".repeat(40));
+    expect(res.headers.get("content-length")).toBe(String(Buffer.byteLength("bundle-bytes")));
     expect(await res.text()).toBe("bundle-bytes");
+  });
+
+  it("prefers the bundle-baked sha sidecar file over TASK_ORCH_WORKER_SHA", async () => {
+    const p = writeBundle("bundle-bytes");
+    const bakedSha = "d".repeat(40);
+    writeFileSync(`${p}.sha`, `${bakedSha}\n`);
+    const { runId, credential } = await seededRun();
+    const res = await GET(get({ authorization: `Bearer ${credential}`, "x-run-id": String(runId) }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-worker-sha")).toBe(bakedSha);
   });
 
   it("rejects a credential minted for a different run", async () => {

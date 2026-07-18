@@ -4,14 +4,13 @@
 // operators/API tokens can fetch it for debugging. The X-Bundle-Sha256 header
 // is verified box-side after download.
 // Spec: docs/superpowers/specs/2026-07-18-box-blank-provision-design.md §1.
-import { readFileSync } from "node:fs";
 import { NextResponse } from "next/server";
 import { and, eq } from "drizzle-orm";
 import { auth } from "@/auth";
 import { db } from "@/db";
 import { runnerInstances } from "@/db/schema";
 import { verifyToken } from "@/lib/api-tokens";
-import { locateWorkerBundle } from "@/lib/worker-bundle";
+import { bundleWorkerSha, readWorkerBundle } from "@/lib/worker-bundle";
 import { verifyChannelCredential } from "@/lib/worker-channel/credential";
 import { workerBuildSha } from "@/lib/runner/worker-sha";
 
@@ -46,9 +45,11 @@ export async function GET(req: Request): Promise<NextResponse> {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  const bundle = locateWorkerBundle(
-    process.env.TASK_ORCH_BUNDLE_PATH ? { path: process.env.TASK_ORCH_BUNDLE_PATH } : {}
-  );
+  const bundleOpts = process.env.TASK_ORCH_BUNDLE_PATH ? { path: process.env.TASK_ORCH_BUNDLE_PATH } : {};
+  // Read bytes ONCE so body, content-length, and the sha256 header all derive
+  // from the same buffer — a second, separate readFileSync could observe a
+  // mid-deploy rewrite and mismatch the header against the served bytes.
+  const bundle = readWorkerBundle(bundleOpts);
   if (!bundle) {
     return NextResponse.json(
       { error: "Worker bundle not found on this deployment. Build it with `npm run build:worker:standalone`." },
@@ -56,8 +57,11 @@ export async function GET(req: Request): Promise<NextResponse> {
     );
   }
 
-  const sha = await workerBuildSha().catch(() => "unknown");
-  return new NextResponse(readFileSync(bundle.path), {
+  // Prefer the sha baked next to the bundle at build time (identifies exactly
+  // what bytes this deployment's image ships) over workerBuildSha() (a remote
+  // ref tip / env override that can drift from the served bundle).
+  const sha = bundleWorkerSha(bundleOpts) ?? (await workerBuildSha().catch(() => "unknown"));
+  return new NextResponse(new Uint8Array(bundle.bytes), {
     status: 200,
     headers: {
       "content-type": "application/javascript",

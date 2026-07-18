@@ -214,7 +214,7 @@ The trust boundary is strict because a box runs untrusted agent code:
 | `TASK_ORCH_RUNNER=box` | — | Select the Box provider (control plane only). |
 | `BOX_API_KEY` | — | Account-level control-plane credential. **The only required Box setting.** |
 | `TASK_ORCH_BOX_BASE_URL` | `https://ascii.dev/api/box/v1` | Box API endpoint. |
-| `TASK_ORCH_BOX_TEMPLATE_ID` | — | **Optional pin.** Set it to use a hand-published template and *disable* app-managed builds. Leave unset for the default app-managed flow. |
+| `TASK_ORCH_BOX_TEMPLATE_ID` | — | **Optional pin.** Set it to use a hand-published template and *disable* app-managed builds. Leave unset for the default app-managed flow. Ignored while `TASK_ORCH_BOX_PROVISION=blank` (the default) — set `TASK_ORCH_BOX_PROVISION=template` to restore it; a warning is logged once per process when both are set. |
 | `TASK_ORCH_BOX_REPO_PATH` | — | Path the agent repo is checked out to inside the box (also baked into app-built templates). |
 | `TASK_ORCH_BOX_WORKER_REPO_URL` / `_REF` | task-orchestrator repo / `main` | Worker repo the template build clones. |
 | `TASK_ORCH_BOX_AGENT_REPO_URL` / `TASK_ORCH_BOX_AGENT_REPO` | nodetool repo / `nodetool-ai/nodetool` | Agent repo the template build clones + records. |
