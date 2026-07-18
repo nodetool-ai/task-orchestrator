@@ -38,6 +38,19 @@ const RESUME_LOST_NOTE =
   "Prior conversation history is NOT in your context — re-derive the current state from " +
   "the prompt, the repository/checkout, and any recorded notes, tasks, or PRs before acting.";
 
+/** The SDK's error when its child process dies at spawn — e.g. "Claude Code
+ *  native binary at <path> exists but failed to launch". Seen on a box forked
+ *  from a template snapshot archived moments after `npm ci` wrote the binary
+ *  (run 26): the exec fails before any model work happens. That is an
+ *  infrastructure fault, not an agent error, so the launch is retried with
+ *  settle delays instead of failing the run milliseconds into its turn. */
+const SPAWN_FAILURE_RE = /native binary .*failed to launch|Failed to spawn Claude Code process/i;
+
+/** Settle delays between spawn-failure retries; length bounds the retries.
+ *  Overridable via __test.setSpawnRetryDelays so tests don't wall-clock wait. */
+const DEFAULT_SPAWN_RETRY_DELAYS_MS: readonly number[] = [1_000, 5_000];
+let spawnRetryDelaysMs: readonly number[] = DEFAULT_SPAWN_RETRY_DELAYS_MS;
+
 /** Claude names the built-in tools TitleCase (`Read`/`Write`/`Grep`/`Glob`/…) and
  *  passes file paths as `file_path`; pi (and the canonical interceptor seam) use
  *  lowercase names and `path`. Normalize to the shared vocabulary before
@@ -81,8 +94,15 @@ function denormalizeToolInput(name: string, original: Record<string, any>, canon
   return canonical;
 }
 
-// Exported for unit tests of the built-in tool vocabulary translation.
-export const __test = { normalizeToolCall, denormalizeToolInput };
+// Exported for unit tests of the built-in tool vocabulary translation and the
+// spawn-failure retry policy (null restores the default delays).
+export const __test = {
+  normalizeToolCall,
+  denormalizeToolInput,
+  setSpawnRetryDelays(delays: readonly number[] | null): void {
+    spawnRetryDelaysMs = delays ?? DEFAULT_SPAWN_RETRY_DELAYS_MS;
+  },
+};
 
 function claudeResumeId(token: string | null): string | undefined {
   if (token && token.startsWith(TAG)) return token.slice(TAG.length);
@@ -212,7 +232,13 @@ export class ClaudeBackend implements AgentBackend {
     // a fresh session (context loss, flagged to the model) rather than fail the
     // turn: the dispatch layer replays the unanswered user-message backlog as
     // the prompt, so the fresh session still receives the actual instruction.
-    for (let attempt = 0; ; attempt++) {
+    // Retry state: `resumeLostRetried` gates the single fresh-session fallback;
+    // `spawnRetries` counts launch retries (bounded by spawnRetryDelaysMs);
+    // `retried` is true on ANY re-iteration (guards duplicate init persistence).
+    let resumeLostRetried = false;
+    let spawnRetries = 0;
+    let retried = false;
+    while (true) {
       envelopes.length = 0;
       usage = createUsageAccumulator();
       summary = null;
@@ -221,9 +247,10 @@ export class ClaudeBackend implements AgentBackend {
       sessionId = null;
 
       // On the fresh-session retry, tell the model its history is gone so it
-      // re-derives state instead of assuming context it no longer has.
+      // re-derives state instead of assuming context it no longer has. Spawn
+      // retries say nothing about the transcript, so they carry no note.
       const appendWithNote =
-        attempt > 0 ? [append, RESUME_LOST_NOTE].filter(Boolean).join("\n\n") : append;
+        resumeLostRetried ? [append, RESUME_LOST_NOTE].filter(Boolean).join("\n\n") : append;
 
       const stream = query({
         prompt,
@@ -281,9 +308,9 @@ export class ClaudeBackend implements AgentBackend {
             }
             envelopes.push(env);
             // Keep the init in the in-memory envelope list (it carries the
-            // resume token) but don't re-persist it on the fresh-session retry
-            // if attempt 0 already persisted one.
-            if (isInit && attempt > 0 && persistedInit) {
+            // resume token) but don't re-persist it on a retry if the first
+            // attempt already persisted one.
+            if (isInit && retried && persistedInit) {
               // duplicate init from the retry — in-memory only, not persisted
             } else {
               if (isInit) persistedInit = true;
@@ -309,7 +336,7 @@ export class ClaudeBackend implements AgentBackend {
         }
       } catch (err) {
         if (
-          attempt === 0 &&
+          !resumeLostRetried &&
           resume &&
           !abort.signal.aborted &&
           err instanceof Error &&
@@ -319,7 +346,31 @@ export class ClaudeBackend implements AgentBackend {
             `[ClaudeBackend] resume transcript for session ${resume} not found on this machine; retrying with a fresh session`
           );
           resume = undefined;
+          resumeLostRetried = true;
+          retried = true;
           continue;
+        }
+        if (
+          !abort.signal.aborted &&
+          err instanceof Error &&
+          SPAWN_FAILURE_RE.test(err.message)
+        ) {
+          if (spawnRetries < spawnRetryDelaysMs.length) {
+            const delay = spawnRetryDelaysMs[spawnRetries];
+            spawnRetries += 1;
+            retried = true;
+            console.error(
+              `[ClaudeBackend] agent process failed to launch (retry ${spawnRetries}/${spawnRetryDelaysMs.length} in ${delay}ms): ${err.message.split("\n")[0]}`
+            );
+            await new Promise<void>((r) => setTimeout(r, delay));
+            continue;
+          }
+          throw new Error(
+            `Agent process failed to launch after ${spawnRetries + 1} attempts — an infrastructure fault ` +
+              `(broken runner snapshot or binary), not an agent error. Retry the run; if it persists, ` +
+              `rebuild the runner template. Last error: ${err.message}`,
+            { cause: err }
+          );
         }
         throw err;
       }
