@@ -112,16 +112,29 @@ function blankProvisionCommand(ownerRepo: string, repoPath: string, workerSha: s
     workerEntryPath: "/home/user/worker/run-worker.js",
   });
   const shq = (v: string): string => `'${v.replace(/'/g, `'\\''`)}'`;
+  // A credential embedded in the clone URL itself (https://x-access-token:$GH_TOKEN@…)
+  // would print verbatim in git's "remote: not found" / auth-failure error text,
+  // which runDetachedBoxStep's failure-tail round-trips into the thrown Error —
+  // and from there into lastProviderError/agentEvents. A credential helper keeps
+  // the token out of the URL and out of argv entirely; git invokes it (via `sh -c`,
+  // same as this whole script) only to ask for username/password on demand.
+  const CRED_HELPER =
+    `!f(){ echo username=x-access-token; echo "password=$GH_TOKEN"; };f`;
+  const cloneUrl = `https://github.com/${ownerRepo}.git`;
+  const cloneCommand =
+    `if [ -n "\${GH_TOKEN:-}" ]; then ` +
+    `git -c credential.helper=${shq(CRED_HELPER)} clone --depth 1 "${cloneUrl}" ${shq(repoPath)}; ` +
+    `else git clone --depth 1 "${cloneUrl}" ${shq(repoPath)}; fi`;
   return [
     `set -eu`,
-    `command -v git >/dev/null && command -v node >/dev/null && command -v curl >/dev/null || { echo "blank box missing git/node/curl" >&2; exit 127; }`,
+    `command -v git >/dev/null && command -v node >/dev/null && command -v curl >/dev/null && command -v sha256sum >/dev/null || { echo "blank box missing git/node/curl/sha256sum" >&2; exit 127; }`,
     `mkdir -p /home/user/worker /home/user/.task-orchestrator`,
     `curl -fsS --retry 3 --retry-delay 2 -H "authorization: Bearer $TASK_ORCH_WORKER_CHANNEL_CREDENTIAL" -H "x-run-id: $TASK_ORCH_RUN_ID" -D /tmp/worker-bundle.headers -o /home/user/worker/run-worker.js "$TASK_ORCH_BUNDLE_URL"`,
     `want=$(tr -d '\\r' < /tmp/worker-bundle.headers | awk 'tolower($1)=="x-bundle-sha256:" {print $2}')`,
     `got=$(sha256sum /home/user/worker/run-worker.js | awk '{print $1}')`,
     `[ -n "$want" ] && [ "$want" = "$got" ] || { echo "bundle checksum mismatch (want=$want got=$got)" >&2; exit 1; }`,
     `test ! -e ${shq(repoPath)}`,
-    `if [ -n "\${GH_TOKEN:-}" ]; then git clone --depth 1 "https://x-access-token:\${GH_TOKEN}@github.com/${ownerRepo}.git" ${shq(repoPath)}; else git clone --depth 1 "https://github.com/${ownerRepo}.git" ${shq(repoPath)}; fi`,
+    cloneCommand,
     `printf '%s\\n' ${shq(manifest)} > ${shq(BOX_TEMPLATE_MANIFEST_PATH)}`,
   ].join("; ");
 }
@@ -496,6 +509,16 @@ export class BoxRunnerProvider implements RunnerProvider {
       if (boxId) {
         await this.recordFailure(input.runId, boxId, normalized);
         await box.stop(boxId).catch(() => {});
+        // A blank box has no template snapshot to resume: once stopped, it is
+        // permanently useless. Clearing boxId (but not lastProviderError/state)
+        // makes the NEXT create() attempt take the fresh-provision path again
+        // instead of the existing?.boxId short-circuit — which would otherwise
+        // resume this same dead box, find no manifest was ever written, and
+        // fail forever (the run could never re-provision).
+        await db
+          .update(runnerInstances)
+          .set({ boxId: null })
+          .where(and(eq(runnerInstances.runId, input.runId), eq(runnerInstances.boxId, boxId)));
       }
       throw error;
     }

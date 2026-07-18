@@ -35,10 +35,12 @@ function fakeBlankBox(opts: { rc?: string; tail?: string } = {}) {
   const calls: string[] = [];
   const commands: string[] = [];
   const states = new Map<string, string>();
+  const createdIds: string[] = [];
   let next = 0;
   let createdInput: { env: Record<string, string>; noEnv: true } | undefined;
   let forkCalled = false;
-  const rc = opts.rc ?? "0";
+  let rc = opts.rc ?? "0";
+  let tail = opts.tail ?? "";
 
   const client: BoxClient = {
     limits: async () => ({ canStart: true, activeBoxes: 0, maxActiveBoxes: 2 }),
@@ -52,6 +54,7 @@ function fakeBlankBox(opts: { rc?: string; tail?: string } = {}) {
     create: async (input) => {
       createdInput = input;
       const id = `bx_blank_${sequence}_${++next}`;
+      createdIds.push(id);
       states.set(id, "ready");
       calls.push(`create:${id}`);
       return { id, state: "ready" };
@@ -82,7 +85,7 @@ function fakeBlankBox(opts: { rc?: string; tail?: string } = {}) {
       // Detached-step tail-on-failure read.
       if (cmd.startsWith("tail -c")) {
         calls.push("command:tail");
-        return { success: true, exitCode: 0, stdout: opts.tail ?? "", stderr: "", timedOut: false };
+        return { success: true, exitCode: 0, stdout: tail, stderr: "", timedOut: false };
       }
       // Bootstrap-log tail (readyAndLaunch's captureBootstrapLog) — must be
       // checked BEFORE the manifest `cat`, since it also starts with `if [ -f`.
@@ -125,8 +128,15 @@ function fakeBlankBox(opts: { rc?: string; tail?: string } = {}) {
     calls,
     commands,
     states,
+    createdIds,
     createdInput: () => createdInput,
     forkCalled: () => forkCalled,
+    setRc: (value: string) => {
+      rc = value;
+    },
+    setTail: (value: string) => {
+      tail = value;
+    },
   };
 }
 
@@ -182,6 +192,8 @@ describe("box blank provisioning", () => {
     expect(provisionCommand).toContain("github.com/acme/widget");
     expect(provisionCommand).toContain('"workerEntryPath":"/home/user/worker/run-worker.js"');
     expect(provisionCommand).toContain('"repository":"acme/widget"');
+    // sha256sum joins the git/node/curl preflight.
+    expect(provisionCommand).toContain("sha256sum");
 
     // The literal GH_TOKEN value must never appear in any command text — only
     // the box-shell env reference ($GH_TOKEN) does.
@@ -189,6 +201,12 @@ describe("box blank provisioning", () => {
       expect(cmd).not.toContain("ghp_should_never_appear_in_a_command_literal");
     }
     expect(provisionCommand).toContain("GH_TOKEN");
+    // The credential must never ride in the clone URL itself (it would leak
+    // verbatim into a "remote: not found" clone error and round-trip through
+    // runDetachedBoxStep's log tail into lastProviderError/agentEvents) — it
+    // is injected via a git credential helper instead.
+    expect(provisionCommand).not.toContain("x-access-token:");
+    expect(provisionCommand).toContain("credential.helper");
 
     const [mapping] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
     expect(mapping).toMatchObject({
@@ -227,5 +245,33 @@ describe("box blank provisioning", () => {
     expect(caught).toBeInstanceOf(Error);
     expect((caught as Error).message).toMatch(/provision/i);
     expect((caught as Error).message).toMatch(/clone failed/);
+  });
+
+  it("re-provisions on a fresh box after a provision failure (no retry wedge)", async () => {
+    blankEnv();
+    const fake = fakeBlankBox({ rc: "1", tail: "clone failed: repo not found" });
+    const { run, scope } = await runWithRemote("git@github.com:acme/retry.git");
+
+    await expect(new BoxRunnerProvider(fake.client).create({ runId: run.id, scope })).rejects.toThrow();
+
+    // The failed mapping must not pin a dead boxId: the next attempt has to
+    // provision a fresh blank box rather than resuming/reading a manifest
+    // that was never written on the box the failed provision step stopped.
+    const [afterFailure] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(afterFailure?.boxId).toBeNull();
+    expect(afterFailure?.lastProviderError).toBeTruthy();
+    expect(fake.createdIds).toHaveLength(1);
+
+    fake.setRc("0");
+    fake.setTail("");
+    const ref = await new BoxRunnerProvider(fake.client).create({ runId: run.id, scope });
+
+    expect(ref).toMatchObject({ provider: "box" });
+    expect(fake.forkCalled()).toBe(false);
+    expect(fake.createdIds).toHaveLength(2);
+    expect(fake.createdIds[1]).not.toBe(fake.createdIds[0]);
+
+    const [afterRetry] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(afterRetry).toMatchObject({ boxId: ref?.handle, boxTemplateId: null, state: "running" });
   });
 });
