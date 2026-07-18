@@ -64,6 +64,10 @@ already cost real time once.
 - First run with no warm template triggers an **inline template build
   (~11 min)** on the run's critical path (`reason:"no-template"`). CI warms
   templates; local dev may still hit cold builds.
+- **Blank provisioning is now the default** — a box run needs no template
+  snapshot. `TASK_ORCH_BUNDLE_URL` (or `AUTH_URL`) must resolve on the
+  control plane; the served bundle is `dist/run-worker.standalone.js` from
+  the server deployment.
 - The build has a pre-archive `verifying-worker` step: it runs the
   standalone bundle alone in a scratch dir (expects exit 2, its own usage
   check) and execs `/usr/local/bin/claude --version` (the Box's preinstalled

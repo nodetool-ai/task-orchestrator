@@ -17,6 +17,9 @@ COPY . .
 # enough to compile — no database is contacted during the build.
 ENV DATABASE_URL=postgres://build:build@localhost:5432/build
 RUN npm run build
+# The standalone worker bundle served by GET /api/worker-bundle to
+# blank-provisioned Box runners. Version-locked to this image by construction.
+RUN npm run build:worker:standalone
 
 FROM node:24-bookworm-slim AS runtime
 WORKDIR /app
@@ -35,6 +38,7 @@ COPY --from=build /app/.next ./.next
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/next.config.mjs ./next.config.mjs
 COPY --from=build /app/db ./db
+COPY --from=build /app/dist ./dist
 # The `pipe` service runs `tsx scripts/pipe.ts` from THIS image, so the runtime
 # stage needs the TS source it imports (lib/*, scripts/*, auth) + tsconfig for
 # the `@/*` path alias. `next start` ignores these; they don't affect it.

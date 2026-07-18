@@ -54,6 +54,8 @@ avoided. The credential it could pair with is run-scoped and
 single-purpose, and the URL is public anyway; the worker still learns
 everything else from the pushed `run.start` snapshot.
 
+**Status**: route and blank provisioning landed; template mode remains behind `TASK_ORCH_BOX_PROVISION=template`.
+
 ### 2. Blank provisioning replaces the template fork
 
 `BoxRunnerProvider.create()` in blank mode:
