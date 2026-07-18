@@ -320,6 +320,13 @@ export const config = Object.freeze({
     get backend(): string | undefined {
       return strEnv("TASK_ORCH_AGENT_BACKEND");
     },
+    /** Absolute path to an external Claude Code executable for the Claude
+     *  backend to drive instead of the SDK's bundled platform binary.
+     *  Explicit-only — never probed from PATH. Set by the Box worker env
+     *  (the Box image ships /usr/local/bin/claude); unset everywhere else. */
+    get claudeBinary(): string | undefined {
+      return strEnv("TASK_ORCH_CLAUDE_BINARY");
+    },
     get model(): string | undefined {
       return strEnv("TASK_ORCH_AGENT_MODEL");
     },
