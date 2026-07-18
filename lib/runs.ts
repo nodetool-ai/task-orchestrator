@@ -131,10 +131,13 @@ import { contentText, runTransport } from "./worker";
 // `isLeaseLive`, and `setError` are hoisted function declarations, so they are
 // safe to reference at module-init time. `failRun` lets a failed worker spawn
 // mark the run failed (status + event) instead of wedging it in 'preparing'.
+// It binds recordDispatchFailure (not bare setError) so a RE-dispatch of an
+// already-failed run — a user resuming it — still records why THIS attempt
+// failed instead of no-oping behind the terminal guard.
 runDispatch.__setRunsApi({
   get,
   isLeaseLive,
-  failRun: setError,
+  failRun: recordDispatchFailure,
   failPendingRun,
   countInFlightWorkers,
   countInFlightLightweightChildren,
@@ -1938,30 +1941,10 @@ async function repoRoot(run: {
   return r?.localPath ? resolve(r.localPath) : ORCHESTRATOR_ROOT;
 }
 
-/**
- * Guard the resolved working directory before it reaches the agent backend.
- * A missing cwd makes `child_process.spawn` emit `ENOENT` *against the
- * executable*, which the Claude Agent SDK then misreports as a native-binary /
- * libc mismatch ("binary exists but failed to launch"). Validate here so a
- * stale repository `local_path` surfaces as an actionable error naming the
- * offending repo instead of a misleading message about the Claude binary.
- */
-export function validateCwd(dir: string, ctx: { runId: number; repoId: string | null }): string {
-  const where = `repository '${ctx.repoId ?? "(default)"}'`;
-  if (!existsSync(dir)) {
-    throw new Error(
-      `Run #${ctx.runId}: working directory '${dir}' does not exist. ` +
-        `Check the local_path of ${where}.`
-    );
-  }
-  if (!statSync(dir).isDirectory()) {
-    throw new Error(
-      `Run #${ctx.runId}: working directory '${dir}' is not a directory. ` +
-        `Check the local_path of ${where}.`
-    );
-  }
-  return dir;
-}
+// Guard the resolved working directory before it reaches the agent backend.
+// Shared with the ws worker driver — see lib/run-cwd.ts for the rationale.
+import { validateCwd } from "./run-cwd";
+export { validateCwd };
 
 async function prepareCwd(run: RunRow): Promise<string> {
   const sessionWork = sessionRepoPath();
@@ -3538,7 +3521,10 @@ export async function* sendMessageToRun(opts: {
                 )
               )
             );
-          await runDispatch.dispatchRun(runId);
+          if ((await runDispatch.dispatchRun(runId)) === "spawn-failed") {
+            yield* yieldDispatchFailure(runId);
+            return;
+          }
         }
       }
       // else: a live worker will pick up the run_input notify.
@@ -3570,13 +3556,28 @@ export async function* sendMessageToRun(opts: {
         // tooling inside the parent's Machine — the 2026-07-05 incident where
         // one typecheck OOM wedged the parent and every in-flight child.
         await deferRunForServerDispatch(runId, run.parentRunId ?? null);
-      } else {
-        await runDispatch.dispatchRun(runId);
+      } else if ((await runDispatch.dispatchRun(runId)) === "spawn-failed") {
+        // Dispatch failed synchronously (admission reject, spawn error): no
+        // worker will ever write to the run stream, so relaying would hang the
+        // caller forever (box runs 26/27: the resume UI spun with no feedback).
+        // Surface the recorded failure and end the stream.
+        yield* yieldDispatchFailure(runId);
+        return;
       }
     }
   }
 
   yield* relayRunStream(runId, from, abort, ownMsg.id);
+}
+
+/** Terminal error frame for a synchronous dispatch failure — the failure was
+ *  recorded on the row by recordDispatchFailure (run-dispatch's failRun). */
+async function* yieldDispatchFailure(runId: number): AsyncGenerator<AppendStreamEvent> {
+  const failed = await get(runId);
+  yield {
+    type: "error",
+    error: failed?.error ?? "Runner dispatch failed; see the run for details.",
+  };
 }
 
 /**
@@ -5252,6 +5253,31 @@ export async function setError(runId: number, error: string, opts?: { retries?: 
     extra: { error },
     retries: opts?.retries,
   });
+}
+
+/**
+ * Record a DISPATCH failure (admission reject, tree-limit violation, provider
+ * spawn error). Unlike setError — whose terminal guard makes it a no-op on an
+ * already-terminal row — a re-dispatch of a resumable FAILED run (a user
+ * resuming it) must still surface WHY this attempt failed: box runs 26/27
+ * resumed into an admission reject whose message vanished behind the previous
+ * attempt's stale error, and the stream relay hung with nothing to show.
+ * For a row already 'failed', refresh the error text in place (status
+ * unchanged, cancelled/closed and other statuses untouched).
+ */
+export async function recordDispatchFailure(runId: number, error: string): Promise<void> {
+  await setError(runId, error);
+  const [row] = await db
+    .select({ status: agentSessions.status, error: agentSessions.error })
+    .from(agentSessions)
+    .where(eq(agentSessions.id, runId));
+  if (row?.status === "failed" && row.error !== error) {
+    await db
+      .update(agentSessions)
+      .set({ error, completedAt: new Date() })
+      .where(and(eq(agentSessions.id, runId), eq(agentSessions.status, "failed")));
+    await emitStatus(runId, "failed", { error });
+  }
 }
 
 async function emitStatus(runId: number, status: SessionStatus, extra?: Record<string, unknown>) {

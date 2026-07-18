@@ -127,7 +127,12 @@ function boxEnv() {
 }
 
 async function runWithClaim() {
-  const repository = await repo.createRepository({ name: `box-e2e-${Date.now()}-${Math.random()}` });
+  // Box admission rejects a repo without a clonable remote (runs 26/27), so
+  // the fixture repo must carry one for provisioning to be reachable at all.
+  const repository = await repo.createRepository({
+    name: `box-e2e-${Date.now()}-${Math.random()}`,
+    remote: "git@github.com:acme/box-e2e.git",
+  });
   const run = await create({ goal: "<implement>", defer: true, repoId: repository.id });
   const scope = `run-${run.id}-fake`;
   await db.update(agentSessions).set({ workerScope: scope }).where(eq(agentSessions.id, run.id));

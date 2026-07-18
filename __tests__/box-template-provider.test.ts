@@ -6,7 +6,19 @@ import { environments } from "../db/schema";
 import type { BoxClient } from "../lib/runner/box-client";
 import { BoxRunnerProvider } from "../lib/runner/box";
 import { setTemplateBuildStarter } from "../lib/runner/environments";
-import { create } from "../lib/runs";
+import { createRepository } from "../lib/repo";
+import { create as createRun, type CreateRunInput } from "../lib/runs";
+
+// Box admission rejects a repo without a clonable remote (runs 26/27), so every
+// test run here is bound to a remote-carrying repo — the template gate under
+// test sits BEHIND that check.
+async function create(input: CreateRunInput) {
+  const repository = await createRepository({
+    name: `box-tpl-${Date.now()}-${Math.random()}`,
+    remote: "git@github.com:acme/box-tpl.git",
+  });
+  return createRun({ ...input, repoId: repository.id });
+}
 
 const KNOBS = ["TASK_ORCH_RUNNER", "TASK_ORCH_BOX_TEMPLATE_ID", "TASK_ORCH_WORKER_SHA", "TASK_ORCH_BOX_BASE_ID", "BOX_API_KEY"];
 afterEach(() => {

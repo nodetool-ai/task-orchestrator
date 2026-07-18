@@ -17,6 +17,8 @@ import { boxStateToRunnerState } from "./box-waiters";
 import { isWakeIntentFresh, isWorkerClaimLive } from "./lifecycle";
 import { newChannelInstanceId } from "../worker-channel/credential";
 import { boxChannelDialEndpoint, parseBoxHostUrl } from "../worker-channel/dispatch-env";
+import { dbTransport } from "../worker/db-transport";
+import { ownerRepoFromRemote } from "../gh-url";
 import type {
   CreateRunnerInput,
   RunnerAdmission,
@@ -197,6 +199,26 @@ export class BoxRunnerProvider implements RunnerProvider {
 
   /** Provider-owned account/capacity gate, called inside dispatch's claim lock. */
   async admit(input: RunnerAdmissionInput): Promise<RunnerAdmission> {
+    // Repo-viability gate FIRST (box runs 26/27): a run whose resolved
+    // repository has no clonable remote can never work on a box — the worker
+    // has nothing to check out, and the failure would otherwise surface after
+    // a full template build as a misleading SDK spawn error. Reject before any
+    // template is resolved or built. Best-effort: a lookup hiccup must not
+    // block admission (the later gates re-fail safely).
+    try {
+      const repoRow = await dbTransport.resolveRepo(input.runId);
+      if (repoRow && !ownerRepoFromRemote(repoRow.remote ?? null)) {
+        return {
+          decision: "reject",
+          message:
+            `Repository '${repoRow.name ?? repoRow.id}' has no usable Git remote ` +
+            `(local_path '${repoRow.localPath ?? ""}' only exists on the control plane). ` +
+            `Box runners clone from the remote — add one, or run this repository on the local provider.`,
+        };
+      }
+    } catch {
+      // fall through to the standard gates
+    }
     try {
       const template = await resolveBoxTemplate({ runId: input.runId });
       if (template.kind === "building") {

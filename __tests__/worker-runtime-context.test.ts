@@ -240,6 +240,31 @@ describe("driveWorkerRun", () => {
     expect(emitted.some((e) => e.type === "run.finished")).toBe(true);
   });
 
+  it("fails the turn with an actionable error when the snapshot cwd does not exist in this worker", async () => {
+    // Reproduces box runs 26/27: the snapshot's repository.localPath is a
+    // CONTROL-PLANE path (e.g. /Users/...) that does not exist inside a remote
+    // worker. Spawning from it would surface the SDK's misleading "native
+    // binary failed to launch / libc mismatch" error. The driver must fail the
+    // run BEFORE the backend spawns, naming the path and repository.
+    const runTurn = vi.fn();
+    vi.spyOn(backend, "getBackend").mockResolvedValue({ id: "fake", runTurn } as any);
+    const { session, emitted } = recordingSession();
+    const start = makeStart({
+      run: { id: 26, status: "running", goal: "<implement>" },
+      repository: { id: "R-chess-analyzer", localPath: "/nonexistent-control-plane/chess-analyzer" },
+      transcript: [msg(1, "user", "do it")],
+      pendingInput: [],
+    });
+
+    await driveWorkerRun({ start, session });
+
+    const failed = emitted.find((e) => e.type === "run.failed");
+    expect(failed).toBeDefined();
+    expect(failed!.payload.error).toMatch(/working directory '.*chess-analyzer' does not exist/);
+    expect(failed!.payload.error).toContain("R-chess-analyzer");
+    expect(runTurn).not.toHaveBeenCalled();
+  });
+
   it("does NOT re-append a run.input user message the control plane already persisted", async () => {
     // Regression: a chat follow-up is durably appended by persistMessage (one
     // agent_messages row) and bridged to the worker as run.input carrying that

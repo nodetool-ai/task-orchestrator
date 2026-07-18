@@ -32,6 +32,7 @@ import type {
 } from "../worker-channel/protocol";
 import type { WorkerSessionCommand } from "../worker-channel/worker-session";
 import { getBackend } from "../agent-backend";
+import { validateCwd } from "../run-cwd";
 import type { RunTurnArgs } from "../agent-backend/types";
 import type { RunEnvelope } from "../pi-event-mapper";
 import { config } from "../config";
@@ -354,10 +355,25 @@ async function runModelTurn(
   // repository's working copy from the snapshot. Never fall back to
   // process.cwd() — a local worker's cwd is the ORCHESTRATOR checkout, and an
   // agent turned loose there is exploring the wrong codebase.
-  const cwd =
+  //
+  // GUARD (box runs 26/27): both snapshot paths are CONTROL-PLANE paths. On a
+  // remote worker (box/fly/docker) they may not exist here; spawning from a
+  // missing cwd surfaces as the SDK's misleading "native binary failed to
+  // launch / libc mismatch" error. Validate before any backend spawns so the
+  // run fails with the real cause instead.
+  const cwd = validateCwd(
     (runField(run, "worktreePath") as string | undefined) ??
-    (typeof context.repository?.localPath === "string" ? context.repository.localPath : undefined) ??
-    process.cwd();
+      (typeof context.repository?.localPath === "string" ? context.repository.localPath : undefined) ??
+      process.cwd(),
+    {
+      runId: (runField(run, "id") as number) ?? 0,
+      repoId: (typeof context.repository?.id === "string" ? context.repository.id : null),
+      hint:
+        "This path came from the control-plane snapshot; on a remote worker the " +
+        "repository needs a checkout that exists inside the runner (a clonable " +
+        "remote). See docs/agent-caveats.md.",
+    }
+  );
   const profileCtx = {
     runId: (runField(run, "id") as number) ?? 0,
     run: run as never,
