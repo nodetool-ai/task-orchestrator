@@ -8,6 +8,7 @@
 import { config } from "../config";
 import type { BoxClient } from "./box-client";
 import { emitBoxEvent } from "./box";
+import { BOX_CLAUDE_BINARY } from "./box-env";
 import { BOX_TEMPLATE_MANIFEST_PATH, BOX_TEMPLATE_WORKER_PROTOCOL_VERSION } from "./box-template";
 import { emitTemplateBuildLifecycle } from "./box-template-events";
 import { markEnvironmentFailed, markEnvironmentReady, setEnvironmentDetail } from "./environments";
@@ -17,8 +18,8 @@ const BUILD_STEPS = [
   "cloning-worker",
   "installing-deps",
   "building-worker",
+  "pruning",
   "cloning-agent-repo",
-  "installing-agent-deps",
   "writing-manifest",
   "verifying-worker",
   "archiving",
@@ -26,22 +27,24 @@ const BUILD_STEPS = [
 
 const WORKER_DIR = "/home/user/task-orchestrator";
 
+/** Where the pruning step parks the single-file worker; the ONLY worker
+ *  artifact a finished template contains. The bootstrap in box.ts launches
+ *  this path (with a legacy fallback for pre-bundle templates). */
+const BUNDLE_PATH = "/home/user/worker/run-worker.js";
+
 /**
- * Pre-archive smoke test. Run 26 archived a snapshot seconds after `npm ci`
- * finished writing a 251 MB native binary; a fork of that snapshot got a
- * claude binary that could not exec, and the run died 23 ms into its first
- * turn with the SDK's misleading "libc mismatch" error. Exec the exact binary
- * the worker's Claude backend will spawn (matching the box's libc, mirroring
- * the SDK's variant selection) and `sync` so the checkpoint can never seal a
- * binary that doesn't launch.
+ * Pre-archive smoke test. Run 26 archived a snapshot whose claude binary
+ * could not exec; runs 26/27 then died milliseconds into their first turn.
+ * Verify BOTH launch paths the worker depends on: (a) the standalone bundle,
+ * copied alone into a scratch dir so a hidden node_modules dependency cannot
+ * pass by accident (exit 2 = its own usage check, the full dependency graph
+ * loaded), and (b) the Box's preinstalled claude binary. `sync` so the
+ * checkpoint can never seal half-written pages.
  */
 const VERIFY_WORKER_COMMAND =
-  `set -eu; cd ${WORKER_DIR}; ` +
-  `arch=$(uname -m); case "$arch" in x86_64) a=x64 ;; aarch64|arm64) a=arm64 ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac; ` +
-  `if [ -e "/lib/ld-musl-$arch.so.1" ]; then v="linux-$a-musl"; else v="linux-$a"; fi; ` +
-  `bin="node_modules/@anthropic-ai/claude-agent-sdk-$v/claude"; ` +
-  `test -x "$bin" || { echo "SDK native binary missing: $bin" >&2; exit 1; }; ` +
-  `"$bin" --version; sync`;
+  `set -eu; d=$(mktemp -d); cp ${BUNDLE_PATH} "$d/run-worker.js"; cd "$d"; ` +
+  `node run-worker.js >/dev/null 2>&1 || rc=$?; test "\${rc:-0}" -eq 2 || { echo "bundle isolation check failed (exit \${rc:-0}, expected 2)" >&2; exit 1; }; ` +
+  `${BOX_CLAUDE_BINARY} --version; sync`;
 
 function shq(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -151,18 +154,20 @@ export async function runBoxTemplateBuild(
           `set -eu; command -v git >/dev/null && command -v node >/dev/null && command -v npm >/dev/null || { echo "blank box missing git/node/npm" >&2; exit 127; }; test ! -e ${shq(WORKER_DIR)}; git clone --branch ${shq(config.box.workerRepoRef)} ${shq(config.box.workerRepoUrl)} ${shq(WORKER_DIR)}; cd ${shq(WORKER_DIR)}; git checkout ${input.workerSha}`);
 
         await stepAndDetail("installing-deps");
-        await run(boxId, "installing-deps", `set -eu; cd ${shq(WORKER_DIR)}; npm ci`);
+        await run(boxId, "installing-deps",
+          `set -eu; cd ${shq(WORKER_DIR)}; npm ci --omit=optional`);
 
         await stepAndDetail("building-worker");
         await run(boxId, "building-worker",
-          `set -eu; cd ${shq(WORKER_DIR)}; npm run build:worker; test -s dist/run-worker.js`);
+          `set -eu; cd ${shq(WORKER_DIR)}; npm run build:worker:standalone; test -s dist/run-worker.standalone.js`);
+
+        await stepAndDetail("pruning");
+        await run(boxId, "pruning",
+          `set -eu; mkdir -p $(dirname ${shq(BUNDLE_PATH)}); cp ${shq(`${WORKER_DIR}/dist/run-worker.standalone.js`)} ${shq(BUNDLE_PATH)}; rm -rf ${shq(WORKER_DIR)}`);
 
         await stepAndDetail("cloning-agent-repo");
         await run(boxId, "cloning-agent-repo",
           `set -eu; test ! -e ${shq(repoPath)}; git clone --depth 1 ${shq(config.box.agentRepoUrl)} ${shq(repoPath)}`);
-
-        await stepAndDetail("installing-agent-deps");
-        await run(boxId, "installing-agent-deps", `set -eu; cd ${shq(repoPath)}; npm ci`);
 
         await stepAndDetail("writing-manifest");
         const manifest = JSON.stringify({
@@ -171,6 +176,7 @@ export async function runBoxTemplateBuild(
           workerProtocolVersion: BOX_TEMPLATE_WORKER_PROTOCOL_VERSION,
           repository: config.box.agentRepo,
           repositoryPath: repoPath,
+          workerEntryPath: BUNDLE_PATH,
         });
         await run(boxId, "writing-manifest",
           `set -eu; mkdir -p /home/user/.task-orchestrator; printf '%s\\n' ${shq(manifest)} > ${shq(BOX_TEMPLATE_MANIFEST_PATH)}`);

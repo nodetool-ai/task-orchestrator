@@ -245,6 +245,16 @@ describe("templateBuildView", () => {
     expect(v.steps[0].label).toBe("Verifying worker binary");
   });
 
+  it("labels the pruning step", () => {
+    const state = reduceTemplateBuildEvent(
+      null,
+      { type: "runner_box_template_building", steps: ["pruning"] },
+      0
+    );
+    const view = templateBuildView(state!, 0);
+    expect(view.steps[0].label).toBe("Pruning build artifacts");
+  });
+
   it("shows reassurance past 1.5× the estimate", () => {
     const v = templateBuildView(base, T0 + 900_000 * 1.5 + 1_000);
     expect(v.showReassurance).toBe(true);

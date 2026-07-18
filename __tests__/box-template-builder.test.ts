@@ -95,12 +95,22 @@ describe("runBoxTemplateBuild", () => {
     // The worker clone checks out the exact SHA and the manifest embeds it.
     expect(commands.some((c) => c.includes(`git checkout ${sha}`))).toBe(true);
     expect(commands.some((c) => c.includes(`"workerBuildSha":"${sha}"`) || c.includes(`\\"workerBuildSha\\":\\"${sha}\\"`))).toBe(true);
-    // Before archiving, the build smoke-tests the Claude Agent SDK's native
-    // binary (the exact artifact whose failure-to-exec killed run 26) and
-    // flushes the filesystem so the checkpoint can't seal half-written pages.
-    const verify = commands.find((c) => c.includes("claude-agent-sdk") && c.includes("--version"));
+    // Before archiving, the build (a) runs the standalone bundle in isolation
+    // — its own usage check, exit 2, proves the full dependency graph loads
+    // with no node_modules — and (b) execs the Box's preinstalled claude
+    // binary, then syncs so the checkpoint can't seal half-written pages.
+    const verify = commands.find((c) => c.includes("/usr/local/bin/claude --version"));
     expect(verify).toBeDefined();
+    expect(verify).toContain("run-worker.js");
     expect(verify).toContain("sync");
+    // The reshaped build installs without the SDK's 251MB optional platform
+    // binary, builds the standalone bundle, prunes the checkout, and never
+    // npm-installs the agent repo (deps are on-demand at run time).
+    expect(commands.some((c) => c.includes("npm ci --omit=optional"))).toBe(true);
+    expect(commands.some((c) => c.includes("build:worker:standalone"))).toBe(true);
+    expect(commands.some((c) => c.includes("rm -rf") && c.includes("/home/user/task-orchestrator"))).toBe(true);
+    expect(commands.some((c) => c.includes("workerEntryPath"))).toBe(true);
+    expect(commands.some((c) => c.includes("/home/user/repository") && c.includes("npm ci"))).toBe(false);
     expect(client.stop).toHaveBeenCalledWith("bx_new_tpl");
   });
 
