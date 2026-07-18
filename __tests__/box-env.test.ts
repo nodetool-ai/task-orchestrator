@@ -25,6 +25,7 @@ const KNOBS = [
   "AUTH_SECRET",
   "TASK_ORCH_WORKER_CHANNEL_SECRET",
   "TASK_ORCH_BUNDLE_URL",
+  "AUTH_URL",
 ] as const;
 
 afterEach(() => {
