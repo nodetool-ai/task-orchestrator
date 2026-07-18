@@ -54,7 +54,16 @@ avoided. The credential it could pair with is run-scoped and
 single-purpose, and the URL is public anyway; the worker still learns
 everything else from the pushed `run.start` snapshot.
 
-**Status**: route and blank provisioning landed; template mode remains behind `TASK_ORCH_BOX_PROVISION=template`.
+**Push fallback (local dev):** the bundle curl is the only box→control-plane
+connection in the system, and a localhost control plane is not box-reachable.
+When no bundle URL resolves, `createBlank` instead **pushes** the local
+`dist/run-worker.standalone.js` into the box in base64 chunks via
+`PUT /boxes/:id/files` (`BoxClient.writeFile`), and the provision command
+reassembles the explicitly-ordered parts and verifies the interpolated
+sha256. No tunnel, no route, no auth needed. Pull remains the production
+path (box pulls at its own pace, no ~31MB JSON bodies through the box API).
+
+**Status**: route, blank provisioning, and the push fallback landed; template mode remains behind `TASK_ORCH_BOX_PROVISION=template`.
 
 ### 2. Blank provisioning replaces the template fork
 

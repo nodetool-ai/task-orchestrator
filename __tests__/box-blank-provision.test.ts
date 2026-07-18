@@ -5,6 +5,10 @@
 // (curl + sha256 verify against the X-Bundle-Sha256 header), clones the RUN'S
 // OWN repo, writes the standard manifest — and then the normal manifest/
 // bootstrap flow proceeds unchanged.
+import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 
@@ -41,6 +45,7 @@ function fakeBlankBox(opts: { rc?: string; tail?: string } = {}) {
   let forkCalled = false;
   let rc = opts.rc ?? "0";
   let tail = opts.tail ?? "";
+  const writes: Array<{ path: string; content: string; encoding?: string }> = [];
 
   const client: BoxClient = {
     limits: async () => ({ canStart: true, activeBoxes: 0, maxActiveBoxes: 2 }),
@@ -122,6 +127,10 @@ function fakeBlankBox(opts: { rc?: string; tail?: string } = {}) {
       return { success: true, exitCode: 0, stdout: "42\n", stderr: "", timedOut: false };
     },
     getLatestBoxSnapshot: async (id) => ({ id: `snap_${id}`, status: "completed", completedAt: new Date() }),
+    writeFile: async (_id, input) => {
+      writes.push(input);
+      calls.push(`writeFile:${input.path}`);
+    },
   };
   return {
     client,
@@ -129,6 +138,7 @@ function fakeBlankBox(opts: { rc?: string; tail?: string } = {}) {
     commands,
     states,
     createdIds,
+    writes,
     createdInput: () => createdInput,
     forkCalled: () => forkCalled,
     setRc: (value: string) => {
@@ -219,15 +229,64 @@ describe("box blank provisioning", () => {
     });
   });
 
-  it("fails actionably when no bundle URL is configured", async () => {
+  it("pushes the bundle through the box files API when no bundle URL is configured", async () => {
+    // The first box→control-plane connection this system ever needed was the
+    // bundle curl — which a localhost control plane cannot serve. With no URL,
+    // the control plane PUSHES the bundle into the box via PUT /boxes/:id/files
+    // instead, so local dev needs no tunnel.
     blankEnv();
     vi.stubEnv("TASK_ORCH_BUNDLE_URL", "");
     vi.stubEnv("AUTH_URL", "");
+    const dir = mkdtempSync(join(tmpdir(), "blank-push-"));
+    try {
+      // 13MB forces multiple upload chunks; the assembled bytes must round-trip.
+      const bundleBytes = Buffer.alloc(13 * 1024 * 1024, 7);
+      const bundlePath = join(dir, "run-worker.standalone.js");
+      writeFileSync(bundlePath, bundleBytes);
+      vi.stubEnv("TASK_ORCH_BUNDLE_PATH", bundlePath);
+      const bundleSha = createHash("sha256").update(bundleBytes).digest("hex");
+
+      const fake = fakeBlankBox();
+      const { run, scope } = await runWithRemote("git@github.com:acme/pushed.git");
+
+      const ref = await new BoxRunnerProvider(fake.client).create({ runId: run.id, scope });
+      expect(ref).toMatchObject({ provider: "box" });
+
+      // Chunked, ordered, base64 upload that reassembles to the exact bytes.
+      expect(fake.writes.length).toBeGreaterThan(1);
+      expect(fake.writes.every((w) => w.encoding === "base64")).toBe(true);
+      expect(fake.writes.map((w) => w.path)).toEqual(
+        fake.writes.map((_, i) => `worker-upload/part-${String(i).padStart(3, "0")}`)
+      );
+      const reassembled = Buffer.concat(fake.writes.map((w) => Buffer.from(w.content, "base64")));
+      expect(reassembled.equals(bundleBytes)).toBe(true);
+
+      // The provision command assembles the parts and verifies the interpolated
+      // sha — and never references the (unset) download URL or curl.
+      const provisionCommand = fake.commands.find((cmd) => cmd.includes("worker-upload/part-000"));
+      expect(provisionCommand).toBeTruthy();
+      expect(provisionCommand).toContain(bundleSha);
+      expect(provisionCommand).toContain("/home/user/worker/run-worker.js");
+      expect(provisionCommand).not.toContain("$TASK_ORCH_BUNDLE_URL");
+      expect(fake.createdInput()!.env.TASK_ORCH_BUNDLE_URL).toBeUndefined();
+
+      const [mapping] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+      expect(mapping).toMatchObject({ provider: "box", state: "running" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails actionably when neither a bundle URL nor a local bundle exists", async () => {
+    blankEnv();
+    vi.stubEnv("TASK_ORCH_BUNDLE_URL", "");
+    vi.stubEnv("AUTH_URL", "");
+    vi.stubEnv("TASK_ORCH_BUNDLE_PATH", "/nonexistent/run-worker.standalone.js");
     const fake = fakeBlankBox();
     const { run, scope } = await runWithRemote("git@github.com:acme/nobundle.git");
 
     await expect(new BoxRunnerProvider(fake.client).create({ runId: run.id, scope })).rejects.toThrow(
-      /TASK_ORCH_BUNDLE_URL/
+      /build:worker:standalone/
     );
     expect(fake.calls).toHaveLength(0);
     expect(fake.createdInput()).toBeUndefined();

@@ -71,6 +71,11 @@ export interface BoxClient {
   remove(boxId: string): Promise<void>;
   command(boxId: string, input: { command: string; cwd?: string; timeoutSeconds?: number }): Promise<BoxCommandResult>;
   getLatestBoxSnapshot(boxId: string): Promise<BoxSnapshot | null>;
+  /** Write one file into the Box work directory (PUT /boxes/:id/files). Used
+   *  by blank provisioning to PUSH the worker bundle when the control plane
+   *  has no box-reachable URL (local dev). Optional so narrow test fakes need
+   *  not implement it; the real client always does. */
+  writeFile?(boxId: string, input: { path: string; content: string; encoding?: "utf8" | "base64" }): Promise<void>;
 }
 
 // This mirrors only the generated SDK calls used by this adapter. It is an
@@ -88,6 +93,7 @@ export interface BoxSdkApi {
   remove(input: { boxId: string }): Promise<unknown>;
   command(input: { boxId: string; commandRequest: unknown }): Promise<unknown>;
   getLatestBoxSnapshot(input: { boxId: string }): Promise<unknown>;
+  writeFile(input: { boxId: string; fileWriteRequest: unknown }): Promise<unknown>;
 }
 
 export interface BoxClientOptions {
@@ -255,6 +261,9 @@ export function makeBoxClient(options: BoxClientOptions = {}): BoxClient {
     async getLatestBoxSnapshot(boxId: string): Promise<BoxSnapshot | null> {
       const raw = record(await api.getLatestBoxSnapshot({ boxId }));
       return raw.snapshot == null ? null : snapshotFromSdk(raw.snapshot);
+    },
+    async writeFile(boxId, input): Promise<void> {
+      await api.writeFile({ boxId, fileWriteRequest: input });
     },
   };
 }

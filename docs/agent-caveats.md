@@ -65,9 +65,12 @@ already cost real time once.
   (~11 min)** on the run's critical path (`reason:"no-template"`). CI warms
   templates; local dev may still hit cold builds.
 - **Blank provisioning is now the default** — a box run needs no template
-  snapshot. `TASK_ORCH_BUNDLE_URL` (or `AUTH_URL`) must resolve on the
-  control plane; the served bundle is `dist/run-worker.standalone.js` from
-  the server deployment.
+  snapshot. With `TASK_ORCH_BUNDLE_URL` (or `AUTH_URL`) set, the box curls
+  `dist/run-worker.standalone.js` from the control plane; with neither set
+  (local dev — localhost is not box-reachable), the control plane **pushes**
+  the locally-built bundle into the box via the files API. Either way, run
+  `npm run build:worker:standalone` first or dispatch fails naming that
+  command.
 - The build has a pre-archive `verifying-worker` step: it runs the
   standalone bundle alone in a scratch dir (expects exit 2, its own usage
   check) and execs `/usr/local/bin/claude --version` (the Box's preinstalled

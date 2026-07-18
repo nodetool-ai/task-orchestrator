@@ -38,6 +38,7 @@ describe("BoxClient boundary", () => {
       remove: vi.fn(),
       command: vi.fn(),
       getLatestBoxSnapshot: vi.fn(),
+      writeFile: vi.fn(),
     };
     const box = makeBoxClient({ api });
 
