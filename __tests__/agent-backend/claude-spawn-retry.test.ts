@@ -123,3 +123,25 @@ describe("ClaudeBackend spawn-failure retry", () => {
     expect(outcome.summary).toBe("launched fine");
   });
 });
+
+describe("spawn-failure classification", () => {
+  // With pathToClaudeCodeExecutable set, the SDK's launch errors use
+  // different text than the bundled-binary path. All of them are
+  // infrastructure faults and must be retryable.
+  it("classifies bundled-binary, explicit-path, and generic spawn errors as retryable", () => {
+    const retryable = [
+      SPAWN_ERR, // bundled: "native binary at <path> exists but failed to launch"
+      "Claude Code executable at /usr/local/bin/claude exists but failed to launch",
+      "Claude Code executable not found at /usr/local/bin/claude. Is options.pathToClaudeCodeExecutable set correctly?",
+      "Failed to spawn Claude Code process: EAGAIN",
+    ];
+    for (const msg of retryable) {
+      expect(__test.isSpawnFailure(msg), msg).toBe(true);
+    }
+  });
+
+  it("does not classify ordinary agent errors as spawn failures", () => {
+    expect(__test.isSpawnFailure("API rate limit exceeded")).toBe(false);
+    expect(__test.isSpawnFailure("No conversation found with session ID: abc")).toBe(false);
+  });
+});

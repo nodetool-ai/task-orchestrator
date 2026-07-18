@@ -40,13 +40,16 @@ const RESUME_LOST_NOTE =
   "Prior conversation history is NOT in your context — re-derive the current state from " +
   "the prompt, the repository/checkout, and any recorded notes, tasks, or PRs before acting.";
 
-/** The SDK's error when its child process dies at spawn — e.g. "Claude Code
- *  native binary at <path> exists but failed to launch". Seen on a box forked
- *  from a template snapshot archived moments after `npm ci` wrote the binary
- *  (run 26): the exec fails before any model work happens. That is an
- *  infrastructure fault, not an agent error, so the launch is retried with
- *  settle delays instead of failing the run milliseconds into its turn. */
-const SPAWN_FAILURE_RE = /native binary .*failed to launch|Failed to spawn Claude Code process/i;
+/** The SDK's errors when its child process dies at spawn. Three shapes:
+ *  bundled-binary ("native binary at <path> exists but failed to launch",
+ *  run 26), explicit-path via pathToClaudeCodeExecutable ("executable at
+ *  <path> exists but failed to launch" / "not found at <path>. Is
+ *  options.pathToClaudeCodeExecutable set correctly?"), and the generic
+ *  "Failed to spawn Claude Code process". All are infrastructure faults, not
+ *  agent errors, so the launch is retried with settle delays instead of
+ *  failing the run milliseconds into its turn. */
+const SPAWN_FAILURE_RE =
+  /(?:native binary|executable) at .*(?:exists but )?failed to launch|Failed to spawn Claude Code process|not found at .*pathToClaudeCodeExecutable/i;
 
 /** Settle delays between spawn-failure retries; length bounds the retries.
  *  Overridable via __test.setSpawnRetryDelays so tests don't wall-clock wait. */
@@ -103,6 +106,9 @@ export const __test = {
   denormalizeToolInput,
   setSpawnRetryDelays(delays: readonly number[] | null): void {
     spawnRetryDelaysMs = delays ?? DEFAULT_SPAWN_RETRY_DELAYS_MS;
+  },
+  isSpawnFailure(message: string): boolean {
+    return SPAWN_FAILURE_RE.test(message);
   },
 };
 
