@@ -469,7 +469,12 @@ export class BoxRunnerProvider implements RunnerProvider {
     // exactly what bytes the box will download, unlike workerBuildSha() (a
     // remote ref tip / env override) which can misdescribe the bundle actually
     // served from this deployed image and needs a git/ls-remote round-trip.
-    const sha = bundleWorkerSha() ?? (await workerBuildSha());
+    // Same TASK_ORCH_BUNDLE_PATH derivation as the route: the manifest must
+    // describe the exact bundle the box downloads, not a stale default sidecar.
+    const sha =
+      bundleWorkerSha(
+        process.env.TASK_ORCH_BUNDLE_PATH ? { path: process.env.TASK_ORCH_BUNDLE_PATH } : {}
+      ) ?? (await workerBuildSha());
 
     const env = buildBoxWorkerEnv({
       runId: input.runId,
