@@ -252,6 +252,19 @@ describe("box blank provisioning", () => {
     expect(provisionCommand).not.toContain("x-access-token:");
     expect(provisionCommand).toContain("credential.helper");
 
+    // A blank box carries no baked-in git config, so the provision must write a
+    // persistent identity (else `git commit` fails "Author identity unknown")
+    // and a persistent credential helper (else the agent's `git push` has no
+    // credentials) — parity with the --system config in the Docker/Fly images.
+    // Substrings only — the whole script is wrapped in a single-quoted
+    // `sh -c '(...)'`, so embedded quotes are escaped and the values sit between
+    // escaped quotes rather than appearing as a verbatim quoted token.
+    expect(provisionCommand).toContain("git config --global user.name");
+    expect(provisionCommand).toContain("Task Orchestrator Agent");
+    expect(provisionCommand).toContain("git config --global user.email");
+    expect(provisionCommand).toContain("agent@task-orchestrator.local");
+    expect(provisionCommand).toContain("git config --global credential.helper");
+
     const [mapping] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
     expect(mapping).toMatchObject({
       provider: "box",
