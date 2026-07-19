@@ -33,14 +33,18 @@ afterEach(() => {
 });
 
 describe("spawnLightweightChild", () => {
-  it("passes the memory cap as --max-old-space-size and runs the worker entrypoint", () => {
+  it("passes the memory cap as --max-old-space-size and runs the DB-path entrypoint", () => {
     const pid = spawnLightweightChild(77, "run-77-abc");
     expect(pid).toBe(4242);
     expect(spawnMock).toHaveBeenCalledTimes(1);
     const [cmd, args, options] = spawnMock.mock.calls[0] as [string, string[], Record<string, any>];
     expect(cmd).toBe(process.execPath); // node
     expect(args[0]).toBe("--max-old-space-size=512"); // default cap, before the tsx cli
-    expect(args).toContain("scripts/run-worker.ts");
+    // The lightweight child stays on the control-plane DB path (driveDispatchedRun),
+    // NOT the WebSocket worker entry — run-worker.ts would exit(2) with no channel
+    // identity and the /runs chat would never reply.
+    expect(args).toContain("scripts/run-lightweight-child.ts");
+    expect(args).not.toContain("scripts/run-worker.ts");
     expect(args).toContain("77");
     expect(options.detached).toBe(true);
   });
