@@ -56,13 +56,13 @@ export function EventDigestCard({
     typeof e.event_id === "number" ? `e-${e.event_id}` : `i-${i}`;
 
   return (
-    <div className="mx-4 my-2 rounded-md border border-state-review/30 bg-card/40 text-[11px]">
+    <div className="mx-4 my-2 rounded-md border border-state-review/30 bg-card/40 pi-meta">
       <div className="flex items-center gap-2 border-b border-border/60 px-3 py-1.5 text-muted-foreground">
         <Zap className="size-3.5 text-state-review" />
         <span className="font-semibold text-foreground">
           Woken by {rows.length} event{rows.length === 1 ? "" : "s"}
         </span>
-        <span className="ml-auto text-[10px] tabular-nums text-muted-foreground/80">
+        <span className="ml-auto pi-micro text-muted-foreground/80">
           {formatDateTime(when)}
         </span>
       </div>
@@ -75,7 +75,7 @@ export function EventDigestCard({
       )}
       {supervisor.length > 0 && (
         <div>
-          <div className="flex items-center gap-1.5 border-t border-border/60 bg-muted/30 px-3 py-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+          <div className="flex items-center gap-1.5 border-t border-border/60 bg-muted/30 px-3 py-1 pi-label text-muted-foreground">
             <Eye className="size-3" />
             For awareness — informational; the owning run acts
           </div>
@@ -103,14 +103,14 @@ function EnvelopeRow({ envelope: e }: { envelope: DigestEnvelope }) {
       <Icon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-          <code className="font-mono text-foreground">{e.type}</code>
+          <code className="pi-mono text-foreground">{e.type}</code>
           {typeof e.event_id === "number" && (
-            <span className="font-mono text-[10px] text-muted-foreground/80 tabular-nums">
+            <span className="pi-mono pi-micro text-muted-foreground/80">
               #{e.event_id}
             </span>
           )}
           {CONTROL_TYPES.has(e.type) && (
-            <span className="inline-flex items-center gap-1 rounded bg-state-blocked/10 px-1.5 py-0.5 text-[10px] text-state-blocked">
+            <span className="inline-flex items-center gap-1 rounded bg-state-blocked/10 px-1.5 py-0.5 pi-micro text-state-blocked">
               <ShieldAlert className="size-3" /> platform-enforced
             </span>
           )}
@@ -124,11 +124,11 @@ function EnvelopeRow({ envelope: e }: { envelope: DigestEnvelope }) {
             </span>
           )}
           {e.correlation_id && (
-            <code className="font-mono text-[10px] text-muted-foreground/80">
+            <code className="pi-mono pi-micro text-muted-foreground/80">
               {e.correlation_id}
             </code>
           )}
-          <span className="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground/70">
+          <span className="ml-auto shrink-0 pi-micro text-muted-foreground/70">
             {e.occurred_at ? formatDateTime(new Date(e.occurred_at)) : ""}
           </span>
         </div>
@@ -137,7 +137,7 @@ function EnvelopeRow({ envelope: e }: { envelope: DigestEnvelope }) {
             <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
               payload
             </summary>
-            <pre className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap rounded bg-muted/40 px-2 py-1 font-mono text-[10px] leading-4 text-muted-foreground">
+            <pre className="mt-1 max-h-60 overflow-auto rounded bg-muted/40 px-2 py-1 pi-code text-muted-foreground">
               {payloadJson}
             </pre>
           </details>

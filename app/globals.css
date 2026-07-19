@@ -128,6 +128,21 @@
   }
 }
 
+@layer components {
+  /* Timeline type scale. Three sizes carry every event row — body (message
+     prose), meta (system rows, tool toggles, card chrome), micro (timestamps,
+     ids, counts) — plus a caps label and a code-block treatment. Kept as named
+     roles so the timeline shares one vocabulary instead of ad-hoc px values,
+     the same way motion (pi-fade-in) and colour (--pi-*) already are. Size and
+     leading live here; colour/weight stay as utilities on the element so each
+     row can tune its own contrast. */
+  .pi-body { @apply text-sm leading-6; }
+  .pi-meta { @apply text-[11px] leading-5; }
+  .pi-micro { @apply text-[10px] leading-4 tabular-nums; }
+  .pi-label { @apply text-[10px] font-semibold uppercase tracking-wider; }
+  .pi-code { @apply font-mono text-[11px] leading-5 whitespace-pre-wrap; }
+}
+
 /* Prose tweaks to feel Linear-like, not blog-like. */
 .prose-tasks {
   @apply text-[15px] leading-7 text-foreground/90;

@@ -31,10 +31,10 @@ export function SystemEventRow({ when, kind, payload, content }: Props) {
   const text = textFromContent(content);
   const { icon, body } = render(kind, payload, text);
   return (
-    <div className="flex items-start gap-2 px-4 py-1.5 text-[11px] text-muted-foreground">
+    <div className="flex items-start gap-2 px-4 py-1.5 pi-meta text-muted-foreground">
       <div className="mt-0.5 shrink-0">{icon}</div>
       <div className="min-w-0 flex-1">{body}</div>
-      <span className="shrink-0 text-[10px] text-muted-foreground/80 tabular-nums">
+      <span className="shrink-0 pi-micro text-muted-foreground/80">
         {formatDateTime(when)}
       </span>
     </div>
@@ -53,7 +53,7 @@ function render(
         body: (
           <span>
             worktree{" "}
-            <code className="font-mono text-foreground">
+            <code className="pi-mono text-foreground">
               {String(payload.branch ?? payload.path ?? "")}
             </code>
           </span>
@@ -65,7 +65,7 @@ function render(
         body: (
           <span>
             branch{" "}
-            <code className="font-mono text-foreground">
+            <code className="pi-mono text-foreground">
               {String(payload.branch ?? "")}
             </code>{" "}
             {typeof payload.action === "string" && (
@@ -138,12 +138,12 @@ function render(
         body: (
           <span>
             event{" "}
-            <code className="font-mono text-foreground">{eventType}</code>
+            <code className="pi-mono text-foreground">{eventType}</code>
             {runId != null && (
               <>
                 {" "}
                 from run{" "}
-                <code className="font-mono text-foreground">#{String(runId)}</code>
+                <code className="pi-mono text-foreground">#{String(runId)}</code>
               </>
             )}
             {audience === "supervisor" && (
@@ -178,7 +178,7 @@ function render(
       return {
         icon: <Terminal className="size-3.5 text-muted-foreground" />,
         body: (
-          <code className="font-mono text-foreground/90 text-[11px]">
+          <code className="pi-mono text-foreground/90">
             $ {String(payload.cmd ?? "")}
           </code>
         ),
@@ -194,7 +194,7 @@ function render(
         ),
         body: (
           <pre
-            className={`whitespace-pre-wrap font-mono text-[11px] leading-5 ${
+            className={`pi-code ${
               isErr ? "text-state-blocked/80" : "text-muted-foreground"
             }`}
           >
@@ -208,7 +208,7 @@ function render(
       return {
         icon: <AlertCircle className="size-3.5 text-state-blocked" />,
         body: (
-          <pre className="whitespace-pre-wrap font-mono text-[11px] leading-5 text-state-blocked/80">
+          <pre className="pi-code text-state-blocked/80">
             {data}
           </pre>
         ),
@@ -227,9 +227,9 @@ function render(
       return {
         icon: <MessageSquare className="size-3.5 text-muted-foreground" />,
         body: (
-          <details className="text-[11px]">
+          <details>
             <summary className="cursor-pointer text-foreground">prompt</summary>
-            <pre className="mt-2 whitespace-pre-wrap font-mono text-muted-foreground text-[11px] leading-5">
+            <pre className="mt-2 pi-code text-muted-foreground">
               {String(payload.prompt ?? text ?? "")}
             </pre>
           </details>
@@ -241,7 +241,7 @@ function render(
         body: (
           <span>
             resumed SDK session{" "}
-            <code className="font-mono text-foreground">
+            <code className="pi-mono text-foreground">
               {String(payload.sdkSessionId ?? "")}
             </code>
           </span>
