@@ -115,7 +115,7 @@ export async function buildRunStart(
 
   // Goal-synthesized kickoff prompt (fresh starts only — a resume rides the
   // backend session's prior context plus the inbox digest). This is the
-  // channel-native home of the legacy driveDispatchedRun goal branches:
+  // channel-native home of the worker's goal branches:
   //   <execute>  → the plan-orchestration scaffold (buildExecutePrompt)
   //   <implement>→ the task prompt (buildImplementPrompt)
   //   free-form  → the goal text verbatim

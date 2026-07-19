@@ -4,7 +4,7 @@
 // Detached run worker (M1). Spawned by lib/run-dispatch's defaultSpawn — usually
 // inside a transient `systemd-run --user --scope` unit — so a `systemctl restart`
 // of the web service can't signal it. It drives one already-created (and claimed)
-// run to completion via driveDispatchedRun, then exits.
+// run to completion via driveWorkerRun (over the WebSocket channel), then exits.
 //
 // Mirrors scripts/pipe.ts: load dotenv BEFORE importing any lib/* or ../db so env
 // is set when the DB initialises and migrations run.

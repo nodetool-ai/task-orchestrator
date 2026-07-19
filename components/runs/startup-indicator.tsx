@@ -16,9 +16,6 @@ import {
 } from "@/lib/runner/box-boot-events";
 
 interface Props {
-  /** Persisted placement: 'server' = the in-process lightweight loop (a "light
-   *  chat"), 'worker' = a detached container/Machine that has to boot first. */
-  runtime: "server" | "worker";
   status: SessionStatus;
   /** Live template-build state (spec 2026-07-17); non-null only while a box
    *  template is being built/failed for this run's dispatch. */
@@ -63,7 +60,7 @@ function useElapsedSeconds(): number {
   return seconds;
 }
 
-export function StartupIndicator({ runtime, status, templateBuild, boxBoot, onShowLog }: Props) {
+export function StartupIndicator({ status, templateBuild, boxBoot, onShowLog }: Props) {
   const elapsed = useElapsedSeconds();
   const elapsedLabel = elapsed >= 3 ? `${elapsed}s` : null;
 
@@ -206,17 +203,13 @@ export function StartupIndicator({ runtime, status, templateBuild, boxBoot, onSh
     );
   }
 
-  // A light chat has no container to boot, and a worker run whose container is
-  // already warm (status past the pending/preparing boot arc) is just waking
-  // the agent — neither is a cold boot, so show one calm line rather than a
-  // fake boot sequence.
-  const booting = runtime === "worker" && (status === "pending" || status === "preparing");
+  // A worker run whose container is already warm (status past the
+  // pending/preparing boot arc) is just waking the agent — not a cold boot, so
+  // show one calm line rather than a fake boot sequence.
+  const booting = status === "pending" || status === "preparing";
   if (!booting) {
-    const label = runtime === "server" ? "Starting chat…" : "Waking the agent…";
-    const detail =
-      runtime === "server"
-        ? "Warming up the model — the first reply may take a moment."
-        : "The container is warm — resuming the agent session.";
+    const label = "Waking the agent…";
+    const detail = "The container is warm — resuming the agent session.";
     return (
       <div className="px-4 py-3">
         <div className="flex items-center gap-2 text-[11px] text-muted-foreground">

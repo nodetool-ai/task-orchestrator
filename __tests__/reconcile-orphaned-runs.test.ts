@@ -160,16 +160,16 @@ describe("reconcileOrphanedRuns", () => {
     }
   });
 
-  it("re-dispatches a stale lightweight (server-runtime) plan executor instead of failing it", async () => {
-    // Regression: a web deploy/restart that killed an in-process lightweight
-    // executor turn used to land the run 'failed' with "Worker heartbeat lost —
-    // turn interrupted mid-flight". Its whole context lives in Postgres, so the
-    // reaper must hand it back to dispatchRun (→ resumeServerRun) instead.
-    const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("server-resumed");
+  it("re-dispatches a stale plan executor instead of failing it", async () => {
+    // Regression: a deploy/restart that killed an executor turn used to land the
+    // run 'failed' with "Worker heartbeat lost — turn interrupted mid-flight".
+    // Its whole context lives in Postgres, so the reaper must hand it back to
+    // dispatchRun (→ a fresh worker) instead.
+    process.env.TASK_ORCH_DETACHED_RUNS = "1";
+    const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
     try {
-      const plan = await repo.createPlan({ title: "Orphaned Lightweight Executor", date: "2026-07-10" });
+      const plan = await repo.createPlan({ title: "Orphaned Executor", date: "2026-07-10" });
       const run = await create({ goal: "<execute>", planId: plan.id, backend: "pi", defer: true });
-      expect(run.runtime).toBe("server"); // precondition: lightweight placement
       await db.update(agentSessions)
         .set({ status: "running", heartbeatAt: STALE, workerScope: "server-dead" })
         .where(eq(agentSessions.id, run.id));
@@ -181,6 +181,7 @@ describe("reconcileOrphanedRuns", () => {
       expect(after?.status).not.toBe("failed");
       expect(after?.workerScope).toBeNull(); // stale claim cleared for the re-claim
     } finally {
+      delete process.env.TASK_ORCH_DETACHED_RUNS;
       vi.restoreAllMocks();
     }
   });

@@ -97,19 +97,13 @@ agent_messages           persisted assistant/tool/user message blocks
   content     TEXT     JSON array of content blocks
   created_at  INTEGER  ms epoch
 
-For ad-hoc pi chat, `agent_messages` remains the UI/streaming projection.
-The same row is also the model context: lightweight chat stores raw pi-ai
-`Message` metadata on the first content block as `piMessage`, preserving
-assistant provider/model, response id, usage, stop reason, diagnostics, tool
-calls, tool results, and text/image content without a second chat-message table.
-The frontend ignores `piMessage`; the chat server loads it from Postgres each
-turn rather than relying on process-local SDK session files.
+For chat, `agent_messages` is the UI/streaming projection of the conversation.
 
-The plan executor (goal=`<execute>`) uses the same lightweight loop
-(`lib/chat-ai-loop.ts`) by default: its kickoff prompt is persisted as a
-`user` row and each wake drives `@earendil-works/pi-ai` directly with the
-orchestrator + spawn + event tool surface. Set
-`TASK_ORCH_LIGHTWEIGHT_EXECUTOR=0` to fall back to the full backend harness.
+Every run — chats, plan executors (goal=`<execute>`), implement, and review —
+executes in an out-of-process **worker** (a detached local process, Docker
+container, or Fly/Box Machine). The worker drives its model turns over the
+WebSocket channel and resumes conversation context from its backend's SDK
+session, so no run holds the control-plane event loop or its heap.
 
 personas                 persona registry (seeded from lib/personas/*.ts)
   id                  TEXT  PK              e.g. 'reviewer', 'implementor'

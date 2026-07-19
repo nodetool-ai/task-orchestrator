@@ -232,12 +232,10 @@ export const agentSessions = pgTable(
     resumeOf: integer("resume_of"),
     repoId: text("repo_id").references(() => repositories.id, { onDelete: "set null" }),
     goal: text("goal").notNull().default("<implement>"),
-    // Persisted placement (docs/nested-machine-dispatch.md): WHERE this run's
-    // turns execute — 'server' (the in-process lightweight loop on the web
-    // process) or 'worker' (a detached process/container/Machine). Decided ONCE
-    // by resolvePlacement() at create time, then honored by dispatchRun instead
-    // of re-derived from env predicates at every dispatch site. Defaults to
-    // 'worker' so pre-migration rows (and any raw insert) take the worker path.
+    // Execution placement: WHERE this run's turns execute. Always 'worker' for
+    // new runs (a detached process/container/Machine); the legacy 'server' value
+    // (the retired in-process lightweight loop) survives only on pre-retirement
+    // rows. Defaults to 'worker'.
     runtime: text("runtime").notNull().default("worker"),
     // Reasoning level: low | medium | high | xhigh. NULL inherits the persona's
     // level (which may itself be NULL = model default).

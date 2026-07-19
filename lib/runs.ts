@@ -17,8 +17,7 @@
 //   1. runs.create() inserts the row, optionally kicks off the implement-style
 //      worker (worktree → first agent turn → push → PR → idle/completed).
 //   2. runs.append() persists a new user/system message and, if the run is
-//      idle, drives one turn. Lightweight pi chat uses a direct pi-ai loop;
-//      implementation/review runs use the configured agent backend. Concurrent
+//      idle, drives one turn through the configured agent backend. Concurrent
 //      appends on the same run are serialised by an in-process lock so turns
 //      never race against themselves.
 //   3. On stream end the run lands at `idle` (chat-style) or `completed`
@@ -70,7 +69,7 @@ import {
   isFailedResult,
   resultPrUrl,
 } from "./run-state";
-import { config, lightweightIsolation, runnerProviderKind, type RunnerProviderKind } from "./config";
+import { config, runnerProviderKind, type RunnerProviderKind } from "./config";
 import {
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_STALE_MS,
@@ -140,13 +139,11 @@ runDispatch.__setRunsApi({
   failRun: recordDispatchFailure,
   failPendingRun,
   countInFlightWorkers,
-  countInFlightLightweightChildren,
   listPendingRunIds,
   reconcileOrphanedRuns,
   listLeasedRuns,
   handleWorkerDeath,
   checkTreeLimits,
-  resumeServerRun,
 });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -156,74 +153,6 @@ const KEEP_WORKTREES = config.features.keepWorktrees;
 
 function runnerProviderLabel(): RunnerProviderKind {
   return runnerProviderKind();
-}
-
-function lightweightChatsEnabled(): boolean {
-  return config.features.lightweightChats;
-}
-
-function isLightweightPiChatRun(run: { goal: string; backend: "pi" | "claude" | null }): boolean {
-  return run.goal === "<chat>" && resolveBackendId(run.backend) === "pi" && lightweightChatsEnabled();
-}
-
-// Same flag gates the lightweight loop for the plan executor. The executor's
-// job is purely task orchestration (re-scan list_tasks, start children, park
-// on timer__sleep) — it never writes code or reads PR diffs itself, so it
-// gains nothing from the heavy SDK harness and loses the latency of spawning
-// a backend session per wake. Set TASK_ORCH_LIGHTWEIGHT_EXECUTOR=0 to fall
-// back to runOneTurn + the full backend (Claude session files, etc.).
-function lightweightExecutorEnabled(): boolean {
-  return config.features.lightweightExecutor;
-}
-
-// The guard-less core of the executor predicate: does this run's SHAPE (goal +
-// backend + the two feature flags) qualify for the lightweight loop? Placement
-// (resolvePlacement) decides on THIS shape alone — it always runs on the server,
-// so the "am I inside a worker" question is irrelevant to it. isLightweightPi-
-// ExecutorRun adds the INSIDE_WORKER guard on top, as the RUNTIME check a worker
-// makes to refuse the lightweight path (defense in depth; docs say the guard
-// stays even though placement now front-runs it).
-function isLightweightExecutorShape(run: {
-  goal: string;
-  backend: "pi" | "claude" | null;
-}): boolean {
-  return (
-    run.goal === "<execute>" &&
-    resolveBackendId(run.backend) === "pi" &&
-    lightweightChatsEnabled() &&
-    lightweightExecutorEnabled()
-  );
-}
-
-function isLightweightPiExecutorRun(run: {
-  goal: string;
-  backend: "pi" | "claude" | null;
-}): boolean {
-  if (config.worker.inside) return false;
-  return isLightweightExecutorShape(run);
-}
-
-/**
- * Persisted placement decision (R1). Decided ONCE at create time and stored on
- * the row's `runtime` column; dispatchRun then routes on the stored value
- * instead of re-deriving placement from env predicates at every dispatch site
- * (the root cause of the run-131 incident: a plan-executor woken into a Fly
- * worker where the in-process lightweight loop — which needs DB access — can't
- * run).
- *
- * 'server' for a run that would take the in-process lightweight path (lightweight
- * pi chat or lightweight pi executor), 'worker' otherwise. We deliberately use
- * the guard-LESS executor shape: placement is judged on the server (create()
- * runs there), so the INSIDE_WORKER runtime guard on isLightweightPiExecutorRun
- * must not suppress it here.
- */
-export function resolvePlacement(run: {
-  goal: string;
-  backend: "pi" | "claude" | null;
-}): "server" | "worker" {
-  if (isLightweightPiChatRun(run)) return "server";
-  if (isLightweightExecutorShape(run)) return "server";
-  return "worker";
 }
 
 const SANDBOX_OPTS = {
@@ -292,9 +221,9 @@ export interface RunRow {
   parentRunId: number | null;
   toolsProfile: string;
   cwdStrategy: CwdStrategy;
-  /** Persisted placement (R1): 'server' = the in-process lightweight loop on the
-   *  web process; 'worker' = a detached process/container/Machine. Decided once
-   *  by resolvePlacement() at create time; dispatchRun routes on it. */
+  /** Execution placement. Always 'worker' for new runs — a detached
+   *  process/container/Machine. The legacy 'server' value is retained only for
+   *  pre-retirement rows. */
   runtime: "server" | "worker";
   model: string | null;
   /** Agent backend this run executes on ('pi'|'claude'), or null for the
@@ -715,9 +644,9 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   const personaModel = `${persona.modelProvider}/${persona.modelId}`;
   const effectiveModel = input.model ?? personaModel ?? DEFAULT_MODEL;
 
-  // Per-run backend choice. Ad-hoc lightweight chat runs through pi-ai directly:
-  // a null backend is allowed for legacy/deployment-default rows, but an
-  // explicit chat backend must be pi. Other run kinds normalize/validate the
+  // Per-run backend choice. Chat runs default to pi: a null backend is allowed
+  // for legacy/deployment-default rows, but an explicit chat backend must be pi.
+  // Other run kinds normalize/validate the
   // requested backend eagerly; null falls through to the persona's backend
   // default (if set), then the deployment default at turn time.
   // An explicit 'claude' pick is additionally checked against the model's
@@ -790,10 +719,9 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     parentRunId: input.parentRunId ?? null,
     toolsProfile,
     cwdStrategy,
-    // Placement is decided ONCE here (R1) from the run's final shape (goal +
-    // resolved backend) and persisted; dispatchRun honors this column rather
-    // than re-rolling placement per dispatch.
-    runtime: resolvePlacement({ goal, backend: persistedBackend }),
+    // Every run executes in an out-of-process worker; the runtime column is
+    // retained for legacy rows but is always 'worker' for new runs.
+    runtime: "worker",
     model: effectiveModel,
     backend: persistedBackend,
     thinkingLevel: input.thinkingLevel ?? null,
@@ -892,7 +820,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     void (async () => {
       const { detachedRunsEnabled } = await import("./run-dispatch");
       // FIX 7 (M20): launchDetached persists a custom initialPrompt as the first
-      // user message so driveDispatchedRun's <review> branch can read it back and
+      // user message so the worker's <review> drive can read it back and
       // pass it to runReview (which would otherwise be dispatched with no prompt).
       if (detachedRunsEnabled()) {
         await launchDetached(run.id, input.initialPrompt, input.parentRunId ?? null);
@@ -908,29 +836,19 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   // root (no worktree of its own); children make their own worktrees.
   if (!input.defer && goal === "<execute>" && input.planId) {
     void (async () => {
-      const { detachedRunsEnabled, dispatchRun } = await import("./run-dispatch");
+      const { detachedRunsEnabled } = await import("./run-dispatch");
       // FIX 7 (M20): launchDetached persists a custom initialPrompt as the first
-      // user message so driveDispatchedRun's <execute> branch can read it back and
+      // user message so the worker's <execute> drive can read it back and
       // pass it to runExecute as operator instructions.
-      if (detachedRunsEnabled() && !isLightweightPiExecutorRun(run)) {
+      if (detachedRunsEnabled()) {
         await launchDetached(run.id, input.initialPrompt, input.parentRunId ?? null);
-      } else if (isLightweightPiExecutorRun(run) && lightweightIsolation() === "child") {
-        // Lightweight executor under 'child' isolation: persist any custom
-        // initialPrompt (so the child's <execute> branch reads it back as operator
-        // instructions, exactly like the detached path) and dispatch — dispatchRun
-        // claims the row and spawns the memory-capped child. No in-process turn.
-        if (input.initialPrompt) {
-          await persistMessage(run.id, "user", [{ type: "text", text: input.initialPrompt }]);
-        }
-        await dispatchRun(run.id);
       } else {
-        // In-process lightweight executor ('inprocess' isolation): take the
-        // server-turn claim (R2) so a duplicate wake (an inbox emit racing this
-        // create-time turn) can't drive a second coordinator turn concurrently.
-        // withServerClaim no-ops the drive if the claim is already held.
-        // Match the sibling dispatch branches' fire-and-forget guard: a throw
-        // from claimServerTurn/withServerClaim would otherwise surface as an
-        // unhandled rejection off this un-awaited IIFE.
+        // In-process (non-detached dev): take the server-turn claim so a
+        // duplicate wake (an inbox emit racing this create-time turn) can't drive
+        // a second coordinator turn concurrently. withServerClaim no-ops the drive
+        // if the claim is already held. Match the sibling dispatch branches'
+        // fire-and-forget guard: a throw would otherwise surface as an unhandled
+        // rejection off this un-awaited IIFE.
         await withServerClaim(run.id, () =>
           runExecute(run.id, input.planId!, input.initialPrompt ?? null)
         ).catch(() => {});
@@ -1280,11 +1198,9 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       // pump sweep / next turn retries pending events
     }
 
-    // A lightweight pi chat now drives through runOneTurn like every other run
-    // (R3): runOneTurn selects the 'postgres' context source from the run shape,
-    // and the while-loop below (single iteration for a chat — not an implement
-    // worktree) lands 'idle'/'parked' through the same finalize. The bespoke
-    // lightweight branch and its parallel finalize are gone.
+    // A chat drives through runOneTurn like every other run: the while-loop
+    // below (single iteration for a chat — not an implement worktree) lands
+    // 'idle'/'parked' through the same finalize.
     let promptForTurn = effectivePrompt;
     let result: TurnResult | null = null;
     let prUrlUpdate = run.prUrl;
@@ -1501,7 +1417,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // the generic terminal no-op guard — nextStatus here may itself be
     // non-terminal (parked/idle on a resuming chat turn), and this CAS already
     // stops a cancel()/close() that raced the turn end from being resurrected.
-    // Retries: the worker (driveDispatchedRun) is about to exit, so a transient
+    // Retries: the worker is about to exit, so a transient
     // DB blip re-acknowledges the atomic, guarded finalize a few times.
     await (await runTransport()).applyStatus(run.id, nextStatus, {
       set: {
@@ -2815,22 +2731,14 @@ async function runExecute(
       // pump sweep / next turn retries pending events
     }
     // Persist the kickoff prompt so a page load shows what this executor was
-    // asked to do. For the postgres/lightweight path the role MUST be 'user' —
-    // the loop's context loader skips system rows, and its turn-start annotation
-    // rewrites the latest user row in place to embed the pi-message metadata. The
-    // full-SDK path keeps the historical 'system' role since the backend receives
-    // the prompt directly and the row is display-only.
-    const lightweight = isLightweightPiExecutorRun(run);
-    await persistMessage(
-      runId,
-      lightweight ? "user" : "system",
-      [{ type: "text", text: prompt }]
-    );
+    // asked to do. The backend receives the prompt directly (sdk-session
+    // context), so the row is display-only and carries the historical 'system'
+    // role.
+    await persistMessage(runId, "system", [{ type: "text", text: prompt }]);
 
-    // Both paths now drive through runOneTurn — it selects the 'postgres' context
-    // source for a lightweight executor and 'sdk-session' otherwise (R3). Same
-    // turn-end contract either way: the event tools write parkReason/result via
-    // the transport and the finalize below lands the status.
+    // The turn drives through runOneTurn (sdk-session context). The event tools
+    // write parkReason/result via the transport and the finalize below lands the
+    // status.
     const result = await runOneTurn({
       run,
       cwd,
@@ -2932,178 +2840,6 @@ async function runExecute(
  * process only ever enters through here, then exits when the turn lands a
  * terminal status. A missing run is a no-op (the row may have been reaped).
  */
-export async function driveDispatchedRun(runId: number): Promise<void> {
-  const run = await get(runId);
-  if (!run) return;
-
-  // Chat runs get a long-lived, warm-checkout session loop — one turn per inbound
-  // user message (run_input channel) — instead of a single turn-and-exit. Returns
-  // only when the chat idles out; the worker then exits. driveChatSession manages
-  // (and releases) its own claim in its finally, so it returns BEFORE the
-  // single-turn release below and must not be routed through it.
-  if (run.goal === "<chat>") {
-    await driveChatSession(runId);
-    return;
-  }
-
-  // Single-turn detached workers (review / execute / implement) drive ONE turn and
-  // exit. Their final DB update lands a terminal status but never clears the worker
-  // claim (worker_scope/worker_pid) — and handleWorkerDeath early-returns on a
-  // terminal status before it would release. A lingering claim then wedges the run:
-  // dispatchRun forever returns "already-claimed" (a follow-up via sendMessageToRun
-  // persists but spawns nothing), and countInFlightWorkers charges the ghost claim
-  // against the admission budget until the heartbeat goes stale (HEARTBEAT_STALE_MS,
-  // 5 min). Release the claim here — this runs inside the worker process that owns
-  // it, so it is the single safe release point covering every single-turn path
-  // (including the setError early-exits, which are inside the try). Unconditional,
-  // mirroring driveChatSession's finally: the row is terminal, so no concurrent
-  // re-dispatch can have re-claimed it (dispatchRun no-ops while worker_scope is set).
-  // FIX 3a (M7): snapshot the newest user message BEFORE driving the turn. A
-  // follow-up user message persisted while this single-turn worker's turn is in
-  // flight is rejected by dispatchRun ("already-claimed"); once we exit nothing
-  // re-dispatches it and it sits unprocessed forever. In the finally (after the
-  // claim release) we re-check and fire a fresh dispatch, mirroring
-  // driveChatSession's stranded-message drain.
-  const priorUserId = await newestUserMessageId(runId);
-  try {
-    if (run.goal === "<review>") {
-      if (!run.prUrl) {
-        await setError(runId, "Dispatched <review> run has no prUrl to review.");
-        return;
-      }
-      // FIX 7b (M20): a custom initialPrompt was persisted as the run's first user
-      // message by create(); pass it into runReview so the review uses it instead
-      // of the default prompt. runReview builds its own prompt and does NOT persist
-      // it (unlike runExecute), so there is no duplicate message row.
-      await runReview(runId, run.prUrl, await firstUserMessageText(runId));
-      return;
-    }
-
-    if (run.goal === "<execute>") {
-      if (!run.planId) {
-        await setError(runId, "Dispatched <execute> run has no planId to execute.");
-        return;
-      }
-      // Operator instructions for this turn: the UNANSWERED user backlog first.
-      // A follow-up message to a completed executor ("continue with merging")
-      // re-dispatches it through here — feeding only the FIRST user message
-      // would replay the original instructions and silently drop what the
-      // operator just said. The backlog is exactly the not-yet-answered
-      // messages; on a fresh executor it IS the first message (the custom
-      // initialPrompt create() persisted, FIX 7b/M20), and on an orphan
-      // re-dispatch with nothing new it's empty → fall back to that first
-      // message, preserving the old behavior. runExecute persists its own
-      // SYSTEM scaffold prompt — a different role than our user rows — so
-      // nothing duplicates.
-      await runExecute(
-        runId,
-        run.planId,
-        unansweredUserBacklogText(await listMessages(runId)) ?? (await firstUserMessageText(runId))
-      );
-      return;
-    }
-
-    // implement (or a resumed run): drive ONE turn and exit. A fresh implement run
-    // reconstructs the task prompt create() would have passed to kickoffFirstTurn; a
-    // resume (orphan re-dispatch) or a follow-up message replays its last user
-    // message, falling back to a bare continue sentinel.
-    // takeover: this worker holds the run's claim (dispatchRun left it `preparing`
-    // with a fresh heartbeat), so append() must adopt it rather than reject it as
-    // an in-flight turn in another process.
-    // fromUserMsg tells us the prompt IS an already-persisted user message (a
-    // follow-up the server inserted, or a replayed one) — so append must not
-    // re-insert it (persistUser=false). A synthesized task prompt / resume sentinel
-    // is persisted as the first user message (persistUser=true).
-    const { text, fromUserMsg } = await dispatchTurnPrompt(run);
-    await kickoffFirstTurn(runId, text, undefined, true, !fromUserMsg);
-  } finally {
-    // Release the single-turn worker claim now the turn has landed (one
-    // transport op: clear the claim guarded on a non-lease status, then
-    // re-dispatch if a newer non-empty user message was stranded while this
-    // turn held the claim — FIX 3a (M7). In HTTP mode both halves run
-    // server-side, where the re-dispatch belongs). Does NOT touch heartbeatAt
-    // (the turn is over; staleness is fine). Skipped re-dispatch when
-    // cancel/close made the run terminal — those must not be revived.
-    await (await runTransport()).releaseClaim(runId, { lastProcessedUserMsgId: priorUserId });
-  }
-}
-
-const DISPATCH_RESUME_PROMPT =
-  "Resume this run and continue from where the previous session left off.";
-
-/** Extract the concatenated text of a message's content blocks. */
-function messageText(m: MessageRow): string {
-  // Shared definition of "is this message empty" — the transport's
-  // claim-release stranded check uses the same helper, and the two paths must
-  // agree on whether a follow-up message warrants a re-dispatch.
-  return contentText(m.content);
-}
-
-/**
- * Concatenated text of the UNANSWERED user-message backlog — every user message
- * newer than the most recent 'agent'-role reply, joined with blank lines — or
- * null when everything has been answered. Pure over the rows so it's directly
- * unit-testable. Used by dispatchTurnPrompt (implement follow-ups) and by
- * driveDispatchedRun's <execute> branch (operator steering of a plan executor).
- */
-export function unansweredUserBacklogText(msgs: MessageRow[]): string | null {
-  let lastAgentId = 0;
-  for (const m of msgs) if (m.role === "agent" && m.id > lastAgentId) lastAgentId = m.id;
-  const backlog = msgs
-    .filter((m) => m.role === "user" && m.id > lastAgentId)
-    .map(messageText)
-    .filter((t) => t !== "");
-  return backlog.length > 0 ? backlog.join("\n\n") : null;
-}
-
-async function dispatchTurnPrompt(run: RunRow): Promise<{ text: string; fromUserMsg: boolean }> {
-  // FIX 3b/FIX 7a: replay the UNANSWERED user-message backlog first — every
-  // user message newer than the most recent 'agent'-role reply, concatenated
-  // with blank lines. This covers, in one branch:
-  //   • a resume / single follow-up after the agent last replied,
-  //   • SEVERAL follow-ups that piled up while a single-turn worker was mid-turn
-  //     (the old code replayed only the LAST, silently dropping the rest),
-  //   • a custom initialPrompt that create()'s detached kickoff persisted as the
-  //     run's first user message (FIX 7) — which must WIN over the synthesized
-  //     task prompt, hence this check runs BEFORE buildImplementPrompt below.
-  // These rows are already in the DB, so the caller must NOT re-persist them
-  // (fromUserMsg=true → kickoffFirstTurn passes persistUser=false).
-  const msgs = await listMessages(run.id);
-  const backlogText = unansweredUserBacklogText(msgs);
-  if (backlogText != null) return { text: backlogText, fromUserMsg: true };
-
-  // First turn of a fresh implement worktree run with no persisted messages:
-  // rebuild the task prompt (synthesized, not yet persisted → caller persists it).
-  if (!run.sdkSessionId && run.taskId) {
-    const task = await (await runTransport()).getTask(run.taskId);
-    if (task) return { text: await buildImplementPrompt(task), fromUserMsg: false };
-  }
-  // Resume with nothing new to say (orphan re-dispatch): a bare continue sentinel.
-  return { text: DISPATCH_RESUME_PROMPT, fromUserMsg: false };
-}
-
-/** First non-empty user-message text of a run, or null. Used by driveDispatchedRun
- *  to feed a custom initialPrompt (persisted by create() under FIX 7) into
- *  runReview/runExecute, which build their own prompts and take it as an override. */
-async function firstUserMessageText(runId: number): Promise<string | null> {
-  const msgs = await listMessages(runId);
-  for (const m of msgs) {
-    if (m.role !== "user") continue;
-    const t = messageText(m);
-    if (t) return t;
-  }
-  return null;
-}
-
-/** Newest user-message id of a run (0 if none). Snapshot before a single-turn
- *  drive so its finally can detect a follow-up that arrived mid-turn (FIX 3a). */
-async function newestUserMessageId(runId: number): Promise<number> {
-  const msgs = await listMessages(runId);
-  let id = 0;
-  for (const m of msgs) if (m.role === "user" && m.id > id) id = m.id;
-  return id;
-}
-
 // ──────────────────────────────────────────────────────────
 // Server-side turn claim (R2)
 // ──────────────────────────────────────────────────────────
@@ -3208,257 +2944,9 @@ export async function withServerClaim(runId: number, drive: () => Promise<void>)
   }
 }
 
-/**
- * Server-side resume path for a 'server'-placement run (R2), injected into
- * lib/run-dispatch as the RunsApi.resumeServerRun front door. dispatchRun calls
- * this — instead of provisioning a worker — the moment it sees runtime='server',
- * so the emit-time inbox wakes and the pump's parked-wake sweep (which already
- * call dispatchRun) route a woken server run back in-process for free.
- *
- * Takes the server-turn claim, drives ONE bounded turn in-process, releases.
- * The claim short-circuit is the concurrency fix: duplicate wakes race the CAS
- * and exactly one wins; the losers no-op (their pending events are drained by
- * the winner's digest injection, and the pump retries). The heartbeat runExecute
- * / append start keeps the server claim's lease fresh across a long turn, so the
- * orphan reaper never reaps a live server turn.
- */
-export async function resumeServerRun(runId: number): Promise<void> {
-  const run = await get(runId);
-  if (!run) return;
-  await withServerClaim(runId, async () => {
-    if (run.goal === "<execute>") {
-      if (!run.planId) {
-        await setError(runId, "Server-resumed <execute> run has no planId to execute.");
-        return;
-      }
-      // Operator steering, same contract as driveDispatchedRun's <execute> branch:
-      // the unanswered user backlog first, else the first user message.
-      const prompt =
-        unansweredUserBacklogText(await listMessages(runId)) ??
-        (await firstUserMessageText(runId));
-      await runExecute(runId, run.planId, prompt);
-      return;
-    }
-    // Lightweight chat (or any other server-placement run) woken by an inbox
-    // event: drive one in-process turn through the append engine. `takeover`
-    // lets append adopt the 'preparing' claim we just wrote rather than reject
-    // it as an in-flight turn. A pure wake has no new user text — replay the
-    // unanswered backlog (already persisted → persistUser=false), else a resume
-    // sentinel; the digest injection inside append weaves in pending events.
-    const backlog = unansweredUserBacklogText(await listMessages(runId));
-    const text = backlog ?? DISPATCH_RESUME_PROMPT;
-    for await (const _evt of append({
-      runId,
-      role: "user",
-      text,
-      persistUser: false,
-      ephemeralInput: backlog == null,
-      takeover: true,
-    })) {
-      // drain the generator; persistence + status landing happen inside append
-      void _evt;
-    }
-  });
-}
-
 // ──────────────────────────────────────────────────────────
-// Long-lived chat worker + server-side dispatch/relay
+// Server-side dispatch/relay
 // ──────────────────────────────────────────────────────────
-
-function chatIdleMs(): number {
-  const raw = process.env.TASK_ORCH_CHAT_IDLE_MS;
-  const n = raw ? Number(raw) : NaN;
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 600_000;
-}
-
-/** Per-turn end marker on the run_stream tail. Lets the server relay close a
- *  single turn's response while the chat run stays idle/resumable (the worker
- *  lives on). Rides the existing run_stream NOTIFY as a plain agent_events row. */
-async function emitTurnDone(runId: number): Promise<void> {
-  try {
-    await (await runTransport()).appendEvent(runId, "turn_done", {});
-  } catch {
-    // best-effort: a missed marker just falls back to the relay's safety timeout.
-  }
-}
-
-/**
- * Long-lived chat worker loop — runs INSIDE a dispatched worker container for a
- * goal='<chat>' run. Keeps the checkout warm (/work/<id> reused across turns) and
- * runs one append() turn per inbound user message, learning of new messages via
- * the run_input LISTEN channel. Exits after TASK_ORCH_CHAT_IDLE_MS with no
- * message; the run lands 'idle' (resumable) and releases its claim, so the next
- * message re-dispatches a fresh worker that resumes via sdkSessionId.
- */
-export async function driveChatSession(runId: number): Promise<void> {
-  const transport = await runTransport();
-  const idleMs = chatIdleMs();
-  const abort = new AbortController();
-  // Keep the heartbeat fresh even while idle-waiting (so reconcile can't reap a
-  // parked worker) AND poll the cross-process cancel flag so a UI cancel aborts.
-  // Both the heartbeat and the input subscription are started INSIDE the try
-  // below (matches append()): starting them here, with awaited calls between them
-  // and the try, would leak the interval/subscription forever if one of those
-  // awaits threw before the finally could clear them.
-  let heartbeat: ReturnType<typeof setInterval> | null = null;
-  let unsub: Awaited<ReturnType<typeof transport.subscribeInput>> | null = null;
-  let onAbort: (() => void) | null = null;
-  let lastProcessed = 0;
-  let pendingWake = false;
-  let wake: (() => void) | null = null;
-
-  try {
-    heartbeat = startHeartbeatWithCancel(runId, abort);
-
-    // On (re)start, skip user messages a prior worker already handled — the resumed
-    // SDK session already contains those turns. Each completed turn emits exactly one
-    // turn_done and messages are drained in id order, so the turn_done count is the
-    // number of already-processed user messages. (A fresh chat has 0 → start at 0.)
-    const priorTurns = await transport.countEvents(runId, "turn_done");
-    const priorUserIds = (await listMessages(runId))
-      .filter((m) => m.role === "user")
-      .map((m) => m.id)
-      .sort((a, b) => a - b);
-    lastProcessed =
-      priorTurns > 0 && priorTurns <= priorUserIds.length ? priorUserIds[priorTurns - 1] : 0;
-    // New-user-message wakeups: Postgres LISTEN 'run_input' in db mode, the
-    // /control SSE channel in http mode.
-    unsub = await transport.subscribeInput(runId, () => {
-      pendingWake = true;
-      wake?.();
-      wake = null;
-    });
-    onAbort = () => {
-      wake?.();
-      wake = null;
-    };
-    abort.signal.addEventListener("abort", onAbort);
-
-    for (;;) {
-      // Drain all unprocessed user messages oldest-first, one turn each (handles
-      // messages that arrived while the previous turn was running).
-      const msgs = (await listMessages(runId)).filter(
-        (m) => m.role === "user" && m.id > lastProcessed
-      );
-      if (msgs.length === 0) {
-        const run = await get(runId);
-        if (!run || run.status === "closed") return;
-        // Event wake: a parked chat resumed because emitInboxEvent dispatched it,
-        // but no human message was added. Run one turn with a small synthetic
-        // prompt; append() injects the claimed inbox digest before this text, so
-        // the model sees the actual child/timer events that woke it.
-        //
-        // Gate on there actually being pending owner events: parkReason is set
-        // by ANY park (timer__sleep, await_session), so firing purely on it
-        // would defeat the park — an empty digest re-woken instantly, burning a
-        // turn. And drive the turn on every genuine wake, not just the first:
-        // keying off handledEventWake stranded a second in-worker park until the
-        // idle timeout. The pending-count check is the real, self-resetting gate.
-        const pendingEvents =
-          run.parkReason != null &&
-          (run.status === "preparing" || run.status === "parked")
-            ? await pendingOwnerCount(runId)
-            : 0;
-        if (pendingEvents > 0) {
-          for await (const _ev of append({
-            runId,
-            role: "user",
-            text: "Continue from the newly delivered run events.",
-            persistUser: false,
-            ephemeralInput: true,
-            takeover: run.status === "preparing",
-            abort,
-          })) {
-            void _ev;
-          }
-          // No emitTurnDone here: an event wake consumes no user message, so
-          // emitting one would push the turn_done count above priorUserIds.length
-          // and drive the restart seed to 0 → full replay of every message.
-          continue;
-        }
-      }
-      for (const m of msgs) {
-        if (abort.signal.aborted) return;
-        const run = await get(runId);
-        if (!run || run.status === "closed") return;
-        const text = messageText(m);
-        // takeover only on the very first turn (run still 'preparing' from
-        // dispatchRun's claim); later turns see 'idle'. persistUser=false: the
-        // message is already in the DB — it's how we were woken.
-        if (text) {
-          for await (const _ev of append({
-            runId,
-            role: "user",
-            text,
-            persistUser: false,
-            // Pin context reconstruction to THIS backlogged message so an
-            // earlier turn doesn't splice its text into a later message's row.
-            inputMessageId: m.id,
-            takeover: run.status === "preparing",
-            abort,
-          })) {
-            void _ev; // frames reach clients via the run_stream tail (server relay)
-          }
-        }
-        // Advance and emit exactly one turn_done per consumed message — including
-        // an empty one (skipped above) — so the turn_done count stays 1:1 with the
-        // messages we've drained. The restart seed (priorUserIds[priorTurns-1])
-        // relies on that correspondence; advancing lastProcessed without an emit
-        // (the prior empty-text `continue`) desynced it into reprocessing an
-        // already-answered message.
-        lastProcessed = m.id;
-        await emitTurnDone(runId);
-      }
-      if (abort.signal.aborted) break;
-      // Idle-wait for the next run_input notify or the idle timeout.
-      if (!pendingWake) {
-        const timedOut = await new Promise<boolean>((resolve) => {
-          const t = setTimeout(() => {
-            wake = null;
-            resolve(true);
-          }, idleMs);
-          wake = () => {
-            clearTimeout(t);
-            resolve(false);
-          };
-        });
-        if (timedOut) {
-          // A run_input notify can land in the race between the timeout firing
-          // (which nulled `wake`) and here: its callback set pendingWake but had no
-          // live `wake` to resume us. Don't strand that message — loop back to drain
-          // it instead of exiting on the timeout.
-          if (pendingWake) {
-            pendingWake = false;
-            continue;
-          }
-          break;
-        }
-      }
-      pendingWake = false;
-    }
-  } finally {
-    if (heartbeat) clearInterval(heartbeat);
-    if (unsub) unsub();
-    if (onAbort) abort.signal.removeEventListener("abort", onAbort);
-    // Release the claim so the next message spawns a fresh worker, land the run
-    // resumable-idle (unless cancel/close already wrote a terminal row), and
-    // drain any message stranded by the idle-timeout race: a user message can
-    // be persisted (its wake fired) in the window between our last drain and
-    // this release — sendMessageToRun saw isWorkerLive()===true then, so it
-    // only notified and did NOT dispatch, and with this worker exiting that
-    // message would sit unprocessed forever. releaseClaim re-checks for an
-    // unprocessed non-empty user message (id > lastProcessed) after the
-    // release and fires a fresh dispatch if one exists (server-side in HTTP
-    // mode). The claim clear itself stays guarded on a non-lease status,
-    // mirroring the single-turn release: a lease status here means a false
-    // death report already released our claim and a re-dispatched worker
-    // re-claimed — don't clear the new owner's claim out from under it.
-    await transport.releaseClaim(runId, {
-      lastProcessedUserMsgId: lastProcessed,
-      idleIfNonTerminal: true,
-    });
-  }
-}
 
 /**
  * Server-side entry for a user/system message. In the containerized model the
@@ -3482,26 +2970,11 @@ export async function* sendMessageToRun(opts: {
     yield { type: "error", error: `Run ${runId} not found` };
     return;
   }
-  // Chat runs are latency-sensitive and do not need the implementation runner's
-  // branch/container/PR lifecycle. Two lightweight modes (TASK_ORCH_LIGHTWEIGHT_
-  // ISOLATION):
-  //  - 'inprocess': run the turn IN this web process (append) — lowest latency,
-  //    but a runaway turn shares the control-plane heap/event loop.
-  //  - 'child' (default): persist the message, ensure a memory-capped local Node
-  //    child is running (notify-if-live else dispatch), and RELAY the reply from
-  //    the durable run_stream tail — the same worker-backed shape used for remote
-  //    runners, minus the container. Off the control-plane event loop, DB-capped.
-  const lightweightChat = isLightweightPiChatRun(run);
-  if (lightweightChat && lightweightIsolation() === "inprocess") {
-    yield* append({ runId, role, text, author, abort });
-    return;
-  }
-  // Non-lightweight runs: remote runner deployments (Docker worker image or Fly
-  // Machines provider) force turns through workers; plain dev/test with no remote
-  // runner keeps the old in-process streaming path. A lightweight chat under
-  // 'child' isolation always takes the worker-backed path below (its "worker" is
-  // the local memory-capped child), independent of the remote-runner setting.
-  if (!lightweightChat && !runDispatch.remoteRunnerEnabled()) {
+  // Remote runner deployments (Docker worker image or Fly/Box provider) force
+  // turns through out-of-process workers; plain dev/test with no remote runner
+  // keeps the in-process streaming path (append) so a single-process dev server
+  // still drives turns.
+  if (!runDispatch.remoteRunnerEnabled()) {
     yield* append({ runId, role, text, author, abort });
     return;
   }
@@ -3572,9 +3045,9 @@ export async function* sendMessageToRun(opts: {
       // Non-chat follow-up: dispatch a single-turn worker. If the prior turn is
       // still in flight the claim is held and dispatchRun returns already-claimed
       // (harmless — that turn will resume onto this freshly persisted message).
-      // Once the prior turn finished it released its claim (see
-      // driveDispatchedRun's finally), so this dispatch now spawns a fresh worker
-      // to pick up the follow-up instead of no-oping against a ghost claim forever.
+      // Once the prior turn finished the worker released its claim, so this
+      // dispatch now spawns a fresh worker to pick up the follow-up instead of
+      // no-oping against a ghost claim forever.
       if (workerIsolate) {
         // Worker context (e.g. an executor's spawn__append_message): park the
         // child at 'pending' for the server to dispatch onto the child's OWN
@@ -3904,13 +3377,11 @@ interface TurnResult {
 async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   const { run, cwd, prompt, abort, author, onSdk } = args;
 
-  // R3: the lightweight in-process loop is now a MODE of the pi backend, selected
-  // by the run's shape. A lightweight pi chat or pi executor replays its context
-  // from agent_messages ('postgres' contextSource) and drives pi-ai in-process;
-  // every other run resumes an SDK session file ('sdk-session', the default).
-  // runOneTurn is the single turn driver either way — the branch only changes
-  // WHERE context comes from, not who assembles extensions or lands the status.
-  const usePostgres = isLightweightPiChatRun(run) || isLightweightPiExecutorRun(run);
+  // Every run resumes an SDK session file ('sdk-session' contextSource). The
+  // pi backend's 'postgres' context mode was only ever selected for the retired
+  // in-process lightweight tier; now that all runs execute in workers, runOneTurn
+  // never selects it (the backend capability remains for potential future use).
+  const usePostgres = false;
 
   const persona = await (await runTransport()).getPersona(run.personaId ?? "implementor");
   if (!persona) {
@@ -4915,23 +4386,20 @@ export async function reconcileOrphanedRuns(): Promise<number> {
     });
     // A plan executor is resumable too, just not via the worktree predicate
     // above: its whole durable state lives in Postgres (plan/tasks/notes +
-    // agent_messages + inbox). A server-placement row re-enters through
-    // resumeServerRun; a worker-placement executor re-dispatches through
-    // driveDispatchedRun's <execute> branch (gated on detached mode — without
-    // it there is no dispatch machinery to hand the row to). Failing it with
-    // "Worker heartbeat lost" after a deploy/restart killed its turn mid-flight
-    // abandons a plan that can simply pick itself back up. Chat runs
-    // deliberately stay out of this (their policy is already 'idle': the next
-    // user message resumes them; an unattended auto-resume would burn a turn).
-    const serverResumable =
-      row.goal === "<execute>" &&
-      !!row.planId &&
-      (row.runtime === "server" || runDispatch.detachedRunsEnabled());
+    // agent_messages + inbox). A worker-placement executor re-dispatches through
+    // the worker's <execute> drive (gated on detached mode — without it there is
+    // no dispatch machinery to hand the row to). Failing it with "Worker
+    // heartbeat lost" after a deploy/restart killed its turn mid-flight abandons
+    // a plan that can simply pick itself back up. Chat runs deliberately stay out
+    // of this (their policy is already 'idle': the next user message resumes
+    // them; an unattended auto-resume would burn a turn).
+    const executorResumable =
+      row.goal === "<execute>" && !!row.planId && runDispatch.detachedRunsEnabled();
     // The sweep has no OOM signal (it only sees a stale heartbeat), so oom=false:
     // a resumable orphan always re-dispatches here, exactly as before R8.
     const policy = decideDeadRunPolicy({
       goal: row.goal,
-      resumable: resumable || serverResumable,
+      resumable: resumable || executorResumable,
       oom: false,
     });
     // BUG 6b: atomically take this orphan out of any worker's hands before acting
@@ -5050,11 +4518,9 @@ export async function handleWorkerDeath(
   // without this, a dead executor routed here (e.g. via the container sweep)
   // lands `failed` instead of re-dispatched. Worker-placement executors need
   // detached mode (the dispatch machinery) to be re-handed to a fresh worker.
-  const serverResumable =
-    row.goal === "<execute>" &&
-    !!row.planId &&
-    (row.runtime === "server" || runDispatch.detachedRunsEnabled());
-  const resumable = worktreeResumable || serverResumable;
+  const executorResumable =
+    row.goal === "<execute>" && !!row.planId && runDispatch.detachedRunsEnabled();
+  const resumable = worktreeResumable || executorResumable;
   // §3.1: durable infra-death fact for the parent, whatever policy follows
   // below (re-dispatch / idle / failed). Deduped per container so the events
   // monitor and the sweep racing each other produce ONE event, not two.
@@ -5120,8 +4586,7 @@ export async function listLeasedRuns(): Promise<RunRow[]> {
 /**
  * Count runs currently occupying a detached-worker slot: runtime='worker', a
  * non-null worker_scope, and a fresh heartbeat. Status is deliberately ignored:
- * a resident chat worker remains charged while idle, while an in-process server
- * turn never consumes Docker admission capacity.
+ * a resident chat worker remains charged while idle.
  */
 export async function countInFlightWorkers(): Promise<number> {
   // Count runs a LIVE worker owns — worker_scope set AND a fresh heartbeat —
@@ -5134,30 +4599,6 @@ export async function countInFlightWorkers(): Promise<number> {
     .where(
       and(
         eq(agentSessions.runtime, "worker"),
-        isNotNull(agentSessions.workerScope),
-        gt(agentSessions.heartbeatAt, new Date(Date.now() - HEARTBEAT_STALE_MS))
-      )
-    );
-  return rows.length;
-}
-
-/**
- * Count live lightweight children: runtime='server' rows holding a claim with a
- * fresh heartbeat. Each represents an active lightweight execution (a spawned
- * memory-capped child under 'child' isolation, or an in-process server turn under
- * 'inprocess'). dispatchRun uses this to bound the lightweight tier's concurrency
- * (TASK_ORCH_LIGHTWEIGHT_MAX_CHILDREN) so a burst of chats can't fork-bomb the
- * host — over-cap dispatches park at 'pending' and drain through the pump. A dead
- * child's stale claim (expired heartbeat) is excluded, so a crashed child frees
- * its slot the moment the reaper would reclaim it.
- */
-export async function countInFlightLightweightChildren(): Promise<number> {
-  const rows = await db
-    .select({ id: agentSessions.id })
-    .from(agentSessions)
-    .where(
-      and(
-        eq(agentSessions.runtime, "server"),
         isNotNull(agentSessions.workerScope),
         gt(agentSessions.heartbeatAt, new Date(Date.now() - HEARTBEAT_STALE_MS))
       )

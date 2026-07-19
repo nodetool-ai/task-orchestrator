@@ -14,14 +14,6 @@ process.env.TASK_ORCH_PG_SCHEMA ??= `t_${process.pid}_${Date.now().toString(36)}
 // everywhere; individual tests override/delete as needed.
 process.env.TASK_ORCH_WORKER_CHANNEL_SECRET ??= "vitest-worker-channel-secret";
 
-// Lightweight tier default: run turns IN-PROCESS across the suite. The production
-// default is 'child' (a memory-capped local Node child), but unit tests drive
-// turns synchronously in-process (resumeServerRun / append) and stub the model
-// loop; spawning a real child would fork a process no test controls. Tests that
-// specifically exercise the 'child' routing set TASK_ORCH_LIGHTWEIGHT_ISOLATION
-// = "child" themselves (and inject dispatchRun's spawn seam so nothing forks).
-process.env.TASK_ORCH_LIGHTWEIGHT_ISOLATION ??= "inprocess";
-
 // Migrate + seed the fork's schema before any test runs.
 const { initDb } = await import("./db");
 await initDb();

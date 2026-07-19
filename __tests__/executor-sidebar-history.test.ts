@@ -23,12 +23,10 @@ const h = vi.hoisted(() => ({
   snapshot: null as null | (() => Promise<Array<{ role: string }>>),
 }));
 
-// After R3 BOTH executor paths drive through runOneTurn → getBackend().runTurn:
-// the lightweight (default) path selects the pi backend's postgres mode and the
-// heavy path (TASK_ORCH_LIGHTWEIGHT_EXECUTOR=0) its SDK-session mode. One fake
-// backend covers both — it streams a fixed kickoff+assistant+tool+assistant
+// The executor drives through runOneTurn → getBackend().runTurn (SDK-session
+// mode). One fake backend streams a fixed kickoff+assistant+tool+assistant
 // sequence through onEvent (runOneTurn persists each), and runExecute persists
-// the kickoff row itself ('user' for lightweight, 'system' for heavy).
+// the kickoff row itself as 'system'.
 vi.mock("../lib/agent-backend", () => ({
   resolveBackendId: (backend: string | null | undefined) =>
     (backend ?? process.env.TASK_ORCH_AGENT_BACKEND ?? "pi").trim().toLowerCase(),
@@ -83,10 +81,6 @@ import * as runs from "../lib/runs";
 import { GET as getLiveSessions } from "../app/api/live-sessions/route";
 
 beforeEach(async () => {
-  // The default here exercises the heavy (SDK-session) executor path; the
-  // lightweight (postgres) path — which shares the same getBackend().runTurn
-  // driver after R3 — has its own describe block that flips the flag on.
-  process.env.TASK_ORCH_LIGHTWEIGHT_EXECUTOR = "0";
   await seedPersonas();
   await db.delete(agentMessages);
   await db.delete(agentEvents);
@@ -133,38 +127,6 @@ describe("plan-executor run history", () => {
     const msgs = await runs.listMessages(run.id);
     expect(msgs.map((m) => m.role)).toEqual(["system", "agent", "tool", "agent"]);
     // The kickoff prompt anchors the transcript.
-    expect(JSON.stringify(msgs[0].content)).toContain(plan.id);
-    expect((await runs.get(run.id))!.status).toBe("completed");
-  });
-});
-
-// Lightweight executor path (the default): same mid-turn persistence guarantee
-// as the heavy path above — it now shares the runOneTurn → getBackend().runTurn
-// driver (postgres mode). The only difference is the kickoff prompt lands as a
-// 'user' row (the postgres loader keys on the latest user row) instead of 'system'.
-describe("plan-executor run history (lightweight loop)", () => {
-  beforeEach(() => {
-    process.env.TASK_ORCH_LIGHTWEIGHT_EXECUTOR = "1";
-  });
-
-  it("persists the kickoff prompt and each streamed envelope mid-turn", async () => {
-    const plan = await repo.createPlan({ title: "Ship Light", date: "2026-07-02" });
-    h.snapshot = async () => {
-      const r = (await runs.list({ goal: "<execute>" }))[0];
-      return r ? (await runs.listMessages(r.id)).map((m) => ({ role: m.role })) : [];
-    };
-
-    const run = await runs.create({ goal: "<execute>", planId: plan.id });
-    await waitForTerminal(run.id);
-
-    // Mid-turn the DB already holds the kickoff prompt (user) and the first
-    // assistant envelope — same guarantee as the runOneTurn path.
-    expect(h.midTurn).not.toBeNull();
-    expect(h.midTurn!.map((m) => m.role)).toEqual(["user", "agent"]);
-
-    const msgs = await runs.listMessages(run.id);
-    // user kickoff, assistant, tool result, assistant final.
-    expect(msgs.map((m) => m.role)).toEqual(["user", "agent", "tool", "agent"]);
     expect(JSON.stringify(msgs[0].content)).toContain(plan.id);
     expect((await runs.get(run.id))!.status).toBe("completed");
   });
