@@ -97,8 +97,13 @@ already cost real time once.
   guard). A worker log line "Direct database access attempted inside a run
   worker" means some code path fell back to direct DB — route it through
   the channel transport.
-- Known pre-existing flake: `worker-websocket-e2e` "wakes on a follow-up
-  input" fails on a clean tree too — don't chase it as a regression.
+- The `worker-websocket-e2e` "wakes on a follow-up input" test was
+  deterministically red in isolation for days and misfiled as a flake: it
+  asserted a user row the worker is deliberately forbidden to write (the
+  control plane persists run.input BEFORE bridging it). Fixed 2026-07-19 by
+  persisting first, like `sendMessageToRun`. Lesson: a "flake" that fails in
+  isolation but passes in a full file is usually a real contract bug masked
+  by sibling-test side effects — run it alone before writing it off.
 
 ## Claude backend / SDK
 
