@@ -41,9 +41,20 @@ describe("runs.create backend column", () => {
     ).rejects.toMatchObject({ status: 400 });
   });
 
-  it("rejects non-pi chat backends", async () => {
+  it("accepts the claude backend for chat runs with an Anthropic model", async () => {
+    const run = await runs.create({
+      goal: "<chat>",
+      backend: "claude",
+      model: "anthropic/claude-sonnet-4-6",
+      defer: true,
+    });
+    expect(run.backend).toBe("claude");
+    expect((await runs.get(run.id))?.backend).toBe("claude");
+  });
+
+  it("rejects the claude backend for a chat run with a non-Anthropic model", async () => {
     await expect(
-      runs.create({ goal: "<chat>", backend: "claude", model: "anthropic/claude-sonnet-4-6", defer: true })
+      runs.create({ goal: "<chat>", backend: "claude", model: "openai/gpt-5", defer: true })
     ).rejects.toMatchObject({ status: 400 });
   });
 

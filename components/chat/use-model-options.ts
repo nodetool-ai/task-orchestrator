@@ -84,9 +84,8 @@ function loadCatalog(): Promise<BackendCatalog> {
  * the current model when the other backend also offers it — otherwise it snaps
  * to the first model of the new catalog.
  *
- * Pass `lockBackend` to pin a composer to a single backend (e.g. the chat
- * composer, which only ever runs on pi via the lightweight loop). The picker
- * then surfaces just that backend's models and `backendOptions` is empty so no
+ * Pass `lockBackend` to pin a composer to a single backend. The picker then
+ * surfaces just that backend's models and `backendOptions` is empty so no
  * engine selector renders; `setBackend` becomes a no-op.
  */
 export function useModelOptions(
