@@ -4,8 +4,11 @@ import path from "node:path";
 
 export const CODEX_ACCESS_TOKEN_ENV = "CODEX_ACCESS_TOKEN";
 
-const CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-const CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token";
+// OpenAI's public Codex CLI client (public/native app, no client secret). The
+// login flow in codex-oauth-login.ts and the just-in-time refresh below share
+// these so there is a single source of truth for the client identity.
+export const CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+export const CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token";
 const EXPIRY_SKEW_MS = 60_000;
 
 type EnvLike = Record<string, string | undefined>;

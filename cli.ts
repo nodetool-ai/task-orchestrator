@@ -612,6 +612,53 @@ function safeBoxCliText(value: string): string {
     .replace(/\bpostgres(?:ql)?:\/\/[^\s"'<>]+/gi, "[redacted-url]");
 }
 
+async function cmdCodex(args: Args): Promise<number> {
+  const sub = args._.shift();
+  if (sub === "login") {
+    const { loginWithChatGPT } = await import("./lib/codex-oauth-login");
+    console.log("Opening your browser to sign in with ChatGPT…");
+    const result = await loginWithChatGPT({
+      onAuthorizationUrl: (url) =>
+        console.log(`If it doesn't open automatically, visit:\n  ${url}`),
+    });
+    console.log(
+      `Signed in. Credentials written to ${result.authPath}` +
+        (result.accountId ? ` (account ${result.accountId}).` : ".")
+    );
+    return 0;
+  }
+  if (sub === "logout") {
+    const { resolveCodexAccessTokenSync, codexAuthPath } = await import("./lib/codex-oauth-token");
+    const { revokeToken } = await import("./lib/codex-oauth-login");
+    const token = resolveCodexAccessTokenSync();
+    if (token) await revokeToken(token);
+    const file = codexAuthPath();
+    try {
+      const { rmSync } = await import("node:fs");
+      rmSync(file, { force: true });
+    } catch {
+      // Best-effort: the token is already revoked; a read-only file just stays.
+    }
+    console.log(`Signed out. Removed ${file}.`);
+    return 0;
+  }
+  if (sub === "status") {
+    const { resolveCodexAccessTokenSync, codexAuthPath } = await import("./lib/codex-oauth-token");
+    const { extractAccountId } = await import("./lib/codex-oauth-login");
+    const token = resolveCodexAccessTokenSync();
+    if (!token) {
+      console.log("Not signed in. Run `npm run task -- codex login`.");
+      return 1;
+    }
+    const accountId = extractAccountId(token);
+    console.log(
+      `Signed in via ${codexAuthPath()}` + (accountId ? ` (account ${accountId}).` : ".")
+    );
+    return 0;
+  }
+  throw new Error("Usage: codex <login|logout|status>");
+}
+
 async function cmdBox(args: Args): Promise<number> {
   const area = args._.shift();
   const action = args._.shift();
@@ -792,6 +839,10 @@ Commands:
   user link <email> [--origin=...]  Generate a magic login link (valid 1h, reusable until expiry).
   user rm <email>                   Delete a user.
 
+  codex login                       Sign in with ChatGPT (Codex OAuth) and write ~/.codex/auth.json.
+  codex logout                      Revoke the Codex token and remove ~/.codex/auth.json.
+  codex status                      Report whether a Codex login is present.
+
   runners [--json] [--reap]         List runner Fly Machines/volumes and persisted Box mappings. --reap destroys orphan Fly volumes.
   box template validate <bx_...>    Read-only archived-state and completed-snapshot validation.
   box template publish <bx_...> --yes
@@ -856,6 +907,9 @@ async function main(): Promise<void> {
         break;
       case "box":
         code = await cmdBox(args);
+        break;
+      case "codex":
+        code = await cmdCodex(args);
         break;
       case "help":
       case undefined:
