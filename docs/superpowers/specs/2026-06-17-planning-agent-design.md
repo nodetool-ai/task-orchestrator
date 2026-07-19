@@ -204,6 +204,12 @@ stage rules above).
 
 ### 5. Entry point (`app/plans/page.tsx` + small client component)
 
+> **Retired.** The dedicated "Plan with agent" button/dialog on the Plans
+> index has been removed — a planning run is started from a normal chat
+> instead (the `planning-agent` persona and `<plan>` goal are still wired
+> through `runs.create` and `POST /api/runs`). The original design is kept
+> below for reference.
+
 A **"Plan with agent"** button on the Plans index, beside the existing
 manual New Plan form. Optional repo picker (defaults to the default repo).
 On submit it `POST /api/runs` with `goal: "<plan>"`, `personaId:
