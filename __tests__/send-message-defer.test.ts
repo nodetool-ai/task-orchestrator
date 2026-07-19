@@ -10,33 +10,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// A lightweight chat drives through runOneTurn → the pi backend's postgres mode
-// (R3). Stub that loop: emit one assistant envelope through onEvent (runOneTurn
-// persists + streams it) and return the turn's usage totals.
-vi.mock("../lib/agent-backend/postgres-turn", () => ({
-  runPostgresTurn: vi.fn(async (args: any) => {
-    await args.onEvent({
-      type: "assistant",
-      message: { content: [{ type: "text", text: "hi" }] },
-    });
-    return {
-      envelopes: [],
-      summary: "hi",
-      resumeToken: null,
-      totalCostUsd: null,
-      inputTokens: 0,
-      outputTokens: 0,
-      turns: 1,
-    };
-  }),
-}));
-
 import { and, desc, eq } from "drizzle-orm";
 import { db } from "../db";
 import { agentEvents, agentSessions } from "../db/schema";
 import { create, get, sendMessageToRun } from "../lib/runs";
 import * as dispatch from "../lib/run-dispatch";
-import * as pgTurn from "../lib/agent-backend/postgres-turn";
 
 const ENV_KEYS = [
   "TASK_ORCH_WORKER_ALLOW_DB",
@@ -45,7 +23,6 @@ const ENV_KEYS = [
   "TASK_ORCH_RUNNER",
   "TASK_ORCH_WORKER_IMAGE",
   "TASK_ORCH_DETACHED_RUNS",
-  "TASK_ORCH_LIGHTWEIGHT_CHATS",
 ] as const;
 let saved: Record<string, string | undefined>;
 
@@ -134,52 +111,15 @@ describe("sendMessageToRun on the server (unchanged behavior)", () => {
     expect((await get(run.id))?.status).toBe("completed"); // parking is worker-only
   });
 
-  it("keeps chat turns in-process even when remote runners are enabled", async () => {
+  it("dispatches a chat follow-up to a worker when remote runners are enabled", async () => {
     process.env.TASK_ORCH_WORKER_IMAGE = "orch-worker:test";
     process.env.TASK_ORCH_DETACHED_RUNS = "1";
     const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
     const run = await create({ goal: "<chat>", defer: true });
 
-    const abort = new AbortController();
-    const frames = [];
-    for await (const ev of sendMessageToRun({ runId: run.id, role: "user", text: "hello", abort })) {
-      frames.push(ev.type);
-      if (ev.type === "done" || ev.type === "error") break;
-    }
+    await fireAppend(run.id, "hello");
 
-    expect(frames).toContain("user_message");
-    expect(frames).toContain("sdk");
-    expect(frames).toContain("done");
-    expect(spy).not.toHaveBeenCalled();
-    expect(pgTurn.runPostgresTurn).toHaveBeenCalled();
-    expect((await get(run.id))?.status).toBe("idle");
-  });
-
-  it("keeps a lightweight chat parked when a tool sets parkReason", async () => {
-    process.env.TASK_ORCH_WORKER_IMAGE = "orch-worker:test";
-    process.env.TASK_ORCH_DETACHED_RUNS = "1";
-    (pgTurn.runPostgresTurn as any).mockImplementationOnce(async (args: any) => {
-      const { runTransport } = await import("../lib/worker");
-      await (await runTransport()).patchRun(args.contextSource.runId, { parkReason: "waiting" });
-      return {
-        envelopes: [],
-        summary: "waiting",
-        resumeToken: null,
-        totalCostUsd: null,
-        inputTokens: 0,
-        outputTokens: 0,
-        turns: 1,
-      };
-    });
-    const run = await create({ goal: "<chat>", defer: true });
-
-    const abort = new AbortController();
-    for await (const ev of sendMessageToRun({ runId: run.id, role: "user", text: "wait", abort })) {
-      if (ev.type === "done" || ev.type === "error") break;
-    }
-
-    const after = await get(run.id);
-    expect(after?.status).toBe("parked");
-    expect(after?.parkReason).toBe("waiting");
+    // No live worker owns the chat yet, so the follow-up spawns one.
+    expect(spy).toHaveBeenCalledWith(run.id);
   });
 });

@@ -216,7 +216,7 @@ export function isRunInput(command: WorkerSessionCommand): command is RunInput {
 // HTTP API; heartbeat / ackCancel / releaseClaim do not exist on this path (the
 // channel and the control-plane commit handler own them).
 //
-// The turn machinery mirrors lib/runs.ts's `append`/`driveChatSession`: the same
+// The turn machinery mirrors lib/runs.ts's `append`: the same
 // backend seam is invoked the same way, but every WRITE that `append` performs
 // against the DB transport becomes a semantic event here. That duplication is
 // deliberate and temporary — the legacy HTTP driver stays intact until plan

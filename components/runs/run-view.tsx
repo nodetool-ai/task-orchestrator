@@ -946,15 +946,10 @@ export function RunView({
               if (awaitingFirstToken || buildVisible || bootVisible) {
                 return (
                   <StartupIndicator
-                    runtime={run.runtime}
                     status={status}
                     templateBuild={templateBuild}
                     boxBoot={boxBoot}
-                    onShowLog={
-                      run.runtime === "worker"
-                        ? () => setShowWorkerLog(true)
-                        : undefined
-                    }
+                    onShowLog={() => setShowWorkerLog(true)}
                   />
                 );
               }

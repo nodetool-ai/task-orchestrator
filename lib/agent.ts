@@ -134,11 +134,10 @@ async function reapOrphans() {
     ) {
       return false;
     }
-    // Server-placement <execute> runs resume from Postgres alone (no worktree);
+    // Plan-executor <execute> runs resume from Postgres alone (no worktree);
     // reconcileOrphanedRuns redispatches them too. Leave them for the pump.
     if (
       (row.status === "preparing" || row.status === "running") &&
-      row.runtime === "server" &&
       row.goal === "<execute>" &&
       !!row.planId
     ) {

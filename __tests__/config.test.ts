@@ -22,7 +22,7 @@ const KEYS = [
   "TASK_ORCH_DETACHED_RUNS",
   "TASK_ORCH_INSIDE_WORKER",
   "TASK_ORCH_NESTED_DISPATCH",
-  "TASK_ORCH_LIGHTWEIGHT_CHATS",
+  "TASK_ORCH_ADMISSION_ENABLED",
   "TASK_ORCH_WORKER_IMAGE",
   "TASK_ORCH_MAX_MACHINES",
   "TASK_ORCH_MAX_RUN_DEPTH",
@@ -84,12 +84,12 @@ describe("flag() — default-on vs default-off", () => {
     expect(flag("TASK_ORCH_INSIDE_WORKER", false)).toBe(false);
   });
 
-  it("default-on reproduces the LIGHTWEIGHT_CHATS parser (absent ⇒ on)", () => {
+  it("default-on reproduces the ADMISSION_ENABLED parser (absent ⇒ on)", () => {
     // old: v == null || (v !== "0" && v.toLowerCase() !== "false")
     const old = (v: string | undefined) => v == null || (v !== "0" && v.toLowerCase() !== "false");
     for (const v of [undefined, "", "0", "false", "FALSE", "1", "true"]) {
-      set("TASK_ORCH_LIGHTWEIGHT_CHATS", v);
-      expect(flag("TASK_ORCH_LIGHTWEIGHT_CHATS", true)).toBe(old(v));
+      set("TASK_ORCH_ADMISSION_ENABLED", v);
+      expect(flag("TASK_ORCH_ADMISSION_ENABLED", true)).toBe(old(v));
     }
   });
 });
