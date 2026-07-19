@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseMergeability } from "../lib/gh-merge";
 import { buildMergePrompt } from "../lib/run-templates";
-import { isResumableWorktreeRun } from "../lib/runs";
+import { isResumableRun, isResumableWorktreeRun } from "../lib/runs";
 
 describe("parseMergeability", () => {
   it("maps a CONFLICTING PR with its base ref", () => {
@@ -67,5 +67,37 @@ describe("isResumableWorktreeRun", () => {
     expect(isResumableWorktreeRun("completed", "none")).toBe(false);
     expect(isResumableWorktreeRun("completed", "repo")).toBe(false);
     expect(isResumableWorktreeRun("completed", "worktree_at_pr")).toBe(false);
+  });
+});
+
+describe("isResumableRun", () => {
+  const executor = { goal: "<execute>", cwdStrategy: "repo", planId: "P-1" };
+
+  it("resumes a terminal plan executor (state is durable Postgres rows, not a worktree)", () => {
+    for (const status of ["idle", "completed", "failed", "budget_exhausted"]) {
+      expect(isResumableRun({ ...executor, status }), status).toBe(true);
+    }
+  });
+
+  it("never resumes a cancelled/closed or in-flight executor", () => {
+    for (const status of ["cancelled", "closed", "running", "preparing", "pending", "parked"]) {
+      expect(isResumableRun({ ...executor, status }), status).toBe(false);
+    }
+  });
+
+  it("requires a planId on the executor", () => {
+    expect(isResumableRun({ ...executor, status: "failed", planId: null })).toBe(false);
+  });
+
+  it("keeps the worktree rule for non-executor runs", () => {
+    expect(
+      isResumableRun({ goal: "<implement>", cwdStrategy: "worktree", planId: null, status: "failed" })
+    ).toBe(true);
+    expect(
+      isResumableRun({ goal: "<chat>", cwdStrategy: "none", planId: null, status: "failed" })
+    ).toBe(false);
+    expect(
+      isResumableRun({ goal: "<review>", cwdStrategy: "worktree_at_pr", planId: null, status: "failed" })
+    ).toBe(false);
   });
 });
