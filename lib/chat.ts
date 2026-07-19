@@ -85,10 +85,14 @@ export async function createChat(
   userId: number | null,
   title = "New chat",
   repoId?: string | null,
-  // Chat is the lightweight path: no branch, PR lifecycle, or per-chat worktree
-  // by default. Callers that need filesystem isolation can still opt into
-  // "worktree" explicitly.
-  cwdStrategy: CwdStrategy = "none"
+  // Chat carries no branch, PR lifecycle, or per-chat worktree by default.
+  // Callers that need filesystem isolation can still opt into "worktree".
+  cwdStrategy: CwdStrategy = "none",
+  // Chat runs execute in the full worker harness and support either backend.
+  // This convenience creator defaults to pi (matching DEFAULT_MODEL, a pi
+  // model); callers wanting claude must pass it alongside an Anthropic model.
+  backend: "pi" | "claude" = "pi",
+  model: string = DEFAULT_MODEL
 ): Promise<ChatRow> {
   if (repoId === undefined) repoId = await repo.defaultRepoId();
   // `!= null` (not truthiness): an empty-string repoId must hit the existence
@@ -105,8 +109,8 @@ export async function createChat(
     repoId,
     userId,
     title,
-    model: DEFAULT_MODEL,
-    backend: "pi",
+    model,
+    backend,
   });
   return (await getChat(created.id, userId))!;
 }

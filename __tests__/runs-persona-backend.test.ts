@@ -1,6 +1,7 @@
 // A persona can carry a default agent backend ("engine"); a run that doesn't
 // pick one explicitly inherits it before falling back to the deployment
-// default. Chat runs are always pinned to pi regardless of the persona default.
+// default. Chat runs follow the same inheritance now that they execute in the
+// full worker harness (no longer pinned to pi).
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db";
@@ -41,9 +42,9 @@ describe("runs.create persona backend inheritance", () => {
     expect(run.backend).toBe("pi");
   });
 
-  it("chat runs ignore the persona default and stay on pi", async () => {
+  it("chat runs inherit the persona default backend (with a matching model)", async () => {
     const run = await runs.create({ goal: "<chat>", defer: true });
-    expect(run.backend).toBe("pi");
+    expect(run.backend).toBe("claude");
   });
 
   it("rejects a persona default of claude with a non-Anthropic model", async () => {

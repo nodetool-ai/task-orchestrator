@@ -644,25 +644,17 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   const personaModel = `${persona.modelProvider}/${persona.modelId}`;
   const effectiveModel = input.model ?? personaModel ?? DEFAULT_MODEL;
 
-  // Per-run backend choice. Chat runs default to pi: a null backend is allowed
-  // for legacy/deployment-default rows, but an explicit chat backend must be pi.
-  // Other run kinds normalize/validate the
-  // requested backend eagerly; null falls through to the persona's backend
-  // default (if set), then the deployment default at turn time.
-  // An explicit 'claude' pick is additionally checked against the model's
-  // provider — the Claude backend is Anthropic-only, and this combination can
-  // never run.
+  // Per-run backend choice. Chat runs execute in the full worker harness now
+  // (the lightweight in-process/postgres tier was retired), so they support
+  // both backends just like every other run kind — no chat-specific pinning.
+  // An explicit pick normalizes/validates eagerly; null falls through to the
+  // persona's backend default (if set), then the deployment default at turn
+  // time. An explicit or persona-inherited 'claude' selection is additionally
+  // checked against the model's provider — the Claude backend is Anthropic-only,
+  // and that combination can never run.
   let backend: "pi" | "claude" | null = null;
   const requestedBackend = input.backend;
-  if (requestedBackend != null) {
-    try {
-      backend = resolveBackendId(requestedBackend);
-    } catch (err) {
-      throw new repo.RepoError(err instanceof Error ? err.message : String(err), 400);
-    }
-    if (goal === "<chat>" && backend !== "pi") {
-      throw new repo.RepoError("Chat runs only support the 'pi' backend.", 400);
-    }
+  const validateClaudeProvider = () => {
     const { provider } = parseProviderQualifiedModel(effectiveModel);
     if (backend === "claude" && provider !== "anthropic") {
       throw new repo.RepoError(
@@ -671,28 +663,24 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
         400
       );
     }
+  };
+  if (requestedBackend != null) {
+    try {
+      backend = resolveBackendId(requestedBackend);
+    } catch (err) {
+      throw new repo.RepoError(err instanceof Error ? err.message : String(err), 400);
+    }
+    validateClaudeProvider();
   } else if (persona.backend) {
     // No per-run pick: inherit the persona's engine default when set. Validate
     // it the same way as an explicit pick so a misconfigured persona surfaces
-    // here rather than at turn time. Chat runs stay pinned to pi regardless.
+    // here rather than at turn time.
     try {
       backend = resolveBackendId(persona.backend);
     } catch (err) {
       throw new repo.RepoError(err instanceof Error ? err.message : String(err), 400);
     }
-    if (goal === "<chat>") {
-      // Chat only runs on pi; force it and ignore the persona default.
-      backend = "pi";
-    } else {
-      const { provider } = parseProviderQualifiedModel(effectiveModel);
-      if (backend === "claude" && provider !== "anthropic") {
-        throw new repo.RepoError(
-          `The 'claude' backend only supports Anthropic models, but the run's model is '${effectiveModel}'. ` +
-            `Pick an anthropic/* model or the 'pi' backend.`,
-          400
-        );
-      }
-    }
+    validateClaudeProvider();
   }
 
   // Tree limits (Decision 2): reject BEFORE inserting, same reasoning as the
