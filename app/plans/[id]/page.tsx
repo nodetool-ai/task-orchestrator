@@ -63,6 +63,12 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
         {plan.owner && <span className="text-xs text-muted-foreground">@{plan.owner}</span>}
         <span className="text-xs text-muted-foreground">Created {formatDate(plan.createdAt)}</span>
         <div className="ml-auto flex items-center gap-2">
+          <PlanChatBox
+            planId={plan.id}
+            repoOptions={plan.repos.map((r) => ({ id: r.id, name: r.name }))}
+            promptPrefix={chatPromptPrefix}
+            personas={personas}
+          />
           <ExecutePlanButton
             planId={plan.id}
             openTaskCount={tasks.filter((t) => t.state !== "merged" && t.state !== "cancelled").length}
@@ -134,22 +140,6 @@ export default async function PlanPage({ params }: { params: Promise<{ id: strin
             })}
           </div>
         )}
-      </PageSection>
-
-      <PageSection
-        title="Chat about this plan"
-        action={
-          <span className="text-[11px] text-muted-foreground">
-            agent can create tasks, edit the plan, change state
-          </span>
-        }
-      >
-        <PlanChatBox
-          planId={plan.id}
-          repoOptions={plan.repos.map((r) => ({ id: r.id, name: r.name }))}
-          promptPrefix={chatPromptPrefix}
-          personas={personas}
-        />
       </PageSection>
 
       {executorRuns.length > 0 && (

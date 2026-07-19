@@ -1,9 +1,10 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { MessageCircle } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { MessagesSquare, X } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Modal } from "@/components/ui/modal";
 import {
   PersonaPicker,
   type PersonaOption,
@@ -64,10 +65,10 @@ const QUICK_PROMPTS: Array<{ label: string; prompt: string }> = [
 ];
 
 /**
- * Free-form chat composer pinned to the plan page. Sending creates a
- * plan-scoped `<chat>` run (orchestrator tools default plan_id to this
- * plan), hands the user's first message — prepended with the plan context
- * block — to the run view, then navigates into the new run.
+ * Chat-about-this-plan button. Opens a modal holding the free-form composer:
+ * sending creates a plan-scoped `<chat>` run (orchestrator tools default
+ * plan_id to this plan), hands the user's first message — prepended with the
+ * plan context block — to the run view, then navigates into the new run.
  */
 export function PlanChatBox({
   planId,
@@ -77,15 +78,23 @@ export function PlanChatBox({
   className,
 }: Props) {
   const router = useRouter();
+  const [open, setOpen] = useState(false);
   const [input, setInput] = useState("");
   const [personaId, setPersonaId] = useState(personas[0]?.id ?? "implementor");
   const [repoId, setRepoId] = useState<string>(repoOptions[0]?.id ?? "");
   // Plan-scoped chats run on the lightweight pi loop — pi only, no engine picker.
-  const { model, setModel, modelOptions } = useModelOptions(undefined, true, "pi");
+  const { model, setModel, modelOptions } = useModelOptions(undefined, open, "pi");
   const [reasoning, setReasoning] = useState<ThinkingLevel | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setError(null);
+    // Focus once the modal has mounted its panel.
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [open]);
 
   function onInput(e: React.ChangeEvent<HTMLTextAreaElement>) {
     setInput(e.target.value);
@@ -164,70 +173,98 @@ export function PlanChatBox({
   }
 
   return (
-    <div className={cn("space-y-2", className)}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-          <MessageCircle className="size-3.5 shrink-0" />
-          <span>
-            Ask the agent to manage this plan. Each send opens a new chat run.
-          </span>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <PersonaPicker
-            personas={personas}
-            value={personaId}
-            onChange={setPersonaId}
-            size="compact"
-          />
-          <ModelPicker
-            value={model}
-            options={modelOptions}
-            onChange={setModel}
-            disabled={pending}
-          />
-          <ThinkingLevelPicker
-            value={reasoning}
-            onChange={setReasoning}
-            className="rounded-md border border-border/60 bg-background px-2 py-1 text-xs outline-none focus:border-foreground/40"
-          />
-          {repoOptions.length > 1 && (
-            <RepositoryPicker
-              repositories={repoOptions}
-              value={repoId}
-              onChange={setRepoId}
-              size="compact"
-            />
-          )}
-        </div>
-      </div>
+    <>
+      <Button variant="outline" onClick={() => setOpen(true)} className={className}>
+        <MessagesSquare className="size-3.5" />
+        Chat about this plan
+      </Button>
 
-      <ComposerInputShell>
-        <ComposerTextarea
-          ref={textareaRef}
-          value={input}
-          onChange={onInput}
-          onKeyDown={onKeyDown}
-          placeholder="Reshape the plan, add tasks, change state…"
-          disabled={pending}
-        />
-        <ComposerSendButton pending={pending} disabled={!input.trim()} onClick={submit} />
-      </ComposerInputShell>
-
-      {!input.trim() && !pending && (
-        <div className="flex flex-wrap gap-1.5 pt-1">
-          {QUICK_PROMPTS.map((q) => (
-            <ChipButton
-              key={q.label}
-              onClick={() => pickQuickPrompt(q.prompt)}
-              className="bg-card/30 px-2 py-1 text-[11px]"
+      {open && (
+        <Modal onClose={() => setOpen(false)} ariaLabel="Chat about this plan">
+          <header className="flex items-center justify-between gap-3 border-b border-border/60 px-5 py-3">
+            <div className="flex items-center gap-2">
+              <MessagesSquare className="size-4 text-foreground" />
+              <h2 className="text-sm font-semibold tracking-tight">Chat about this plan</h2>
+              <span className="font-mono text-[11px] text-muted-foreground">{planId}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+              aria-label="Close"
             >
-              {q.label}
-            </ChipButton>
-          ))}
-        </div>
-      )}
+              <X className="size-4" />
+            </button>
+          </header>
 
-      <ErrorText>{error}</ErrorText>
-    </div>
+          <div className="space-y-3 px-5 py-4">
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Ask the agent to manage this plan — it can create tasks, edit the plan and
+              change state. Each send opens a new chat run.
+            </p>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <PersonaPicker
+                personas={personas}
+                value={personaId}
+                onChange={setPersonaId}
+                size="compact"
+              />
+              <ModelPicker
+                value={model}
+                options={modelOptions}
+                onChange={setModel}
+                disabled={pending}
+              />
+              <ThinkingLevelPicker
+                value={reasoning}
+                onChange={setReasoning}
+                className="rounded-md border border-border/60 bg-background px-2 py-1 text-xs outline-none focus:border-foreground/40"
+              />
+              {repoOptions.length > 1 && (
+                <RepositoryPicker
+                  repositories={repoOptions}
+                  value={repoId}
+                  onChange={setRepoId}
+                  size="compact"
+                />
+              )}
+            </div>
+
+            <ComposerInputShell>
+              <ComposerTextarea
+                ref={textareaRef}
+                value={input}
+                onChange={onInput}
+                onKeyDown={onKeyDown}
+                placeholder="Reshape the plan, add tasks, change state…"
+                disabled={pending}
+              />
+              <ComposerSendButton
+                pending={pending}
+                disabled={!input.trim()}
+                onClick={submit}
+              />
+            </ComposerInputShell>
+
+            {!input.trim() && !pending && (
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                {QUICK_PROMPTS.map((q) => (
+                  <ChipButton
+                    key={q.label}
+                    onClick={() => pickQuickPrompt(q.prompt)}
+                    className="bg-card/30 px-2 py-1 text-[11px]"
+                  >
+                    {q.label}
+                  </ChipButton>
+                ))}
+              </div>
+            )}
+
+            <ErrorText>{error}</ErrorText>
+          </div>
+        </Modal>
+      )}
+    </>
   );
 }
