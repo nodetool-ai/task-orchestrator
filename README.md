@@ -388,8 +388,13 @@ Requires:
   default `pi` backend reads per-provider keys (`ANTHROPIC_API_KEY`,
   `OPENAI_API_KEY`, `GEMINI_API_KEY`, …), `~/.pi/agent/auth.json`, and the Codex
   login stored at `CODEX_HOME/auth.json` (default `~/.codex/auth.json`) for
-  `openai-codex` models. `CODEX_ACCESS_TOKEN` is accepted as an explicit
-  override, but local Codex OAuth login is the intended source. On the
+  `openai-codex` models. Sign in with `npm run task -- codex login`, which runs
+  the "Login with ChatGPT" OAuth flow (PKCE + a loopback listener on
+  `localhost:1455`) and writes `auth.json` itself — the external OpenAI Codex
+  CLI is not required. `codex status` reports whether a login is present and
+  `codex logout` revokes the token and clears the file. `CODEX_ACCESS_TOKEN` is
+  accepted as an explicit override, but local Codex OAuth login is the intended
+  source. On the
   containerized paths (Docker workers, Fly runner Machines) every recognized
   provider credential set on the server is forwarded into the run container, so
   either backend works there — see `lib/agent-backend/provider-env.ts` for the
