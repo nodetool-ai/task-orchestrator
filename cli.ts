@@ -615,44 +615,46 @@ function safeBoxCliText(value: string): string {
 async function cmdCodex(args: Args): Promise<number> {
   const sub = args._.shift();
   if (sub === "login") {
-    const { loginWithChatGPT } = await import("./lib/codex-oauth-login");
-    console.log("Opening your browser to sign in with ChatGPT…");
-    const result = await loginWithChatGPT({
-      onAuthorizationUrl: (url) =>
-        console.log(`If it doesn't open automatically, visit:\n  ${url}`),
-    });
+    const { startCodexLogin, completeCodexLogin } = await import("./lib/codex-oauth-store");
+    const { authorizationUrl } = await startCodexLogin();
     console.log(
-      `Signed in. Credentials written to ${result.authPath}` +
-        (result.accountId ? ` (account ${result.accountId}).` : ".")
+      "Open this URL, approve the sign-in, then paste the code (or the whole\n" +
+        "callback URL) from the page you land on:\n\n  " +
+        authorizationUrl +
+        "\n"
+    );
+    const { createInterface } = await import("node:readline/promises");
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    let code: string;
+    try {
+      code = await rl.question("Code: ");
+    } finally {
+      rl.close();
+    }
+    const status = await completeCodexLogin(code);
+    console.log(
+      "Signed in; credentials stored in the database" +
+        (status.accountId ? ` (account ${status.accountId}).` : ".")
     );
     return 0;
   }
   if (sub === "logout") {
-    const { resolveCodexAccessTokenSync, codexAuthPath } = await import("./lib/codex-oauth-token");
-    const { revokeToken } = await import("./lib/codex-oauth-login");
-    const token = resolveCodexAccessTokenSync();
-    if (token) await revokeToken(token);
-    const file = codexAuthPath();
-    try {
-      const { rmSync } = await import("node:fs");
-      rmSync(file, { force: true });
-    } catch {
-      // Best-effort: the token is already revoked; a read-only file just stays.
-    }
-    console.log(`Signed out. Removed ${file}.`);
+    const { codexLogout } = await import("./lib/codex-oauth-store");
+    await codexLogout();
+    console.log("Signed out. Cleared the stored Codex credential.");
     return 0;
   }
   if (sub === "status") {
-    const { resolveCodexAccessTokenSync, codexAuthPath } = await import("./lib/codex-oauth-token");
-    const { extractAccountId } = await import("./lib/codex-oauth-login");
-    const token = resolveCodexAccessTokenSync();
-    if (!token) {
+    const { codexAuthStatus } = await import("./lib/codex-oauth-store");
+    const status = await codexAuthStatus();
+    if (!status.signedIn) {
       console.log("Not signed in. Run `npm run task -- codex login`.");
       return 1;
     }
-    const accountId = extractAccountId(token);
     console.log(
-      `Signed in via ${codexAuthPath()}` + (accountId ? ` (account ${accountId}).` : ".")
+      "Signed in (credential stored in the database)" +
+        (status.accountId ? ` (account ${status.accountId})` : "") +
+        (status.expiresAt ? `; access token expires ${status.expiresAt}.` : ".")
     );
     return 0;
   }

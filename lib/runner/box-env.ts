@@ -75,7 +75,7 @@ export function validateBoxWorkerEnv(env: Readonly<Record<string, string>>): voi
  * inheriting process.env: in particular the Box control-plane API key and
  * DATABASE_URL cannot cross the control-plane boundary.
  */
-export function buildBoxWorkerEnv(input: BoxWorkerEnvInput): Record<string, string> {
+export async function buildBoxWorkerEnv(input: BoxWorkerEnvInput): Promise<Record<string, string>> {
   const repoPath = requiredString(input.repoPath ?? config.box.repoPath, "TASK_ORCH_BOX_REPO_PATH");
   const repoId = requiredString(input.repoId, "repoId");
   const instanceId = input.instanceId ?? config.deployment.instanceId ?? "default";
@@ -107,7 +107,7 @@ export function buildBoxWorkerEnv(input: BoxWorkerEnvInput): Record<string, stri
   // Keep the allowlist coupled to the credential registry.  Iterating the
   // declared keys (instead of spreading agentCredentialEnv()) prevents a
   // future helper addition from silently widening the Box environment.
-  const credentials = agentCredentialEnv();
+  const credentials = await agentCredentialEnv();
   for (const key of AGENT_CREDENTIAL_ENV_KEYS) setIfPresent(env, key, credentials[key]);
   setIfPresent(env, "GH_TOKEN", process.env.GH_TOKEN);
 

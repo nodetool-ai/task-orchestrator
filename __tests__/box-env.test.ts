@@ -43,7 +43,7 @@ function stubBaseEnv(): void {
 }
 
 describe("buildBoxWorkerEnv", () => {
-  it("uses an explicit allowlist and forwards only worker credentials", () => {
+  it("uses an explicit allowlist and forwards only worker credentials", async () => {
     stubBaseEnv();
     vi.stubEnv("BOX_API_KEY", "bx-control-plane-key");
     vi.stubEnv("DATABASE_URL", "postgres://must-not-leak");
@@ -53,7 +53,7 @@ describe("buildBoxWorkerEnv", () => {
     vi.stubEnv("CEREBRAS_API_KEY", "");
     vi.stubEnv("TASK_ORCH_RUNNER", "box");
 
-    const env = buildBoxWorkerEnv({ runId: 42, repoId: "repo_123", channelInstanceId: CHANNEL_INSTANCE_ID });
+    const env = await buildBoxWorkerEnv({ runId: 42, repoId: "repo_123", channelInstanceId: CHANNEL_INSTANCE_ID });
 
     expect(env).toMatchObject({
       TASK_ORCH_INSIDE_WORKER: "1",
@@ -84,10 +84,10 @@ describe("buildBoxWorkerEnv", () => {
     expect(env).not.toHaveProperty("UNRELATED_CONTROL_PLANE_SECRET");
   });
 
-  it("uses caller-provided Box-local paths and resolved dispatch policy", () => {
+  it("uses caller-provided Box-local paths and resolved dispatch policy", async () => {
     stubBaseEnv();
 
-    const env = buildBoxWorkerEnv({
+    const env = await buildBoxWorkerEnv({
       runId: 7,
       repoId: "repo_7",
       channelInstanceId: CHANNEL_INSTANCE_ID,
@@ -107,31 +107,31 @@ describe("buildBoxWorkerEnv", () => {
     });
   });
 
-  it("fails before a Box API request when a credential exceeds the byte limit", () => {
+  it("fails before a Box API request when a credential exceeds the byte limit", async () => {
     stubBaseEnv();
     vi.stubEnv("GH_TOKEN", "x".repeat(BOX_ENV_MAX_BYTES));
 
-    expect(() =>
+    await expect(
       buildBoxWorkerEnv({ runId: 7, repoId: "repo_7", channelInstanceId: CHANNEL_INSTANCE_ID })
-    ).toThrow(/Box worker environment is .* bytes; Box permits at most 65536 bytes/);
+    ).rejects.toThrow(/Box worker environment is .* bytes; Box permits at most 65536 bytes/);
   });
 
-  it("rejects a malformed channel instance id before minting a credential", () => {
+  it("rejects a malformed channel instance id before minting a credential", async () => {
     stubBaseEnv();
-    expect(() =>
+    await expect(
       buildBoxWorkerEnv({ runId: 7, repoId: "repo_7", channelInstanceId: "not-a-valid-id" })
-    ).toThrow(/invalid channelInstanceId/);
+    ).rejects.toThrow(/invalid channelInstanceId/);
   });
 
-  it("pins the Box's preinstalled Claude Code binary for the worker", () => {
+  it("pins the Box's preinstalled Claude Code binary for the worker", async () => {
     stubBaseEnv();
-    const env = buildBoxWorkerEnv({ runId: 42, repoId: "repo_123", channelInstanceId: CHANNEL_INSTANCE_ID });
+    const env = await buildBoxWorkerEnv({ runId: 42, repoId: "repo_123", channelInstanceId: CHANNEL_INSTANCE_ID });
     expect(env.TASK_ORCH_CLAUDE_BINARY).toBe("/usr/local/bin/claude");
   });
 });
 
 describe("validateBoxWorkerEnv", () => {
-  it("rejects more than 100 variables", () => {
+  it("rejects more than 100 variables", async () => {
     const env = Object.fromEntries(
       Array.from({ length: BOX_ENV_MAX_VARIABLES + 1 }, (_, index) => [`VAR_${index}`, "x"])
     );
@@ -139,7 +139,7 @@ describe("validateBoxWorkerEnv", () => {
     expect(() => validateBoxWorkerEnv(env)).toThrow(/101 variables; Box permits at most 100/);
   });
 
-  it("accepts the exact variable and byte limits", () => {
+  it("accepts the exact variable and byte limits", async () => {
     const env = Object.fromEntries(
       Array.from({ length: BOX_ENV_MAX_VARIABLES }, (_, index) => [`V${index}`, ""])
     );
@@ -148,7 +148,7 @@ describe("validateBoxWorkerEnv", () => {
 });
 
 describe("redactBoxWorkerEnv", () => {
-  it("redacts worker and provider secrets without mutating the live environment", () => {
+  it("redacts worker and provider secrets without mutating the live environment", async () => {
     const live = {
       TASK_ORCH_RUN_ID: "42",
       TASK_ORCH_WORKER_TOKEN: "wt1.42.secret",

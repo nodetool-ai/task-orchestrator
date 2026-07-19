@@ -7,7 +7,7 @@ import { cpus, totalmem } from "node:os";
 import { dirname, join } from "node:path";
 import { db } from "../db";
 import { agentSessions, runnerInstances } from "../db/schema";
-import { AGENT_CREDENTIAL_ENV_KEYS } from "./agent-backend/provider-env";
+import { AGENT_CREDENTIAL_ENV_KEYS, agentCredentialEnv } from "./agent-backend/provider-env";
 // lib/inbox has no static import of this module (its wake path uses a lazy
 // dynamic import), so this edge is cycle-free.
 import { fireDueTimers, parkedRunsWithPendingEvents } from "./inbox";
@@ -1150,13 +1150,16 @@ export interface DockerChannelConfig {
 /** Full createContainer options for a run's worker (exported for tests). The
  *  `channel` argument is omitted only by tests that don't exercise the
  *  websocket wiring; real dispatch always provides it. */
-export function buildWorkerContainerConfig(
+export async function buildWorkerContainerConfig(
   runId: number,
   scope: string,
   channel?: DockerChannelConfig
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   const image = process.env.TASK_ORCH_WORKER_IMAGE!;
   const pass = (k: string) => `${k}=${process.env[k] ?? ""}`;
+  // Resolved rather than read straight from process.env: the Codex credential
+  // lives in the DB, not the server's env, and workers have no DB access.
+  const credentials = await agentCredentialEnv();
   // Worker container config skeleton (labels, limits, mounts). Workers hold NO
   // database credentials — DATABASE_URL is deliberately absent. Channel
   // credentials (instance id, bearer token, listen endpoint) are added below,
@@ -1168,7 +1171,7 @@ export function buildWorkerContainerConfig(
     // provider key set on the server, so a worker dispatched with
     // TASK_ORCH_AGENT_BACKEND=pi can reach non-Anthropic providers too. Only
     // set keys are forwarded (an absent key stays absent in the container).
-    ...AGENT_CREDENTIAL_ENV_KEYS.filter((k) => process.env[k] != null).map(pass),
+    ...AGENT_CREDENTIAL_ENV_KEYS.filter((k) => credentials[k] != null).map((k) => `${k}=${credentials[k]}`),
     pass("TASK_ORCH_AGENT_BACKEND"),
     pass("TASK_ORCH_CHAT_MODEL"),
     pass("TASK_ORCH_AGENT_MODEL"),
@@ -1316,7 +1319,9 @@ export async function dockerSpawn(
 ): Promise<{ pid: number; channelEndpoint: string } | null> {
   const docker = dockerArg ?? (await getDocker());
   const channel: DockerChannelConfig = { instanceId: channelInstanceId, listenEndpoint: dockerListenEndpoint() };
-  const container = await docker.createContainer(buildWorkerContainerConfig(runId, scope, channel));
+  const container = await docker.createContainer(
+    await buildWorkerContainerConfig(runId, scope, channel)
+  );
   await container.start();
   const host = await resolveDockerDialHost(docker, scope);
   if (!host) return null;

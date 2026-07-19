@@ -50,7 +50,7 @@ async function runnerDeferredEvents(runId: number) {
 }
 
 describe("nestedDispatchMode()", () => {
-  it("honors an explicit env value (case-insensitive), ignoring the provider", () => {
+  it("honors an explicit env value (case-insensitive), ignoring the provider", async () => {
     process.env.TASK_ORCH_RUNNER = "fly"; // default would be isolate
     process.env.TASK_ORCH_NESTED_DISPATCH = "inline";
     expect(nestedDispatchMode()).toBe("inline");
@@ -60,7 +60,7 @@ describe("nestedDispatchMode()", () => {
     expect(nestedDispatchMode()).toBe("isolate");
   });
 
-  it("falls through to the provider default on a garbage env value", () => {
+  it("falls through to the provider default on a garbage env value", async () => {
     process.env.TASK_ORCH_NESTED_DISPATCH = "banana";
     // no TASK_ORCH_RUNNER → local → inline
     expect(nestedDispatchMode()).toBe("inline");
@@ -68,7 +68,7 @@ describe("nestedDispatchMode()", () => {
     expect(nestedDispatchMode()).toBe("isolate");
   });
 
-  it("defaults to isolate on Fly and inline otherwise when unset", () => {
+  it("defaults to isolate on Fly and inline otherwise when unset", async () => {
     expect(nestedDispatchMode()).toBe("inline"); // no runner
     process.env.TASK_ORCH_RUNNER = "fly";
     expect(nestedDispatchMode()).toBe("isolate");
@@ -135,15 +135,15 @@ describe("create() launch branches: nested-dispatch isolate", () => {
 });
 
 describe("buildFlyWorkerEnv nested-dispatch passthrough", () => {
-  it("passes the resolved policy (isolate on Fly by default)", () => {
+  it("passes the resolved policy (isolate on Fly by default)", async () => {
     process.env.TASK_ORCH_RUNNER = "fly";
-    expect(buildFlyWorkerEnv(42).TASK_ORCH_NESTED_DISPATCH).toBe("isolate");
+    expect((await buildFlyWorkerEnv(42)).TASK_ORCH_NESTED_DISPATCH).toBe("isolate");
   });
 
-  it("passes an explicit inline override (rollback)", () => {
+  it("passes an explicit inline override (rollback)", async () => {
     process.env.TASK_ORCH_RUNNER = "fly";
     process.env.TASK_ORCH_NESTED_DISPATCH = "inline";
-    expect(buildFlyWorkerEnv(42).TASK_ORCH_NESTED_DISPATCH).toBe("inline");
+    expect((await buildFlyWorkerEnv(42)).TASK_ORCH_NESTED_DISPATCH).toBe("inline");
   });
 });
 
@@ -153,14 +153,14 @@ describe("buildFlyWorkerEnv REPO_CACHE_DIR", () => {
     delete process.env[REPO_CACHE_KNOB];
   });
 
-  it("defaults to the image-baked cache dir when TASK_ORCH_REPO_CACHE_DIR is unset", () => {
+  it("defaults to the image-baked cache dir when TASK_ORCH_REPO_CACHE_DIR is unset", async () => {
     delete process.env[REPO_CACHE_KNOB];
-    expect(buildFlyWorkerEnv(42).REPO_CACHE_DIR).toBe("/opt/repo-cache");
+    expect((await buildFlyWorkerEnv(42)).REPO_CACHE_DIR).toBe("/opt/repo-cache");
   });
 
-  it("honors a TASK_ORCH_REPO_CACHE_DIR override", () => {
+  it("honors a TASK_ORCH_REPO_CACHE_DIR override", async () => {
     process.env[REPO_CACHE_KNOB] = "/custom/cache";
-    expect(buildFlyWorkerEnv(42).REPO_CACHE_DIR).toBe("/custom/cache");
+    expect((await buildFlyWorkerEnv(42)).REPO_CACHE_DIR).toBe("/custom/cache");
   });
 });
 
@@ -170,7 +170,7 @@ describe("buildFlyWorkerEnv never forwards server-only Fly credentials", () => {
     for (const k of KNOBS2) delete process.env[k];
   });
 
-  it("omits FLY_API_TOKEN and TASK_ORCH_FLY_APP even when set on the server process", () => {
+  it("omits FLY_API_TOKEN and TASK_ORCH_FLY_APP even when set on the server process", async () => {
     // These are server-only: FLY_API_TOKEN is the Fly Machines API control-
     // plane credential (lib/runner/fly-client.ts), and TASK_ORCH_FLY_APP names
     // the runner pool app. Neither belongs on a worker Machine — a worker that
@@ -178,14 +178,14 @@ describe("buildFlyWorkerEnv never forwards server-only Fly credentials", () => {
     process.env.FLY_API_TOKEN = "fo1_should_never_leak";
     process.env.TASK_ORCH_FLY_APP = "task-orch-runner";
 
-    const env = buildFlyWorkerEnv(42);
+    const env = await buildFlyWorkerEnv(42);
     expect(env.FLY_API_TOKEN).toBeUndefined();
     expect(env.TASK_ORCH_FLY_APP).toBeUndefined();
   });
 });
 
 describe("remoteRunnerEnabled inside workers", () => {
-  it("treats an isolate-mode worker as remote (appends must never run in-process there)", () => {
+  it("treats an isolate-mode worker as remote (appends must never run in-process there)", async () => {
     // A Fly worker: gets INSIDE_WORKER + NESTED_DISPATCH from buildFlyWorkerEnv,
     // but deliberately NOT TASK_ORCH_RUNNER / TASK_ORCH_WORKER_IMAGE.
     process.env.TASK_ORCH_INSIDE_WORKER = "1";
@@ -198,7 +198,7 @@ describe("remoteRunnerEnabled inside workers", () => {
     expect(remoteRunnerEnabled()).toBe(true);
   });
 
-  it("keeps an inline-mode worker on the in-process path", () => {
+  it("keeps an inline-mode worker on the in-process path", async () => {
     process.env.TASK_ORCH_INSIDE_WORKER = "1";
     process.env.TASK_ORCH_WORKER_ALLOW_DB = "1"; // test-only: simulated worker in the orchestrator process
     process.env.TASK_ORCH_NESTED_DISPATCH = "inline";

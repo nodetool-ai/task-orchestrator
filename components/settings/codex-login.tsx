@@ -11,61 +11,41 @@ interface CodexAuthStatus {
   signedIn: boolean;
   pending: boolean;
   accountId?: string;
-  authPath: string;
-  authorizationUrl?: string;
-  error?: { code: string; message: string };
+  expiresAt?: string;
+  updatedAt?: string;
 }
-
-const POLL_INTERVAL_MS = 2000;
 
 export function CodexLoginPanel() {
   const confirm = useConfirm();
   const [status, setStatus] = React.useState<CodexAuthStatus | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [starting, setStarting] = React.useState(false);
+  const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const pollRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Set once a login is started; holds the URL so the user can reopen the tab.
+  const [authorizationUrl, setAuthorizationUrl] = React.useState<string | null>(null);
+  const [code, setCode] = React.useState("");
 
-  const fetchStatus = React.useCallback(async (): Promise<CodexAuthStatus | null> => {
+  const fetchStatus = React.useCallback(async () => {
     const res = await fetch("/api/codex");
     if (!res.ok) {
       setError(`HTTP ${res.status}`);
-      return null;
-    }
-    const body = (await res.json()) as CodexAuthStatus;
-    setStatus(body);
-    return body;
-  }, []);
-
-  const stopPolling = React.useCallback(() => {
-    if (pollRef.current) {
-      clearTimeout(pollRef.current);
-      pollRef.current = null;
-    }
-  }, []);
-
-  // Poll while a login is in flight; stop once it lands or errors.
-  const poll = React.useCallback(async () => {
-    const body = await fetchStatus();
-    if (!body) return;
-    if (body.signedIn || body.error || !body.pending) {
-      stopPolling();
       return;
     }
-    pollRef.current = setTimeout(poll, POLL_INTERVAL_MS);
-  }, [fetchStatus, stopPolling]);
+    setStatus((await res.json()) as CodexAuthStatus);
+  }, []);
 
   React.useEffect(() => {
-    (async () => {
-      setLoading(true);
-      const body = await fetchStatus();
+    void (async () => {
+      await fetchStatus();
       setLoading(false);
-      if (body?.pending && !body.signedIn) {
-        pollRef.current = setTimeout(poll, POLL_INTERVAL_MS);
-      }
     })();
-    return () => stopPolling();
-  }, [fetchStatus, poll, stopPolling]);
+  }, [fetchStatus]);
+
+  async function readError(res: Response): Promise<string> {
+    const b = (await res.json().catch(() => ({}))) as { error?: string };
+    return b.error ?? `HTTP ${res.status}`;
+  }
 
   async function signIn() {
     if (starting) return;
@@ -74,19 +54,38 @@ export function CodexLoginPanel() {
     try {
       const res = await fetch("/api/codex", { method: "POST" });
       if (!res.ok) {
-        const b = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(b.error ?? `HTTP ${res.status}`);
+        setError(await readError(res));
         return;
       }
       const body = (await res.json()) as { authorizationUrl: string; status: CodexAuthStatus };
       setStatus(body.status);
-      // Open OpenAI's sign-in page in a new tab; the server's loopback listener
-      // catches the redirect back to localhost:1455 and finishes the exchange.
+      setAuthorizationUrl(body.authorizationUrl);
+      setCode("");
       window.open(body.authorizationUrl, "_blank", "noopener,noreferrer");
-      stopPolling();
-      pollRef.current = setTimeout(poll, POLL_INTERVAL_MS);
     } finally {
       setStarting(false);
+    }
+  }
+
+  async function submitCode() {
+    if (submitting || !code.trim()) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/codex", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      if (!res.ok) {
+        setError(await readError(res));
+        return;
+      }
+      setStatus((await res.json()) as CodexAuthStatus);
+      setAuthorizationUrl(null);
+      setCode("");
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -102,13 +101,12 @@ export function CodexLoginPanel() {
     setError(null);
     const res = await fetch("/api/codex", { method: "DELETE" });
     if (!res.ok) {
-      setError(`HTTP ${res.status}`);
+      setError(await readError(res));
       return;
     }
     setStatus((await res.json()) as CodexAuthStatus);
+    setAuthorizationUrl(null);
   }
-
-  const pending = Boolean(status?.pending && !status?.signedIn);
 
   return (
     <div className="space-y-4">
@@ -124,7 +122,7 @@ export function CodexLoginPanel() {
               <div>
                 <div className="font-medium">Signed in with ChatGPT</div>
                 <div className="text-[11px] text-muted-foreground font-mono">
-                  {status.accountId ? `account ${status.accountId}` : status.authPath}
+                  {status.accountId ? `account ${status.accountId}` : "stored in database"}
                 </div>
               </div>
             </div>
@@ -132,55 +130,64 @@ export function CodexLoginPanel() {
               <LogOut className="size-3.5" /> Sign out
             </Button>
           </div>
-        ) : pending ? (
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2 text-sm">
-              <Spinner className="size-4" />
-              <div>
-                <div className="font-medium">Waiting for you to approve in the browser…</div>
-                <div className="text-[11px] text-muted-foreground">
-                  Complete the sign-in in the tab that opened. This page updates automatically.
-                </div>
-              </div>
-            </div>
-            {status?.authorizationUrl && (
-              <a
-                href={status.authorizationUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
-              >
-                <ExternalLink className="size-3.5" /> Reopen sign-in
-              </a>
-            )}
-          </div>
         ) : (
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="text-sm text-muted-foreground">
-              Not signed in. Codex (<code>openai-codex</code>) models need a ChatGPT login.
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="text-sm text-muted-foreground">
+                Not signed in. Codex (<code>openai-codex</code>) models need a ChatGPT login.
+              </div>
+              <Button onClick={signIn} disabled={starting}>
+                {starting ? (
+                  <Spinner className="size-3.5" />
+                ) : (
+                  <MessageSquare className="size-3.5" />
+                )}
+                {authorizationUrl ? "Restart sign-in" : "Sign in with ChatGPT"}
+              </Button>
             </div>
-            <Button onClick={signIn} disabled={starting}>
-              {starting ? <Spinner className="size-3.5" /> : <MessageSquare className="size-3.5" />}
-              Sign in with ChatGPT
-            </Button>
+
+            {authorizationUrl && (
+              <div className="space-y-2 border-t border-border/60 pt-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label htmlFor="codex-code" className="text-sm font-medium">
+                    Paste the code from the ChatGPT page
+                  </label>
+                  <a
+                    href={authorizationUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                  >
+                    <ExternalLink className="size-3.5" /> Reopen sign-in
+                  </a>
+                </div>
+                <textarea
+                  id="codex-code"
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  rows={3}
+                  spellCheck={false}
+                  placeholder="ac_… — or paste the whole https://auth.openai.com/deviceauth/callback?… URL"
+                  className="w-full rounded-md border border-border/60 bg-background p-2 font-mono text-xs"
+                />
+                <Button onClick={submitCode} disabled={submitting || !code.trim()}>
+                  {submitting && <Spinner className="size-3.5" />} Complete sign-in
+                </Button>
+              </div>
+            )}
           </div>
         )}
 
-        {status?.error && !pending && !status.signedIn && (
-          <ErrorText>
-            {status.error.message} ({status.error.code})
-          </ErrorText>
-        )}
         <ErrorText>{error}</ErrorText>
       </div>
 
       <p className="text-xs text-muted-foreground">
-        This runs the OAuth flow on the server: it opens OpenAI&apos;s sign-in page in a new tab and
-        catches the redirect on a loopback listener at <code>localhost:1455</code>. Because that
-        port is fixed by OpenAI&apos;s public client, sign-in works when your browser and this server
-        share a machine (local or self-hosted). Credentials are written to{" "}
-        <code>~/.codex/auth.json</code> and refreshed automatically. The{" "}
-        <code>npm run task -- codex login</code> CLI command does the same thing.
+        This uses OpenAI&apos;s device-code flow: sign-in opens in a new tab, and OpenAI redirects
+        to a page showing an authorization code. Copy that code (or the whole callback URL) back
+        here. Unlike a loopback login, this works when the server and your browser are on different
+        machines — a hosted deployment included. Credentials are stored in the orchestrator database
+        and refreshed automatically. The <code>npm run task -- codex login</code> CLI command does
+        the same thing.
       </p>
     </div>
   );

@@ -421,7 +421,7 @@ export class BoxRunnerProvider implements RunnerProvider {
       throw new Error("Box template is not ready; the run must remain deferred.");
     }
     const templateId = template.boxId;
-    const env = buildBoxWorkerEnv({
+    const env = await buildBoxWorkerEnv({
       runId: input.runId,
       repoId: run.repoId,
       channelInstanceId,
@@ -513,7 +513,7 @@ export class BoxRunnerProvider implements RunnerProvider {
     // the exact bundle the box receives, not a stale default sidecar.
     const sha = bundleWorkerSha(bundleOpts) ?? (await workerBuildSha());
 
-    const env = buildBoxWorkerEnv({
+    const env = await buildBoxWorkerEnv({
       runId: input.runId,
       repoId,
       channelInstanceId,
@@ -809,7 +809,7 @@ export class BoxRunnerProvider implements RunnerProvider {
     const box = this.box();
     let replacementId: string | undefined;
     try {
-      const env = buildBoxWorkerEnv({ runId: input.runId, repoId: run.repoId, channelInstanceId });
+      const env = await buildBoxWorkerEnv({ runId: input.runId, repoId: run.repoId, channelInstanceId });
       replacementId = (await box.fork(sourceId, { env, noEnv: true })).id;
       await box.update(replacementId, { name: boxName(input) });
       await waitForBoxReady(box, replacementId, { timeoutMs: config.box.readyTimeoutMs, pollMs: config.box.pollMs });

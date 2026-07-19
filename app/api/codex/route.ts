@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
-import { codexAuthStatus, codexWebLogout, startCodexWebLogin } from "@/lib/codex-oauth-web";
+import { CodexLoginError } from "@/lib/codex-oauth-login";
+import { codexAuthStatus, codexLogout, completeCodexLogin, startCodexLogin } from "@/lib/codex-oauth-store";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -12,31 +13,52 @@ async function authorized(): Promise<boolean> {
 
 const unauthorized = () => NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-// Current Codex credential + any in-flight login.
-export async function GET() {
-  if (!(await authorized())) return unauthorized();
-  return NextResponse.json(codexAuthStatus());
+function failure(err: unknown) {
+  // A CodexLoginError is the user's problem to fix (expired sign-in, bad
+  // paste), so it reports as 400 with its stable code; anything else is ours.
+  if (err instanceof CodexLoginError) {
+    return NextResponse.json({ error: err.message, code: err.code }, { status: 400 });
+  }
+  return NextResponse.json(
+    { error: err instanceof Error ? err.message : String(err) },
+    { status: 500 }
+  );
 }
 
-// Start (or rejoin) the interactive "Sign in with ChatGPT" flow. Returns the
-// authorization URL for the browser to open; the exchange finishes in the
-// background and the client polls GET until `signedIn`.
+// Current Codex credential + whether a device login is outstanding.
+export async function GET() {
+  if (!(await authorized())) return unauthorized();
+  return NextResponse.json(await codexAuthStatus());
+}
+
+// Start a device-code login. Returns the authorization URL for the browser to
+// open; the user then pastes the code back through PUT.
 export async function POST() {
   if (!(await authorized())) return unauthorized();
   try {
-    const { authorizationUrl } = await startCodexWebLogin();
-    return NextResponse.json({ authorizationUrl, status: codexAuthStatus() });
+    const { authorizationUrl } = await startCodexLogin();
+    return NextResponse.json({ authorizationUrl, status: await codexAuthStatus() });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    return failure(err);
   }
 }
 
-// Sign out: revoke + clear the local credential.
+// Redeem the pasted authorization code (or full callback URL) for tokens.
+export async function PUT(req: Request) {
+  if (!(await authorized())) return unauthorized();
+  try {
+    const body = (await req.json().catch(() => ({}))) as { code?: unknown };
+    if (typeof body.code !== "string") {
+      return NextResponse.json({ error: "Expected a `code` string." }, { status: 400 });
+    }
+    return NextResponse.json(await completeCodexLogin(body.code));
+  } catch (err) {
+    return failure(err);
+  }
+}
+
+// Sign out: revoke + clear the stored credential.
 export async function DELETE() {
   if (!(await authorized())) return unauthorized();
-  await codexWebLogout();
-  return NextResponse.json(codexAuthStatus());
+  return NextResponse.json(await codexLogout());
 }

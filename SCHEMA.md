@@ -148,6 +148,26 @@ The memory tools search scoped candidate rows with application-level BM25 over
 `body` plus boosted `keywords`. Agents and chats can write memories with
 `memory_remember`, search them with `memory_search`, and remove stale entries
 with `memory_forget`.
+
+codex_credentials       The Codex (ChatGPT) OAuth credential. Singleton row.
+  id                 INTEGER  PK, pinned to 1 by CHECK
+  access_token       TEXT     NOT NULL
+  refresh_token      TEXT
+  id_token           TEXT
+  account_id         TEXT     chatgpt_account_id claim (or the OIDC subject)
+  expires_at         TIMESTAMPTZ  decoded from the access token's exp claim
+  updated_at         TIMESTAMPTZ
+
+codex_login_attempts    Device-code logins in flight (PKCE verifiers).
+  state              TEXT     PK, the OAuth state echoed back on the callback
+  verifier           TEXT     NOT NULL
+  created_at         TIMESTAMPTZ  swept after 15 minutes
+
+Written by the device-code login in Settings → Codex (lib/codex-oauth-store.ts).
+This is the control plane's only source for the Codex bearer — ~/.codex/auth.json
+is not read, and CODEX_ACCESS_TOKEN is not a deploy secret. Dispatch resolves and
+refreshes the token here, then forwards it to workers as CODEX_ACCESS_TOKEN,
+since workers hold no database credentials.
 ```
 
 ## ID format

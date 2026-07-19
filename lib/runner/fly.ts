@@ -313,10 +313,10 @@ async function emitRunnerEvent(runId: number, type: string, payload: Record<stri
   }
 }
 
-export function buildFlyWorkerEnv(
+export async function buildFlyWorkerEnv(
   runId: number,
   opts: { prewarmDir?: string; channelInstanceId?: string; channelListenEndpoint?: string } = {}
-): Record<string, string> {
+): Promise<Record<string, string>> {
   // The worker protocol is WebSocket-only (plan section 18). Workers hold NO
   // database credentials — DATABASE_URL is deliberately absent. The channel
   // instance id/credential/listen-endpoint (plan section 20) are injected only
@@ -334,7 +334,7 @@ export function buildFlyWorkerEnv(
     // Agent credentials for BOTH backends: the Claude auth pair plus every
     // pi provider key the server holds, so a Machine dispatched with
     // TASK_ORCH_AGENT_BACKEND=pi can reach non-Anthropic providers too.
-    ...agentCredentialEnv(),
+    ...(await agentCredentialEnv()),
     TASK_ORCH_AGENT_BACKEND: envValue("TASK_ORCH_AGENT_BACKEND"),
     TASK_ORCH_CHAT_MODEL: envValue("TASK_ORCH_CHAT_MODEL"),
     TASK_ORCH_AGENT_MODEL: envValue("TASK_ORCH_AGENT_MODEL"),
@@ -379,11 +379,11 @@ function assertValidSharedMachineResources(cpus: number, memoryMb: number): void
   }
 }
 
-export function buildFlyMachineConfig(
+export async function buildFlyMachineConfig(
   runId: number,
   volumeId: string,
   opts: { prewarmDir?: string; channelInstanceId?: string; channelListenEndpoint?: string } = {}
-): FlyMachineConfig {
+): Promise<FlyMachineConfig> {
   // Default bumped from 2→4 vCPU alongside the existing 4096MB memory default:
   // 4 vCPU supports up to 8192MB, matching the memory ceiling operators reach
   // for first under OOM pressure (see incident note above).
@@ -392,7 +392,7 @@ export function buildFlyMachineConfig(
   assertValidSharedMachineResources(cpus, memoryMb);
   return {
     image: process.env.FLY_RUNNER_IMAGE || "fly-runner:latest",
-    env: buildFlyWorkerEnv(runId, opts),
+    env: await buildFlyWorkerEnv(runId, opts),
     mounts: [{ volume: volumeId, path: "/mnt/session" }],
     guest: {
       cpu_kind: "shared",
@@ -492,11 +492,11 @@ export class FlyRunnerProvider implements RunnerProvider {
       );
       machine = await timeRunnerPhase(
         "fly_machine_create",
-        () =>
+        async () =>
           this.flyClient.createMachine({
             name: input.scope,
             region,
-            config: buildFlyMachineConfig(input.runId, volume!.id, {
+            config: await buildFlyMachineConfig(input.runId, volume!.id, {
               prewarmDir,
               channelInstanceId,
               channelListenEndpoint,
@@ -649,7 +649,7 @@ export class FlyRunnerProvider implements RunnerProvider {
       const channelListenEndpoint = flyListenEndpoint();
       const machine = await timeRunnerPhase(
         "fly_machine_cold_recover_create",
-        () =>
+        async () =>
           this.flyClient.createMachine({
             name: scope,
             region,
@@ -657,7 +657,7 @@ export class FlyRunnerProvider implements RunnerProvider {
             // PREWARM_MOUNT_DIR, so the recovered machine must point PREWARM_DIR
             // there to boot warm. lib/prewarm.ts existsSync-guards it, so a non-
             // forked (cold-install) volume that lacks the dir is unaffected.
-            config: buildFlyMachineConfig(runId, volumeId, {
+            config: await buildFlyMachineConfig(runId, volumeId, {
               prewarmDir: PREWARM_MOUNT_DIR,
               channelInstanceId,
               channelListenEndpoint,

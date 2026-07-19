@@ -13,7 +13,7 @@
 // test (__tests__/agent-backend/provider-env.test.ts) asserts this list covers
 // every provider key pi-ai knows, so a pi upgrade that adds a provider fails
 // the suite instead of silently starving containers of the new key.
-import { CODEX_ACCESS_TOKEN_ENV, resolveCodexAccessTokenSync } from "../codex-oauth-token";
+import { CODEX_ACCESS_TOKEN_ENV, resolveCodexAccessToken } from "../codex-oauth-token";
 
 export const AGENT_CREDENTIAL_ENV_KEYS: readonly string[] = [
   // Claude backend (resolved like the Claude Code CLI) + pi's anthropic provider.
@@ -65,15 +65,20 @@ export const AGENT_CREDENTIAL_ENV_KEYS: readonly string[] = [
 ];
 
 /** The subset of AGENT_CREDENTIAL_ENV_KEYS currently set (possibly to ""),
- *  as a { key: value } record — spread into a worker env map. */
-export function agentCredentialEnv(): Record<string, string> {
+ *  as a { key: value } record — spread into a worker env map.
+ *
+ *  Async because the Codex token lives in the DB (codex_credentials) rather
+ *  than the process env, and resolving it also refreshes it when it is near
+ *  expiry — workers have no DB access, so whatever is forwarded here is the
+ *  token the run is stuck with. */
+export async function agentCredentialEnv(): Promise<Record<string, string>> {
   const env: Record<string, string> = {};
   for (const key of AGENT_CREDENTIAL_ENV_KEYS) {
     const value = process.env[key];
     if (value != null) env[key] = value;
   }
   if (env[CODEX_ACCESS_TOKEN_ENV] == null) {
-    const token = resolveCodexAccessTokenSync();
+    const token = await resolveCodexAccessToken();
     if (token) env[CODEX_ACCESS_TOKEN_ENV] = token;
   }
   return env;

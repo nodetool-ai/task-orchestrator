@@ -204,7 +204,6 @@ values have defaults; credentials are prompted for interactively if unset.
 | `GH_TOKEN` | *(prompted)* | GitHub token passed to every runner. |
 | `ANTHROPIC_API_KEY` | *(prompted)* | Claude API key (or use the OAuth token below). |
 | `CLAUDE_CODE_OAUTH_TOKEN` | *(prompted)* | claude.ai subscription token from `claude setup-token`. |
-| `CODEX_ACCESS_TOKEN` | *(unset)* | Optional override for pi `openai-codex` models. Prefer a mounted `CODEX_HOME/auth.json` where possible because access tokens are short-lived. |
 | `GITHUB_WEBHOOK_SECRET` | *(unset)* | If set, staged so the webhook endpoint verifies signatures. |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | *(unset)* | If both set, the script creates this first dashboard login over SSH. |
 
@@ -224,7 +223,8 @@ rolling redeploy).
 | `FLY_RUNNER_IMAGE` | script | `registry.fly.io/<runner-app>:latest`. |
 | `GH_TOKEN` | script | Passed into each runner Machine's env. |
 | `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` | script | Claude auth, passed into each runner Machine. |
-| `OPENAI_API_KEY`, `CODEX_ACCESS_TOKEN`, `GEMINI_API_KEY`, … | script (if provided) | pi-backend provider keys/tokens; every recognized credential set on the web app is passed into each runner Machine (full list: `lib/agent-backend/provider-env.ts`). |
+| `OPENAI_API_KEY`, `GEMINI_API_KEY`, … | script (if provided) | pi-backend provider keys; every recognized credential set on the web app is passed into each runner Machine (full list: `lib/agent-backend/provider-env.ts`). |
+| `CODEX_ACCESS_TOKEN` | *not staged* | Codex (ChatGPT) is **not** a deploy secret. Sign in once from **Settings → Codex** after deploying; the token lands in the `codex_credentials` table, survives redeploys, and is refreshed and forwarded to each runner Machine automatically. |
 | `GITHUB_WEBHOOK_SECRET` | script (if provided) | Verifies inbound GitHub webhook HMAC. |
 
 ### 5.3 Runtime env (baked into `fly.toml`)

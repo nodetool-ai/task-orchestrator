@@ -37,7 +37,9 @@ set -euo pipefail
 #   GH_TOKEN                  GitHub token for clone/push + `gh pr create`
 #   ANTHROPIC_API_KEY        Claude API key  (or …)
 #   CLAUDE_CODE_OAUTH_TOKEN  …claude.ai subscription token (`claude setup-token`)
-#   OPENAI_API_KEY / CODEX_ACCESS_TOKEN / …  pi-backend provider keys/tokens (staged when set)
+#   OPENAI_API_KEY / GEMINI_API_KEY / …  pi-backend provider keys (staged when set)
+#   NOTE: Codex (ChatGPT) is NOT staged here — sign in from Settings once deployed
+#   and the token is stored in the DB (codex_credentials), surviving redeploys.
 #   ADMIN_EMAIL / ADMIN_PASSWORD   first dashboard login to create
 # =============================================================================
 
@@ -164,7 +166,11 @@ secret_args=(
 # Optional pi-backend provider keys (TASK_ORCH_AGENT_BACKEND=pi): whatever the
 # web app holds is forwarded into each runner Machine's env by the server
 # (lib/agent-backend/provider-env.ts). Stage any that are set in the deploy env.
-for key in OPENAI_API_KEY CODEX_ACCESS_TOKEN GEMINI_API_KEY GROQ_API_KEY CEREBRAS_API_KEY XAI_API_KEY \
+# CODEX_ACCESS_TOKEN is deliberately absent: the Codex credential is obtained
+# through the device-code login in Settings and lives in the codex_credentials
+# table, so it outlives a deploy and can be rotated without one. The server
+# still forwards it to runner Machines as env — that is transport, not config.
+for key in OPENAI_API_KEY GEMINI_API_KEY GROQ_API_KEY CEREBRAS_API_KEY XAI_API_KEY \
            OPENROUTER_API_KEY ZAI_API_KEY MISTRAL_API_KEY DEEPSEEK_API_KEY FIREWORKS_API_KEY; do
   [[ -n "${!key:-}" ]] && secret_args+=( "$key=${!key}" )
 done

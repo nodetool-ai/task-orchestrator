@@ -4,9 +4,6 @@
 // with TASK_ORCH_AGENT_BACKEND=pi boots fine and then fails its first provider
 // call if only the Anthropic pair was forwarded.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { getProviders, findEnvKeys } from "@earendil-works/pi-ai/compat";
 import {
   AGENT_CREDENTIAL_ENV_KEYS,
@@ -49,46 +46,47 @@ describe("AGENT_CREDENTIAL_ENV_KEYS", () => {
     ).toEqual([]);
   });
 
-  it("agentCredentialEnv returns only the keys actually set", () => {
+  it("agentCredentialEnv returns only the keys actually set", async () => {
     vi.stubEnv(PI_KEY, "sk-or-test");
     delete process.env[UNSET_KEY];
-    const env = agentCredentialEnv();
+    const env = await agentCredentialEnv();
     expect(env[PI_KEY]).toBe("sk-or-test");
     expect(UNSET_KEY in env).toBe(false);
   });
 
-  it("agentCredentialEnv forwards the Codex login access token when no env token is set", () => {
-    const dir = mkdtempSync(join(tmpdir(), "task-orch-codex-home-"));
-    try {
-      vi.stubEnv("CODEX_HOME", dir);
-      vi.stubEnv("CODEX_ACCESS_TOKEN", "");
-      delete process.env.CODEX_ACCESS_TOKEN;
-      writeFileSync(
-        join(dir, "auth.json"),
-        JSON.stringify({ tokens: { access_token: "codex-oauth-token" } })
-      );
+  // The Codex credential is the one key that does NOT come from the server's
+  // env: it lives in the codex_credentials table, and the control plane
+  // resolves (and refreshes) it at dispatch time so the worker — which has no
+  // DB access — receives a live token.
+  it("agentCredentialEnv forwards the stored Codex token when no env token is set", async () => {
+    delete process.env.CODEX_ACCESS_TOKEN;
+    vi.doMock("../../lib/codex-oauth-store", () => ({
+      resolveStoredAccessToken: async () => "codex-oauth-token",
+    }));
+    const { agentCredentialEnv: resolveEnv } = await import(
+      "../../lib/agent-backend/provider-env"
+    );
 
-      expect(agentCredentialEnv().CODEX_ACCESS_TOKEN).toBe("codex-oauth-token");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    expect((await resolveEnv()).CODEX_ACCESS_TOKEN).toBe("codex-oauth-token");
+    vi.doUnmock("../../lib/codex-oauth-store");
+    vi.resetModules();
   });
 });
 
 describe("worker env builders forward pi provider credentials", () => {
-  it("buildFlyWorkerEnv includes a set pi key and omits unset ones", () => {
+  it("buildFlyWorkerEnv includes a set pi key and omits unset ones", async () => {
     vi.stubEnv(PI_KEY, "sk-or-test");
     delete process.env[UNSET_KEY];
-    const env = buildFlyWorkerEnv(42);
+    const env = await buildFlyWorkerEnv(42);
     expect(env[PI_KEY]).toBe("sk-or-test");
     expect(UNSET_KEY in env).toBe(false);
   });
 
-  it("buildWorkerContainerConfig includes a set pi key and omits unset ones", () => {
+  it("buildWorkerContainerConfig includes a set pi key and omits unset ones", async () => {
     vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
     vi.stubEnv(PI_KEY, "sk-or-test");
     delete process.env[UNSET_KEY];
-    const cfg = buildWorkerContainerConfig(42, "run-42-x") as { Env: string[] };
+    const cfg = (await buildWorkerContainerConfig(42, "run-42-x")) as { Env: string[] };
     expect(cfg.Env).toContain(`${PI_KEY}=sk-or-test`);
     expect(cfg.Env.some((e) => e.startsWith(`${UNSET_KEY}=`))).toBe(false);
   });

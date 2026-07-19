@@ -712,6 +712,39 @@ export const memories = pgTable(
   })
 );
 
+// Codex (ChatGPT) OAuth credential, obtained through the device-code login in
+// Settings. Singleton row (id is pinned to 1 by a CHECK) — one orchestrator,
+// one ChatGPT account. This replaces both ~/.codex/auth.json and the
+// CODEX_ACCESS_TOKEN deploy secret as the control plane's source of truth;
+// CODEX_ACCESS_TOKEN survives only as the env transport to workers, which have
+// no DB access of their own.
+export const codexCredentials = pgTable("codex_credentials", {
+  id: integer("id").primaryKey().default(1),
+  accessToken: text("access_token").notNull(),
+  refreshToken: text("refresh_token"),
+  idToken: text("id_token"),
+  accountId: text("account_id"),
+  // Decoded from the access token's `exp` claim so the resolver can refresh
+  // ahead of expiry without parsing the JWT on every read.
+  expiresAt: ts("expires_at"),
+  updatedAt: ts("updated_at").notNull().defaultNow(),
+});
+
+// A device-code login in flight. The PKCE verifier has to survive between "user
+// clicked sign in" and "user pasted the code back" — minutes later, possibly
+// across a redeploy — so it is persisted rather than held in module scope.
+export const codexLoginAttempts = pgTable(
+  "codex_login_attempts",
+  {
+    state: text("state").primaryKey(),
+    verifier: text("verifier").notNull(),
+    createdAt: ts("created_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    createdIdx: index("codex_login_attempts_created_idx").on(t.createdAt),
+  })
+);
+
 export const apiTokens = pgTable(
   "api_tokens",
   {

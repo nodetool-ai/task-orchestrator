@@ -92,20 +92,20 @@ function fakeDocker(opts: {
 }
 
 describe("demuxDockerLog", () => {
-  it("strips the 8-byte frame headers and concatenates payloads", () => {
+  it("strips the 8-byte frame headers and concatenates payloads", async () => {
     const buf = Buffer.concat([muxFrame(1, "hello "), muxFrame(2, "stderr\n"), muxFrame(1, "world")]);
     expect(demuxDockerLog(buf)).toBe("hello stderr\nworld");
   });
 
-  it("passes a non-multiplexed (TTY / plain-text) buffer through verbatim", () => {
+  it("passes a non-multiplexed (TTY / plain-text) buffer through verbatim", async () => {
     expect(demuxDockerLog(Buffer.from("plain text log"))).toBe("plain text log");
   });
 
-  it("handles an empty buffer", () => {
+  it("handles an empty buffer", async () => {
     expect(demuxDockerLog(Buffer.alloc(0))).toBe("");
   });
 
-  it("tolerates a truncated final frame", () => {
+  it("tolerates a truncated final frame", async () => {
     const full = muxFrame(1, "complete");
     const cut = Buffer.concat([full, muxFrame(1, "chopped").subarray(0, 10)]);
     expect(demuxDockerLog(cut)).toContain("complete");
@@ -113,9 +113,9 @@ describe("demuxDockerLog", () => {
 });
 
 describe("buildWorkerContainerConfig", () => {
-  it("labels the container with its run id and keeps it after exit (no AutoRemove)", () => {
+  it("labels the container with its run id and keeps it after exit (no AutoRemove)", async () => {
     vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
-    const cfg = buildWorkerContainerConfig(42, "run-42-x") as {
+    const cfg = (await buildWorkerContainerConfig(42, "run-42-x")) as {
       Labels: Record<string, string>;
       HostConfig: { AutoRemove?: boolean; LogConfig?: { Type: string } };
     };
@@ -124,18 +124,18 @@ describe("buildWorkerContainerConfig", () => {
     expect(cfg.HostConfig.LogConfig?.Type).toBe("json-file");
   });
 
-  it("scopes the container to this instance (finding 3)", () => {
+  it("scopes the container to this instance (finding 3)", async () => {
     vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
     vi.stubEnv("TASK_ORCH_INSTANCE_ID", "prod-1");
-    const cfg = buildWorkerContainerConfig(7, "run-7-x") as { Labels: Record<string, string> };
+    const cfg = (await buildWorkerContainerConfig(7, "run-7-x")) as { Labels: Record<string, string> };
     expect(cfg.Labels[INSTANCE_LABEL]).toBe("prod-1");
     expect(instanceId()).toBe("prod-1");
   });
 
   // plan section 19: Docker provisioning
-  it("exposes the fixed channel port with no PortBindings (never public ingress)", () => {
+  it("exposes the fixed channel port with no PortBindings (never public ingress)", async () => {
     vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
-    const cfg = buildWorkerContainerConfig(1, "run-1-x") as {
+    const cfg = (await buildWorkerContainerConfig(1, "run-1-x")) as {
       ExposedPorts: Record<string, unknown>;
       HostConfig: Record<string, unknown>;
     };
@@ -143,27 +143,27 @@ describe("buildWorkerContainerConfig", () => {
     expect(cfg.HostConfig.PortBindings).toBeUndefined();
   });
 
-  it("injects the channel identity, credential, and tcp listen endpoint when given a channel", () => {
+  it("injects the channel identity, credential, and tcp listen endpoint when given a channel", async () => {
     vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
-    const cfg = buildWorkerContainerConfig(1, "run-1-x", {
+    const cfg = (await buildWorkerContainerConfig(1, "run-1-x", {
       instanceId: "wi_" + "a".repeat(32),
       listenEndpoint: "tcp:0.0.0.0:8787",
-    }) as { Env: string[] };
+    })) as { Env: string[] };
     expect(cfg.Env).toContain(`TASK_ORCH_WORKER_INSTANCE_ID=wi_${"a".repeat(32)}`);
     expect(cfg.Env).toContain("TASK_ORCH_WORKER_CHANNEL_ENDPOINT=tcp:0.0.0.0:8787");
     expect(cfg.Env.some((e) => e.startsWith("TASK_ORCH_WORKER_CHANNEL_CREDENTIAL="))).toBe(true);
   });
 
-  it("omits channel env when no channel is given (legacy 2-arg call)", () => {
+  it("omits channel env when no channel is given (legacy 2-arg call)", async () => {
     vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
-    const cfg = buildWorkerContainerConfig(1, "run-1-x") as { Env: string[] };
+    const cfg = (await buildWorkerContainerConfig(1, "run-1-x")) as { Env: string[] };
     expect(cfg.Env.some((e) => e.startsWith("TASK_ORCH_WORKER_INSTANCE_ID="))).toBe(false);
   });
 
-  it("uses NetworkMode from TASK_ORCH_DOCKER_NETWORK when configured", () => {
+  it("uses NetworkMode from TASK_ORCH_DOCKER_NETWORK when configured", async () => {
     vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
     vi.stubEnv("TASK_ORCH_DOCKER_NETWORK", "compose_net");
-    const cfg = buildWorkerContainerConfig(1, "run-1-x") as { HostConfig: { NetworkMode?: string } };
+    const cfg = (await buildWorkerContainerConfig(1, "run-1-x")) as { HostConfig: { NetworkMode?: string } };
     expect(cfg.HostConfig.NetworkMode).toBe("compose_net");
   });
 });

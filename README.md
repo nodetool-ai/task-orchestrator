@@ -386,21 +386,22 @@ Requires:
   `ANTHROPIC_API_KEY` when set, otherwise the claude.ai subscription (`claude login`,
   or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` for headless hosts). The
   default `pi` backend reads per-provider keys (`ANTHROPIC_API_KEY`,
-  `OPENAI_API_KEY`, `GEMINI_API_KEY`, …), `~/.pi/agent/auth.json`, and the Codex
-  login stored at `CODEX_HOME/auth.json` (default `~/.codex/auth.json`) for
-  `openai-codex` models. Sign in with `npm run task -- codex login`, which runs
-  the "Login with ChatGPT" OAuth flow (PKCE + a loopback listener on
-  `localhost:1455`) and writes `auth.json` itself — the external OpenAI Codex
-  CLI is not required. `codex status` reports whether a login is present and
-  `codex logout` revokes the token and clears the file. The same flow is
-  available from the web UI under **Settings → Codex** ("Sign in with ChatGPT"):
-  the server opens OpenAI's sign-in page and catches the redirect on its own
-  `localhost:1455` listener, so it works when your browser and the server share
-  a machine (local or self-hosted). `CODEX_ACCESS_TOKEN` is accepted as an
-  explicit override, but local Codex OAuth login is the intended source. On the
-  containerized paths (Docker workers, Fly runner Machines) every recognized
-  provider credential set on the server is forwarded into the run container, so
-  either backend works there — see `lib/agent-backend/provider-env.ts` for the
+  `OPENAI_API_KEY`, `GEMINI_API_KEY`, …), `~/.pi/agent/auth.json`, and — for
+  `openai-codex` models — the Codex credential stored in the orchestrator
+  database. Sign in under **Settings → Codex** ("Sign in with ChatGPT"): this
+  runs OpenAI's device-code OAuth flow (PKCE, redirecting to
+  `https://auth.openai.com/deviceauth/callback`), which shows you an
+  authorization code to paste back. Because nothing has to listen on a loopback
+  port, it works when the server and your browser are on different machines — a
+  hosted deployment included. `npm run task -- codex login` does the same from
+  the CLI; `codex status` reports whether a login is present and `codex logout`
+  revokes the token and clears the row. The external OpenAI Codex CLI is not
+  required, and `~/.codex/auth.json` is no longer read. `CODEX_ACCESS_TOKEN` is
+  accepted as an explicit override and is how the control plane hands the token
+  to workers, which have no database access. On the containerized paths (Docker
+  workers, Fly runner Machines) every recognized provider credential set on the
+  server is forwarded into the run container, so either backend works there —
+  see `lib/agent-backend/provider-env.ts` for the
   list.
 - `gh` CLI installed and authenticated for PR creation
 - A `main` branch on `origin` (override per-session via `baseBranch`)

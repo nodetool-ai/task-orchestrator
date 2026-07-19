@@ -16,36 +16,36 @@ afterEach(() => {
 });
 
 describe("buildFlyMachineConfig resource validation", () => {
-  it("defaults to a valid shared-cpu ratio (4 vCPU / 4096MB)", () => {
-    const config = buildFlyMachineConfig(1, "vol_run_1");
+  it("defaults to a valid shared-cpu ratio (4 vCPU / 4096MB)", async () => {
+    const config = await buildFlyMachineConfig(1, "vol_run_1");
     expect(config.guest.cpu_kind).toBe("shared");
     expect(config.guest.cpus).toBe(4);
     expect(config.guest.memory_mb).toBe(4096);
   });
 
-  it("accepts the incident's intended fix: 8192MB across the new 4 vCPU default", () => {
+  it("accepts the incident's intended fix: 8192MB across the new 4 vCPU default", async () => {
     process.env.TASK_ORCH_FLY_MEMORY_MB = "8192";
-    const config = buildFlyMachineConfig(1, "vol_run_1");
+    const config = await buildFlyMachineConfig(1, "vol_run_1");
     expect(config.guest.cpus).toBe(4);
     expect(config.guest.memory_mb).toBe(8192);
   });
 
-  it("throws the exact incident combination: 8192MB over 2 vCPU (max is 4096MB)", () => {
+  it("throws the exact incident combination: 8192MB over 2 vCPU (max is 4096MB)", async () => {
     process.env.TASK_ORCH_FLY_CPUS = "2";
     process.env.TASK_ORCH_FLY_MEMORY_MB = "8192";
-    expect(() => buildFlyMachineConfig(1, "vol_run_1")).toThrow(/8192MB.*2 vCPU|shared-cpu allows/i);
+    await expect(buildFlyMachineConfig(1, "vol_run_1")).rejects.toThrow(/8192MB.*2 vCPU|shared-cpu allows/i);
   });
 
-  it("throws when memory is below the shared-cpu minimum (256MB per vCPU)", () => {
+  it("throws when memory is below the shared-cpu minimum (256MB per vCPU)", async () => {
     process.env.TASK_ORCH_FLY_CPUS = "2";
     process.env.TASK_ORCH_FLY_MEMORY_MB = "128";
-    expect(() => buildFlyMachineConfig(1, "vol_run_1")).toThrow(/shared-cpu allows/i);
+    await expect(buildFlyMachineConfig(1, "vol_run_1")).rejects.toThrow(/shared-cpu allows/i);
   });
 
-  it("allows a valid explicit combination at the upper bound (2048MB * cpus)", () => {
+  it("allows a valid explicit combination at the upper bound (2048MB * cpus)", async () => {
     process.env.TASK_ORCH_FLY_CPUS = "8";
     process.env.TASK_ORCH_FLY_MEMORY_MB = "16384";
-    const config = buildFlyMachineConfig(1, "vol_run_1");
+    const config = await buildFlyMachineConfig(1, "vol_run_1");
     expect(config.guest.cpus).toBe(8);
     expect(config.guest.memory_mb).toBe(16384);
   });
