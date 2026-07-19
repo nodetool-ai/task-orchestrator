@@ -1331,15 +1331,19 @@ export async function dockerSpawn(
 // this one implementation (no duplicated spawn/tsx-resolution logic).
 function spawnLocalRunWorker(
   runId: number,
-  opts: { env: NodeJS.ProcessEnv; execArgv?: string[] }
+  opts: { env: NodeJS.ProcessEnv; execArgv?: string[]; entry?: string }
 ): number | null {
   const node = process.execPath;
   const tsx =
     process.env.TASK_ORCH_TSX_CLI || join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
   if (!existsSync(tsx)) throw new Error(`tsx CLI not found at ${tsx} (set TASK_ORCH_TSX_CLI to override)`);
+  // Default entry is the WebSocket worker; the lightweight server-tier child
+  // (spawnLightweightChild) overrides it with the DB-path entry, which drives the
+  // run through driveDispatchedRun instead of the channel protocol.
+  const entry = opts.entry ?? "scripts/run-worker.ts";
   const child = nodeSpawn(
     node,
-    [...(opts.execArgv ?? []), tsx, "scripts/run-worker.ts", String(runId)],
+    [...(opts.execArgv ?? []), tsx, entry, String(runId)],
     {
       cwd: process.cwd(),
       env: opts.env,
@@ -1398,7 +1402,15 @@ function detachedSpawn(
 export function spawnLightweightChild(runId: number, _scope: string): number | null {
   const memMb = config.features.lightweightMemoryMb;
   const execArgv = memMb > 0 ? [`--max-old-space-size=${memMb}`] : [];
-  return spawnLocalRunWorker(runId, { env: { ...process.env }, execArgv });
+  // Drive on the control-plane DB path (scripts/run-lightweight-child.ts →
+  // driveDispatchedRun), NOT the WebSocket worker entry: this child inherits
+  // DATABASE_URL and is given no channel identity, so run-worker.ts would exit(2)
+  // on its missing-channel guard and the run would never produce a reply.
+  return spawnLocalRunWorker(runId, {
+    env: { ...process.env },
+    execArgv,
+    entry: "scripts/run-lightweight-child.ts",
+  });
 }
 
 /** Best-effort hard stop of a run's worker container (cancel fallback). No-op if
