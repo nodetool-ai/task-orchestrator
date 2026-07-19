@@ -6,7 +6,7 @@ import { and, eq, isNotNull } from "drizzle-orm";
 import { db } from "@/db";
 import { agentEvents, agentSessions, runnerInstances } from "@/db/schema";
 import { config, validateBoxConfig } from "../config";
-import { buildBoxWorkerEnv, BOX_CLAUDE_BINARY } from "./box-env";
+import { buildBoxWorkerEnv, BOX_CLAUDE_BINARY, BOX_GIT_CREDENTIAL_HELPER, boxGitConfigCommands } from "./box-env";
 import { bundleWorkerSha, readWorkerBundle } from "../worker-bundle";
 import { makeBoxClient, type BoxClient, type BoxLimits } from "./box-client";
 import { normalizeBoxApiError, serializeBoxApiError } from "./box-errors";
@@ -143,8 +143,7 @@ function blankProvisionCommand(
   // and from there into lastProviderError/agentEvents. A credential helper keeps
   // the token out of the URL and out of argv entirely; git invokes it (via `sh -c`,
   // same as this whole script) only to ask for username/password on demand.
-  const CRED_HELPER =
-    `!f(){ echo username=x-access-token; echo "password=$GH_TOKEN"; };f`;
+  const CRED_HELPER = BOX_GIT_CREDENTIAL_HELPER;
   const cloneUrl = `https://github.com/${ownerRepo}.git`;
   const cloneCommand =
     `if [ -n "\${GH_TOKEN:-}" ]; then ` +
@@ -171,6 +170,9 @@ function blankProvisionCommand(
     ...acquire,
     `test ! -e ${shq(repoPath)} || { echo "repo path already exists: ${repoPath}" >&2; exit 1; }`,
     cloneCommand,
+    // Persistent identity + credential helper so the agent can commit and push;
+    // parity with the --system config baked into the Docker/Fly runner images.
+    ...boxGitConfigCommands(),
     `printf '%s\\n' ${shq(manifest)} > ${shq(BOX_TEMPLATE_MANIFEST_PATH)}`,
   ].join("; ");
 }

@@ -82,6 +82,14 @@ run_step "prune worker checkout" \
 run_step "clone nodetool" \
   "set -eu; test ! -e $(quote "$nodetool_dir"); git clone --depth 1 --branch $(quote "$nodetool_ref") $(quote "$nodetool_url") $(quote "$nodetool_dir")"
 
+# Bake git identity + credential helper into the template so a restored box can
+# commit and push. Mirrors boxGitConfigCommands() in lib/runner/box-env.ts and
+# the --system config in Dockerfile.worker / Dockerfile.fly-runner. The helper
+# is single-quoted on the box and $GH_TOKEN is escaped (\$) so it stays literal
+# in gitconfig — git expands it from the box env when credentials are requested.
+run_step "configure git identity and credentials" \
+  "set -eu; git config --global user.name 'Task Orchestrator Agent'; git config --global user.email 'agent@task-orchestrator.local'; git config --global credential.helper '!f(){ echo username=x-access-token; echo \"password=\$GH_TOKEN\"; };f'"
+
 run_step "write template manifest" \
   "set -eu; mkdir -p /home/user/.task-orchestrator; sha=\$(cat /home/user/.task-orchestrator-worker-sha); rm -f /home/user/.task-orchestrator-worker-sha; printf '{\"formatVersion\":1,\"workerBuildSha\":\"%s\",\"workerProtocolVersion\":1,\"repository\":\"nodetool-ai/nodetool\",\"repositoryPath\":\"/home/user/nodetool\",\"workerEntryPath\":\"/home/user/worker/run-worker.js\"}\\n' \"\$sha\" > /home/user/.task-orchestrator/template.json"
 

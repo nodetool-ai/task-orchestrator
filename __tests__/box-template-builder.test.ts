@@ -87,13 +87,17 @@ describe("runBoxTemplateBuild", () => {
 
     const types = await eventTypes(runId);
     expect(types[0]).toBe("runner_box_template_building");
-    expect(types.filter((t) => t === "runner_box_template_step")).toHaveLength(8);
+    expect(types.filter((t) => t === "runner_box_template_step")).toHaveLength(9);
     expect(types[types.length - 1]).toBe("runner_box_template_ready");
 
     // The first step verifies the blank-box runtime before cloning.
     expect(commands.some((c) => c.includes("command -v git") && c.includes("node") && c.includes("npm"))).toBe(true);
     // The worker clone checks out the exact SHA and the manifest embeds it.
     expect(commands.some((c) => c.includes(`git checkout ${sha}`))).toBe(true);
+    // Git identity + credential helper are baked into the snapshot so an agent
+    // restored from the template can commit and push.
+    expect(commands.some((c) => c.includes("git config --global user.name") && c.includes("Task Orchestrator Agent"))).toBe(true);
+    expect(commands.some((c) => c.includes("git config --global credential.helper"))).toBe(true);
     expect(commands.some((c) => c.includes(`"workerBuildSha":"${sha}"`) || c.includes(`\\"workerBuildSha\\":\\"${sha}\\"`))).toBe(true);
     // Before archiving, the build (a) runs the standalone bundle in isolation
     // — its own usage check, exit 2, proves the full dependency graph loads

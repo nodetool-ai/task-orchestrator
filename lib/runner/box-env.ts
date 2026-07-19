@@ -16,6 +16,38 @@ const DEFAULT_SESSION_ROOT = "/home/user/.task-orchestrator/session";
  *  worker's Claude backend drives it via pathToClaudeCodeExecutable; the
  *  template omits the SDK's 251MB bundled binary (`npm ci --omit=optional`). */
 export const BOX_CLAUDE_BINARY = "/usr/local/bin/claude";
+
+/** Git identity written onto a box so `git commit` succeeds. Kept identical to
+ *  the `git config --system` identity baked into Dockerfile.worker /
+ *  Dockerfile.fly-runner so every runner authors commits the same way. The
+ *  `.local` email is deliberately unroutable/unverifiable: GitHub won't link
+ *  agent commits to any real account, and PR authorship comes from the GH_TOKEN
+ *  pusher regardless — the local identity only needs to be non-empty. */
+export const BOX_GIT_USER_NAME = "Task Orchestrator Agent";
+export const BOX_GIT_USER_EMAIL = "agent@task-orchestrator.local";
+
+/** Credential helper that hands git the forwarded GH_TOKEN as HTTP basic auth
+ *  without ever placing it in a remote URL (a URL-embedded token leaks verbatim
+ *  into git's "remote: not found" error text). git expands $GH_TOKEN from the
+ *  box env at invoke time, so the literal string — not the token value — is what
+ *  lands in gitconfig. Same helper the Dockerfile runners install --system. */
+export const BOX_GIT_CREDENTIAL_HELPER =
+  `!f(){ echo username=x-access-token; echo "password=$GH_TOKEN"; };f`;
+
+/** Persistent `git config --global` commands giving a box the identity + push
+ *  credentials the Docker/Fly images carry as `--system` config. Written
+ *  --global (the box user's HOME) because box provisioning runs as that user,
+ *  not root. Single-quoting keeps $GH_TOKEN literal in the helper so git — not
+ *  the provisioning shell — expands it when credentials are requested. */
+export function boxGitConfigCommands(): string[] {
+  const q = (v: string): string => `'${v.replace(/'/g, `'\\''`)}'`;
+  return [
+    `git config --global user.name ${q(BOX_GIT_USER_NAME)}`,
+    `git config --global user.email ${q(BOX_GIT_USER_EMAIL)}`,
+    `git config --global credential.helper ${q(BOX_GIT_CREDENTIAL_HELPER)}`,
+  ];
+}
+
 const REDACTED = "[redacted]";
 
 export type BoxWorkerEnvInput = {

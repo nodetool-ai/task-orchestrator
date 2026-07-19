@@ -9,7 +9,7 @@ import { config } from "../config";
 import type { BoxClient } from "./box-client";
 import { emitBoxEvent } from "./box";
 import { runDetachedBoxStep } from "./box-detached";
-import { BOX_CLAUDE_BINARY } from "./box-env";
+import { BOX_CLAUDE_BINARY, boxGitConfigCommands } from "./box-env";
 import { BOX_TEMPLATE_MANIFEST_PATH, BOX_TEMPLATE_WORKER_PROTOCOL_VERSION } from "./box-template";
 import { emitTemplateBuildLifecycle } from "./box-template-events";
 import { markEnvironmentFailed, markEnvironmentReady, setEnvironmentDetail } from "./environments";
@@ -21,6 +21,7 @@ const BUILD_STEPS = [
   "building-worker",
   "pruning",
   "cloning-agent-repo",
+  "configuring-git",
   "writing-manifest",
   "verifying-worker",
   "archiving",
@@ -137,6 +138,13 @@ export async function runBoxTemplateBuild(
         await stepAndDetail("cloning-agent-repo");
         await run(boxId, "cloning-agent-repo",
           `set -eu; test ! -e ${shq(repoPath)}; git clone --depth 1 ${shq(config.box.agentRepoUrl)} ${shq(repoPath)}`);
+
+        // Bake git identity + credential helper into the snapshot so an agent
+        // restored from this template can commit and push — parity with the
+        // blank-provision path and the Docker/Fly runner images.
+        await stepAndDetail("configuring-git");
+        await run(boxId, "configuring-git",
+          `set -eu; ${boxGitConfigCommands().join("; ")}`);
 
         await stepAndDetail("writing-manifest");
         const manifest = JSON.stringify({
