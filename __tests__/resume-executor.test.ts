@@ -93,7 +93,11 @@ async function waitFor(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const r = await runs.get(runId);
-    if (r && statuses.includes(r.status)) return r.status;
+    // Also require the in-process runner registration to be gone: runExecute
+    // lands the terminal status BEFORE its finally deletes the runner entry, and
+    // a resume attempted inside that window trips append's "already in flight"
+    // guard (seen on CI, where the window is wider than locally).
+    if (r && statuses.includes(r.status) && !runs.isLive(runId)) return r.status;
     await new Promise((res) => setTimeout(res, 20));
   }
   throw new Error(`run ${runId} did not reach ${statuses.join("/")} in ${timeoutMs}ms`);
