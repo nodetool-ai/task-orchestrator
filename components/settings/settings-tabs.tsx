@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 const TABS = [
   { id: "repos", label: "Repositories" },
   { id: "personas", label: "Personas" },
+  { id: "environments", label: "Environments" },
   { id: "tokens", label: "API tokens" },
   { id: "codex", label: "Codex" },
 ] as const;
@@ -21,12 +22,14 @@ export function SettingsTabs({
   initialTab,
   repos,
   personas,
+  environments,
   tokens,
   codex,
 }: {
   initialTab?: string;
   repos: React.ReactNode;
   personas: React.ReactNode;
+  environments: React.ReactNode;
   tokens: React.ReactNode;
   codex: React.ReactNode;
 }) {
@@ -38,7 +41,7 @@ export function SettingsTabs({
     router.replace(`/settings?tab=${id}`, { scroll: false });
   }
 
-  const content: Record<TabId, React.ReactNode> = { repos, personas, tokens, codex };
+  const content: Record<TabId, React.ReactNode> = { repos, personas, environments, tokens, codex };
 
   return (
     <div className="space-y-6">

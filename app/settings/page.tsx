@@ -9,6 +9,8 @@ import { CodeBlock } from "@/components/ui/code-block";
 import { EmptyState } from "@/components/ui/empty-state";
 import { formatDate, relativeDate } from "@/lib/utils";
 import { SettingsTabs } from "@/components/settings/settings-tabs";
+import { listEnvironments, registerConfiguredEnvironments } from "@/lib/runner/environments";
+import { EnvironmentsView } from "@/components/environments/environments-view";
 
 export const dynamic = "force-dynamic";
 
@@ -18,9 +20,11 @@ export default async function SettingsPage({
   searchParams: Promise<{ tab?: string }>;
 }) {
   const { tab } = await searchParams;
-  const [repositories, personaRows] = await Promise.all([
+  await registerConfiguredEnvironments();
+  const [repositories, personaRows, environmentRows] = await Promise.all([
     repo.listRepositories(),
     repo.listPersonas(),
+    listEnvironments(),
   ]);
 
   const personas: PersonaDto[] = personaRows.map((p) => ({
@@ -42,7 +46,7 @@ export default async function SettingsPage({
       <header className="mb-6 space-y-1">
         <h1 className="text-xl font-semibold tracking-tight">Settings</h1>
         <p className="text-sm text-muted-foreground">
-          Repositories, personas, and API tokens for this workspace.
+          Repositories, personas, environments, and API tokens for this workspace.
         </p>
       </header>
 
@@ -121,6 +125,31 @@ export default async function SettingsPage({
                 ))}
               </ul>
             )}
+          </div>
+        }
+        environments={
+          <div className="space-y-6">
+            <header className="space-y-1">
+              <h2 className="text-base font-semibold tracking-tight">Environments</h2>
+              <p className="text-sm text-muted-foreground">
+                The execution artifact each runner provider launches from — a
+                Docker image, a Fly runner image, or a Box template snapshot —
+                versioned by worker build SHA.
+              </p>
+            </header>
+            <EnvironmentsView
+              rows={environmentRows.map((r) => ({
+                id: r.id,
+                provider: r.provider,
+                workerSha: r.workerSha,
+                state: r.state,
+                artifact: r.boxId ?? r.image ?? null,
+                detail: r.detail,
+                error: r.error,
+                createdAt: r.createdAt.toISOString(),
+                readyAt: r.readyAt?.toISOString() ?? null,
+              }))}
+            />
           </div>
         }
         tokens={
