@@ -134,14 +134,31 @@ describe("worker websocket e2e", () => {
       try {
         const drive = (driveWorkerRun as any)({ session: server.session } as any);
 
+        // Mirror sendMessageToRun's contract: the control plane persists the
+        // user row FIRST, then bridges it as run.input carrying that row id.
+        // The worker must NOT re-persist it (the duplicate-row fix) — so the
+        // proof that the wake+drain ran is the SECOND agent reply below, not
+        // the user row (which exists by construction here, as in production).
+        const [userRow] = await db
+          .insert(agentMessages)
+          .values({
+            runId: run.id,
+            role: "user",
+            content: JSON.stringify([{ type: "text", text: "follow-up" }]),
+            createdAt: new Date(),
+          })
+          .returning();
         await sendCommand(run.id, "run.input", {
-          messages: [{ id: 1, role: "user", content: [{ type: "text", text: "follow-up" }] }],
+          messages: [{ id: userRow.id, role: "user", content: [{ type: "text", text: "follow-up" }] }],
         });
 
         await drive;
 
         const msgs = await listMessages(run.id);
         expect(msgs.filter((m) => m.role === "user").length).toBeGreaterThanOrEqual(1);
+        // The wake+drain must have produced a second turn: one agent reply for
+        // the snapshot kickoff, one for the drained follow-up.
+        expect(msgs.filter((m) => m.role === "agent").length).toBeGreaterThanOrEqual(2);
       } finally {
         await disconnectRun(run.id);
         await server.close();
@@ -197,6 +214,7 @@ describe("worker websocket e2e", () => {
         await drive;
 
         const msgs = await listMessages(run.id);
+        console.error(`[PROBE] rows for run ${run.id}: ${JSON.stringify(msgs.map((m) => ({ role: m.role, content: String(m.content).slice(0, 60) })))}`);
         expect(msgs.filter((m) => m.role === "user").length).toBeGreaterThanOrEqual(1);
         expect(msgs.some((m) => m.role === "agent")).toBe(true);
       } finally {
