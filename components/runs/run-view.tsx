@@ -43,6 +43,10 @@ import {
   reduceTemplateBuildEvent,
   type TemplateBuildState,
 } from "@/lib/runner/box-template-events";
+import {
+  reduceBoxBootEvent,
+  type BoxBootState,
+} from "@/lib/runner/box-boot-events";
 
 interface SidebarRepo {
   id: string;
@@ -59,6 +63,10 @@ interface Props {
    *  stepper shows immediately for a run opened mid-build. Null when there's no
    *  build (non-box runs, or a ready/pinned template). */
   initialTemplateBuild: TemplateBuildState | null;
+  /** Box boot / worker-startup state folded from persisted events at render, so
+   *  the stepper shows immediately for a run opened mid-boot. Null when there's
+   *  no box boot in flight (non-box runs, or a run already past startup). */
+  initialBoxBoot: BoxBootState | null;
   live: boolean;
   userEmail: string | null;
   repositories: SidebarRepo[];
@@ -137,6 +145,7 @@ export function RunView({
   initialMessages,
   initialCursor,
   initialTemplateBuild,
+  initialBoxBoot,
   live,
   userEmail,
   repositories,
@@ -163,6 +172,7 @@ export function RunView({
   const [templateBuild, setTemplateBuild] = useState<TemplateBuildState | null>(
     initialTemplateBuild
   );
+  const [boxBoot, setBoxBoot] = useState<BoxBootState | null>(initialBoxBoot);
   const [showInbox, setShowInbox] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -404,6 +414,23 @@ export function RunView({
     if (raw.type.startsWith("runner_box_template_")) {
       setTemplateBuild((prev) => reduceTemplateBuildEvent(prev, raw, Date.now()));
       return;
+    }
+    // Per-run box boot / worker-startup lifecycle. These flat runner_* frames
+    // ride the same stream; fold them into the boot stepper. runner_failed is
+    // shared with other lifecycle paths but the reducer only reacts to it while
+    // a boot is in flight, so a later failure can't revive the stepper.
+    if (
+      raw.type === "runner_box_forking" ||
+      raw.type === "runner_box_provisioning" ||
+      raw.type === "runner_box_ready" ||
+      raw.type === "runner_box_bootstrap_log" ||
+      raw.type === "runner_box_channel_hosted" ||
+      raw.type === "runner_failed"
+    ) {
+      setBoxBoot((prev) => reduceBoxBootEvent(prev, raw, Date.now()));
+      // runner_failed also surfaces through status/error; don't return so the
+      // rest of the handler still runs for it.
+      if (raw.type !== "runner_failed") return;
     }
     if (event.type === "status" && event.status) {
       setRun((r) => ({ ...r, status: event.status! }));
@@ -911,13 +938,18 @@ export function RunView({
                 templateBuild != null &&
                 templateBuild.phase !== "ready" &&
                 (status === "pending" || status === "preparing");
-              if (!sending && !buildVisible) return null;
-              if (awaitingFirstToken || buildVisible) {
+              // The box boot stepper stays up until it hits its terminal ready
+              // (channel hosted) or failed phase — the agent's first token then
+              // clears it via awaitingFirstToken.
+              const bootVisible = boxBoot != null && boxBoot.phase !== "ready";
+              if (!sending && !buildVisible && !bootVisible) return null;
+              if (awaitingFirstToken || buildVisible || bootVisible) {
                 return (
                   <StartupIndicator
                     runtime={run.runtime}
                     status={status}
                     templateBuild={templateBuild}
+                    boxBoot={boxBoot}
                     onShowLog={
                       run.runtime === "worker"
                         ? () => setShowWorkerLog(true)
