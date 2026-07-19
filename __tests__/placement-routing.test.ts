@@ -149,7 +149,28 @@ describe("dispatchRun placement routing", () => {
     // The run must NOT have taken a worker claim (scope 'run-<id>-...').
     const row = await get(run.id);
     expect(row?.workerScope == null || row.workerScope.startsWith("server-")).toBe(true);
-    await new Promise((r) => setTimeout(r, 20)); // let the background turn settle
+    // dispatchRun returns 'server-resumed' BEFORE the fire-and-forget turn runs
+    // (`void resumeServerRun(...)`). Await its landing deterministically: the old
+    // fixed 20ms sleep let the turn leak into LATER tests' chatTurns call counts
+    // on slow machines (its runPostgresTurn call showed up under the
+    // duplicate-wake tests, failing them with an extra, execute-scaffold call).
+    // The run starts 'idle', so status alone can look "settled" BEFORE the
+    // background turn has even claimed it — require the turn to have actually
+    // run (chatTurns called) and its claim to be released again.
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      const settled = await get(run.id);
+      if (
+        chatTurns.mock.calls.length >= 1 &&
+        settled &&
+        !["pending", "preparing", "running"].includes(settled.status) &&
+        settled.workerScope == null
+      ) {
+        break;
+      }
+      if (Date.now() > deadline) throw new Error("background server turn did not settle");
+      await new Promise((r) => setTimeout(r, 20));
+    }
   });
 
   it("still spawns a worker for a worker-placement run", async () => {
