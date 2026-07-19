@@ -247,34 +247,123 @@ export function RunView({
   // read the live status from `statusRef` to decide whether to open at all and
   // rely on the server's `_eos` frame to close a run that reaches a terminal
   // status.
+  //
+  // Reconnection: a live run's stream can drop for reasons that aren't the run
+  // ending — a network blip, the web server restarting, a proxy idle-timeout,
+  // the laptop sleeping. The browser's native EventSource retry can't be used
+  // here because the resume cursor lives in the URL's query string: a native
+  // reconnect would reopen with the stale open-time cursor and replay every row
+  // since page load. So we drive reconnection ourselves — close on error and
+  // reopen from the *advanced* `streamCursorRef` cursor (which `_cursor` frames
+  // keep current), with exponential backoff so a persistent outage doesn't
+  // hammer the server while a transient blip recovers almost immediately. A
+  // full page reload re-seeds the cursor from the server render and re-runs
+  // this effect, so reload reconnects for free.
   useEffect(() => {
     if (isTerminalStatus(statusRef.current) && statusRef.current !== "idle") return;
-    const { msgId, evtId } = streamCursorRef.current;
-    const url = `/api/runs/${run.id}/events?msgCursor=${msgId}&evtCursor=${evtId}`;
-    const es = new EventSource(url);
-    es.onmessage = (msg) => {
-      let parsed: StreamEventClient;
-      try {
-        parsed = JSON.parse(msg.data) as StreamEventClient;
-      } catch {
-        return;
-      }
-      // Cursor bookkeeping: track the tail position so a reconnect resumes
-      // cleanly. Not a domain event, so it never reaches handleSseEvent.
-      if (parsed.type === "_cursor") {
-        if (parsed.cursor) streamCursorRef.current = parsed.cursor;
-        return;
-      }
-      handleSseEvent(parsed);
-      if (parsed.type === "_eos") {
+
+    let es: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
+    let disposed = false;
+
+    // A hard-terminal run (anything but idle) will never emit again — don't
+    // open or keep retrying a stream for it.
+    const runIsDone = () =>
+      isTerminalStatus(statusRef.current) && statusRef.current !== "idle";
+
+    const closeStream = () => {
+      if (es) {
         es.close();
-        router.refresh();
+        es = null;
       }
     };
-    es.onerror = () => {
-      es.close();
+
+    const clearReconnect = () => {
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
     };
-    return () => es.close();
+
+    const scheduleReconnect = () => {
+      if (disposed || reconnectTimer || runIsDone()) return;
+      const delay = Math.min(1000 * 2 ** attempt, 15_000);
+      attempt += 1;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+      }, delay);
+    };
+
+    const connect = () => {
+      if (disposed || runIsDone()) return;
+      closeStream();
+      const { msgId, evtId } = streamCursorRef.current;
+      const url = `/api/runs/${run.id}/events?msgCursor=${msgId}&evtCursor=${evtId}`;
+      const source = new EventSource(url);
+      es = source;
+      source.onopen = () => {
+        // A live (re)connection resets the backoff so the next drop retries fast.
+        attempt = 0;
+      };
+      source.onmessage = (msg) => {
+        let parsed: StreamEventClient;
+        try {
+          parsed = JSON.parse(msg.data) as StreamEventClient;
+        } catch {
+          return;
+        }
+        // Cursor bookkeeping: track the tail position so a reconnect resumes
+        // cleanly. Not a domain event, so it never reaches handleSseEvent.
+        if (parsed.type === "_cursor") {
+          if (parsed.cursor) streamCursorRef.current = parsed.cursor;
+          return;
+        }
+        handleSseEvent(parsed);
+        if (parsed.type === "_eos") {
+          // The run reached a terminal status — stop for good and refresh.
+          disposed = true;
+          clearReconnect();
+          closeStream();
+          router.refresh();
+        }
+      };
+      source.onerror = () => {
+        // The connection dropped. Take over from the browser's native retry
+        // (which would reuse the stale open-time cursor) and reconnect from the
+        // advanced cursor after a backoff.
+        closeStream();
+        scheduleReconnect();
+      };
+    };
+
+    // Recover promptly instead of waiting out the backoff when the network
+    // returns or the tab becomes visible again — a drop that happened while
+    // hidden or offline may never have fired `onerror`, so force a fresh
+    // reconnect from the current cursor (no rows lost: the resume is cursored).
+    const reconnectNow = () => {
+      if (disposed || runIsDone()) return;
+      clearReconnect();
+      attempt = 0;
+      connect();
+    };
+    const onOnline = () => reconnectNow();
+    const onVisible = () => {
+      if (!document.hidden) reconnectNow();
+    };
+    window.addEventListener("online", onOnline);
+    document.addEventListener("visibilitychange", onVisible);
+
+    connect();
+
+    return () => {
+      disposed = true;
+      clearReconnect();
+      closeStream();
+      window.removeEventListener("online", onOnline);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
     // Subscribe once per run; status transitions are tracked via statusRef and
     // handled by the `_eos` frame instead of re-running this effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
