@@ -1166,12 +1166,14 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     }
     // A worktree run (the task's attached session) is resumable even after it
     // lands `completed`/`failed`: prepareCwd re-materializes the worktree on its
-    // branch. Only `closed` is a hard stop. Chat/none runs keep idle-only resume.
+    // branch. A plan-executor run is resumable too — its state is durable task
+    // rows, not a worktree (isResumableRun). Only `cancelled`/`closed` are hard
+    // stops. Chat/none runs keep idle-only resume.
     if (
       isTerminalStatus(run.status) &&
       run.status !== "idle" &&
       !(run.goal === "<chat>" && run.status === "completed") &&
-      !isResumableWorktreeRun(run.status, run.cwdStrategy)
+      !isResumableRun(run)
     ) {
       const why =
         run.status === "closed"
@@ -1199,8 +1201,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // = fresh intent). Note 'parked' itself needs no special-casing in the
     // status gates above: it is non-terminal, so a parked run is appendable
     // exactly like 'idle' — a human/agent message wakes it.
-    const resumesTerminalAttempt =
-      isTerminalStatus(run.status) && isResumableWorktreeRun(run.status, run.cwdStrategy);
+    const resumesTerminalAttempt = isTerminalStatus(run.status) && isResumableRun(run);
     await (await runTransport()).patchRun(run.id, {
       result: null,
       parkReason: null,
@@ -2022,12 +2023,37 @@ async function prepareCwd(run: RunRow): Promise<string> {
  */
 export function isResumableWorktreeRun(status: string, cwdStrategy: string): boolean {
   if (cwdStrategy !== "worktree") return false;
-  return (
-    status === "idle" ||
-    status === "completed" ||
-    status === "failed" ||
-    status === "budget_exhausted"
-  );
+  return RESUMABLE_STATUSES.has(status);
+}
+
+/** The statuses a resumable run can be re-driven from: idle plus the soft
+ *  terminals. `cancelled`/`closed` are hard stops everywhere. */
+const RESUMABLE_STATUSES: ReadonlySet<string> = new Set([
+  "idle",
+  "completed",
+  "failed",
+  "budget_exhausted",
+]);
+
+/**
+ * Full resume predicate for a run ROW (isResumableWorktreeRun plus the
+ * executor case). A plan-executor run (<execute> with a planId) is resumable
+ * after a terminal landing even though it has no worktree: its durable state
+ * is Postgres — plan, tasks, notes, child runs (docs/agent-events.md §8) — and
+ * its persona re-scans task state on every wake, so a follow-up message can
+ * always re-drive it. Before this predicate, the append() gate admitted only
+ * worktree runs, so a completed/failed executor could be resumed through the
+ * dispatch path (remote deployments) but not the in-process path (dev) — the
+ * same composer action erred with "cannot resume" depending on deployment.
+ */
+export function isResumableRun(run: {
+  status: string;
+  cwdStrategy: string;
+  goal: string;
+  planId: string | null;
+}): boolean {
+  if (isResumableWorktreeRun(run.status, run.cwdStrategy)) return true;
+  return run.goal === "<execute>" && !!run.planId && RESUMABLE_STATUSES.has(run.status);
 }
 
 /**
@@ -3581,6 +3607,70 @@ async function* yieldDispatchFailure(runId: number): AsyncGenerator<AppendStream
 }
 
 /**
+ * Fork-resume for a plan executor: start a FRESH <execute> generation on the
+ * prior run's plan. A replaced executor reconstructs progress from durable
+ * state — list_tasks, child runs, task notes — so the new generation needs no
+ * transcript from the old one (docs/agent-events.md §8); the kickoff prompt
+ * carries a resume note naming the prior run and its landing so the agent
+ * knows it is picking up mid-plan. Used by POST /api/sessions/[id]/resume,
+ * whose implement-run path (agent.startSession) requires a taskId that
+ * executors never have — the route used to 404 on every executor.
+ *
+ * Only a settled prior may be forked: a live/parked/idle executor resumes IN
+ * PLACE via a message (sendMessageToRun/append), and a second generation
+ * racing the first would double-dispatch children.
+ */
+export async function resumeExecutorRun(
+  priorId: number,
+  overrides: { model?: string | null; backend?: "pi" | "claude" | null } = {}
+): Promise<RunRow> {
+  const prior = await get(priorId);
+  if (!prior) throw new repo.RepoError(`Run ${priorId} not found`, 404);
+  if (prior.goal !== "<execute>" || !prior.planId) {
+    throw new repo.RepoError(
+      `Run ${priorId} is not a plan-executor run (goal=${prior.goal}); this resume path only forks executors.`,
+      400
+    );
+  }
+  if (!isTerminalStatus(prior.status)) {
+    throw new repo.RepoError(
+      `Executor run ${priorId} is still '${prior.status}' — send it a message to resume it in place instead of forking a new generation.`,
+      409
+    );
+  }
+  const note =
+    `You are a fresh executor generation resuming plan ${prior.planId}: the prior executor ` +
+    `run #${priorId} ended with status '${prior.status}'` +
+    (prior.error ? ` (error: ${prior.error})` : "") +
+    `. Reconstruct current progress from list_tasks, task notes, and child runs before ` +
+    `starting any children, and never re-dispatch tasks that are already merged or in flight.`;
+  return create({
+    goal: "<execute>",
+    planId: prior.planId,
+    repoId: prior.repoId,
+    personaId: prior.personaId ?? "executor",
+    toolsProfile: prior.toolsProfile,
+    // cwdStrategy deliberately NOT inherited: create() derives the executor
+    // default ('repo'), and a legacy row carrying the column default
+    // ('worktree') would otherwise trip the worktree-requires-taskId invariant.
+    // An explicit override wins; otherwise inherit the prior generation's
+    // model/backend (mirroring agent.startSession's resume inheritance).
+    model: overrides.model ?? prior.model ?? undefined,
+    backend: overrides.backend ?? prior.backend,
+    thinkingLevel: prior.thinkingLevel,
+    parentRunId: priorId,
+    userId: prior.userId,
+    title: prior.title,
+    budget: {
+      maxTurns: prior.budgetMaxTurns ?? undefined,
+      maxUsd: prior.budgetMaxUsd ?? undefined,
+      maxSeconds: prior.budgetMaxSeconds ?? undefined,
+    },
+    initialPrompt: note,
+  });
+}
+
+/**
  * Tail the durable run_stream for one turn and translate rows into the exact
  * AppendStreamEvent wire shape (user_message | sdk | done | error) the message
  * routes already emit — so a worker-run turn streams to the browser byte-compatibly
@@ -4823,16 +4913,20 @@ export async function reconcileOrphanedRuns(): Promise<number> {
       hasBranch: !!row.branch,
       worktreeOnDisk: !!row.worktreePath && existsSync(row.worktreePath),
     });
-    // A lightweight (runtime='server') plan executor is resumable too, just not
-    // via the worktree predicate above: its whole conversational state lives in
-    // Postgres (agent_messages + inbox), and dispatchRun routes a server-placement
-    // row to resumeServerRun, which replays that context in-process. Failing it
-    // with "Worker heartbeat lost" after a web deploy/restart killed its turn
-    // mid-flight abandons a plan that can simply pick itself back up. Chat runs
+    // A plan executor is resumable too, just not via the worktree predicate
+    // above: its whole durable state lives in Postgres (plan/tasks/notes +
+    // agent_messages + inbox). A server-placement row re-enters through
+    // resumeServerRun; a worker-placement executor re-dispatches through
+    // driveDispatchedRun's <execute> branch (gated on detached mode — without
+    // it there is no dispatch machinery to hand the row to). Failing it with
+    // "Worker heartbeat lost" after a deploy/restart killed its turn mid-flight
+    // abandons a plan that can simply pick itself back up. Chat runs
     // deliberately stay out of this (their policy is already 'idle': the next
     // user message resumes them; an unattended auto-resume would burn a turn).
     const serverResumable =
-      row.runtime === "server" && row.goal === "<execute>" && !!row.planId;
+      row.goal === "<execute>" &&
+      !!row.planId &&
+      (row.runtime === "server" || runDispatch.detachedRunsEnabled());
     // The sweep has no OOM signal (it only sees a stale heartbeat), so oom=false:
     // a resumable orphan always re-dispatches here, exactly as before R8.
     const policy = decideDeadRunPolicy({
@@ -4951,12 +5045,15 @@ export async function handleWorkerDeath(
     hasBranch: !!row.branch,
     worktreeOnDisk: !!row.worktreePath && existsSync(row.worktreePath),
   });
-  // Same carve-out as reconcileOrphanedRuns: a lightweight plan executor's
-  // whole state lives in Postgres, so it resumes cleanly regardless of
-  // worktree/branch — without this, a dead lightweight executor routed here
-  // (e.g. via the container sweep) lands `failed` instead of re-dispatched.
+  // Same carve-out as reconcileOrphanedRuns: a plan executor's whole state
+  // lives in Postgres, so it resumes cleanly regardless of worktree/branch —
+  // without this, a dead executor routed here (e.g. via the container sweep)
+  // lands `failed` instead of re-dispatched. Worker-placement executors need
+  // detached mode (the dispatch machinery) to be re-handed to a fresh worker.
   const serverResumable =
-    row.runtime === "server" && row.goal === "<execute>" && !!row.planId;
+    row.goal === "<execute>" &&
+    !!row.planId &&
+    (row.runtime === "server" || runDispatch.detachedRunsEnabled());
   const resumable = worktreeResumable || serverResumable;
   // §3.1: durable infra-death fact for the parent, whatever policy follows
   // below (re-dispatch / idle / failed). Deduped per container so the events

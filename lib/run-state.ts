@@ -172,7 +172,8 @@ export const STATUS_TRANSITIONS: Record<SessionStatus, readonly SessionStatus[]>
   // terminal status on the resumed turn.
   idle: ["running", "preparing", "cancelled", "closed", "completed", "failed"],
   // Resumable terminals — a follow-up turn re-drives a worktree run whose
-  // branch + checkout persist (isResumableWorktreeRun).
+  // branch + checkout persist, or a plan executor whose state is durable task
+  // rows (runs.isResumableRun).
   completed: ["preparing", "running"],
   failed: ["preparing", "running"],
   budget_exhausted: ["preparing", "running"],
