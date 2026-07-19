@@ -33,7 +33,7 @@ export function RunMessage({ role, content, createdAt }: Props) {
   if (role === "agent") {
     return (
       <HoverTimestamp align="right" timestamp={timestamp}>
-        <div className="px-4 py-1.5 text-sm text-foreground space-y-2">
+        <div className="px-4 py-1.5 pi-body text-foreground space-y-2">
           {content.map((block, i) => (
             <ContentBlock key={i} block={block} role={role} />
           ))}
@@ -44,7 +44,7 @@ export function RunMessage({ role, content, createdAt }: Props) {
   return (
     <HoverTimestamp align="left" timestamp={timestamp}>
       <div className="flex justify-end px-4 py-2">
-        <div className="max-w-[80%] min-w-0 space-y-2 rounded-2xl rounded-br-md bg-foreground text-background px-4 py-2.5 text-sm shadow-md shadow-foreground/5">
+        <div className="max-w-[80%] min-w-0 space-y-2 rounded-2xl rounded-br-md bg-foreground text-background px-4 py-2.5 pi-body shadow-md shadow-foreground/5">
           {content.map((block, i) => (
             <ContentBlock key={i} block={block} role={role} />
           ))}
@@ -69,7 +69,7 @@ function HoverTimestamp({
       {children}
       <span
         className={
-          "pointer-events-none absolute top-1 z-10 rounded border border-border/70 bg-popover px-1.5 py-0.5 text-[10px] text-muted-foreground opacity-0 shadow-sm transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 " +
+          "pointer-events-none absolute top-1 z-10 rounded border border-border/70 bg-popover px-1.5 py-0.5 pi-micro text-muted-foreground opacity-0 shadow-sm transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 " +
           (align === "left" ? "left-4" : "right-4")
         }
       >
@@ -88,7 +88,7 @@ function ContentBlock({
 }) {
   if (block.type === "text" && typeof block.text === "string") {
     if (role === "user") {
-      return <p className="whitespace-pre-wrap leading-6">{block.text}</p>;
+      return <p className="whitespace-pre-wrap">{block.text}</p>;
     }
     const html = renderMarkdown(block.text);
     return (
@@ -117,7 +117,7 @@ function ContentBlock({
 export function ToolUseBlock({ block }: { block: SdkContentBlock }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="text-xs text-muted-foreground">
+    <div className="pi-meta text-muted-foreground">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -132,7 +132,7 @@ export function ToolUseBlock({ block }: { block: SdkContentBlock }) {
         <span className="text-foreground/90">{humanizeToolName(block.name)}</span>
       </button>
       {open && (
-        <pre className="mx-2 mb-2 rounded bg-muted/30 p-2 text-[11px] leading-5 font-mono whitespace-pre-wrap text-muted-foreground overflow-x-auto">
+        <pre className="mx-2 mb-2 rounded bg-muted/30 p-2 pi-code text-muted-foreground overflow-x-auto">
           {JSON.stringify(block.input, null, 2)}
         </pre>
       )}
@@ -147,7 +147,7 @@ export function ToolResultBlocks({ blocks }: { blocks: SdkContentBlock[] }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground"
+        className="inline-flex items-center gap-1.5 pi-meta text-muted-foreground hover:text-foreground"
       >
         {open ? (
           <ChevronDown className="size-3" />
@@ -157,7 +157,7 @@ export function ToolResultBlocks({ blocks }: { blocks: SdkContentBlock[] }) {
         tool result{blocks.length > 1 ? `s (${blocks.length})` : ""}
       </button>
       {open && (
-        <pre className="mt-1 ml-4 rounded bg-muted/30 p-2 text-[11px] leading-5 font-mono whitespace-pre-wrap text-muted-foreground max-h-64 overflow-y-auto">
+        <pre className="mt-1 ml-4 rounded bg-muted/30 p-2 pi-code text-muted-foreground max-h-64 overflow-y-auto">
           {blocks
             .map((b) =>
               typeof b.content === "string"
