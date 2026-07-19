@@ -8,6 +8,7 @@ const TABS = [
   { id: "repos", label: "Repositories" },
   { id: "personas", label: "Personas" },
   { id: "tokens", label: "API tokens" },
+  { id: "codex", label: "Codex" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -21,11 +22,13 @@ export function SettingsTabs({
   repos,
   personas,
   tokens,
+  codex,
 }: {
   initialTab?: string;
   repos: React.ReactNode;
   personas: React.ReactNode;
   tokens: React.ReactNode;
+  codex: React.ReactNode;
 }) {
   const router = useRouter();
   const [active, setActive] = React.useState<TabId>(isTabId(initialTab) ? initialTab : "repos");
@@ -35,7 +38,7 @@ export function SettingsTabs({
     router.replace(`/settings?tab=${id}`, { scroll: false });
   }
 
-  const content: Record<TabId, React.ReactNode> = { repos, personas, tokens };
+  const content: Record<TabId, React.ReactNode> = { repos, personas, tokens, codex };
 
   return (
     <div className="space-y-6">

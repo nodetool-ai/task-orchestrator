@@ -4,6 +4,7 @@ import * as repo from "@/lib/repo";
 import { NewRepositoryForm } from "@/components/repositories/repository-form";
 import { PersonaEditor, type PersonaDto } from "@/components/persona-editor";
 import { ApiTokensManager } from "@/components/api-tokens-manager";
+import { CodexLoginPanel } from "@/components/settings/codex-login";
 import { CodeBlock } from "@/components/ui/code-block";
 import { EmptyState } from "@/components/ui/empty-state";
 import { formatDate, relativeDate } from "@/lib/utils";
@@ -168,6 +169,19 @@ export default async function SettingsPage({
               </div>
             </header>
             <ApiTokensManager />
+          </div>
+        }
+        codex={
+          <div className="space-y-6">
+            <header className="space-y-1">
+              <h2 className="text-base font-semibold tracking-tight">Codex (ChatGPT) sign-in</h2>
+              <p className="text-sm text-muted-foreground">
+                Sign in with ChatGPT so the <code>pi</code> backend can run{" "}
+                <code>openai-codex</code> models. This is the same OAuth login as the{" "}
+                <code>codex login</code> CLI command, driven from the browser.
+              </p>
+            </header>
+            <CodexLoginPanel />
           </div>
         }
       />
