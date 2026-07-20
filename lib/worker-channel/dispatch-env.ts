@@ -11,6 +11,7 @@
 // The dial form is the `ws` package's Unix-domain URL syntax: the socket path
 // precedes a literal ":" and the request path.
 
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import { config } from "../config";
@@ -156,10 +157,17 @@ export function workerChannelDispatchEnv(
   };
 }
 
-/** Deterministic `run.start` command id for an instance. The 32 hex characters
- * of `wi_<hex>` become a UUID, so a reconnect (or an idempotent re-send) reuses
- * the same durable command instead of building a second snapshot. */
-export function runStartCommandId(instanceId: string): string {
-  const hex = instanceId.replace(/^wi_/, "");
+/** Deterministic `run.start` command id for one worker generation (an instance
+ * id at a given controller epoch), so a reconnect WITHIN that generation (boot
+ * backoff retry, concurrent dispatch) replays the same durable command instead
+ * of building a second snapshot. A NEW generation — e.g. a fresh worker process
+ * after a Box/Fly checkpoint resume, which bumps the controller epoch — mints
+ * its own id: `ControllerConnection.sendPersisted` only delivers commands whose
+ * `controllerEpoch` matches its current epoch, so the prior generation's
+ * (already-acked, now-stale) run.start could never reach this connection, and
+ * its snapshot (mode/pendingInput/inboxDigest) no longer reflects run state
+ * anyway. */
+export function runStartCommandId(instanceId: string, controllerEpoch: number): string {
+  const hex = createHash("sha256").update(`${instanceId}:${controllerEpoch}`).digest("hex").slice(0, 32);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }

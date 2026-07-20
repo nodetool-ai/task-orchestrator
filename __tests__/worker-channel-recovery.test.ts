@@ -25,6 +25,7 @@ import {
   acquireControllerLease,
   getChannelIdentity,
   getLastAcceptedWorkerSeq,
+  releaseControllerLease,
   touchChannel,
 } from "../lib/worker-channel/repository";
 import {
@@ -308,6 +309,76 @@ describe("worker channel recovery (plan section 17)", () => {
     // touch also advances the shared heartbeat.
     expect(await touchChannel(runId, channel.instanceId, "replica-a", a.epoch, new Date("2026-07-16T00:01:05Z"))).toBe(false);
     expect(await touchChannel(runId, channel.instanceId, "replica-b", b.epoch, new Date("2026-07-16T00:01:05Z"))).toBe(true);
+  });
+
+  // Regression: a Box/Fly checkpoint resume launches a brand-new worker process
+  // but reuses the same channel instance id, so ControllerConnection dials in
+  // under a BUMPED controller epoch while the run's original `run.start`
+  // command (persisted, already acked) is still stamped with the OLD epoch.
+  // ControllerConnection.sendPersisted silently no-ops on an epoch mismatch, so
+  // naively replaying that stale command sends nothing — the fresh worker
+  // connects, heartbeats forever, and never receives a bootstrap. A dispatch
+  // that just (re)created the worker must mint a NEW run.start scoped to the
+  // new epoch instead.
+  it("freshWorker mints a new run.start after an epoch bump post-ack", async () => {
+    const { runId, channel } = await provisionRun("preparing");
+    const root = await newRoot();
+    await bootServer(runId, channel.instanceId, channel.listenEndpoint, root);
+
+    await runDispatch.startChannelForRun(runId, channel.instanceId, { freshWorker: true });
+    await waitFor(async () => (await commandRows(runId, "run.start")).length === 1);
+    await waitFor(async () => (await commandRows(runId, "run.start")).every((r) => r.state === "acked"));
+    const before = await db
+      .select({ epoch: workerChannelCommands.controllerEpoch, id: workerChannelCommands.id })
+      .from(workerChannelCommands)
+      .where(and(eq(workerChannelCommands.runId, runId), eq(workerChannelCommands.type, "run.start")));
+    const firstEpoch = before[0].epoch;
+
+    // Simulate the checkpoint/resume cycle: the connection drops, and by the
+    // time the box comes back another actor (or simply an expired lease) has
+    // bumped the epoch out from under this instance id.
+    await disconnectRun(runId);
+    const bumped = await acquireControllerLease(runId, "checkpoint-interloper", new Date());
+    expect(bumped.epoch).toBeGreaterThan(firstEpoch);
+    await releaseControllerLease(runId, "checkpoint-interloper", bumped.epoch);
+
+    // The buggy version of startChannelForRun would find the OLD (acked, wrong-
+    // epoch) command via its instance-only id, replay it through
+    // sendPersisted — which silently drops any command whose epoch doesn't
+    // match the connection's — and return, leaving exactly ONE row forever and
+    // the fresh worker never bootstrapped. The fix mints a second, distinct
+    // row scoped to the new epoch instead.
+    await runDispatch.startChannelForRun(runId, channel.instanceId, { freshWorker: true });
+    await waitFor(async () => (await commandRows(runId, "run.start")).length === 2);
+    const after = await db
+      .select({ epoch: workerChannelCommands.controllerEpoch, id: workerChannelCommands.id })
+      .from(workerChannelCommands)
+      .where(and(eq(workerChannelCommands.runId, runId), eq(workerChannelCommands.type, "run.start")));
+    expect(new Set(after.map((r) => r.id)).size).toBe(2);
+    const secondRow = after.find((r) => r.id !== before[0].id);
+    expect(secondRow?.epoch).toBeGreaterThan(firstEpoch);
+    expect(getConnection(runId)?.controllerEpoch).toBe(secondRow?.epoch);
+  });
+
+  // Counterpart: a plain re-adoption (control-plane restart re-dialing a worker
+  // that may still be the SAME live process, freshWorker omitted) must NOT
+  // mint or resend anything once an already-acked run.start exists from a
+  // different epoch — the worker needs no re-kickoff, only its genuinely
+  // pending commands, which connect()'s own rebase/replay already covers.
+  it("a plain re-adoption never re-sends a stale-epoch run.start", async () => {
+    const { runId, channel } = await provisionRun("running");
+    const root = await newRoot();
+    await bootServer(runId, channel.instanceId, channel.listenEndpoint, root);
+
+    await runDispatch.startChannelForRun(runId, channel.instanceId, { freshWorker: true });
+    await waitFor(async () => (await commandRows(runId, "run.start")).length === 1);
+    await waitFor(async () => (await commandRows(runId, "run.start")).every((r) => r.state === "acked"));
+
+    await disconnectRun(runId);
+    await acquireControllerLease(runId, "restart-interloper", new Date());
+
+    await runDispatch.startChannelForRun(runId, channel.instanceId);
+    expect((await commandRows(runId, "run.start")).length).toBe(1);
   });
 
   // Fix 1 (CRITICAL): epoch fencing must NOT reject a replayed worker event. The

@@ -282,10 +282,11 @@ export async function reconnectActiveChannels(): Promise<number> {
       // startChannelForRun (not a bare connectRun): an adopted channel whose
       // dispatch died before persisting `run.start` would otherwise sit
       // connected-but-idle forever — channel liveness keeps bumping the
-      // heartbeat, so the reaper never rescues it. The start command id is
-      // stable per instance and persistCommand is idempotent, so for an
-      // already-started worker this replays the existing snapshot, never
-      // builds a second one.
+      // heartbeat, so the reaper never rescues it. `freshWorker` is omitted
+      // (false): this is a RE-ADOPTION, not a provider create()/resume() — the
+      // worker process may be the same live one from before this control-plane
+      // restart, so an already-started instance gets no re-sent/rebuilt
+      // command, only the one true gap (no run.start ever persisted) is filled.
       const runDispatch = await import("../run-dispatch");
       await runDispatch.startChannelForRun(channel.runId, channel.instanceId);
       reconnected++;

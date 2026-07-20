@@ -34,7 +34,7 @@ import { recordDispatch, recordRunnerEvent, timeRunnerPhase } from "./runner/tel
 import { isTerminalStatus } from "./types";
 import { newChannelInstanceId } from "./worker-channel/credential";
 import {
-  getCommand,
+  getLatestRunStartCommand,
   persistCommand,
   reserveChannelIdentity,
   setChannelEndpoint,
@@ -540,7 +540,7 @@ export async function dispatchRun(
       // Connect and push the authoritative start snapshot off the dispatch
       // path: the worker is still booting its listener, and dispatch must not
       // block on the controller handshake or the worker's ack.
-      void startChannelForRun(runId, channel.instanceId).catch((err) =>
+      void startChannelForRun(runId, channel.instanceId, { freshWorker: true }).catch((err) =>
         console.error(`Worker channel start failed for run ${runId}:`, err)
       );
       handle = ref.handle;
@@ -570,7 +570,7 @@ export async function dispatchRun(
         return finish(await failSpawn(runId, outcome.scope, "runner started without a worker channel endpoint"));
       }
       await setChannelEndpoint(runId, ref.channelInstanceId ?? channel.instanceId, ref.channelEndpoint);
-      void startChannelForRun(runId, ref.channelInstanceId ?? channel.instanceId).catch((err) =>
+      void startChannelForRun(runId, ref.channelInstanceId ?? channel.instanceId, { freshWorker: true }).catch((err) =>
         console.error(`Worker channel start failed for run ${runId}:`, err)
       );
       handle = ref.handle;
@@ -600,7 +600,7 @@ export async function dispatchRun(
         return finish(await failSpawn(runId, outcome.scope, "runner started without a worker channel endpoint"));
       }
       await setChannelEndpoint(runId, ref.channelInstanceId ?? channel.instanceId, ref.channelEndpoint);
-      void startChannelForRun(runId, ref.channelInstanceId ?? channel.instanceId).catch((err) =>
+      void startChannelForRun(runId, ref.channelInstanceId ?? channel.instanceId, { freshWorker: true }).catch((err) =>
         console.error(`Worker channel start failed for run ${runId}:`, err)
       );
       handle = ref.handle;
@@ -774,19 +774,54 @@ async function connectWithBootBackoff(runId: number) {
   }
 }
 
-export async function startChannelForRun(runId: number, instanceId: string): Promise<void> {
+/**
+ * Connect to a run's worker channel and ensure it has (or gets) its `run.start`
+ * bootstrap. `opts.freshWorker` must be true when the caller just ran a
+ * provider `create()`/`resume()` that (re)launched the worker process — e.g.
+ * dispatchRun's local/fly/box branches — and false for a channel that is only
+ * being RE-ADOPTED (reconnectActiveChannels on control-plane boot): there the
+ * worker process may still be the SAME live one that already has this run's
+ * full state in memory, and must not be re-sent a kickoff command it never
+ * asked for.
+ */
+export async function startChannelForRun(
+  runId: number,
+  instanceId: string,
+  opts: { freshWorker?: boolean } = {}
+): Promise<void> {
   const connection = await connectWithBootBackoff(runId);
-  const startId = runStartCommandId(instanceId);
-  // Idempotent by REPLAY, not by rebuild: once a snapshot is persisted for
-  // this instance it is the authoritative one — a later call (startup channel
-  // adoption, a repeated dispatch) must resend that exact command. Building a
-  // fresh snapshot here would change the payload under the stable id and trip
-  // the COMMAND_ID_MISMATCH guard.
-  const existing = await getCommand(startId);
-  if (existing) {
+  // The command id is scoped to (instanceId, controllerEpoch) — see
+  // runStartCommandId — so this lookup spans every epoch ever persisted for
+  // this instance, not just the current one.
+  const existing = await getLatestRunStartCommand(runId, instanceId);
+
+  if (existing && existing.controllerEpoch === connection.controllerEpoch) {
+    // Same generation as this connection: replay verbatim (boot-backoff retry,
+    // a repeated call before the boot deadline). Never rebuild — that would
+    // change the payload under a stable id and trip COMMAND_ID_MISMATCH.
     await connection.sendPersisted(existing);
     return;
   }
+
+  if (existing && !opts.freshWorker) {
+    // A stale-epoch command from a prior generation, but this call did NOT
+    // follow a provider create()/resume() — the worker may still be the same
+    // live process (e.g. a control-plane restart just re-adopting it).
+    // ControllerConnection.sendPersisted only ever delivers a command whose
+    // epoch matches its own, so this old row is unsendable regardless; a live
+    // worker needs no fresh kickoff, and connectWithBootBackoff's connect()
+    // already rebased/replayed any genuinely pending commands. Nothing to do.
+    return;
+  }
+
+  // No run.start has ever been persisted for this instance, OR this call
+  // follows a provider create()/resume() that just (re)launched the worker
+  // process for a brand-new generation (e.g. a Box checkpoint resume): mint a
+  // fresh command scoped to the current epoch. buildRunStart re-derives mode
+  // ("resume" once the run carries a backend session id) plus the latest
+  // pendingInput/inboxDigest, so a resumed worker gets current state, not the
+  // run's original kickoff snapshot.
+  const startId = runStartCommandId(instanceId, connection.controllerEpoch);
   const snapshot = await buildRunStart(runId);
   const row = await persistCommand({
     runId,

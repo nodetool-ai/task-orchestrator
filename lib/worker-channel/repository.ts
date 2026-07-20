@@ -797,6 +797,28 @@ export async function getCommand(id: string): Promise<CommandRow | null> {
   return result[0] ? commandRow(result[0]) : null;
 }
 
+/** Load the most recent `run.start` command for an instance, regardless of
+ *  which controller epoch it was persisted under (its id is epoch-scoped —
+ *  see {@link runStartCommandId} — so a plain id lookup only ever finds the
+ *  current epoch's copy). Used by {@link startChannelForRun} to detect a prior
+ *  generation's command when deciding whether one still needs to be sent. */
+export async function getLatestRunStartCommand(
+  runId: number,
+  instanceId: string
+): Promise<CommandRow | null> {
+  const result = await queryRows(
+    db,
+    drizzleSql`
+      SELECT id, run_id, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
+      FROM worker_channel_commands
+      WHERE run_id = ${runId} AND instance_id = ${instanceId} AND type = 'run.start'
+      ORDER BY controller_epoch DESC, seq DESC
+      LIMIT 1
+    `
+  );
+  return result[0] ? commandRow(result[0]) : null;
+}
+
 /**
  * Read the authoritative allowed-tool set from the run's persisted `run.start`
  * command (plan section 15 rule 2). The start snapshot is the single source of
