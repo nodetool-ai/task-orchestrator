@@ -210,6 +210,22 @@ async function handleRunCheckpoint(tx: WorkerChannelTransaction, frame: WorkerEv
     if (typeof meta.totalCostUsd === "number") set.totalCostUsd = meta.totalCostUsd;
   }
   await tx.update(agentSessions).set(set).where(eq(agentSessions.id, frame.runId));
+  // Close the turn for the message relay. A chat worker emits exactly one
+  // run.checkpoint per completed model turn (emitCheckpoint in
+  // lib/worker-runtime/context.ts is called only on the chat drive paths), and a
+  // chat run lands resumable-'idle' rather than a terminal status — so without a
+  // per-turn marker relayRunStream never closes the POST /messages stream and the
+  // composer stays stuck in its "sending" state, unable to send a follow-up. The
+  // legacy in-process chat driver wrote this same turn_done event; it was lost when
+  // the lightweight tier was retired and every chat moved onto the worker channel.
+  // Written AFTER the turn's transcript rows persisted, so it sorts after the
+  // reply and the relay yields the answer before closing.
+  await tx.insert(agentEvents).values({
+    sessionId: frame.runId,
+    type: "turn_done",
+    payload: JSON.stringify({}),
+    createdAt: new Date(),
+  });
 }
 
 // ── 14.3 Finish / fail / cancel ──────────────────────────────────────────────

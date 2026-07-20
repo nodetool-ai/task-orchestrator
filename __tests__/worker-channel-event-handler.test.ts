@@ -216,6 +216,21 @@ describe("run.checkpoint", () => {
     // The non-allowlisted `status` key in metadata must NOT move the column.
     expect(row.status).not.toBe("hacked");
   });
+
+  it("writes a turn_done marker so the message relay closes the turn", async () => {
+    // A chat run lands resumable-'idle' rather than a terminal status, so
+    // relayRunStream (POST /api/runs/[id]/messages) closes the stream only on a
+    // per-turn turn_done event. Each completed chat turn emits exactly one
+    // run.checkpoint; that must leave behind exactly one turn_done or the composer
+    // hangs after the first message, unable to send a follow-up.
+    const runId = await newRun();
+    await apply(makeFrame(runId, "run.checkpoint", { sdkSessionId: "sess-1" }));
+    const marks = await db
+      .select({ id: agentEvents.id })
+      .from(agentEvents)
+      .where(and(eq(agentEvents.sessionId, runId), eq(agentEvents.type, "turn_done")));
+    expect(marks).toHaveLength(1);
+  });
 });
 
 // ── 14.3 run.finished (port: atomic-finalize idempotency + timers) ────────────
