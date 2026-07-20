@@ -24,6 +24,7 @@ const KEYS = [
   "TASK_ORCH_NESTED_DISPATCH",
   "TASK_ORCH_ADMISSION_ENABLED",
   "TASK_ORCH_WORKER_IMAGE",
+  "TASK_ORCH_GIT_CLONE_DEPTH",
   "TASK_ORCH_MAX_MACHINES",
   "TASK_ORCH_MAX_RUN_DEPTH",
   "TASK_ORCH_MAX_TREE_RUNS",
@@ -218,6 +219,23 @@ describe("documented numeric defaults", () => {
     expect(config.agent.chatMaxToolRounds).toBe(64);
     expect(config.agent.executorMaxToolRounds).toBe(30);
     expect(config.dispatch.treeBudgetMult).toBe(3);
+  });
+});
+
+describe("deployment.gitCloneDepth — shallow in-runner clone depth", () => {
+  it("defaults to a depth-1 shallow clone", () => {
+    set("TASK_ORCH_GIT_CLONE_DEPTH", undefined);
+    expect(config.deployment.gitCloneDepth).toBe(1);
+  });
+
+  it("honours an explicit deeper limit", () => {
+    set("TASK_ORCH_GIT_CLONE_DEPTH", "50");
+    expect(config.deployment.gitCloneDepth).toBe(50);
+  });
+
+  it("treats 0 as an opt-out (full-history clone)", () => {
+    set("TASK_ORCH_GIT_CLONE_DEPTH", "0");
+    expect(config.deployment.gitCloneDepth).toBe(0);
   });
 });
 

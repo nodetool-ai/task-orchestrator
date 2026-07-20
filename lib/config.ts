@@ -187,6 +187,13 @@ export const config = Object.freeze({
     get repoCacheDir(): string | undefined {
       return strEnv("TASK_ORCH_REPO_CACHE_DIR");
     },
+    /** Shallow-clone depth for in-runner repo checkouts. Default `1` fetches
+     *  only the latest commit per branch, so a cold clone moves far less of a
+     *  long-history repo; `0` (or negative) restores a full-history clone.
+     *  @see containerCheckoutAt in lib/runs.ts */
+    get gitCloneDepth(): number {
+      return intEnv("TASK_ORCH_GIT_CLONE_DEPTH", 1);
+    },
     /** tsx CLI path for the worker entrypoint (test/dev override). */
     get tsxCli(): string | undefined {
       return strEnv("TASK_ORCH_TSX_CLI");

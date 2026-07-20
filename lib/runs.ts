@@ -2062,6 +2062,17 @@ function isConfiguredRunnerRepoPath(work: string): boolean {
   return !!configured && path.isAbsolute(configured) && resolve(configured) === resolve(work);
 }
 
+// Shallow-clone flags for the in-runner checkout, from TASK_ORCH_GIT_CLONE_DEPTH
+// (default 1). Depth caps the commit/tree history each cold clone transfers; the
+// paired `--no-single-branch` still fetches every branch tip so the later
+// origin/<base> fallback checkout can resolve. A depth of 0 disables shallowing
+// and restores a full-history clone. Compatible with `--filter=blob:none` and
+// with the `--reference` mirror below (both narrow what a cold clone moves).
+export function gitCloneDepthArgs(): string[] {
+  const depth = config.deployment.gitCloneDepth;
+  return depth > 0 ? ["--depth", String(depth), "--no-single-branch"] : [];
+}
+
 // Worker/Fly git checkout: clone the run's repo from GitHub, optionally using the
 // mounted repo-cache mirror as an object reference. With `base` set, branch off
 // origin/base (first turn); without it, check out the existing pushed branch
@@ -2102,10 +2113,20 @@ async function containerCheckoutAt(
     // Blobless partial clone: history blobs are fetched on demand through the
     // image's git credential helper; pairs with the image-baked blobless mirror
     // so a cold clone moves only refs/commits/trees plus the checkout's blobs.
+    // gitCloneDepthArgs additionally caps the commit/tree history transferred.
+    const depth = gitCloneDepthArgs();
     await timeRunnerPhase(
       "git_clone",
-      () => sh(["git", "clone", "--filter=blob:none", ...reference, url, work], "/"),
-      { provider: runnerProviderLabel(), fields: { runId: run.id, repoId: run.repoId, reference: reference.length > 0 } }
+      () => sh(["git", "clone", "--filter=blob:none", ...depth, ...reference, url, work], "/"),
+      {
+        provider: runnerProviderLabel(),
+        fields: {
+          runId: run.id,
+          repoId: run.repoId,
+          reference: reference.length > 0,
+          shallow: depth.length > 0,
+        },
+      }
     );
   } else {
     await sh(["git", "-C", work, "remote", "set-url", "origin", url], "/").catch(() => {});
