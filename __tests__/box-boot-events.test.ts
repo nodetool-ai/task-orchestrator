@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BOX_BOOT_EVENT,
-  BOX_BOOT_STEPS,
+  BOX_BOOT_STEPS_FORK,
   boxBootView,
   reduceBoxBootEvent,
   type BoxBootState,
@@ -24,6 +24,22 @@ describe("reduceBoxBootEvent", () => {
   it("starts a blank boot from a provisioning event", () => {
     const s = reduceBoxBootEvent(null, { type: BOX_BOOT_EVENT.provisioning, mode: "blank" }, T0)!;
     expect(s).toMatchObject({ phase: "booting", mode: "blank", stepIndex: 0 });
+  });
+
+  it("advances a blank boot through clone, then worker, then connecting", () => {
+    let s = reduceBoxBootEvent(null, { type: BOX_BOOT_EVENT.provisioning, mode: "blank" }, T0);
+    s = reduceBoxBootEvent(s, { type: BOX_BOOT_EVENT.cloning, repository: "a/b" }, T0 + 1_000);
+    expect(s).toMatchObject({ stepIndex: 1, stepStartedAt: T0 + 1_000 });
+    s = reduceBoxBootEvent(s, { type: BOX_BOOT_EVENT.ready }, T0 + 4_000);
+    expect(s).toMatchObject({ stepIndex: 2 });
+    s = reduceBoxBootEvent(s, { type: BOX_BOOT_EVENT.bootstrapLog }, T0 + 5_000);
+    expect(s).toMatchObject({ stepIndex: 3 });
+  });
+
+  it("ignores a cloning event on a fork boot (forks inherit the checkout)", () => {
+    let s = reduceBoxBootEvent(null, { type: BOX_BOOT_EVENT.forking }, T0);
+    const after = reduceBoxBootEvent(s, { type: BOX_BOOT_EVENT.cloning }, T0 + 1_000)!;
+    expect(after.stepIndex).toBe(0);
   });
 
   it("advances to the worker step on ready and restamps stepStartedAt", () => {
@@ -54,7 +70,7 @@ describe("reduceBoxBootEvent", () => {
     s = reduceBoxBootEvent(s, { type: BOX_BOOT_EVENT.channelHosted, boxId: "bx1" }, T0 + 8_000);
     expect(s).toMatchObject({
       phase: "ready",
-      stepIndex: BOX_BOOT_STEPS.length - 1,
+      stepIndex: BOX_BOOT_STEPS_FORK.length - 1,
       durationMs: 8_000,
     });
   });
@@ -62,7 +78,7 @@ describe("reduceBoxBootEvent", () => {
   it("a channel_hosted replay with no prior state still yields a ready state", () => {
     const s = reduceBoxBootEvent(null, { type: BOX_BOOT_EVENT.channelHosted }, T0)!;
     expect(s.phase).toBe("ready");
-    expect(s.stepIndex).toBe(BOX_BOOT_STEPS.length - 1);
+    expect(s.stepIndex).toBe(BOX_BOOT_STEPS_FORK.length - 1);
   });
 
   it("runner_failed during boot captures the active step and error message", () => {
@@ -125,12 +141,26 @@ describe("boxBootView", () => {
 
   it("labels the first step differently for blank provisioning", () => {
     const v = boxBootView({ ...base, mode: "blank", stepIndex: 0 }, T0 + 1_000);
-    expect(v.steps[0].label).toBe("Provisioning the box");
+    expect(v.steps[0].label).toBe("Creating the box");
+  });
+
+  it("shows the clone as its own step for blank provisioning only", () => {
+    const blank = boxBootView({ ...base, mode: "blank", stepIndex: 1 }, T0 + 5_000);
+    expect(blank.steps.map((s) => s.step)).toEqual([
+      "starting-box",
+      "cloning-repo",
+      "starting-worker",
+      "connecting",
+    ]);
+    expect(blank.steps[1]).toMatchObject({ label: "Cloning the repository", state: "active" });
+
+    const fork = boxBootView(base, T0 + 5_000);
+    expect(fork.steps.map((s) => s.step)).not.toContain("cloning-repo");
   });
 
   it("collapses to a ready label with the boot duration", () => {
     const v = boxBootView(
-      { ...base, phase: "ready", stepIndex: BOX_BOOT_STEPS.length - 1, durationMs: 9_000 },
+      { ...base, phase: "ready", stepIndex: BOX_BOOT_STEPS_FORK.length - 1, durationMs: 9_000 },
       T0 + 9_000
     );
     expect(v.readyLabel).toBe("Box ready (9s)");

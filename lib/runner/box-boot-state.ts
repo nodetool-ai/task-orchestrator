@@ -14,6 +14,7 @@ import { BOX_BOOT_EVENT, reduceBoxBootEvent, type BoxBootState } from "./box-boo
 const BOOT_EVENT_TYPES = [
   BOX_BOOT_EVENT.forking,
   BOX_BOOT_EVENT.provisioning,
+  BOX_BOOT_EVENT.cloning,
   BOX_BOOT_EVENT.ready,
   BOX_BOOT_EVENT.bootstrapLog,
   BOX_BOOT_EVENT.channelHosted,

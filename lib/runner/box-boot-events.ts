@@ -18,6 +18,9 @@ export const BOX_BOOT_EVENT = {
   forking: "runner_box_forking",
   // blank provisioning: create a fresh box and push+run the worker bundle.
   provisioning: "runner_box_provisioning",
+  // blank provisioning only: the box is up with the bundle in place; the repo
+  // clone is starting. Forked boxes inherit the template's checkout instead.
+  cloning: "runner_box_cloning",
   // box is up and its template manifest was read; about to launch the worker.
   ready: "runner_box_ready",
   // the worker bootstrap command was launched (its early log was captured).
@@ -31,14 +34,26 @@ export const BOX_BOOT_EVENT = {
 
 export type BoxBootMode = "fork" | "blank";
 
-// The three human-visible boot steps, in order. The first step's label depends
-// on the provisioning mode (fork vs blank); the rest are shared.
-export const BOX_BOOT_STEPS = ["starting-box", "starting-worker", "connecting"] as const;
+// The human-visible boot steps, in order. They differ by provisioning mode:
+// a blank box clones the repository as its own visible step, while a forked
+// box inherits the template's checkout and never clones. The first step's
+// label also depends on the mode; the rest are shared.
+export const BOX_BOOT_STEPS_BLANK = [
+  "starting-box",
+  "cloning-repo",
+  "starting-worker",
+  "connecting",
+] as const;
+export const BOX_BOOT_STEPS_FORK = ["starting-box", "starting-worker", "connecting"] as const;
+
+export function bootSteps(mode: BoxBootMode): readonly string[] {
+  return mode === "blank" ? BOX_BOOT_STEPS_BLANK : BOX_BOOT_STEPS_FORK;
+}
 
 export interface BoxBootState {
   phase: "booting" | "ready" | "failed";
   mode: BoxBootMode;
-  /** 0-based index into BOX_BOOT_STEPS of the currently active step. */
+  /** 0-based index into bootSteps(mode) of the currently active step. */
   stepIndex: number;
   /** Client receipt time (ms) of the first boot event. */
   startedAt: number;
@@ -63,9 +78,12 @@ function initialState(mode: BoxBootMode, nowMs: number): BoxBootState {
   return { phase: "booting", mode, stepIndex: 0, startedAt: nowMs, stepStartedAt: nowMs };
 }
 
-/** Advance to `index` only if it is a forward move (tolerates replays / reorders). */
-function advance(state: BoxBootState, index: number, nowMs: number): BoxBootState {
-  if (index <= state.stepIndex) return state;
+/** Advance to the named step only if it is a forward move (tolerates replays /
+ *  reorders). A step the current mode does not have (e.g. "cloning-repo" on a
+ *  fork) is simply ignored. */
+function advance(state: BoxBootState, step: string, nowMs: number): BoxBootState {
+  const index = bootSteps(state.mode).indexOf(step);
+  if (index < 0 || index <= state.stepIndex) return state;
   return { ...state, stepIndex: index, stepStartedAt: nowMs };
 }
 
@@ -86,14 +104,21 @@ export function reduceBoxBootEvent(
       return initialState("fork", nowMs);
     case BOX_BOOT_EVENT.provisioning:
       return initialState("blank", nowMs);
+    case BOX_BOOT_EVENT.cloning: {
+      // Only blank provisioning clones; a stray event on a fork is ignored by
+      // advance() because the fork step list has no "cloning-repo".
+      const base = state ?? initialState("blank", nowMs);
+      if (base.phase !== "booting") return base;
+      return advance(base, "cloning-repo", nowMs);
+    }
     case BOX_BOOT_EVENT.ready: {
       const base = state ?? initialState("fork", nowMs);
       if (base.phase !== "booting") return base;
-      return advance(base, 1, nowMs);
+      return advance(base, "starting-worker", nowMs);
     }
     case BOX_BOOT_EVENT.bootstrapLog: {
       if (!state || state.phase !== "booting") return state;
-      return advance(state, 2, nowMs);
+      return advance(state, "connecting", nowMs);
     }
     case BOX_BOOT_EVENT.channelHosted: {
       const base = state ?? initialState("fork", nowMs);
@@ -101,7 +126,7 @@ export function reduceBoxBootEvent(
       return {
         ...base,
         phase: "ready",
-        stepIndex: BOX_BOOT_STEPS.length - 1,
+        stepIndex: bootSteps(base.mode).length - 1,
         durationMs: nowMs - base.startedAt,
       };
     }
@@ -112,7 +137,7 @@ export function reduceBoxBootEvent(
       return {
         ...state,
         phase: "failed",
-        failedStep: BOX_BOOT_STEPS[state.stepIndex],
+        failedStep: bootSteps(state.mode)[state.stepIndex],
         error: extractError(event.error),
       };
     }
@@ -123,8 +148,9 @@ export function reduceBoxBootEvent(
 
 function stepLabel(step: string, mode: BoxBootMode): string {
   if (step === "starting-box") {
-    return mode === "blank" ? "Provisioning the box" : "Forking the box";
+    return mode === "blank" ? "Creating the box" : "Forking the box";
   }
+  if (step === "cloning-repo") return "Cloning the repository";
   if (step === "starting-worker") return "Starting the worker";
   if (step === "connecting") return "Connecting the agent channel";
   return step;
@@ -151,7 +177,7 @@ export interface BoxBootView {
 /** Everything the boot stepper renders, computed here so it is unit-testable
  *  without a DOM (this repo's vitest runs in node, no jsdom). */
 export function boxBootView(state: BoxBootState, nowMs: number): BoxBootView {
-  const steps: BoxBootStepView[] = BOX_BOOT_STEPS.map((step, i) => {
+  const steps: BoxBootStepView[] = bootSteps(state.mode).map((step, i) => {
     if (state.phase === "failed" && i === state.stepIndex) {
       return { step, label: stepLabel(step, state.mode), state: "failed" };
     }

@@ -3,9 +3,10 @@
 // Blank provisioning: no template snapshot. create() must CREATE a blank box
 // (never fork), UPLOAD the worker bundle through the box files API (base64
 // chunks — the only transport that works for every control plane, localhost
-// included), then run one detached provision command that reassembles +
-// sha256-verifies the bundle, clones the RUN'S OWN repo, and writes the
-// standard manifest — after which the normal manifest/bootstrap flow
+// included), then run TWO detached steps — one that reassembles +
+// sha256-verifies the bundle, and a separate one that clones the RUN'S OWN repo
+// and writes the standard manifest (split so the boot stepper can show box
+// creation and cloning as distinct steps) — after which the normal manifest/bootstrap flow
 // proceeds unchanged.
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -223,17 +224,22 @@ describe("box blank provisioning", () => {
     const reassembled = Buffer.concat(fake.writes.map((w) => Buffer.from(w.content, "base64")));
     expect(reassembled.equals(BUNDLE_BYTES)).toBe(true);
 
+    // Bundle reassembly and the repo clone run as two separate detached steps
+    // so the boot stepper can show "Creating the box" and "Cloning the
+    // repository" independently.
     const provisionCommand = fake.commands.find((cmd) => cmd.includes("worker-upload/part-000"));
+    const cloneCommand = fake.commands.find((cmd) => cmd.includes("git clone --depth 1"));
     expect(provisionCommand).toBeTruthy();
-    // The command verifies the interpolated sha of the exact uploaded bytes
+    expect(cloneCommand).toBeTruthy();
+    expect(cloneCommand).not.toBe(provisionCommand);
+    // The bundle step verifies the interpolated sha of the exact uploaded bytes
     // and never references curl or a download URL.
     expect(provisionCommand).toContain(BUNDLE_SHA);
     expect(provisionCommand).not.toContain("curl");
     expect(provisionCommand).not.toContain("TASK_ORCH_BUNDLE_URL");
-    expect(provisionCommand).toContain("git clone --depth 1");
-    expect(provisionCommand).toContain("github.com/acme/widget");
-    expect(provisionCommand).toContain('"workerEntryPath":"/home/user/worker/run-worker.js"');
-    expect(provisionCommand).toContain('"repository":"acme/widget"');
+    expect(cloneCommand).toContain("github.com/acme/widget");
+    expect(cloneCommand).toContain('"workerEntryPath":"/home/user/worker/run-worker.js"');
+    expect(cloneCommand).toContain('"repository":"acme/widget"');
     // sha256sum joins the git/node/curl preflight.
     expect(provisionCommand).toContain("sha256sum");
     // The claude binary the run needs must also be preflighted (final review #2).
@@ -244,13 +250,13 @@ describe("box blank provisioning", () => {
     for (const cmd of fake.commands) {
       expect(cmd).not.toContain("ghp_should_never_appear_in_a_command_literal");
     }
-    expect(provisionCommand).toContain("GH_TOKEN");
+    expect(cloneCommand).toContain("GH_TOKEN");
     // The credential must never ride in the clone URL itself (it would leak
     // verbatim into a "remote: not found" clone error and round-trip through
     // runDetachedBoxStep's log tail into lastProviderError/agentEvents) — it
     // is injected via a git credential helper instead.
-    expect(provisionCommand).not.toContain("x-access-token:");
-    expect(provisionCommand).toContain("credential.helper");
+    expect(cloneCommand).not.toContain("x-access-token:");
+    expect(cloneCommand).toContain("credential.helper");
 
     // A blank box carries no baked-in git config, so the provision must write a
     // persistent identity (else `git commit` fails "Author identity unknown")
@@ -259,11 +265,11 @@ describe("box blank provisioning", () => {
     // Substrings only — the whole script is wrapped in a single-quoted
     // `sh -c '(...)'`, so embedded quotes are escaped and the values sit between
     // escaped quotes rather than appearing as a verbatim quoted token.
-    expect(provisionCommand).toContain("git config --global user.name");
-    expect(provisionCommand).toContain("Task Orchestrator Agent");
-    expect(provisionCommand).toContain("git config --global user.email");
-    expect(provisionCommand).toContain("agent@task-orchestrator.local");
-    expect(provisionCommand).toContain("git config --global credential.helper");
+    expect(cloneCommand).toContain("git config --global user.name");
+    expect(cloneCommand).toContain("Task Orchestrator Agent");
+    expect(cloneCommand).toContain("git config --global user.email");
+    expect(cloneCommand).toContain("agent@task-orchestrator.local");
+    expect(cloneCommand).toContain("git config --global credential.helper");
 
     const [mapping] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
     expect(mapping).toMatchObject({

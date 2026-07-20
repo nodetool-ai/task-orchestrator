@@ -122,11 +122,34 @@ function bundleUploadPartPath(index: number): string {
   return `${BUNDLE_UPLOAD_DIR}/part-${String(index).padStart(3, "0")}`;
 }
 
-function blankProvisionCommand(
+const shq = (v: string): string => `'${v.replace(/'/g, `'\\''`)}'`;
+
+/** Step 1 of blank provisioning: verify the box has the tools we need and
+ *  reassemble + checksum the uploaded worker bundle. Split from the clone so
+ *  the two show up as distinct steps in the boot stepper. */
+function blankBundleCommand(bundle: BundleAcquisition): string {
+  const tools = ["git", "node", "sha256sum"];
+  const toolCheck =
+    tools.map((t) => `command -v ${t} >/dev/null`).join(" && ") +
+    ` && test -x ${shq(BOX_CLAUDE_BINARY)} || { echo "blank box missing required tool: ${tools.join(", ")}, or ${BOX_CLAUDE_BINARY}" >&2; exit 127; }`;
+
+  return [
+    `set -eu`,
+    toolCheck,
+    `mkdir -p /home/user/worker /home/user/.task-orchestrator`,
+    // Parts listed explicitly, in upload order — never trust glob order
+    // for byte-level reassembly.
+    `cat ${Array.from({ length: bundle.partCount }, (_, i) => bundleUploadPartPath(i)).join(" ")} > /home/user/worker/run-worker.js`,
+    `rm -rf ${BUNDLE_UPLOAD_DIR}`,
+    `got=$(sha256sum /home/user/worker/run-worker.js | awk '{print $1}')`,
+    `[ "${bundle.sha256}" = "$got" ] || { echo "bundle checksum mismatch after upload (want=${bundle.sha256} got=$got)" >&2; exit 1; }`,
+  ].join("; ");
+}
+
+function blankCloneCommand(
   ownerRepo: string,
   repoPath: string,
-  workerSha: string,
-  bundle: BundleAcquisition
+  workerSha: string
 ): string {
   const manifest = JSON.stringify({
     formatVersion: 1,
@@ -136,7 +159,6 @@ function blankProvisionCommand(
     repositoryPath: repoPath,
     workerEntryPath: "/home/user/worker/run-worker.js",
   });
-  const shq = (v: string): string => `'${v.replace(/'/g, `'\\''`)}'`;
   // A credential embedded in the clone URL itself (https://x-access-token:$GH_TOKEN@…)
   // would print verbatim in git's "remote: not found" / auth-failure error text,
   // which runDetachedBoxStep's failure-tail round-trips into the thrown Error —
@@ -149,25 +171,8 @@ function blankProvisionCommand(
     `if [ -n "\${GH_TOKEN:-}" ]; then ` +
     `git -c credential.helper=${shq(CRED_HELPER)} clone --depth 1 "${cloneUrl}" ${shq(repoPath)}; ` +
     `else git clone --depth 1 "${cloneUrl}" ${shq(repoPath)}; fi`;
-  const tools = ["git", "node", "sha256sum"];
-  const toolCheck =
-    tools.map((t) => `command -v ${t} >/dev/null`).join(" && ") +
-    ` && test -x ${shq(BOX_CLAUDE_BINARY)} || { echo "blank box missing required tool: ${tools.join(", ")}, or ${BOX_CLAUDE_BINARY}" >&2; exit 127; }`;
-
-  const acquire = [
-    // Parts listed explicitly, in upload order — never trust glob order
-    // for byte-level reassembly.
-    `cat ${Array.from({ length: bundle.partCount }, (_, i) => bundleUploadPartPath(i)).join(" ")} > /home/user/worker/run-worker.js`,
-    `rm -rf ${BUNDLE_UPLOAD_DIR}`,
-    `got=$(sha256sum /home/user/worker/run-worker.js | awk '{print $1}')`,
-    `[ "${bundle.sha256}" = "$got" ] || { echo "bundle checksum mismatch after upload (want=${bundle.sha256} got=$got)" >&2; exit 1; }`,
-  ];
-
   return [
     `set -eu`,
-    toolCheck,
-    `mkdir -p /home/user/worker /home/user/.task-orchestrator`,
-    ...acquire,
     `test ! -e ${shq(repoPath)} || { echo "repo path already exists: ${repoPath}" >&2; exit 1; }`,
     cloneCommand,
     // Persistent identity + credential helper so the agent can commit and push;
@@ -481,8 +486,9 @@ export class BoxRunnerProvider implements RunnerProvider {
   }
 
   /** Blank provisioning (spec: box-blank-provision): create a blank box, run
-   *  ONE detached provision command (bundle download + repo clone + manifest),
-   *  then reuse the normal manifest/bootstrap flow. No template snapshot. */
+   *  two detached steps (bundle reassembly, then repo clone + manifest) so the
+   *  boot stepper can show them separately, then reuse the normal
+   *  manifest/bootstrap flow. No template snapshot. */
   private async createBlank(
     input: CreateRunnerInput,
     repoId: string,
@@ -581,15 +587,18 @@ export class BoxRunnerProvider implements RunnerProvider {
         partCount += 1;
       }
       const acquisition: BundleAcquisition = { sha256: pushBundle.sha256, partCount };
+      const stepOpts = {
+        timeoutSeconds: config.box.provisionTimeoutSeconds,
+        pollMs: config.box.pollMs,
+      };
+      await runDetachedBoxStep(box, boxId, "provisioning", blankBundleCommand(acquisition), stepOpts);
+      await emitBoxEvent(input.runId, "runner_box_cloning", { repository: ownerRepo, repoPath });
       await runDetachedBoxStep(
         box,
         boxId,
-        "provisioning",
-        blankProvisionCommand(ownerRepo, repoPath, sha, acquisition),
-        {
-          timeoutSeconds: config.box.provisionTimeoutSeconds,
-          pollMs: config.box.pollMs,
-        }
+        "cloning",
+        blankCloneCommand(ownerRepo, repoPath, sha),
+        stepOpts
       );
       return await this.readyAndLaunch(input, boxId, channelInstanceId);
     } catch (error) {

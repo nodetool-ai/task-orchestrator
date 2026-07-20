@@ -24,7 +24,7 @@ primary_region = "ams"
   TASK_ORCH_RUNNER = "box"
   TASK_ORCH_BOX_TEMPLATE_ID = "bx_htkmny98"
   TASK_ORCH_BOX_REPO_PATH = "/home/user/nodetool"
-  TASK_ORCH_BOX_MAX_ACTIVE = "1"
+  TASK_ORCH_BOX_MAX_ACTIVE = "100"
   # Run each agent turn in its own Machine, never in this web process, so a
   # redeploy/restart of the server never kills an in-flight run.
   TASK_ORCH_DETACHED_RUNS = "1"
