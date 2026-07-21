@@ -52,6 +52,11 @@ const ALLOWLIST = new Set([
   // a worker/chat locally. A script, not runtime code — same category as the
   // other scripts/*.ts entries above.
   "scripts/worker-chat.ts",
+  // Ops probe (see its header): provisions one disposable Fly Machine and dials
+  // its worker channel. Reads TASK_ORCH_FLY_APP/REGION and its own
+  // TASK_ORCH_FLY_PROBE opt-in gate. A script, not runtime code — same category
+  // as the other scripts/*.ts entries above.
+  "scripts/fly-channel-probe.ts",
 ]);
 
 // git grep emits forward-slash paths on every platform, so no normalization.

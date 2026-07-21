@@ -11,7 +11,10 @@
 // row was re-selected ~every 15s and emitted runner_failed forever. create()
 // had the same hole: its `existing?.boxId` short-circuit called box.get()
 // with no not-found escape, so the run could never re-provision either.
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { eq } from "drizzle-orm";
 
 import { db } from "../db";
@@ -99,6 +102,18 @@ function ok(stdout: string) {
   return { success: true, exitCode: 0, stdout, stderr: "", timedOut: false };
 }
 
+// The re-provision path is blank provisioning, which uploads a worker bundle.
+// Ship a fixture one rather than depending on `npm run build:worker:standalone`
+// having been run — CI runs `npm test` against a clean tree with no dist/.
+let bundleDir: string;
+let bundlePath: string;
+beforeAll(() => {
+  bundleDir = mkdtempSync(join(tmpdir(), "box-dead-bundle-"));
+  bundlePath = join(bundleDir, "run-worker.standalone.js");
+  writeFileSync(bundlePath, Buffer.alloc(1024, 3));
+});
+afterAll(() => rmSync(bundleDir, { recursive: true, force: true }));
+
 function boxEnv() {
   vi.stubEnv("TASK_ORCH_RUNNER", "box");
   vi.stubEnv("BOX_API_KEY", "control-plane-only-key");
@@ -106,6 +121,7 @@ function boxEnv() {
   vi.stubEnv("TASK_ORCH_BOX_POLL_MS", "0");
   vi.stubEnv("AUTH_SECRET", "test-channel-secret");
   vi.stubEnv("TASK_ORCH_WORKER_SHA", "c".repeat(40));
+  vi.stubEnv("TASK_ORCH_BUNDLE_PATH", bundlePath);
   vi.stubEnv("GH_TOKEN", "ghp_test");
 }
 
