@@ -20,3 +20,6 @@ cloudflared.local.yml
 .pi/
 .worker-sessions/
 .worker-sockets/
+
+# Worker outbox spool when SESSION_ROOT is unset (root falls back to cwd)
+/channel/
