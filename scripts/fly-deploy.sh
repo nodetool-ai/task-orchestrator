@@ -15,8 +15,8 @@ set -euo pipefail
 # Usage:
 #   ./scripts/fly-deploy.sh                    # interactive: prompts for secrets
 #   FLY_APP=my-orch FLY_REGION=iad \
-#     GH_TOKEN=ghp_… ANTHROPIC_API_KEY=sk-… \
-#     ADMIN_EMAIL=you@example.com ADMIN_PASSWORD=… \
+#     GH_TOKEN=ghp_... ANTHROPIC_API_KEY=sk-... \
+#     ADMIN_EMAIL=you@example.com ADMIN_PASSWORD=... \
 #     ./scripts/fly-deploy.sh                  # non-interactive
 #
 # Re-runnable: every step is idempotent, so re-running redeploys with the same
@@ -35,9 +35,9 @@ set -euo pipefail
 #   NEXTAUTH_URL      public origin             (default: https://${FLY_APP}.fly.dev)
 #   AUTH_SECRET       session-signing secret    (default: generated)
 #   GH_TOKEN                  GitHub token for clone/push + `gh pr create`
-#   ANTHROPIC_API_KEY        Claude API key  (or …)
-#   CLAUDE_CODE_OAUTH_TOKEN  …claude.ai subscription token (`claude setup-token`)
-#   OPENAI_API_KEY / GEMINI_API_KEY / …  pi-backend provider keys (staged when set)
+#   ANTHROPIC_API_KEY        Claude API key  (or ...)
+#   CLAUDE_CODE_OAUTH_TOKEN  ...claude.ai subscription token (`claude setup-token`)
+#   OPENAI_API_KEY / GEMINI_API_KEY / ...  pi-backend provider keys (staged when set)
 #   NOTE: Codex (ChatGPT) is NOT staged here — sign in from Settings once deployed
 #   and the token is stored in the DB (codex_credentials), surviving redeploys.
 #   ADMIN_EMAIL / ADMIN_PASSWORD   first dashboard login to create
@@ -119,14 +119,14 @@ elif "$FLY" secrets list -a "$APP" 2>/dev/null | grep -qw DATABASE_URL; then
   info "DATABASE_URL secret already present on $APP — leaving it."
 else
   if ! "$FLY" apps list 2>/dev/null | awk '{print $1}' | grep -qx "$PG_APP"; then
-    info "Creating Fly Postgres cluster $PG_APP (this takes a minute)…"
+    info "Creating Fly Postgres cluster $PG_APP (this takes a minute)..."
     "$FLY" postgres create \
       --name "$PG_APP" --org "$ORG" --region "$REGION" \
       --initial-cluster-size 1 --vm-size shared-cpu-1x --volume-size 10
   else
     info "Postgres app $PG_APP already exists."
   fi
-  info "Attaching $PG_APP to $APP (sets DATABASE_URL over the 6PN private network)…"
+  info "Attaching $PG_APP to $APP (sets DATABASE_URL over the 6PN private network)..."
   "$FLY" postgres attach "$PG_APP" --app "$APP" \
     || warn "postgres attach reported an error (already attached?) — continuing."
 fi
@@ -142,7 +142,7 @@ info "Pushed $RUNNER_IMAGE"
 # ── 4. Runner API token + secrets ────────────────────────────────────────────
 bold "--- 4/6  Wiring secrets ---"
 # App-scoped token the server uses to create/destroy runner Machines + Volumes.
-info "Minting a Fly API token scoped to $RUNNER_APP…"
+info "Minting a Fly API token scoped to $RUNNER_APP..."
 # Grab only the token line (starts with "FlyV1 "); it has no internal newlines,
 # so this is robust against any flyctl notice printed alongside it.
 FLY_API_TOKEN="$("$FLY" tokens create deploy --app "$RUNNER_APP" --expiry 8760h --name task-orch-runner 2>/dev/null | grep -m1 '^FlyV1 ')"
@@ -188,7 +188,7 @@ bold "--- 5/6  Deploying the server ---"
 # ── 6. First user ────────────────────────────────────────────────────────────
 bold "--- 6/6  Admin account ---"
 if [[ -n "${ADMIN_EMAIL:-}" && -n "${ADMIN_PASSWORD:-}" ]]; then
-  info "Creating dashboard login $ADMIN_EMAIL…"
+  info "Creating dashboard login $ADMIN_EMAIL..."
   # ${var@Q}: shell-quote the credentials — the -C string is re-parsed by the
   # remote shell, so an unquoted password with spaces/metacharacters would be
   # word-split or executed there.
@@ -196,7 +196,7 @@ if [[ -n "${ADMIN_EMAIL:-}" && -n "${ADMIN_PASSWORD:-}" ]]; then
     || warn "Could not create the admin user automatically — create it manually (see below)."
 else
   info "Set ADMIN_EMAIL + ADMIN_PASSWORD to auto-create a login, or run:"
-  info "  $FLY ssh console -a $APP -C \"npm run task -- user add you@example.com --password=…\""
+  info "  $FLY ssh console -a $APP -C \"npm run task -- user add you@example.com --password=...\""
 fi
 
 echo ""
