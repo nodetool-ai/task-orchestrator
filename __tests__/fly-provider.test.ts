@@ -610,6 +610,34 @@ describe("FlyRunnerProvider", () => {
         isReapableVolume({ id: "v1", attachedMachineId: null, createdAt: OLD }, new Set(), now)
       ).toBe(false);
     });
+
+    // Fly's GET /volumes keeps returning a volume after a successful DELETE while
+    // it settles in `pending_destroy`. Re-selecting it re-issues DELETE and logs a
+    // bogus "reaped orphan volume" line on EVERY sweep, forever (observed in prod:
+    // vol_run_142 looped every ~10s for 20+ minutes). Already-dying volumes are
+    // not leaks — there is nothing left to reap.
+    it.each(["pending_destroy", "destroying", "destroyed"])(
+      "is NOT reapable when already in state %s",
+      (state) => {
+        expect(
+          isReapableVolume(
+            { id: "v1", name: "vol_run_7", state, attachedMachineId: null, createdAt: OLD },
+            new Set(),
+            now
+          )
+        ).toBe(false);
+      }
+    );
+
+    it("is still reapable in a live state (created)", () => {
+      expect(
+        isReapableVolume(
+          { id: "v1", name: "vol_run_7", state: "created", attachedMachineId: null, createdAt: OLD },
+          new Set(),
+          now
+        )
+      ).toBe(true);
+    });
   });
 
   it("sweep reaps a leaked volume but spares attached/referenced ones", async () => {

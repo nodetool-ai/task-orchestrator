@@ -115,6 +115,14 @@ export function isEligibleForLifecycleAction(row: {
   return !isActiveRunStatus(row.status) && !isWorkerClaimLive(row) && !isWakeIntentFresh(row);
 }
 
+// Volume states that mean "already being destroyed". Fly's GET /volumes keeps
+// returning a volume for a while after a successful DELETE, parked in
+// `pending_destroy` (the flyctl CLI hides these; the Machines API does not).
+// Without this guard the reaper re-selects the same corpse on every sweep,
+// re-issues DELETE, and logs a bogus "reaped orphan volume" line forever —
+// observed in prod on vol_run_142, looping every ~10s for 20+ minutes.
+const DYING_VOLUME_STATES = new Set(["pending_destroy", "destroying", "destroyed"]);
+
 /**
  * Whether a Fly volume is a safe-to-destroy LEAK: an orphan with no attached
  * Machine and no live/resumable runner_instances row referencing it. Exported as
@@ -135,14 +143,22 @@ export function isEligibleForLifecycleAction(row: {
  *    ENOUGH (reapable): a leaked volume from a crash often carries no usable
  *    timestamp, and we don't want unknown-age leaks to live forever. The name +
  *    unattached + unprotected guards already make this safe.
+ *  - the volume is NOT already dying — see DYING_VOLUME_STATES.
  */
 export function isReapableVolume(
-  vol: { id: string; name?: string; attachedMachineId?: string | null; createdAt?: Date | null },
+  vol: {
+    id: string;
+    name?: string;
+    state?: string;
+    attachedMachineId?: string | null;
+    createdAt?: Date | null;
+  },
   protectedVolumeIds: Set<string>,
   nowMs: number
 ): boolean {
   if (!vol.name || !vol.name.startsWith("vol_run_")) return false;
   if (vol.attachedMachineId) return false;
+  if (vol.state && DYING_VOLUME_STATES.has(vol.state)) return false;
   if (protectedVolumeIds.has(vol.id)) return false;
   // createdAt absent/null → unknown age → treat as old enough (reapable); see
   // doc-comment above for why leaks must not be immortal.
@@ -155,7 +171,9 @@ export function isReapableVolume(
  * unattached `vol_run_*` volume no non-"gone" runner_instances row references,
  * aged past the grace window. Shared by the sweep and the `runners --reap` CLI
  * so both paths apply the same safety checks. Crash-safe and idempotent — a
- * second pass finds the already-destroyed volume gone from listVolumes().
+ * second pass skips the volume either because listVolumes() no longer returns it
+ * or because it now reports a dying state (see DYING_VOLUME_STATES; Fly lingers
+ * on `pending_destroy` well after the DELETE succeeds).
  * Returns the ids actually destroyed.
  */
 export async function reapOrphanVolumes(flyClient: FlyClient, nowMs: number = Date.now()): Promise<string[]> {
