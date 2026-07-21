@@ -756,7 +756,26 @@ export async function provisionLocalChannel(
 // ladder until the boot deadline; never retry protocol/auth/scope rejections
 // (ControllerProtocolError with retryable=false).
 const BOOT_BACKOFF_MS = [250, 500, 1000, 2000, 5000] as const;
-const BOOT_DEADLINE_MS = 60_000;
+
+// Must cover the SLOWEST path from "provider create() returned" to "the worker
+// has bound its listener". On Fly that is dominated by a cold image pull, which
+// happens on the first run scheduled onto a host after every deploy:
+//
+//   run 169 (2026-07-21, measured):
+//     image pull ......................... 57s
+//     machine created and started ........ 61s total
+//     node/tsx boot to bound listener .... ~30s more  => ~90s
+//
+// The old 60s deadline expired ~30s BEFORE the worker could possibly listen, so
+// the dial failed with ECONNREFUSED and the run sat in `preparing` forever —
+// reproducible after any deploy. Overshooting is cheap: the ladder returns as
+// soon as the worker answers, and a genuinely dead worker only delays the
+// failure report. Override for slower images/regions.
+export const BOOT_DEADLINE_MS = (() => {
+  const raw = process.env.TASK_ORCH_WORKER_BOOT_DEADLINE_MS;
+  const n = raw == null || raw === "" ? NaN : Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 180_000;
+})();
 
 async function connectWithBootBackoff(runId: number) {
   const deadline = Date.now() + BOOT_DEADLINE_MS;
