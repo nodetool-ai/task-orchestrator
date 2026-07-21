@@ -218,7 +218,10 @@ function parseEndpoint(config: WorkerServerConfig): ListenerAddress {
     // default and bound a socket under the root-owned /app instead of TCP.
     const normalized = endpoint.startsWith("tcp://") ? endpoint : `tcp://${endpoint.slice("tcp:".length)}`;
     const parsed = new URL(normalized);
-    return { kind: "tcp", host: parsed.hostname, port: Number(parsed.port || 8787) };
+    // WHATWG URL keeps the brackets on an IPv6 literal ("[::]"), but
+    // Server.listen() wants the bare address ("::"). Strip them.
+    const hostname = parsed.hostname.replace(/^\[(.+)\]$/, "$1");
+    return { kind: "tcp", host: hostname, port: Number(parsed.port || 8787) };
   }
   if (config.transport === "tcp" || config.port !== undefined || process.env.FLY_APP_NAME) {
     return { kind: "tcp", host: config.host ?? "0.0.0.0", port: config.port ?? 8787 };

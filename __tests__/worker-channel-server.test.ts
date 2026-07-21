@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { decodeFrame, encodeFrame } from "../lib/worker-channel/codec";
 import { mintChannelCredential } from "../lib/worker-channel/credential";
+import { flyListenEndpoint } from "../lib/worker-channel/dispatch-env";
 import {
   startWorkerServer,
   type WorkerServer,
@@ -183,6 +184,40 @@ describe("worker WebSocket supervisor", () => {
     await openSocket(socket);
     expect((await nextFrame(socket)).type).toBe("channel.hello");
     socket.close();
+  });
+
+  // Prod incident 2026-07-21: every Fly run failed with
+  //   Worker channel start failed for run 167: connect ECONNREFUSED fdaa:...:8787
+  // flyListenEndpoint() emitted `tcp:0.0.0.0:8787`, and Node's
+  // listen(port, "0.0.0.0") binds IPv4 ONLY (confirmed on a real Machine:
+  // /proc/net/tcp had 00000000:2253 state 0A, /proc/net/tcp6 had nothing).
+  // The control plane dials the Machine's private 6PN IPv6 address, so the
+  // worker was permanently unreachable. Binding :: gives a dual-stack listener
+  // that serves both families.
+  it("binds a DUAL-STACK listener for the Fly 6PN IPv6 dial path", async () => {
+    const root = await mkdtemp(join(tmpdir(), "worker-channel-server-"));
+    roots.push(root);
+    const runId = 73;
+    const instanceId = `wi_${"c".repeat(32)}`;
+    const token = mintChannelCredential(runId, instanceId, { secret });
+    const server = await startWorkerServer({
+      runId,
+      instanceId,
+      credential: token,
+      credentialSecret: secret,
+      outboxRoot: root,
+      // The bracketed IPv6 listen form flyListenEndpoint() emits.
+      endpoint: "tcp:[::]:0",
+    });
+    servers.push(server);
+    const address = server.address();
+    expect(address && typeof address === "object").toBe(true);
+    // IPv6 family is what makes the 6PN dial reachable at all.
+    expect((address as { family: string }).family).toBe("IPv6");
+  });
+
+  it("flyListenEndpoint binds IPv6-any so the 6PN dial can reach it", () => {
+    expect(flyListenEndpoint()).toBe("tcp:[::]:8787");
   });
 
   it("binds TCP from the `tcp:host:port` listen form dockerListenEndpoint emits", async () => {

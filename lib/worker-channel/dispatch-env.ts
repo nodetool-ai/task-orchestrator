@@ -78,7 +78,14 @@ export function dockerDialEndpoint(host: string): string {
  *  Docker; kept as its own named export so a future divergence doesn't force
  *  callers to reach for `dockerListenEndpoint`. */
 export function flyListenEndpoint(): string {
-  return dockerListenEndpoint();
+  // MUST be IPv6-any, not 0.0.0.0. The control plane reaches a Fly worker only
+  // over the Machine's private 6PN address, which is IPv6
+  // (flyChannelDialEndpoint → ws://[fdaa:...]:8787). Node's
+  // listen(port, "0.0.0.0") binds IPv4 ONLY, so a 6PN dial got ECONNREFUSED and
+  // every Fly run failed to start (prod, 2026-07-21: runs 162/166/167).
+  // "::" is dual-stack — it serves IPv4 clients too — so this is strictly more
+  // permissive than the Docker form it used to share.
+  return `tcp:[::]:${DOCKER_CHANNEL_PORT}`;
 }
 
 /** Endpoint the control plane stores and dials for a Fly worker: the fixed

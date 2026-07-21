@@ -897,7 +897,11 @@ describe("FlyRunnerProvider", () => {
       await provider.create({ runId: run.id, scope: `run-${run.id}-x`, channelInstanceId: "wi_" + "b".repeat(32) });
 
       expect(capturedEnv?.TASK_ORCH_WORKER_INSTANCE_ID).toBe("wi_" + "b".repeat(32));
-      expect(capturedEnv?.TASK_ORCH_WORKER_CHANNEL_ENDPOINT).toBe("tcp:0.0.0.0:8787");
+      // IPv6-any, NOT 0.0.0.0: the control plane reaches a Fly worker only over
+      // the Machine's private 6PN IPv6 address, and listen(port, "0.0.0.0")
+      // binds IPv4 only — which made every Fly run fail with ECONNREFUSED
+      // (prod, 2026-07-21). "::" is dual-stack, so IPv4 clients still work.
+      expect(capturedEnv?.TASK_ORCH_WORKER_CHANNEL_ENDPOINT).toBe("tcp:[::]:8787");
       expect(capturedEnv?.TASK_ORCH_WORKER_CHANNEL_CREDENTIAL).toBeTruthy();
     });
 
