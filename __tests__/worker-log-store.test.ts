@@ -101,3 +101,30 @@ describe("startWorkerLogFlusher over the worker channel", () => {
     }
   });
 });
+
+// Prod, run 168: the terminal flush logged
+//   [worker-log-store] flush failed runId=168 error="worker session is closed"
+// because run-worker's finally closed the supervisor BEFORE calling stop().
+// The flush emits over the channel, so the last — and most valuable — bytes of
+// a run could never land. stop() must still deliver while the sink is alive.
+describe("terminal flush", () => {
+  it("delivers the tail written after the last periodic tick", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "worker-log-terminal-"));
+    try {
+      const file = join(dir, "runner.log");
+      await writeFile(file, "early\n");
+      const sent: string[] = [];
+      const stop = startWorkerLogFlusher(9, file, {
+        intervalMs: 0,
+        sink: async (text) => void sent.push(text),
+      });
+      await flushWorkerLogOnce(9, file);
+      // Written after the last tick — only the terminal flush can catch it.
+      await appendFile(file, "DYING WORDS\n");
+      await stop();
+      expect(sent.join("")).toContain("DYING WORDS");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -101,11 +101,14 @@ async function main() {
     log.error("worker fatal", { runId, error: e instanceof Error ? (e.stack ?? e.message) : String(e) });
     exitCode = 1;
   } finally {
-    await supervisor?.close().catch(() => {});
     // Terminal flush of runner.log — wraps BOTH the success and the catch path
     // so the last bytes land regardless of how the run ended. Runs BEFORE
-    // process.exit (which would otherwise terminate before this awaited flush).
+    // process.exit (which would otherwise terminate before this awaited flush)
+    // and, critically, BEFORE supervisor.close(): the flush emits over the
+    // channel, so closing the session first makes the most important flush of
+    // the run fail with "worker session is closed" every time.
     if (stopLogFlusher) await stopLogFlusher().catch(() => {});
+    await supervisor?.close().catch(() => {});
   }
   process.exit(exitCode);
 }
