@@ -40,6 +40,23 @@ const WORKER_BOOTSTRAP_TIMEOUT_SECONDS = 30;
 const BOOTSTRAP_LOG_TIMEOUT_SECONDS = 10;
 const BOOTSTRAP_LOG_TAIL_LINES = 200;
 const SWEEP_KEY = "__taskOrchBoxRunnerSweep";
+// Grace window before a 404 on a mapped Box is believed to be permanent.
+// A just-provisioned Box that 404s is far more likely to be Box-side eventual
+// consistency than a dead box, and retiring a LIVE mapping is expensive: the
+// box keeps running (and billing) with nothing pointing at it while the run
+// provisions a duplicate. Mirrors the same defensive reasoning as fly.ts's
+// REAP_MIN_AGE_MS. `lastStartedAt` only advances on a SUCCESSFUL provision, so
+// a genuinely dead mapping always ages past this window and does get retired.
+const BOX_DEAD_GRACE_MS = 5 * 60_000;
+
+/** Whether a 404 against this mapping has persisted long enough to be death. */
+function isBoxMappingRetirable(
+  row: { createdAt: Date; lastStartedAt: Date | null },
+  nowMs: number = Date.now()
+): boolean {
+  const freshest = Math.max(row.createdAt.getTime(), row.lastStartedAt?.getTime() ?? 0);
+  return nowMs - freshest >= BOX_DEAD_GRACE_MS;
+}
 // The worker binds this fixed TCP port (plan section 2) inside the Box; the
 // ascii.dev `host` proxy exposes it as a public WSS URL the control plane dials.
 const BOX_CHANNEL_PORT = 8787;
@@ -389,12 +406,26 @@ export class BoxRunnerProvider implements RunnerProvider {
     if (existing?.boxId) {
       // A retry continues its tracked fork. It must never fork a second Box for
       // a mapping that is still usable/provisioning.
-      if (existing.credentialsExpiresAt && existing.credentialsExpiresAt.getTime() <= Date.now()) {
-        return this.refreshCredentials(input, existing.boxId, channelInstanceId);
+      //
+      // ...unless the Box is GONE. A recorded box can vanish from the account
+      // (manual deletion, account-side GC, retention), and then every call here
+      // 404s. Without this escape the run re-takes this branch on every dispatch
+      // and fails identically forever — it can never re-provision. Retire the
+      // dead mapping and fall through to a fresh provision, mirroring the
+      // blank-provision failure path below.
+      try {
+        if (existing.credentialsExpiresAt && existing.credentialsExpiresAt.getTime() <= Date.now()) {
+          return await this.refreshCredentials(input, existing.boxId, channelInstanceId);
+        }
+        const current = await box.get(existing.boxId);
+        if (current.state === "archived")
+          return await this.resumeExisting(input, existing.boxId, channelInstanceId);
+        return await this.readyAndLaunch(input, existing.boxId, channelInstanceId);
+      } catch (error) {
+        const normalized = await normalizeBoxApiError(error);
+        if (normalized.category !== "not-found" || !isBoxMappingRetirable(existing)) throw error;
+        await this.retireDeadBox(input.runId, existing.boxId, "create");
       }
-      const current = await box.get(existing.boxId);
-      if (current.state === "archived") return this.resumeExisting(input, existing.boxId, channelInstanceId);
-      return this.readyAndLaunch(input, existing.boxId, channelInstanceId);
     }
 
     const [run] = await db
@@ -848,6 +879,24 @@ export class BoxRunnerProvider implements RunnerProvider {
     }
   }
 
+  /**
+   * Retire a mapping whose Box no longer exists on the account.
+   *
+   * Clearing boxId is the load-bearing part: sweep() selects on `boxId IS NOT
+   * NULL` and create() short-circuits on `existing?.boxId`, so a row that keeps
+   * a dangling boxId is re-dereferenced — and re-fails — on every single tick.
+   * recordFailure() is deliberately NOT used here: it re-sets state='starting'
+   * and preserves boxId, which is exactly the loop this avoids. A 404 is
+   * terminal for the box, not a retryable provider error.
+   */
+  private async retireDeadBox(runId: number, boxId: string, phase: string): Promise<void> {
+    await db
+      .update(runnerInstances)
+      .set({ boxId: null, snapshotId: null, state: "gone", lastProviderError: null })
+      .where(and(eq(runnerInstances.runId, runId), eq(runnerInstances.boxId, boxId)));
+    await emitBoxEvent(runId, "runner_box_missing", { boxId, phase });
+  }
+
   private async recordFailure(runId: number, boxId: string, error: ReturnType<typeof serializeBoxApiError>): Promise<void> {
     await db
       .update(runnerInstances)
@@ -917,7 +966,16 @@ export class BoxRunnerProvider implements RunnerProvider {
           );
           if (Date.now() - idleSince >= config.box.idleStopMs) await this.checkpoint(row.runId);
         } catch (error) {
-          await this.recordFailure(row.runId, row.boxId, await normalizeBoxApiError(error));
+          const normalized = await normalizeBoxApiError(error);
+          // A vanished Box is terminal: retire the mapping so this row leaves
+          // the sweep's `boxId IS NOT NULL` selection. recordFailure() would
+          // keep boxId and re-set state='starting', re-selecting this same row
+          // every tick and emitting runner_failed forever.
+          if (normalized.category === "not-found" && isBoxMappingRetirable(row)) {
+            await this.retireDeadBox(row.runId, row.boxId, "sweep");
+            continue;
+          }
+          await this.recordFailure(row.runId, row.boxId, normalized);
         }
       }
     } finally {

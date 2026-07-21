@@ -100,6 +100,35 @@ function fakeFlyClient(calls: string[] = [], opts: FakeOptions = {}): FlyClient 
 afterEach(() => vi.unstubAllEnvs());
 
 describe("FlyRunnerProvider", () => {
+  // Switching TASK_ORCH_RUNNER box->fly (prod, 2026-07-21) leaves rows carrying a
+  // stale box_id. Flipping `provider` alone is not enough: if the deployment ever
+  // switches back, BoxRunnerProvider.create() short-circuits on `existing?.boxId`
+  // and dereferences a box that has been dead for weeks. Fly owns the row now, so
+  // it must clear the other provider's identifiers when it takes over.
+  it("clears stale box identifiers when taking over a box-provisioned row", async () => {
+    const provider = new FlyRunnerProvider(fakeFlyClient());
+    const run = await create({ goal: "<implement>", defer: true });
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      provider: "box",
+      boxId: "bx_long_dead",
+      boxTemplateId: "bx_template",
+      snapshotId: "snap_stale",
+      lastProviderError: JSON.stringify({ category: "not-found", status: 404 }),
+      state: "starting",
+    });
+
+    await provider.create({ runId: run.id, scope: `run-${run.id}-x` });
+
+    const [row] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(row.provider).toBe("fly");
+    expect(row.machineId).toBeTruthy();
+    expect(row.boxId).toBeNull();
+    expect(row.boxTemplateId).toBeNull();
+    expect(row.snapshotId).toBeNull();
+    expect(row.lastProviderError).toBeNull();
+  });
+
   it("provisions a volume + machine and records the mapping", async () => {
     const calls: string[] = [];
     const provider = new FlyRunnerProvider(fakeFlyClient(calls));

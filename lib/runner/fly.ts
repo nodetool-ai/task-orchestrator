@@ -555,6 +555,13 @@ export class FlyRunnerProvider implements RunnerProvider {
             lastStartedAt: new Date(),
             channelInstanceId,
             channelEndpoint,
+            // Taking over a row another provider owned (a TASK_ORCH_RUNNER
+            // switch): drop its identifiers. Leaving a stale boxId behind means
+            // a later switch back would short-circuit onto a long-dead Box.
+            boxId: null,
+            boxTemplateId: null,
+            snapshotId: null,
+            lastProviderError: null,
           },
         });
       await emitRunnerEvent(input.runId, "runner_created", {
