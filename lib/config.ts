@@ -223,6 +223,13 @@ export const config = Object.freeze({
     get channelSecret(): string | undefined {
       return strEnv("TASK_ORCH_WORKER_CHANNEL_SECRET");
     },
+    /** Dead-worker backstop: exit when no controller has been attached for this
+     *  long, so a worker that is never dialed (run 169) stops holding its Fly
+     *  Machine open at full price. 0 disables — use that for a long manual or
+     *  debugging session you do not want killed at the 10-minute mark. */
+    get idleExitMs(): number {
+      return intEnv("TASK_ORCH_WORKER_IDLE_EXIT_MS", 600_000);
+    },
     /** Directory for local workers' Unix-domain sockets. MUST stay short: the
      *  kernel caps sun_path at ~104-108 bytes, and a cwd-derived path already
      *  overflowed on GitHub runners (110 chars → listen EINVAL, the red-CI

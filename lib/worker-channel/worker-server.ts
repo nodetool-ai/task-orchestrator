@@ -98,6 +98,22 @@ export interface WorkerServerConfig {
   acceptTimeoutMs?: number;
   disconnectGraceMs?: number;
   maxInFlightBytes?: number;
+  /**
+   * Dead-worker backstop: exit when NO controller has been attached for this
+   * long. Armed as soon as the listener binds, disarmed while a controller is
+   * attached, re-armed when one goes away. 0 (the DEFAULT here) disables it —
+   * the entrypoint (scripts/run-worker.ts) opts in, so embedded servers and the
+   * test suite can never be killed mid-use.
+   *
+   * This is the outer backstop, not a replacement for disconnectGraceMs: that
+   * one aborts the SESSION 60s after a controller drops, this one guarantees the
+   * PROCESS dies so the Machine stops billing. Run 169 idled indefinitely
+   * because nothing covered "bound, but never dialed at all".
+   */
+  idleExitMs?: number;
+  /** What to do when idleExitMs elapses. Defaults to a clean drain + exit(0).
+   *  Injected by tests so nothing calls process.exit under vitest. */
+  onIdleExit?: (reason: string) => void | Promise<void>;
   /** Override the protocol range advertised in `channel.hello`. Tests use it to
    * force a protocol mismatch; production always advertises the current major. */
   helloProtocol?: { min: number; max: number };
@@ -249,6 +265,8 @@ class WorkerServerImpl implements WorkerServer {
 
   private readonly config: WorkerServerConfig;
   private readonly listener: ListenerAddress;
+  private readonly idleExitMs: number = 0;
+  private idleTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly acceptTimeoutMs: number;
   private readonly defaultGraceMs: number;
   private active?: ControllerConnection;
@@ -268,6 +286,10 @@ class WorkerServerImpl implements WorkerServer {
     this.instanceId = config.instanceId;
     this.acceptTimeoutMs = positiveInteger(config.acceptTimeoutMs, DEFAULT_ACCEPT_TIMEOUT_MS, "acceptTimeoutMs");
     this.defaultGraceMs = positiveInteger(config.disconnectGraceMs, DEFAULT_GRACE_MS, "disconnectGraceMs");
+    // 0 / absent => disabled. Deliberately opt-in; see WorkerServerConfig.idleExitMs.
+    this.idleExitMs = Number.isFinite(config.idleExitMs) && (config.idleExitMs as number) > 0
+      ? Math.floor(config.idleExitMs as number)
+      : 0;
     this.endpoint = listener.kind === "unix" ? `unix://${listener.socketPath}` : `tcp://${listener.host}:${listener.port}`;
 
     this.websocketServer = new WebSocketServer({
@@ -327,6 +349,7 @@ class WorkerServerImpl implements WorkerServer {
 
   private async performClose(options: WorkerServerCloseOptions): Promise<void> {
     this.draining = true;
+    this.disarmIdleTimer();
     if (this.graceTimer) clearTimeout(this.graceTimer);
     const code = options.code ?? CLOSE_CODE_CLEAN_DRAIN;
     const reason = safeReason(options.reason ?? "worker server closed");
@@ -363,6 +386,8 @@ class WorkerServerImpl implements WorkerServer {
     if (this.listener.kind === "unix" && this.listener.socketPath) await chmod(this.listener.socketPath, 0o600);
     this.started = true;
     (this as { endpoint: string }).endpoint = formatEndpoint(this.listener, this.httpServer);
+    // Bound but never dialed is the run-169 hole: arm immediately.
+    this.armIdleTimer();
   }
 
   private async closeHttpServer(): Promise<void> {
@@ -523,6 +548,7 @@ class WorkerServerImpl implements WorkerServer {
     connection.epoch = payload.controllerEpoch;
     connection.accepted = true;
     this.active = connection;
+    this.disarmIdleTimer();
     if (connection.acceptTimer) clearTimeout(connection.acceptTimer);
     if (this.graceTimer) {
       clearTimeout(this.graceTimer);
@@ -601,12 +627,56 @@ class WorkerServerImpl implements WorkerServer {
     }
   }
 
+
+  /** Dead-worker backstop. See WorkerServerConfig.idleExitMs. */
+  private armIdleTimer(): void {
+    if (!this.idleExitMs || this.draining || this.closed) return;
+    if (this.idleTimer) return;
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = undefined;
+      // Re-check: a controller may have attached between the last arm and now.
+      if (this.active || this.draining || this.closed) return;
+      void this.onIdleExpired();
+    }, this.idleExitMs);
+    // Never let this timer alone hold the process open.
+    (this.idleTimer as { unref?: () => void }).unref?.();
+  }
+
+  private disarmIdleTimer(): void {
+    if (!this.idleTimer) return;
+    clearTimeout(this.idleTimer);
+    this.idleTimer = undefined;
+  }
+
+  private async onIdleExpired(): Promise<void> {
+    const reason = `no controller attached for ${this.idleExitMs}ms`;
+    this.logError("worker idle backstop firing; shutting down", new Error(reason));
+    const handler = this.config.onIdleExit;
+    if (handler) {
+      await handler(reason);
+      return;
+    }
+    // Drain so the spool is flushed, then exit ZERO. Fly's machine restart
+    // policy is on-failure/max_retries=3: a non-zero exit here would RESTART the
+    // Machine, re-bind, re-arm this very timer, and burn 4x the billing this is
+    // meant to save.
+    try {
+      await this.close({ code: CLOSE_CODE_CLEAN_DRAIN, reason: "worker idle backstop" });
+    } catch {
+      // Never let a drain failure keep a dead worker (and its Machine) alive.
+    }
+    process.exit(0);
+  }
+
   private handleConnectionClose(connection: ControllerConnection): void {
     connection.closed = true;
     if (connection.acceptTimer) clearTimeout(connection.acceptTimer);
     this.connections.delete(connection);
     if (this.active !== connection) return;
     this.active = undefined;
+    // Re-arm the backstop: the session grace below only aborts the SESSION; this
+    // guarantees the PROCESS eventually dies if no controller comes back.
+    this.armIdleTimer();
     if (connection.superseded || this.draining || this.closed) return;
     const graceMs = this.defaultGraceMs;
     this.graceTimer = setTimeout(() => {

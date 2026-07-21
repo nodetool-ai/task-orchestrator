@@ -70,7 +70,16 @@ async function main() {
     // Start the supervisor, wait for that snapshot, build the worker run context
     // from it, and drive the run without any Postgres or control-plane HTTP read.
     // The supervisor is closed (drained) in the finally below.
-    supervisor = await startWorkerServer({ runId, instanceId, credential, endpoint });
+    // Dead-worker backstop. A worker that binds but is never dialed (run 169:
+    // the control plane's boot deadline expired mid image-pull) would otherwise
+    // idle forever, holding a Fly Machine open at full price.
+    supervisor = await startWorkerServer({
+      runId,
+      instanceId,
+      credential,
+      endpoint,
+      idleExitMs: appConfig.worker.idleExitMs,
+    });
 
     // Ship the tee'd runner.log over the CHANNEL, not the db. A worker holds no
     // database credentials (the guard rejects direct access), so this must start
