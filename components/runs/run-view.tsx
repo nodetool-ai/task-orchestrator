@@ -855,7 +855,7 @@ export function RunView({
                 {childRuns.length}
               </span>
             </div>
-            <div className="divide-y divide-border/60">
+            <div className="max-h-48 divide-y divide-border/60 overflow-y-auto">
               {childRuns.map((c) => (
                 <div
                   key={c.id}
