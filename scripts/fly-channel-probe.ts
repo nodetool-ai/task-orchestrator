@@ -218,9 +218,30 @@ async function main() {
     socket!.once("close", (code: number, reason: Buffer) => {
       closed = `${code} ${reason?.toString() ?? ""}`;
     });
-    await delay(3_000);
+
+    // The worker ships its tee'd runner.log over this channel as `worker.log`
+    // (15s cadence). Waiting for one proves the log path actually works on a
+    // real Machine — it used to call the db transport and fail on every tick.
+    let workerLog: any;
+    socket!.on("message", (data: Buffer) => {
+      try {
+        const frame = JSON.parse(data.toString());
+        if (frame?.type === "worker.log" && !workerLog) workerLog = frame;
+      } catch {}
+    });
+
+    log("waiting up to 40s for a worker.log event (proves log shipping works)");
+    const logDeadline = Date.now() + 40_000;
+    while (!workerLog && !closed && Date.now() < logDeadline) await delay(1_000);
+
     if (closed) throw new Error(`worker closed the channel after accept: ${closed}`);
     if (socket!.readyState !== WebSocket.OPEN) throw new Error("socket is no longer open after accept");
+    if (!workerLog) throw new Error("no worker.log event arrived within 40s — log shipping is broken");
+    const firstEntry = String(workerLog.payload?.entries?.[0]?.message ?? "");
+    log(`worker.log received (${firstEntry.length} chars): ${JSON.stringify(firstEntry.slice(0, 120))}`);
+    if (/Direct database access attempted/.test(firstEntry)) {
+      throw new Error("worker.log still contains the db-guard error — the flusher is still hitting the db");
+    }
 
     log("");
     log("RESULT: PASS — full control-plane handshake completed against a real Fly Machine.");

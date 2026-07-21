@@ -45,14 +45,6 @@ async function main() {
   const sessionRoot = process.env.SESSION_ROOT;
   const logPath = sessionRoot ? `${sessionRoot}/logs/runner.log` : null;
   let stopLogFlusher: (() => Promise<void>) | null = null;
-  if (logPath && insideWorker()) {
-    try {
-      stopLogFlusher = startWorkerLogFlusher(runId, logPath);
-    } catch (e) {
-      // A log-capture failure must never stop us from driving the run.
-      console.error("[run-worker] failed to start log flusher:", e);
-    }
-  }
 
   const instanceId = appConfig.worker.channelInstanceId;
   const credential = appConfig.worker.channelCredential;
@@ -79,6 +71,25 @@ async function main() {
     // from it, and drive the run without any Postgres or control-plane HTTP read.
     // The supervisor is closed (drained) in the finally below.
     supervisor = await startWorkerServer({ runId, instanceId, credential, endpoint });
+
+    // Ship the tee'd runner.log over the CHANNEL, not the db. A worker holds no
+    // database credentials (the guard rejects direct access), so this must start
+    // after the supervisor exists — the first flush reads from byte 0, so no
+    // boot output is lost by starting here rather than earlier.
+    if (logPath && insideWorker()) {
+      try {
+        const server = supervisor;
+        stopLogFlusher = startWorkerLogFlusher(runId, logPath, {
+          sink: async (text) => {
+            await server.emit("worker.log", { entries: [{ message: text }] });
+          },
+        });
+      } catch (e) {
+        // A log-capture failure must never stop us from driving the run.
+        console.error("[run-worker] failed to start log flusher:", e);
+      }
+    }
+
     const session = supervisor.session;
     if (!session.waitForStart || !session.commands) {
       throw new Error("worker supervisor session does not expose the ws run-driver API");
