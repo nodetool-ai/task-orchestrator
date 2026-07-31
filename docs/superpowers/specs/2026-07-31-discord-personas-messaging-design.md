@@ -266,9 +266,11 @@ run per Discord thread (existing auto-thread behavior). `/new` resets
 the thread to a fresh run (existing). Because context is rebuilt from
 Postgres each turn, long threads eventually need compaction: reuse the
 transcript-summarization approach from the planning agent (summarize
-`agent_messages` older than N turns into a synthetic system block) —
-kept simple in v1: hard cap with a "start a /new thread" nudge, real
-compaction as follow-up.
+`agent_messages` older than N turns into a synthetic system block).
+v1: on hitting the turn cap, the persona announces the reset and
+`/new` carries a short model-generated summary of the old thread into
+the fresh run (durable facts already persist via memory); rolling
+mid-thread compaction is follow-up work.
 
 ### 6. Security posture
 

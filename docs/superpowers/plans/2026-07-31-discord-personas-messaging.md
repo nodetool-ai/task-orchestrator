@@ -9,6 +9,7 @@
 **Tech Stack:** TypeScript, Next.js 15, Drizzle (Postgres), discord.js 14, `@earendil-works/pi-coding-agent`, Vitest. Existing: `lib/pipe/*`, `lib/runs.ts`, `lib/run-dispatch.ts`, `lib/agent-backend/postgres-turn.ts`, `lib/extensions/persona-memory.ts`, `lib/repo.ts`, `db/schema.ts`.
 
 **Source spec:** `docs/superpowers/specs/2026-07-31-discord-personas-messaging-design.md`
+**Source PRD:** `docs/superpowers/specs/2026-07-31-discord-personas-messaging-prd.md` — where the design doc and PRD conflict on user-visible behavior, the PRD wins. Milestones 4–6 implement its UX contract: slash-command registration, reactions as input, `/status` digest, thread-title status, breadcrumb throttling, onboarding replies, pre-queue interrupts, `/new` summary carry-over, and metrics.
 
 ---
 
@@ -68,19 +69,29 @@
 - [ ] `loadPipeConfig()`: discover `DISCORD_BOT_TOKEN_<PERSONA_ID>` vars → `bots: PersonaBotConfig[]`; legacy `DISCORD_BOT_TOKEN` maps to `DISCORD_DEFAULT_PERSONA` (default `implementor`); per-bot `DISCORD_ALLOWED_USERS_<ID>`/`DISCORD_ALLOWED_CHANNELS_<ID>` overrides; validate persona ids against DB; refuse empty user allowlists.
 - [ ] `scripts/pipe.ts`: one `(DiscordChannel, AgentLoop)` per bot; graceful multi-client shutdown.
 - [ ] `session-store.ts#getOrCreateRun(channel, externalId, personaId)`: look up `user_id` via `channel_identities`; create via `runs.create({goal: "<chat>", personaId, userId, runtime: "server", cwdStrategy: "none", toolsProfile: persona.toolsProfile, backend: persona.backend})`.
-- [ ] `/link <token>` (DM only): verify via `lib/api-tokens.ts`, upsert `channel_identities`, confirm; `/whoami` reports persona + linked user.
-- [ ] Tests: config discovery/legacy mapping, two bots isolated conversations in same channel, link flow, unlinked-user behavior unchanged.
+- [ ] `/link <token>` (DM only): verify via `lib/api-tokens.ts`, upsert `channel_identities`, confirm; `/whoami` reports persona + linked user + active thread's task/run.
+- [ ] Register the command surface (`/status`, `/new`, `/stop`, `/link`, `/whoami`, `/help`) as Discord slash commands per bot at pipe boot (idempotent PUT of application commands; requires `DISCORD_APP_ID_<PERSONA_ID>` alongside each token). Note: `registerSlashCommands` exists in the claude-pipe lineage but was never wired — wire it here.
+- [ ] Onboarding UX (PRD J1): first-ever DM from a user → 3-line intro + link nudge if unlinked; non-allowlisted DM → one-time "not enabled for you, ask <admin>" reply (tracked in `channel_identities`-adjacent state or in-memory LRU), silent thereafter and always silent in guilds.
+- [ ] Pre-queue interrupts: "stop"/"cancel"/`/stop` and the ❌ reaction are recognized before the serialization queue and abort the in-flight turn.
+- [ ] Tests: config discovery/legacy mapping, two bots isolated conversations in same channel, link flow, unlinked-user behavior unchanged, slash registration payload, onboarding replies, pre-queue abort.
 
 ## Milestone 5 — Orchestration + progress relay
 
 - [ ] Seed `lib/personas/concierge.ts`: end-user-facing prompt, `toolsProfile: "orchestrator,spawn"`, `backend: "pi"`, generous `budgetMaxTurns`; register in `index.ts` / `seed-personas.ts`.
-- [ ] `lib/pipe/relay.ts`: subscribe to `runs.subscribe` for child runs whose `parentRunId` maps (via `channel_threads`) to a pipe-owned persona run; post breadcrumbs (started / PR opened / failed / done) using `render.ts` formatting; dedupe per status transition.
+- [ ] `lib/pipe/relay.ts`: subscribe to `runs.subscribe` for child runs whose `parentRunId` maps (via `channel_threads`) to a pipe-owned persona run; post breadcrumbs (started / progress / PR opened / failed / done) using `render.ts` formatting; dedupe per status transition.
+- [ ] Breadcrumb etiquette (PRD §8): ≤1 progress breadcrumb per run per 10 min, edit the previous breadcrumb in place where possible, batch into a single digest message when >3 would fire within a minute; breadcrumbs never @-mention, milestone persona messages @-mention the thread owner (resolved via `channel_identities`).
+- [ ] `/status` digest (PRD J3): live-state summary — in-flight runs, blocked-on-user items first, ≤5 lines then summarize, one next action per line, deep links to web UI for every task/plan/run/PR id mentioned (base URL from config).
+- [ ] Reactions as input: enable `GuildMessageReactions`/`DirectMessageReactions` intents + `Partials.Reaction`; 👍/👎 on a persona's pending question = yes/no answer injected as a turn, ❌ on a breadcrumb = confirm-then-cancel of that run, persona reacts 👀 when a reply will take >5s.
+- [ ] Thread-title status: relay renames the persona's thread through the state machine 🚧 → 🔍 (in review) → ✅ (merged) / ❌ (cancelled); skip rename if a human has manually edited the title since the last persona rename.
 - [ ] Verify inbox-driven turns (`child.result`, CI events) stream to the Discord thread through the existing draft/edit path.
-- [ ] Long-thread guard: turn-count cap with `/new` nudge message.
-- [ ] Tests: relay mapping + dedupe, breadcrumb formatting.
+- [ ] Long-thread guard: turn-count cap → persona announces the reset, `/new` (auto or manual) carries over a short model-generated summary of the thread as the first system-visible block of the fresh run (PRD §10; durable facts already live in memory).
+- [ ] Tests: relay mapping + dedupe, throttle/batching, breadcrumb formatting, digest formatting, reaction handling, thread-rename state machine, summary carry-over.
 
-## Milestone 6 — Docs & polish
+## Milestone 6 — Metrics, docs & polish
 
-- [ ] `.env.example`: multi-bot token pattern, per-persona allowlists, `DISCORD_DEFAULT_PERSONA`.
+- [ ] Metrics (PRD §11): counters/histograms on the existing `/api/metrics` surface — time-to-first-PR per thread, zero-command session rate, clarify rate (persona questions per user request), digest latency, messaging-vs-web creation share; emitted from `agent-loop.ts`/`relay.ts`, tagged by persona and (linked) user.
+- [ ] Persona voice + message-design rules (PRD §4/§8: status-first replies, ~600-char soft cap, glyph conventions, links-not-dumps, loud assumptions, one-question-at-a-time) encoded in the concierge system prompt and a shared prompt fragment reusable by other Discord-facing personas.
+- [ ] Roster: concierge ships as the default bot; existing `qa` persona is Discord-enabled by documentation only (add a token = get Rex) — no new persona files needed (PRD open question #1 resolved as "concierge + optionally qa").
+- [ ] `.env.example`: multi-bot token pattern, `DISCORD_APP_ID_<PERSONA_ID>`, per-persona allowlists, `DISCORD_DEFAULT_PERSONA`, web base URL for deep links.
 - [ ] README/docs: "Persona bots on Discord" section — creating a Discord app per persona, required intents (`MessageContent` privileged, `Partials.Channel` for DMs), `/link` flow, security posture (no shell on server runtime).
 - [ ] Update `SCHEMA.md` for the new tables/columns.
