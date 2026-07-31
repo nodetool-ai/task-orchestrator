@@ -24,7 +24,8 @@ UPDATE "channel_threads" SET "persona_id" = 'implementor' WHERE "persona_id" IS 
 --> statement-breakpoint
 -- The FK below needs personas.'implementor' to exist. seedRequiredPersonas()
 -- runs *after* migrations on boot, so seed a placeholder here when there is
--- something to backfill and the row is missing; the boot seed overwrites it.
+-- something to backfill and the row is missing. seedRequiredPersonas() detects
+-- this placeholder (by its system_prompt marker) and replaces it on next boot.
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM "channel_threads")
@@ -34,20 +35,19 @@ BEGIN
   END IF;
 END $$;
 --> statement-breakpoint
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM "pg_constraint" WHERE "conname" = 'channel_threads_persona_id_personas_id_fk') THEN
-    ALTER TABLE "channel_threads" ADD CONSTRAINT "channel_threads_persona_id_personas_id_fk"
-      FOREIGN KEY ("persona_id") REFERENCES "personas"("id") ON DELETE cascade ON UPDATE no action;
-  END IF;
+-- Idempotency via duplicate_object (repo convention, see 0000): a pg_constraint
+-- conname lookup would be database-wide and skip creating the FK in this schema
+-- whenever a sibling schema (parallel test schemas) already has the name.
+DO $$ BEGIN
+ ALTER TABLE "channel_threads" ADD CONSTRAINT "channel_threads_persona_id_personas_id_fk" FOREIGN KEY ("persona_id") REFERENCES "personas"("id") ON DELETE cascade ON UPDATE no action;
+EXCEPTION
+ WHEN duplicate_object THEN null;
 END $$;
 --> statement-breakpoint
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM "pg_constraint" WHERE "conname" = 'channel_threads_user_id_users_id_fk') THEN
-    ALTER TABLE "channel_threads" ADD CONSTRAINT "channel_threads_user_id_users_id_fk"
-      FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE set null ON UPDATE no action;
-  END IF;
+DO $$ BEGIN
+ ALTER TABLE "channel_threads" ADD CONSTRAINT "channel_threads_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE set null ON UPDATE no action;
+EXCEPTION
+ WHEN duplicate_object THEN null;
 END $$;
 --> statement-breakpoint
 -- Constraint swap: (channel, external_id) → (channel, external_id, persona_id).
@@ -68,12 +68,10 @@ CREATE TABLE IF NOT EXISTS "channel_identities" (
   "created_at" timestamp with time zone NOT NULL DEFAULT now()
 );
 --> statement-breakpoint
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM "pg_constraint" WHERE "conname" = 'channel_identities_user_id_users_id_fk') THEN
-    ALTER TABLE "channel_identities" ADD CONSTRAINT "channel_identities_user_id_users_id_fk"
-      FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE cascade ON UPDATE no action;
-  END IF;
+DO $$ BEGIN
+ ALTER TABLE "channel_identities" ADD CONSTRAINT "channel_identities_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE cascade ON UPDATE no action;
+EXCEPTION
+ WHEN duplicate_object THEN null;
 END $$;
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "channel_identities_channel_external_user_uniq"
