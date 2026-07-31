@@ -39,8 +39,14 @@ import { AgentLoop } from "../lib/pipe/agent-loop";
 import { getOrCreateRun } from "../lib/pipe/session-store";
 import type { Channel, InboundMessage, OutboundDraft, PipeConfig } from "../lib/pipe/types";
 
+// Server-safe persona: a Discord conversation is a runtime='server' run, and
+// runs.create rejects a shell/fs/repo-write profile on that placement.
+const PERSONA = "executor";
+
 const config: PipeConfig = {
-  discord: { token: "x", allowedUsers: ["u1"], allowedChannels: [] },
+  bots: [
+    { personaId: PERSONA, token: "x", allowedUsers: ["u1"], allowedChannels: [] },
+  ],
   defaultModel: "anthropic/claude-sonnet-4-6",
   editThrottleMs: 0, // no throttling — every pushed frame should reach the draft
 };
@@ -51,6 +57,11 @@ const msg = (text: string, externalId = "chan-1"): InboundMessage => ({
   text,
   authorId: "u1",
   authorLabel: "discord:tester",
+  authorName: "tester",
+  personaId: PERSONA,
+  // Guild-ish by default: the onboarding intro is DM-only, and these tests
+  // assert exact send/draft sequences.
+  isDirectMessage: false,
 });
 
 /** Poll `check` until it returns true or `timeoutMs` elapses (avoids flaky fixed sleeps). */
@@ -209,7 +220,7 @@ describe("/stop bypasses the per-conversation queue", () => {
     const { channel } = makeChannel();
     const loop = new AgentLoop(channel, config);
 
-    const runId = await getOrCreateRun("discord", "chan-1", { model: config.defaultModel });
+    const runId = await getOrCreateRun("discord", "chan-1", PERSONA, { model: config.defaultModel });
     const abort = await markLive(runId);
 
     openGate("blocking prompt");
@@ -234,6 +245,43 @@ describe("/stop bypasses the per-conversation queue", () => {
     gates.get("blocking prompt")!.resolve();
     await pTurn;
     expect(events).toEqual(["stop-done", "turn-done"]);
+  });
+
+  it("treats a plain-language \"stop\" as a pre-queue interrupt (PRD §6)", async () => {
+    const { channel, sends } = makeChannel();
+    const loop = new AgentLoop(channel, config);
+
+    const runId = await getOrCreateRun("discord", "chan-1", PERSONA, {
+      model: config.defaultModel,
+    });
+    const abort = await markLive(runId);
+
+    openGate("long running prompt");
+    const events: string[] = [];
+    const pTurn = loop.handle(msg("long running prompt")).then(() => {
+      events.push("turn-done");
+    });
+    await waitFor(() => startedTurns.includes("long running prompt"));
+
+    // No slash: the user just types "stop". It must abort the in-flight turn
+    // rather than queueing behind it and arriving as a prompt afterwards.
+    await loop.handle(msg("stop")).then(() => events.push("stop-done"));
+
+    expect(events).toEqual(["stop-done"]);
+    expect(abort.signal.aborted).toBe(true);
+    expect(sends.at(-1)?.text).toMatch(/stopped/i);
+    // ...and it was never sent to the agent as a prompt.
+    expect(startedTurns).not.toContain("stop");
+
+    gates.get("long running prompt")!.resolve();
+    await pTurn;
+  });
+
+  it("still sends a sentence that merely starts with \"stop\" to the agent", async () => {
+    const { channel } = makeChannel();
+    const loop = new AgentLoop(channel, config);
+    await loop.handle(msg("stop the nightly deploy job", "thread-stopish"));
+    expect(startedTurns).toContain("stop the nightly deploy job");
   });
 });
 

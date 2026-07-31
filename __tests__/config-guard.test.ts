@@ -37,7 +37,6 @@ const ALLOWLIST = new Set([
   "lib/chat.ts",
   "lib/ci-autofix.ts",
   "lib/extensions/spawn.ts",
-  "lib/pipe/config.ts",
   "lib/run-dispatch.ts",
   "lib/runner/fly-client.ts",
   "lib/runner/fly.ts",

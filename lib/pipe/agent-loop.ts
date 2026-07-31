@@ -13,9 +13,11 @@ import * as runs from "@/lib/runs";
 import { describe } from "@/lib/utils";
 import type { RunEnvelope } from "@/lib/pi-event-mapper";
 
-import { handleCommand } from "./commands";
+import * as repo from "@/lib/repo";
+
+import { handleCommand, isCommandText } from "./commands";
 import { TranscriptBuilder, chunkForDiscord } from "./render";
-import { getOrCreateRun } from "./session-store";
+import { getOrCreateRun, hasMapping, resolveUserId } from "./session-store";
 import type { Channel, InboundMessage, PipeConfig } from "./types";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -30,9 +32,13 @@ const ATTACH_POLL_TIMEOUT_MS = 3000;
 
 export class AgentLoop {
   // Per-conversation handling chains (see M9a below), keyed by
-  // `${msg.channel}:${msg.externalId}`. Cleared once a chain drains so the map
-  // never grows past the number of conversations currently in flight.
+  // `${msg.channel}:${msg.externalId}:${msg.personaId}`. Cleared once a chain
+  // drains so the map never grows past the conversations currently in flight.
   private queues = new Map<string, Promise<void>>();
+  // Conversations this process has already greeted (PRD J1). Bounded by the
+  // number of conversations seen since boot; entries are ~60 bytes and a
+  // restart just re-checks the DB mapping, so no eviction is warranted.
+  private greeted = new Set<string>();
 
   constructor(
     private channel: Channel,
@@ -40,11 +46,16 @@ export class AgentLoop {
   ) {}
 
   async handle(msg: InboundMessage): Promise<void> {
-    // 1. Slash-command interception (before any LLM call, and BEFORE the
+    // 1. Command interception (before any LLM call, and BEFORE the
     // per-conversation queue below). Commands run immediately, out of band:
     // /stop's whole point is interrupting a turn that's already in flight, so
     // it must never wait behind the very turn it's trying to kill.
-    if (msg.text.trim().startsWith("/")) {
+    //
+    // isCommandText, not `startsWith("/")`: a bare "stop"/"cancel" is a
+    // plain-language interrupt (PRD §6) and gets the same pre-queue treatment,
+    // otherwise it would sit behind the turn the user is trying to abort and
+    // arrive as a prompt after it finished.
+    if (isCommandText(msg.text)) {
       const result = await handleCommand(msg, this.config);
       if (result.handled) {
         if (result.reply) await this.channel.send(msg.externalId, result.reply);
@@ -53,6 +64,15 @@ export class AgentLoop {
       // else fall through: an unrecognized "/x" is treated as a normal prompt,
       // so it enqueues below like any other message.
     }
+
+    // 1b. Onboarding (PRD J1). The very first DM from an allowlisted user —
+    // no conversation for this persona yet and no linked account — gets a
+    // 3-line intro BEFORE the turn runs, so the reply lands under it. Guild
+    // channels never get this: the intro belongs in the private workspace, and
+    // a channel is exactly where it would be noise.
+    await this.maybeSendOnboarding(msg).catch((err) =>
+      console.error("[pipe] onboarding intro failed:", err)
+    );
 
     // 2. Serialize turns per conversation (M9a). Two messages landing in the
     // same Discord thread milliseconds apart both see the run as "live" as
@@ -64,7 +84,7 @@ export class AgentLoop {
     // has to live here, above that lock. A simple promise chain per
     // conversation key does it; distinct conversations get distinct chains and
     // still run concurrently.
-    const key = `${msg.channel}:${msg.externalId}`;
+    const key = `${msg.channel}:${msg.externalId}:${msg.personaId}`;
     const prior = this.queues.get(key) ?? Promise.resolve();
     const turn = prior.then(() => this.runTurn(msg));
     // Swallow so a failed turn never wedges the chain for the next message;
@@ -79,9 +99,43 @@ export class AgentLoop {
     return turn;
   }
 
+  /**
+   * PRD J1: a 3-line intro on the first-ever DM with this persona — who I am,
+   * one example ask, and (only when unlinked) the `/link` nudge sold by its
+   * benefit. Sent once per conversation: the `greeted` set covers two messages
+   * racing in before either has created a mapping, and the mapping itself
+   * covers process restarts.
+   */
+  private async maybeSendOnboarding(msg: InboundMessage): Promise<void> {
+    if (!msg.isDirectMessage) return;
+    const key = `${msg.channel}:${msg.externalId}:${msg.personaId}`;
+    // Claim SYNCHRONOUSLY, before any await: two first messages arriving
+    // milliseconds apart both reach this method before either has created a
+    // mapping, and a check that awaited first would greet twice.
+    if (this.greeted.has(key)) return;
+    this.greeted.add(key);
+    if (await hasMapping(msg.channel, msg.externalId, msg.personaId)) return;
+    const linked = (await resolveUserId(msg.channel, msg.authorId)) != null;
+
+    const persona = await repo.getPersona(msg.personaId);
+    const lines = [
+      `I'm **${persona?.name ?? msg.personaId}** — ${persona?.description?.trim() || "your agent here"}.`,
+      "Try me: *ship a small fix* or *what's in flight?*",
+    ];
+    if (!linked) {
+      lines.push(
+        "Want your work attributed to your account? Grab a token in the web UI and DM me `/link <token>`."
+      );
+    }
+    await this.channel.send(msg.externalId, lines.join("\n"));
+  }
+
   private async runTurn(msg: InboundMessage): Promise<void> {
-    // 2. Resolve or create the chat run for this conversation.
-    const runId = await getOrCreateRun(msg.channel, msg.externalId, { model: this.config.defaultModel });
+    // 2. Resolve or create the persona conversation for this thread.
+    const runId = await getOrCreateRun(msg.channel, msg.externalId, msg.personaId, {
+      model: this.config.defaultModel,
+      authorId: msg.authorId,
+    });
 
     // 3. Open the streaming draft and run the turn.
     let draft;
@@ -181,6 +235,14 @@ export class AgentLoop {
     // authoritative (complete) envelope list. On abort it yields only `done`
     // with no envelopes — then the partial transcript accumulated from the live
     // bus is all we have to show.
+    //
+    // PLACEMENT (M4 check, nothing to change): the call chain is unchanged —
+    // chat.runChat → runs.sendMessageToRun → (isServerRuntimeRun) append().
+    // A persona conversation is a server-runtime run, so sendMessageToRun takes
+    // the in-process append branch RIGHT HERE, in the pipe process, even on a
+    // deployment with a remote runner configured. That is what makes the
+    // dev-mode shape (bus-carried progress, envelopes batched at the end) the
+    // normal shape for persona bots rather than the relay shape.
     const finalEnvelopes: RunEnvelope[] = [];
     let errorText: string | null = null;
     try {

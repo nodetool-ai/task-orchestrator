@@ -3,12 +3,22 @@
 // Slash-command interception — claude-pipe style. The agent loop calls
 // handleCommand() before any LLM turn; a handled command replies instantly
 // (no tokens spent). Unknown slashes fall through and are treated as a prompt.
+//
+// This module is the single command registry: the same handler serves plain
+// text commands typed into a channel AND registered Discord application
+// commands (SLASH_COMMANDS below is what the adapter PUTs at boot, and an
+// incoming interaction is flattened back into "/name args" before it gets
+// here). Deliberately transport-free — no discord.js import.
 
+import { verifyToken } from "@/lib/api-tokens";
 import * as chat from "@/lib/chat";
+import * as repo from "@/lib/repo";
 import { isLeaseLive } from "@/lib/run-liveness";
 import * as runs from "@/lib/runs";
+import { getUserById } from "@/lib/users";
+
 import { currentRunId, getOrCreateRun, resetThread } from "./session-store";
-import type { InboundMessage, PipeConfig } from "./types";
+import type { InboundMessage, PipeConfig, SlashCommandSpec } from "./types";
 
 export interface CommandResult {
   /** false => not a known command; the loop treats the text as a prompt. */
@@ -17,10 +27,35 @@ export interface CommandResult {
   reply?: string;
 }
 
+/**
+ * The command surface registered as Discord application commands on every bot
+ * (PRD §7). `/model` is deliberately absent: it survives as a hidden power-user
+ * text command, undocumented in /help and not registered.
+ */
+export const SLASH_COMMANDS: SlashCommandSpec[] = [
+  { name: "status", description: "What am I working on right now?" },
+  { name: "new", description: "Start a fresh conversation in this thread/DM" },
+  { name: "stop", description: "Interrupt the turn I'm running" },
+  {
+    name: "link",
+    description: "Link this Discord account to your orchestrator account (DM only)",
+    options: [
+      {
+        type: 3,
+        name: "token",
+        description: "An API token from the web UI. Never share it.",
+        required: true,
+      },
+    ],
+  },
+  { name: "whoami", description: "Who I am, who you are, and what this thread is" },
+  { name: "help", description: "Short cheat sheet" },
+];
+
 // A turn may run either in this (bridge) process — tracked by runs.isLive via the
-// in-process runners map — or in the web server process, which shares the SQLite
-// DB. The web turn is invisible to isLive/interrupt, so /status and /stop also
-// consult the DB liveness lease: an active status with a fresh heartbeat.
+// in-process runners map — or in the web server process, which shares the same
+// Postgres. The web turn is invisible to isLive/interrupt, so /status and /stop
+// also consult the DB liveness lease: an active status with a fresh heartbeat.
 
 /** True when the run holds a live DB lease (active status + fresh heartbeat). */
 function leaseLive(run: runs.RunRow | null): boolean {
@@ -29,21 +64,41 @@ function leaseLive(run: runs.RunRow | null): boolean {
 
 const HELP = [
   "**Commands**",
-  "`/stop` — interrupt the agent's current turn (aliases: `/cancel`, `/abort`)",
-  "`/status` — show whether the agent is working right now",
+  "`/status` — what I'm working on right now",
+  "`/stop` — interrupt my current turn (aliases: `/cancel`, `/abort`, or just say \"stop\")",
   "`/new` or `/reset` — start a fresh conversation",
-  "`/model <provider/id>` — set the model (e.g. `openai/gpt-5.6-sol`)",
-  "`/whoami` or `/session` — show the current run id, model, and repo",
+  "`/link <token>` — link your account, in a DM (grab a token in the web UI)",
+  "`/whoami` or `/session` — who I am, who you are, what this thread is",
   "`/help` — this message",
-  "Anything else is sent to the agent.",
+  "Anything else is just talk — send it and I'll get on it.",
 ].join("\n");
+
+/**
+ * Plain-language interrupts. Recognized BEFORE the per-conversation queue by
+ * the agent loop (PRD §6), so "stop" aborts the turn it is aimed at instead of
+ * waiting behind it. Kept tight on purpose: a bare "stop"/"cancel"/"abort",
+ * optionally punctuated. Anything longer ("stop the deploy") is a real prompt.
+ */
+export function isPlainStop(text: string): boolean {
+  return /^(stop|cancel|abort)\s*[.!]*$/i.test(text.trim());
+}
+
+/** True when the text is handled out of band (pre-queue) by handleCommand. */
+export function isCommandText(text: string): boolean {
+  return text.trim().startsWith("/") || isPlainStop(text);
+}
 
 export async function handleCommand(
   msg: InboundMessage,
   config: PipeConfig
 ): Promise<CommandResult> {
-  const [cmd, ...rest] = msg.text.trim().slice(1).split(/\s+/);
+  const raw = msg.text.trim();
+  // A plain-language interrupt is routed as if it were /stop, so there is one
+  // implementation of "abort this turn".
+  const line = isPlainStop(raw) ? "/stop" : raw;
+  const [cmd, ...rest] = line.slice(1).split(/\s+/);
   const arg = rest.join(" ").trim();
+  const personaId = msg.personaId;
 
   switch (cmd.toLowerCase()) {
     case "stop":
@@ -53,7 +108,7 @@ export async function handleCommand(
       // dispatched concurrently with the running turn (the agent loop is
       // fire-and-forget per message), so this aborts the live runner directly —
       // it doesn't queue behind the turn it's trying to kill.
-      const id = await currentRunId(msg.channel, msg.externalId);
+      const id = await currentRunId(msg.channel, msg.externalId, personaId);
       if (!id) {
         return { handled: true, reply: "Nothing to stop — no active conversation yet." };
       }
@@ -80,7 +135,7 @@ export async function handleCommand(
     }
 
     case "status": {
-      const id = await currentRunId(msg.channel, msg.externalId);
+      const id = await currentRunId(msg.channel, msg.externalId, personaId);
       if (!id) {
         return { handled: true, reply: "No active conversation yet — send a message to start one." };
       }
@@ -109,38 +164,105 @@ export async function handleCommand(
 
     case "new":
     case "reset": {
-      await resetThread(msg.channel, msg.externalId);
-      const runId = await getOrCreateRun(msg.channel, msg.externalId, { model: config.defaultModel });
+      await resetThread(msg.channel, msg.externalId, personaId);
+      const runId = await getOrCreateRun(msg.channel, msg.externalId, personaId, {
+        model: config.defaultModel,
+        authorId: msg.authorId,
+      });
       return { handled: true, reply: `Started a fresh conversation (run #${runId}).` };
     }
 
     case "model": {
       if (!arg) {
-        const id = await currentRunId(msg.channel, msg.externalId);
+        const id = await currentRunId(msg.channel, msg.externalId, personaId);
         const m = (id && (await chat.getChat(id))?.model) || config.defaultModel;
         return {
           handled: true,
           reply: `Current model: \`${m}\`. Usage: \`/model provider/id\``,
         };
       }
-      const runId = await getOrCreateRun(msg.channel, msg.externalId, { model: config.defaultModel });
+      const runId = await getOrCreateRun(msg.channel, msg.externalId, personaId, {
+        model: config.defaultModel,
+        authorId: msg.authorId,
+      });
       await chat.updateChatSettings(runId, { model: arg }); // expects a provider-qualified id
       return { handled: true, reply: `Model set to \`${arg}\` for run #${runId}.` };
     }
 
-    case "whoami":
-    case "session": {
-      const id = await currentRunId(msg.channel, msg.externalId);
-      if (!id) {
-        return { handled: true, reply: "No active conversation yet — just send a message." };
+    case "link": {
+      // DM ONLY (design §6). A bearer token pasted in a guild channel is
+      // readable by everyone in it, so refuse — and do NOT delete the message:
+      // deleting needs Manage Messages, silently fails without it, and either
+      // way the token has already been distributed. Tell the user to revoke it,
+      // which is the only action that actually helps.
+      if (!msg.isDirectMessage) {
+        return {
+          handled: true,
+          reply:
+            "`/link` only works in a DM — a token in a channel is visible to everyone here. " +
+            "Revoke that token in the web UI and DM me a fresh one.",
+        };
       }
-      const c = await chat.getChat(id);
+      if (!arg) {
+        return {
+          handled: true,
+          reply:
+            "Usage: `/link <token>` — mint one in the web UI under Tokens, then paste it here.",
+        };
+      }
+      // The token itself is never echoed back and never logged — only the
+      // verification outcome leaves this block.
+      const verified = await verifyToken(arg);
+      if (!verified) {
+        return {
+          handled: true,
+          reply:
+            "That token didn't verify — it may be revoked, mistyped, or truncated. " +
+            "Mint a fresh one in the web UI and try again.",
+        };
+      }
+      await repo.upsertChannelIdentity({
+        channel: msg.channel,
+        externalUserId: msg.authorId,
+        userId: verified.userId,
+        label: msg.authorName ?? msg.authorLabel,
+      });
+      const user = await getUserById(verified.userId);
       return {
         handled: true,
         reply:
-          `Run #${id} · model \`${c?.model ?? config.defaultModel}\` · repo \`${c?.repoId ?? "(default)"}\`\n` +
-          `Web: /runs/${id}\nYou: ${msg.authorLabel}`,
+          `✅ Linked to **${user?.email ?? `user #${verified.userId}`}**. ` +
+          "Everything we do together is yours in the web UI from now on.",
       };
+    }
+
+    case "whoami":
+    case "session": {
+      const persona = await repo.getPersona(personaId);
+      const identity = await repo.getChannelIdentity(msg.channel, msg.authorId);
+      const user = identity ? await getUserById(identity.userId) : undefined;
+      const account = identity
+        ? `**${user?.email ?? `user #${identity.userId}`}**`
+        : "not linked — `/link <token>` in a DM to attribute your work";
+
+      const lines = [
+        `I'm **${persona?.name ?? personaId}** (persona \`${personaId}\`).`,
+        `You: ${msg.authorLabel} · account: ${account}`,
+      ];
+
+      const id = await currentRunId(msg.channel, msg.externalId, personaId);
+      if (!id) {
+        lines.push("This thread has no conversation yet — just send a message.");
+        return { handled: true, reply: lines.join("\n") };
+      }
+      const run = await runs.getRun(id);
+      const model = (await chat.getChat(id))?.model ?? run?.model ?? config.defaultModel;
+      lines.push(
+        `This thread: run #${id}${run?.taskId ? ` · task \`${run.taskId}\`` : ""}` +
+          `${run?.planId ? ` · plan \`${run.planId}\`` : ""} · model \`${model}\``
+      );
+      lines.push(`Details: /runs/${id}`);
+      return { handled: true, reply: lines.join("\n") };
     }
 
     case "help":

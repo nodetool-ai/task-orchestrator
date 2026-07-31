@@ -26,12 +26,15 @@ async function main() {
     console.error("[pipe] orphaned-run reconciliation failed:", err);
   }
 
-  const cfg = loadPipeConfig();
-  const discord = new DiscordChannel(cfg.discord);
-  const manager = new ChannelManager([discord], cfg);
+  // One (DiscordChannel, AgentLoop) pair per persona bot, all in this process
+  // (design §1). ChannelManager builds the loops and starts every gateway
+  // client concurrently; stop() destroys all of them.
+  const cfg = await loadPipeConfig();
+  const channels = cfg.bots.map((bot) => new DiscordChannel(bot));
+  const manager = new ChannelManager(channels, cfg);
 
   await manager.start();
-  console.log("[pipe] ready");
+  console.log(`[pipe] ready — ${cfg.bots.map((b) => b.personaId).join(", ")}`);
 
   let shuttingDown = false;
   const shutdown = async (sig: string) => {

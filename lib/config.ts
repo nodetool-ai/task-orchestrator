@@ -347,6 +347,17 @@ export const config = Object.freeze({
     },
   }),
 
+  /** Channel bridge (`npm run pipe`). The Discord-specific vars are NOT here:
+   *  they are per-persona-bot secrets discovered by name at boot
+   *  (lib/pipe/config.ts), not deployment-wide settings. */
+  pipe: Object.freeze({
+    /** Throttle for the in-place draft edits a streaming reply makes, in ms. */
+    get editThrottleMs(): number {
+      const value = intEnv("TASK_ORCH_PIPE_EDIT_MS", 750);
+      return value > 0 ? value : 750;
+    },
+  }),
+
   /** Feature gates. */
   features: Object.freeze({
     get autoLaunch(): boolean {

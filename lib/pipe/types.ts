@@ -22,6 +22,22 @@ export interface InboundMessage {
   authorId: string;
   /** Human-readable author label, e.g. "discord:mgeorgi". Passed as runs.append author. */
   authorLabel: string;
+  /**
+   * The persona whose bot received this message (design §1). One pipe process
+   * runs N gateway clients — this is the dimension that keeps two personas in
+   * the SAME Discord channel on separate conversations (channel_threads is
+   * unique on channel + external_id + persona_id).
+   */
+  personaId: string;
+  /**
+   * True when this arrived in a DM rather than a guild channel/thread. Gates
+   * `/link` (a bearer token must never be pasted in a guild, design §6) and the
+   * onboarding / not-enabled replies (PRD §10: always silent in guilds).
+   */
+  isDirectMessage: boolean;
+  /** Channel-native display handle (e.g. the Discord username), stored as the
+   *  channel_identities label at `/link` time. */
+  authorName?: string;
 }
 
 /**
@@ -55,19 +71,50 @@ export interface Channel {
   send(externalId: string, text: string): Promise<void>;
 }
 
-/** Discord-specific config slice. */
-export interface DiscordConfig {
+/**
+ * One persona bot: a Discord application + token bound to a persona id
+ * (design §1). Binding is CONFIG, not schema — tokens are secrets and don't
+ * belong in Postgres — so this whole struct comes out of the environment.
+ */
+export interface PersonaBotConfig {
+  /** Persona id this bot speaks as; validated against the personas table at boot. */
+  personaId: string;
+  /** Gateway bot token (`DISCORD_BOT_TOKEN_<PERSONA_ID>`). Never logged. */
   token: string;
   /** Discord user ids allowed to talk to the bot. Empty => deny all (refused at load). */
   allowedUsers: string[];
   /** Optional channel-id allowlist; empty => any channel the user can reach. */
   allowedChannels: string[];
+  /** Discord application id (`DISCORD_APP_ID_<PERSONA_ID>`). Without it the bot
+   *  still works over the gateway; only slash-command registration is skipped. */
+  applicationId?: string;
 }
 
+/** Back-compat alias: the adapter's config slice IS a persona bot's config. */
+export type DiscordConfig = PersonaBotConfig;
+
 export interface PipeConfig {
-  discord: DiscordConfig;
+  /** One entry per persona bot; scripts/pipe.ts builds a (channel, loop) pair each. */
+  bots: PersonaBotConfig[];
   /** Provider-qualified default model, e.g. "openai/gpt-5.6-sol". */
   defaultModel: string;
   /** Throttle for in-place draft edits, in ms. */
   editThrottleMs: number;
+}
+
+/**
+ * A Discord application command, in raw REST shape. Declared here (not with
+ * discord.js builders) so lib/pipe/commands.ts — the shared command registry —
+ * stays free of transport imports; the adapter PUTs these verbatim.
+ */
+export interface SlashCommandSpec {
+  name: string;
+  description: string;
+  options?: {
+    /** Discord ApplicationCommandOptionType; 3 = STRING (all we need today). */
+    type: 3;
+    name: string;
+    description: string;
+    required?: boolean;
+  }[];
 }
