@@ -5,6 +5,12 @@
 // SAME registry `GET /api/metrics` serves (lib/runner/telemetry.ts), in the same
 // style — a lazily built state object on globalThis, no new dependencies.
 //
+// NOT instrumented (deliberately): PRD §11's "unprompted-message tolerance"
+// (mute/leave/allowlist-removal events) — Discord surfaces none of these to the
+// bot without extra privileged intents; revisit if the guild-members intent is
+// ever added. Plans/tasks creation share is likewise skipped (no creator
+// column), as noted on refreshPipeGauges.
+//
 // LABELS. Every metric carries `persona`; the ones that are about a person also
 // carry `user` — the linked users.id as a string, or "anon" when the Discord
 // account has never run `/link` (PRD §11: "per-persona, per-user"). Cardinality

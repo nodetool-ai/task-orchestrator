@@ -480,6 +480,10 @@ export class ProgressRelay {
     // no lines and so records nothing, which is what we want: the relay must
     // not report a PR it merely re-read after a restart as "first observed now".
     for (const line of lines) recordBreadcrumb(conv.personaId, line.kind);
+    // ttfprObserved is in-memory: if the true first PR happened during pipe
+    // downtime (primed away on restart), a LATER child's PR is observed against
+    // the thread-creation clock and overstates TTFPR. Accepted with the same
+    // "durable cursor is future work" deviation as the rest of relay state.
     if (!st.ttfprObserved && lines.some((l) => l.kind === "pr")) {
       st.ttfprObserved = true;
       observeTimeToFirstPr(

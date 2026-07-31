@@ -483,7 +483,7 @@ adding its token — no new files — but a persona only qualifies if its tools
 profile is **server-safe** (`lib/profiles.ts`) and its backend resolves to `pi`.
 
 The PRD's `@Rex` (the `qa` persona) does **not** qualify as shipped: its profile
-is `orchestrator,repo_read,gh_pr`, and both `repo_read` and `gh_pr` are
+is `orchestrator,repo_read,gh_pr,gh_ci`, and `repo_read` and `gh_pr` are
 server-unsafe — they would give a chat message filesystem reads and process
 spawning inside the pipe process. Setting `DISCORD_BOT_TOKEN_QA` today makes the
 pipe refuse to boot, by design and with that profile named in the error. Giving
