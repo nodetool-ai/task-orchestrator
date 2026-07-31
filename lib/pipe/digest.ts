@@ -29,7 +29,7 @@ import { db } from "@/db";
 import { agentSessions, tasks } from "@/db/schema";
 import { TERMINAL_STATUSES } from "@/lib/run-state";
 
-import { planLink, runLabel, runLink, taskLink } from "./links";
+import { planLink, runLabel, runLink, runsLink, taskLink } from "./links";
 
 /** Lines shown before the digest collapses into "N more…" (PRD J3). */
 export const MAX_LINES = 5;
@@ -63,12 +63,43 @@ interface DigestRunRow {
 }
 
 /**
- * A run is blocked on the human when it parked with `park_reason = 'question'`
- * or left a `pending_question` behind (docs/agent-events.md §6.1). Both are the
- * same user-visible state: nothing moves until someone answers.
+ * The pending question on a run, in its real shape (lib/run-state.ts
+ * PendingQuestion: `{ question_id, question, state, … }`). Tolerates the bare
+ * string an older writer might have left, and returns null for anything else.
+ */
+function pendingQuestionOf(
+  raw: unknown
+): { question: string | null; state: string } | null {
+  if (raw == null) return null;
+  if (typeof raw === "string") {
+    const text = raw.trim();
+    return text ? { question: text, state: "open" } : null;
+  }
+  if (typeof raw !== "object") return null;
+  const q = raw as { question?: unknown; state?: unknown };
+  return {
+    question: typeof q.question === "string" && q.question.trim() ? q.question.trim() : null,
+    // A row with no state is an open question by construction: `state` is only
+    // ever written as part of asking, and only ever moved off "open" by an
+    // answer or an expiry.
+    state: typeof q.state === "string" ? q.state : "open",
+  };
+}
+
+/**
+ * A run is blocked on the human when it left an OPEN `pending_question`, or
+ * parked with `park_reason = 'question'` and nothing has answered it
+ * (docs/agent-events.md §6.1).
+ *
+ * The state check matters: answer_question (lib/extensions/events.ts) settles a
+ * question by writing `state: 'answered'` in place — it does NOT null the column
+ * or clear `park_reason` — so a digest that only tested for presence kept
+ * reporting answered questions as "needs your call" forever.
  */
 function isBlockedOnUser(r: DigestRunRow): boolean {
-  return r.parkReason === "question" || r.pendingQuestion != null;
+  const q = pendingQuestionOf(r.pendingQuestion);
+  if (q) return q.state === "open";
+  return r.parkReason === "question";
 }
 
 /** Classify one run into the glyph + one next action the digest line shows. */
@@ -86,10 +117,7 @@ export function classify(r: DigestRunRow): DigestItem {
   };
 
   if (isBlockedOnUser(r)) {
-    const q =
-      typeof r.pendingQuestion === "string"
-        ? r.pendingQuestion.split("\n")[0].trim()
-        : undefined;
+    const q = pendingQuestionOf(r.pendingQuestion)?.question?.split("\n")[0].trim() || undefined;
     return {
       ...base,
       glyph: "🚧",
@@ -121,9 +149,22 @@ export function orderItems(items: DigestItem[]): DigestItem[] {
   });
 }
 
-/** Render the digest body from ordered items (pure; the formatter under test). */
-export function renderDigest(items: DigestItem[], todo?: { tasks: number; plans: number }): string {
+/**
+ * Render the digest body from ordered items (pure; the formatter under test).
+ *
+ * SHAPE (PRD J3): a header, at most MAX_LINES item lines, then ONE trailing
+ * summary line. Everything that is not an item — the "…and N more" link, the
+ * todo-task counts, the caller's footer (the /status thread-liveness line) —
+ * is folded into that single trailing line, so the message stays the ~5-lines-
+ * then-summarize shape a phone can read rather than growing a line per fact.
+ */
+export function renderDigest(
+  items: DigestItem[],
+  todo?: { tasks: number; plans: number },
+  footer?: string
+): string {
   const lines: string[] = [];
+  const tail: string[] = [];
   if (items.length === 0) {
     lines.push("**Nothing in flight.**");
   } else {
@@ -132,15 +173,19 @@ export function renderDigest(items: DigestItem[], todo?: { tasks: number; plans:
       lines.push(`${it.glyph} ${it.label} — ${it.action} · ${it.links.join(" · ")}`);
     }
     if (items.length > MAX_LINES) {
-      lines.push(`…and ${items.length - MAX_LINES} more — details: ${runLink(items[0].runId)}`);
+      // The link goes to the runs OVERVIEW: "3 more" is about the ones NOT
+      // shown, so pointing at the first one that IS shown was a dead end.
+      tail.push(`…and ${items.length - MAX_LINES} more — all runs: ${runsLink()}`);
     }
   }
   if (todo && todo.tasks > 0) {
-    lines.push(
+    tail.push(
       `${todo.tasks} task${todo.tasks === 1 ? "" : "s"} todo across ` +
         `${todo.plans} plan${todo.plans === 1 ? "" : "s"}.`
     );
   }
+  if (footer) tail.push(footer);
+  if (tail.length) lines.push(tail.join(" · "));
   return lines.join("\n");
 }
 
@@ -194,10 +239,12 @@ async function todoCounts(): Promise<{ tasks: number; plans: number }> {
  */
 export async function buildStatusDigest(
   personaId: string,
-  userId: number | null
+  userId: number | null,
+  /** Folded into the digest's trailing line (the /status thread-liveness note). */
+  footer?: string
 ): Promise<string> {
   const [items, todo] = await Promise.all([collectItems(personaId, userId), todoCounts()]);
-  return renderDigest(items, todo);
+  return renderDigest(items, todo, footer);
 }
 
 function truncate(s: string, n: number): string {

@@ -46,7 +46,10 @@ import {
 } from "../db/schema";
 import { seedPersonas } from "../db/seed-personas";
 import * as backend from "../lib/agent-backend";
+import { reconstructContext } from "../lib/agent-backend/postgres-turn";
 import { emitInboxEvent, hasPendingInboxEvents } from "../lib/inbox";
+import { dispatchRun } from "../lib/run-dispatch";
+import * as runs from "../lib/runs";
 import { AgentLoop } from "../lib/pipe/agent-loop";
 import { ChannelManager } from "../lib/pipe/channel-manager";
 import { agentTurnCount, buildCarryOverSummary } from "../lib/pipe/carryover";
@@ -94,10 +97,10 @@ interface FakeMessage {
 }
 
 /** A RelayChannel that records every message it "posts" and every rename. */
-function fakeRelayChannel(personaId = PERSONA) {
+function fakeRelayChannel(personaId = PERSONA, initialTitle = "Dark-mode toggle") {
   const posts: FakeMessage[] = [];
   const renames: string[] = [];
-  let title = "Dark-mode toggle";
+  let title = initialTitle;
   let seq = 0;
   const channel: RelayChannel = {
     name: "discord",
@@ -141,16 +144,35 @@ function fakeRelayChannel(personaId = PERSONA) {
 function fakeChannel() {
   const sends: string[] = [];
   const reactions: string[] = [];
+  /** Finalized draft texts (the turn's answer), kept apart from plain sends. */
+  const finals: string[] = [];
+  /** mentionUsers passed with each finalize/send, in order. */
+  const mentions: Array<string[] | undefined> = [];
+  /** Ids of the drafts opened, in order — the persona's own messages. */
+  const drafts: string[] = [];
+  let seq = 0;
   const channel: Channel = {
     name: "discord",
     async start() {},
     async stop() {},
     onMessage() {},
     async openDraft(): Promise<OutboundDraft> {
-      return { async update() {}, async finalize() {} };
+      // A real transport gives the draft an addressable id; the loop needs it to
+      // tell "👍 on my question" from "👍 on some other message".
+      const id = `own-${++seq}`;
+      drafts.push(id);
+      return {
+        messageId: id,
+        async update() {},
+        async finalize(text, opts) {
+          finals.push(text);
+          mentions.push(opts?.mentionUsers);
+        },
+      };
     },
-    async send(_id, text) {
+    async send(_id, text, _token, opts) {
       sends.push(text);
+      mentions.push(opts?.mentionUsers);
     },
     async react(_id, _mid, emoji) {
       reactions.push(emoji);
@@ -159,7 +181,7 @@ function fakeChannel() {
       reactions.push(`-${emoji}`);
     },
   };
-  return { channel, sends, reactions };
+  return { channel, sends, finals, mentions, drafts, reactions };
 }
 
 // ── fixtures ────────────────────────────────────────────────────────────────
@@ -216,6 +238,32 @@ async function setChild(id: number, patch: Partial<typeof agentSessions.$inferIn
   await db.update(agentSessions).set(patch).where(eq(agentSessions.id, id));
 }
 
+/** A task in a plan, for the title machine's task-state path. */
+async function makeTask(id: string, state: string): Promise<string> {
+  await db
+    .insert(plans)
+    .values({ id: "P-1", title: "Dark mode" })
+    .onConflictDoNothing();
+  await db.insert(tasks).values({ id, title: "Dark-mode toggle", planId: "P-1", state });
+  return id;
+}
+
+/**
+ * A relay that has completed its PRIMING tick (relay.ts header): the first tick
+ * after startup records whatever it finds as already-announced and says nothing,
+ * so a restart cannot replay history into the thread. Every test that expects a
+ * breadcrumb therefore creates its children AFTER priming — which is also the
+ * real-world shape: the pipe is running, then work starts.
+ */
+async function primedRelay(
+  channels: RelayChannel[],
+  opts?: ConstructorParameters<typeof ProgressRelay>[1]
+): Promise<ProgressRelay> {
+  const relay = new ProgressRelay(channels, opts);
+  await relay.tick();
+  return relay;
+}
+
 async function addAgentMessages(runId: number, n: number) {
   for (let i = 0; i < n; i++) {
     await db.insert(agentMessages).values({
@@ -247,9 +295,9 @@ beforeEach(async () => {
 describe("relay mapping", () => {
   it("posts a child's breadcrumb into the thread that owns its parent run", async () => {
     const parent = await makeConversation("thread-1");
-    const child = await makeChild(parent);
     const ch = fakeRelayChannel();
-    const relay = new ProgressRelay([ch.channel]);
+    const relay = await primedRelay([ch.channel]);
+    const child = await makeChild(parent);
 
     await relay.tick();
 
@@ -257,26 +305,46 @@ describe("relay mapping", () => {
     expect(ch.posts[0].text).toContain(`run #${child} started`);
   });
 
+  it("primes on the first tick after a restart instead of replaying history", async () => {
+    const parent = await makeConversation("thread-1");
+    const child = await makeChild(parent, { prUrl: "https://gh/pr/7" });
+    const ch = fakeRelayChannel();
+
+    // A relay that boots into an existing world says NOTHING about it: the
+    // "started" and "PR opened" breadcrumbs for this child are already history.
+    const relay = new ProgressRelay([ch.channel]);
+    await relay.tick();
+    expect(ch.posts).toEqual([]);
+
+    // Transitions observed AFTER priming do announce.
+    await setChild(child, { status: "completed" });
+    await relay.tick();
+    expect(ch.posts).toHaveLength(1);
+    expect(ch.posts[0].text).toContain(`run #${child} done`);
+  });
+
   it("ignores a conversation belonging to a persona this pipe doesn't run", async () => {
     const parent = await makeConversation("thread-2", OTHER);
-    await makeChild(parent);
     const ch = fakeRelayChannel(PERSONA);
-    await new ProgressRelay([ch.channel]).tick();
+    const relay = await primedRelay([ch.channel]);
+    await makeChild(parent);
+    await relay.tick();
     expect(ch.posts).toEqual([]);
   });
 
   it("ignores an orphan run with no parent conversation", async () => {
-    await db.insert(agentSessions).values({ goal: "loose", status: "running" });
     const ch = fakeRelayChannel();
-    await new ProgressRelay([ch.channel]).tick();
+    const relay = await primedRelay([ch.channel]);
+    await db.insert(agentSessions).values({ goal: "loose", status: "running" });
+    await relay.tick();
     expect(ch.posts).toEqual([]);
   });
 
   it("dedupes per run per status across ticks", async () => {
     const parent = await makeConversation("thread-1");
-    const child = await makeChild(parent);
     const ch = fakeRelayChannel();
-    const relay = new ProgressRelay([ch.channel]);
+    const relay = await primedRelay([ch.channel]);
+    const child = await makeChild(parent);
 
     await relay.tick();
     await relay.tick();
@@ -297,9 +365,9 @@ describe("relay mapping", () => {
 
   it("never writes agent_messages — breadcrumbs are transport-only", async () => {
     const parent = await makeConversation("thread-1");
-    const child = await makeChild(parent);
     const ch = fakeRelayChannel();
-    const relay = new ProgressRelay([ch.channel]);
+    const relay = await primedRelay([ch.channel]);
+    const child = await makeChild(parent);
     await relay.tick();
     await setChild(child, { prUrl: "https://gh/pr/9", status: "completed" });
     await relay.tick();
@@ -319,10 +387,10 @@ describe("relay mapping", () => {
 describe("breadcrumb etiquette", () => {
   it("emits at most one progress breadcrumb per run per 10 minutes", async () => {
     const parent = await makeConversation("thread-1");
-    const child = await makeChild(parent);
     let now = 1_000_000;
     const ch = fakeRelayChannel();
-    const relay = new ProgressRelay([ch.channel], { now: () => now });
+    const relay = await primedRelay([ch.channel], { now: () => now });
+    const child = await makeChild(parent);
 
     await relay.tick(); // started
     await addAgentMessages(child, 2);
@@ -347,10 +415,10 @@ describe("breadcrumb etiquette", () => {
 
   it("says nothing when a running child produced no new turns", async () => {
     const parent = await makeConversation("thread-1");
-    await makeChild(parent);
     let now = 1_000_000;
     const ch = fakeRelayChannel();
-    const relay = new ProgressRelay([ch.channel], { now: () => now });
+    const relay = await primedRelay([ch.channel], { now: () => now });
+    await makeChild(parent);
     await relay.tick();
     now += PROGRESS_THROTTLE_MS * 5;
     await relay.tick();
@@ -359,9 +427,10 @@ describe("breadcrumb etiquette", () => {
 
   it("collapses a burst of more than three breadcrumbs into one digest message", async () => {
     const parent = await makeConversation("thread-1");
-    for (let i = 0; i < BATCH_THRESHOLD + 1; i++) await makeChild(parent);
     const ch = fakeRelayChannel();
-    await new ProgressRelay([ch.channel], { now: () => 5_000 }).tick();
+    const relay = await primedRelay([ch.channel], { now: () => 5_000 });
+    for (let i = 0; i < BATCH_THRESHOLD + 1; i++) await makeChild(parent);
+    await relay.tick();
 
     expect(ch.posts).toHaveLength(1);
     expect(ch.posts[0].text.split("\n")).toHaveLength(BATCH_THRESHOLD + 1);
@@ -369,9 +438,10 @@ describe("breadcrumb etiquette", () => {
 
   it("sends a small burst as separate lines", async () => {
     const parent = await makeConversation("thread-1");
-    for (let i = 0; i < BATCH_THRESHOLD; i++) await makeChild(parent);
     const ch = fakeRelayChannel();
-    await new ProgressRelay([ch.channel], { now: () => 5_000 }).tick();
+    const relay = await primedRelay([ch.channel], { now: () => 5_000 });
+    for (let i = 0; i < BATCH_THRESHOLD; i++) await makeChild(parent);
+    await relay.tick();
     expect(ch.posts).toHaveLength(BATCH_THRESHOLD);
   });
 
@@ -395,18 +465,37 @@ describe("breadcrumb etiquette", () => {
 // ──────────────────────────────────────────────────────────
 
 describe("thread title", () => {
-  it("walks 🚧 → 🔍 → ✅ as the children progress", async () => {
+  it("walks 🚧 → 🔍 → ✅, taking the terminal glyph from TASK state", async () => {
     const parent = await makeConversation("thread-1");
-    const child = await makeChild(parent);
     const ch = fakeRelayChannel();
-    const relay = new ProgressRelay([ch.channel], { now: () => 1000 });
+    const relay = await primedRelay([ch.channel], { now: () => 1000 });
+    await makeTask("T-1", "in_progress");
+    const child = await makeChild(parent, { taskId: "T-1" });
 
     await relay.tick();
     expect(ch.title).toBe("🚧 Dark-mode toggle");
 
+    // Run finished with a PR, task still open → the work is in REVIEW, not done.
     await setChild(child, { status: "completed", prUrl: "https://gh/pr/1" });
     await relay.tick();
     expect(ch.title).toBe("🔍 Dark-mode toggle");
+
+    // The PR merged: the task lands, and the thread is done — with the PR link
+    // still on the run (no artificial prUrl:null needed to reach ✅).
+    await db.update(tasks).set({ state: "merged" }).where(eq(tasks.id, "T-1"));
+    await relay.tick();
+    expect(ch.title).toBe("✅ Dark-mode toggle");
+  });
+
+  it("falls back to run state for a child with no task", async () => {
+    const parent = await makeConversation("thread-1");
+    const ch = fakeRelayChannel();
+    const relay = await primedRelay([ch.channel], { now: () => 1000 });
+    const child = await makeChild(parent);
+
+    await setChild(child, { status: "completed", prUrl: "https://gh/pr/2" });
+    await relay.tick();
+    expect(ch.title).toBe("🔍 Dark-mode toggle"); // a PR on a completed run = review
 
     await setChild(child, { prUrl: null });
     await relay.tick();
@@ -415,20 +504,47 @@ describe("thread title", () => {
 
   it("marks the thread ❌ when the child fails", async () => {
     const parent = await makeConversation("thread-1");
-    const child = await makeChild(parent);
     const ch = fakeRelayChannel();
-    const relay = new ProgressRelay([ch.channel], { now: () => 1000 });
+    const relay = await primedRelay([ch.channel], { now: () => 1000 });
+    const child = await makeChild(parent);
     await relay.tick();
     await setChild(child, { status: "failed" });
     await relay.tick();
     expect(ch.title).toBe("❌ Dark-mode toggle");
   });
 
-  it("stands down permanently once a human has retitled the thread", async () => {
+  it("leaves a title it doesn't recognise alone after a restart", async () => {
+    // The relay restarted into a thread whose title carries none of its glyphs:
+    // either a human renamed it or an older deployment owned it. Either way it
+    // stands down rather than overwriting somebody's words.
+    const parent = await makeConversation("thread-1");
+    await makeChild(parent);
+    const ch = fakeRelayChannel(PERSONA, "Ivo's dark mode work");
+    const relay = new ProgressRelay([ch.channel], { now: () => 1000 });
+
+    await relay.tick(); // priming pass — sees a title it never set
+    await relay.tick();
+    expect(ch.renames).toEqual([]);
+    expect(ch.title).toBe("Ivo's dark mode work");
+  });
+
+  it("adopts a glyphed title after a restart — that one is its own", async () => {
     const parent = await makeConversation("thread-1");
     const child = await makeChild(parent);
-    const ch = fakeRelayChannel();
+    const ch = fakeRelayChannel(PERSONA, "🚧 Dark-mode toggle");
     const relay = new ProgressRelay([ch.channel], { now: () => 1000 });
+
+    await relay.tick(); // priming: the 🚧 says the machine owns this title
+    await setChild(child, { status: "completed" });
+    await relay.tick();
+    expect(ch.title).toBe("✅ Dark-mode toggle");
+  });
+
+  it("stands down permanently once a human has retitled the thread", async () => {
+    const parent = await makeConversation("thread-1");
+    const ch = fakeRelayChannel();
+    const relay = await primedRelay([ch.channel], { now: () => 1000 });
+    const child = await makeChild(parent);
     await relay.tick();
     expect(ch.renames).toHaveLength(1);
 
@@ -445,9 +561,9 @@ describe("thread title", () => {
 
   it("does not rewrite the title when the state hasn't changed", async () => {
     const parent = await makeConversation("thread-1");
-    await makeChild(parent);
     const ch = fakeRelayChannel();
-    const relay = new ProgressRelay([ch.channel], { now: () => 1000 });
+    const relay = await primedRelay([ch.channel], { now: () => 1000 });
+    await makeChild(parent);
     await relay.tick();
     await relay.tick();
     await relay.tick();
@@ -461,6 +577,16 @@ describe("thread title", () => {
         { status: "completed", prUrl: "u" },
         { status: "completed", prUrl: null },
       ])
+    ).toBe("review");
+    // Task state decides the terminal glyph where a child has one.
+    expect(
+      titleStateFor([{ status: "completed", prUrl: "u", taskId: "T-1" }], new Map([["T-1", "merged"]]))
+    ).toBe("done");
+    expect(
+      titleStateFor(
+        [{ status: "completed", prUrl: "u", taskId: "T-1" }],
+        new Map([["T-1", "passing"]])
+      )
     ).toBe("review");
     expect(titleStateFor([{ status: "completed", prUrl: null }])).toBe("done");
     expect(titleStateFor([{ status: "failed", prUrl: null }])).toBe("failed");
@@ -502,12 +628,27 @@ describe("/status digest", () => {
     expect(ordered.map((i) => i.runId)).toEqual([4, 2, 3, 1]);
   });
 
-  it("caps at five lines and summarises the rest", () => {
+  it("caps at five lines and summarises the rest, pointing at the runs overview", () => {
     const items = Array.from({ length: 8 }, (_, i) => item({ runId: i + 1 }));
     const out = renderDigest(items);
     expect(out).toContain("**In flight (8):**");
     expect(out.split("\n")).toHaveLength(1 + 5 + 1);
     expect(out).toContain("…and 3 more");
+    // The link is the OVERVIEW, not the first item shown (which the reader can
+    // already see) — "3 more" is about the ones that aren't on screen.
+    expect(out.split("\n").at(-1)).toContain("/runs");
+    expect(out).not.toContain("/runs/1 ·"); // not the first shown item's link
+  });
+
+  it("folds the todo counts and the caller's footer into the one summary line", () => {
+    const items = Array.from({ length: 8 }, (_, i) => item({ runId: i + 1 }));
+    const out = renderDigest(items, { tasks: 12, plans: 2 }, "⚪ This thread: run #4 idle.");
+    // Header + 5 items + ONE trailing line, not one line per extra fact.
+    expect(out.split("\n")).toHaveLength(1 + 5 + 1);
+    const tail = out.split("\n").at(-1)!;
+    expect(tail).toContain("…and 3 more");
+    expect(tail).toContain("12 tasks todo across 2 plans.");
+    expect(tail).toContain("This thread: run #4 idle.");
   });
 
   it("gives every line one glyph, one action and a link", () => {
@@ -518,23 +659,57 @@ describe("/status digest", () => {
     expect(line).toBe("🔍 Dark-mode toggle — PR open — awaiting review · /tasks/T-1 · https://gh/pr/1");
   });
 
-  it("classifies a parked-on-question run as blocked on the user", () => {
-    const it1 = classify({
-      id: 7,
-      goal: "x",
-      title: "Import cleanup",
-      taskId: "T-9",
-      planId: null,
-      status: "parked",
-      parkReason: "question",
-      pendingQuestion: "Which API shape?",
-      prUrl: null,
-      startedAt: new Date(),
-    });
+  // pending_question is a PendingQuestion OBJECT (lib/run-state.ts), never a
+  // bare string: `{ question_id, question, state, … }`, settled in place by
+  // answer_question writing state:'answered'.
+  const parked = (pendingQuestion: unknown) => ({
+    id: 7,
+    goal: "x",
+    title: "Import cleanup",
+    taskId: "T-9",
+    planId: null,
+    status: "parked",
+    parkReason: "question",
+    pendingQuestion,
+    prUrl: null,
+    startedAt: new Date(),
+  });
+
+  it("classifies an open question as blocked, showing the question itself", () => {
+    const it1 = classify(
+      parked({
+        question_id: "q-1",
+        question: "Which API shape?",
+        asked_at: "2026-01-01T00:00:00Z",
+        deadline: "2026-01-02T00:00:00Z",
+        state: "open",
+      })
+    );
     expect(it1.blockedOnUser).toBe(true);
     expect(it1.glyph).toBe("🚧");
     expect(it1.action).toContain("Which API shape?");
     expect(it1.links).toContain("/tasks/T-9");
+  });
+
+  it("stops calling a run blocked once its question has been answered", () => {
+    // answer_question settles the question IN PLACE — it does not null the
+    // column and does not clear park_reason, so presence alone is not blockage.
+    const it1 = classify(
+      parked({
+        question_id: "q-1",
+        question: "Which API shape?",
+        asked_at: "2026-01-01T00:00:00Z",
+        deadline: "2026-01-02T00:00:00Z",
+        state: "answered",
+        answered_at: "2026-01-01T01:00:00Z",
+      })
+    );
+    expect(it1.blockedOnUser).toBe(false);
+    expect(it1.action).not.toContain("Which API shape?");
+  });
+
+  it("treats a bare park_reason='question' with no question row as blocked", () => {
+    expect(classify(parked(null)).blockedOnUser).toBe(true);
   });
 
   it("answers /status from live state, excluding the persona's own chat runs", async () => {
@@ -577,6 +752,49 @@ describe("reactions as input", () => {
     expect(startedTurns).toEqual(["yes"]);
   });
 
+  it("injects 👍 only when it lands ON the persona's own last message", async () => {
+    const runId = await getOrCreateRun("discord", "thread-1", PERSONA);
+    const { channel, drafts } = fakeChannel();
+    const loop = new AgentLoop(channel, config);
+
+    // One real turn, so the loop knows which message is its own latest.
+    await loop.handle(msg({ text: "what branch?" }));
+    const own = drafts.at(-1)!;
+    await askAQuestion(runId, "I'll target `main`. Sound right?");
+    startedTurns.length = 0;
+
+    // A 👍 on some OTHER message is a thumbs-up, not an answer.
+    await loop.handle(
+      msg({ text: "yes", reaction: { emoji: "👍", messageId: "someone-else", ownMessage: false } })
+    );
+    expect(startedTurns).toEqual([]);
+
+    // A 👍 on the persona's question is the answer.
+    await loop.handle(
+      msg({ text: "yes", reaction: { emoji: "👍", messageId: own, ownMessage: true } })
+    );
+    expect(startedTurns).toEqual(["yes"]);
+  });
+
+  it("ignores 👍 on a breadcrumb even while a question is open", async () => {
+    const parent = await makeConversation("thread-1"); // this IS the conversation's run
+    await askAQuestion(parent, "Want me to start on the second one?");
+
+    const relayCh = fakeRelayChannel();
+    const relay = await primedRelay([relayCh.channel], { now: () => 1000 });
+    await makeChild(parent);
+    await relay.tick();
+    const breadcrumbId = relayCh.posts[0].id;
+
+    const { channel } = fakeChannel();
+    await new AgentLoop(channel, config, relay).handle(
+      msg({ text: "yes", reaction: { emoji: "👍", messageId: breadcrumbId, ownMessage: true } })
+    );
+    // The 👍 meant "nice", not "yes, start the second one" — starting work off
+    // the back of it would be the expensive kind of wrong.
+    expect(startedTurns).toEqual([]);
+  });
+
   it("injects 👎 as \"no\"", async () => {
     const runId = await getOrCreateRun("discord", "thread-1", PERSONA);
     await askAQuestion(runId, "Want Rex to review it?");
@@ -598,13 +816,21 @@ describe("reactions as input", () => {
     expect(sends).toEqual([]); // silent, not chatty
   });
 
+  /** A primed relay holding one breadcrumb for a fresh child of `parent`. */
+  async function breadcrumb(
+    parent: number,
+    now: () => number = () => 1000
+  ): Promise<{ relay: ProgressRelay; messageId: string; child: number }> {
+    const relayCh = fakeRelayChannel();
+    const relay = await primedRelay([relayCh.channel], { now });
+    const child = await makeChild(parent);
+    await relay.tick();
+    return { relay, messageId: relayCh.posts[0].id, child };
+  }
+
   it("❌ on a breadcrumb confirms first, then cancels on 👍", async () => {
     const parent = await makeConversation("thread-1");
-    const child = await makeChild(parent);
-    const relayCh = fakeRelayChannel();
-    const relay = new ProgressRelay([relayCh.channel], { now: () => 1000 });
-    await relay.tick();
-    const breadcrumbId = relayCh.posts[0].id;
+    const { relay, messageId: breadcrumbId, child } = await breadcrumb(parent);
 
     const { channel, sends } = fakeChannel();
     const loop = new AgentLoop(channel, config, relay);
@@ -626,6 +852,71 @@ describe("reactions as input", () => {
       "cancelled"
     );
     expect(startedTurns).toEqual([]); // never became an agent turn
+  });
+
+  it("won't let a bystander confirm somebody else's cancel", async () => {
+    const parent = await makeConversation("thread-1");
+    const { relay, messageId: breadcrumbId, child } = await breadcrumb(parent);
+    const { channel, sends } = fakeChannel();
+    const loop = new AgentLoop(channel, config, relay);
+
+    await loop.handle(
+      msg({
+        text: "/stop",
+        authorId: "u1",
+        reaction: { emoji: "❌", messageId: breadcrumbId, ownMessage: true },
+      })
+    );
+    expect(sends[0]).toContain(`Cancel run #${child}?`);
+
+    // A different user's 👍 is not the confirmation that was asked for.
+    await loop.handle(
+      msg({
+        text: "yes",
+        authorId: "u2",
+        reaction: { emoji: "👍", messageId: "m-2", ownMessage: true },
+      })
+    );
+    expect((await db.select().from(agentSessions).where(eq(agentSessions.id, child)))[0].status).toBe(
+      "running"
+    );
+    expect(startedTurns).toEqual([]); // and it did not become a "yes" turn either
+
+    // The arm survives, so the person who asked can still confirm it.
+    await loop.handle(
+      msg({
+        text: "yes",
+        authorId: "u1",
+        reaction: { emoji: "👍", messageId: "m-3", ownMessage: true },
+      })
+    );
+    expect((await db.select().from(agentSessions).where(eq(agentSessions.id, child)))[0].status).toBe(
+      "cancelled"
+    );
+  });
+
+  it("says a cancel confirmation lapsed instead of answering some other question", async () => {
+    const parent = await makeConversation("thread-1");
+    let now = 1000;
+    const { relay, messageId: breadcrumbId, child } = await breadcrumb(parent, () => now);
+    // A question is open, so a fall-through 👍 would have become a "yes" turn.
+    await askAQuestion(parent, "Shall I also bump the minor version?");
+
+    const { channel, sends } = fakeChannel();
+    const loop = new AgentLoop(channel, config, relay);
+    await loop.handle(
+      msg({ text: "/stop", reaction: { emoji: "❌", messageId: breadcrumbId, ownMessage: true } })
+    );
+
+    now += 6 * 60 * 1000; // past the 5-minute confirmation window
+    await loop.handle(
+      msg({ text: "yes", reaction: { emoji: "👍", messageId: "m-2", ownMessage: true } })
+    );
+    expect(sends.at(-1)).toMatch(/lapsed — react ❌ again/);
+    expect((await db.select().from(agentSessions).where(eq(agentSessions.id, child)))[0].status).toBe(
+      "running"
+    );
+    expect(startedTurns).toEqual([]);
   });
 
   it("❌ on an ordinary bot message still falls through to /stop", async () => {
@@ -702,17 +993,54 @@ describe("long-thread guard", () => {
       )[0];
       expect(mapping.runId).not.toBe(oldRun);
 
-      // The summary persists as a system frame on the NEW run — durable model
-      // context on every later turn, not a one-shot prompt.
+      // The summary persists as a system frame on the NEW run…
       const frames = await db
         .select()
         .from(agentMessages)
         .where(and(eq(agentMessages.runId, mapping.runId), eq(agentMessages.role, "system")));
       expect(frames).toHaveLength(1);
       expect(frames[0].content).toContain("Carried over from the previous conversation");
-      expect(frames[0].content).toContain("Dark-mode toggle");
       // The turn still ran, on the fresh run.
       expect(startedTurns).toEqual(["and another thing"]);
+
+      // …and — the part that actually matters — it REACHES THE MODEL. Drive a
+      // real turn on the fresh run against a stubbed backend, take the context
+      // the postgres loop is handed, and reconstruct it exactly as the loop
+      // does. A persisted row the reconstruction drops is a summary nobody ever
+      // reads (M5 review B1).
+      let rows: Awaited<ReturnType<typeof runs.loadPostgresContextMessages>> = [];
+      vi.spyOn(backend, "getBackend").mockResolvedValue({
+        id: "pi",
+        async runTurn(args: any) {
+          rows = await args.contextSource.loadMessages();
+          args.onEvent({ type: "result", is_error: false, result: "ok", usage: {} });
+          return {
+            summary: "ok",
+            resumeToken: null,
+            turns: 1,
+            inputTokens: 1,
+            outputTokens: 1,
+            totalCostUsd: 0,
+          };
+        },
+      } as any);
+      for await (const _ev of runs.append({
+        runId: mapping.runId,
+        role: "user",
+        text: "where were we?",
+      })) {
+        void _ev;
+      }
+
+      const context = reconstructContext(
+        rows as any,
+        { provider: "anthropic", id: "claude-sonnet-4-6" },
+        "where were we?",
+        false
+      );
+      const prompt = JSON.stringify(context);
+      expect(prompt).toContain("Carried over from the previous conversation");
+      expect(prompt).toContain("Dark-mode toggle");
     } finally {
       delete process.env.TASK_ORCH_PIPE_TURN_CAP;
     }
@@ -761,8 +1089,17 @@ describe("long-thread guard", () => {
 // event on the persona run → the pipe's pump → wakeServerRun → a real
 // server-runtime turn on a stubbed backend → text in the Discord thread.
 describe("inbox-driven milestone turn", () => {
-  it("streams a woken persona turn into the thread", async () => {
-    const runId = await getOrCreateRun("discord", "thread-1", PERSONA);
+  it("streams a woken persona turn into the thread, and mentions the thread owner", async () => {
+    // A linked owner, so the milestone has someone to ping (PRD §9).
+    const [user] = await db
+      .insert(users)
+      .values({ email: "ivo@example.com", passwordHash: "x" })
+      .returning({ id: users.id });
+    await db
+      .insert(channelIdentities)
+      .values({ channel: "discord", externalUserId: "u1", userId: user.id, label: "ivo" });
+
+    const runId = await getOrCreateRun("discord", "thread-1", PERSONA, { authorId: "u1" });
     vi.spyOn(backend, "getBackend").mockResolvedValue({
       id: "pi",
       async runTurn(args: any) {
@@ -782,26 +1119,28 @@ describe("inbox-driven milestone turn", () => {
       },
     } as any);
 
+    // Emitted the way the WEB process emits it — no noWake. In a real
+    // deployment the worker child's terminal status is finalized over there, so
+    // this event (and its wake) originates in a process that holds no Discord
+    // draft.
+    await db.update(agentSessions).set({ status: "parked" }).where(eq(agentSessions.id, runId));
     await emitInboxEvent({
       targetRunId: runId,
       type: "child.result",
       sourceKind: "run",
       sourceId: "999",
       payload: { run_id: 999, outcome: "success", pr_url: "https://gh/pr/1" },
-      noWake: true, // the PIPE does the waking here, not the control plane
     });
     expect(await hasPendingInboxEvents(runId)).toBe(true);
 
-    const { channel, sends } = fakeChannel();
-    const finals: string[] = [];
+    // The control plane's own dispatch must DEFER: waking here would burn the
+    // event on a turn nobody can see, and the pipe would then find nothing to
+    // narrate (M5 review B2).
+    await dispatchRun(runId);
+    expect(await hasPendingInboxEvents(runId)).toBe(true);
+
+    const { channel, sends, finals, mentions } = fakeChannel();
     (channel as any).personaId = PERSONA;
-    (channel as any).openDraft = async () => ({
-      messageId: "d-1",
-      async update() {},
-      async finalize(text: string) {
-        finals.push(text);
-      },
-    });
 
     const manager = new ChannelManager([channel], config);
     await manager.start();
@@ -813,8 +1152,54 @@ describe("inbox-driven milestone turn", () => {
 
     // The narration reached the thread through the draft path…
     expect([...finals, ...sends].join("\n")).toContain("PR's up and CI is green");
+    // …@-mentioning the thread's owner, and only on that message…
+    expect(finals[0]).toContain("<@u1>");
+    expect(mentions[0]).toEqual(["u1"]);
     // …and the event was consumed, so the next pump says nothing.
     expect(await hasPendingInboxEvents(runId)).toBe(false);
+  });
+
+  it("does not mention anyone when the thread has no linked owner", async () => {
+    const runId = await getOrCreateRun("discord", "thread-1", PERSONA);
+    vi.spyOn(backend, "getBackend").mockResolvedValue({
+      id: "pi",
+      async runTurn(args: any) {
+        args.onEvent({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "Child run finished." }] },
+        });
+        args.onEvent({ type: "result", is_error: false, result: "ok", usage: {} });
+        return {
+          summary: "ok",
+          resumeToken: null,
+          turns: 1,
+          inputTokens: 1,
+          outputTokens: 1,
+          totalCostUsd: 0,
+        };
+      },
+    } as any);
+    await emitInboxEvent({
+      targetRunId: runId,
+      type: "child.result",
+      sourceKind: "run",
+      sourceId: "998",
+      payload: { run_id: 998, outcome: "success" },
+      noWake: true,
+    });
+
+    const { channel, finals, mentions } = fakeChannel();
+    (channel as any).personaId = PERSONA;
+    const manager = new ChannelManager([channel], config);
+    await manager.start();
+    try {
+      await manager.pumpOnce();
+    } finally {
+      await manager.stop();
+    }
+    expect(finals[0]).toContain("Child run finished.");
+    expect(finals[0]).not.toContain("<@");
+    expect(mentions[0]).toBeUndefined();
   });
 
   it("says nothing when there is no pending event", async () => {

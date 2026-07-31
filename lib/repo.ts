@@ -5,6 +5,7 @@ import {
   agentSessions,
   attachments,
   channelIdentities,
+  channelThreads,
   memories,
   personaMemories,
   personas as personasTable,
@@ -1862,6 +1863,44 @@ export async function getChannelIdentity(
       )
     ))[0];
   return row ?? null;
+}
+
+/**
+ * The external account a local user holds on ONE channel — the reverse of
+ * getChannelIdentity. Used to turn a thread's owner (channel_threads.user_id)
+ * back into the id a transport can @-mention (design §9: a milestone message
+ * pings the person who asked for it). Null when the user has never linked this
+ * channel, which is the "no mention" case.
+ */
+export async function getChannelIdentityForUser(
+  userId: number,
+  channel: string
+): Promise<ChannelIdentity | null> {
+  const row = (await db
+    .select()
+    .from(channelIdentities)
+    .where(and(eq(channelIdentities.userId, userId), eq(channelIdentities.channel, channel)))
+    .orderBy(asc(channelIdentities.id))
+    .limit(1))[0];
+  return row ?? null;
+}
+
+/**
+ * True when a run is a PIPE-OWNED CONVERSATION: some channel_threads row points
+ * at it, i.e. a persona bot is holding a Discord thread for it.
+ *
+ * One indexed lookup (channel_threads_run_idx). It exists for the dispatch gate
+ * in lib/run-dispatch.ts: a server-runtime run with a thread must have its wake
+ * driven by the pipe process (which holds the draft the narration streams into),
+ * not by whichever process happened to emit the inbox event.
+ */
+export async function runHasChannelThread(runId: number): Promise<boolean> {
+  const row = (await db
+    .select({ id: channelThreads.id })
+    .from(channelThreads)
+    .where(eq(channelThreads.runId, runId))
+    .limit(1))[0];
+  return row !== undefined;
 }
 
 /** All identities linked to a local user (one per channel account). */

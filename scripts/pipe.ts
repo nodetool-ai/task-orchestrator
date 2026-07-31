@@ -5,6 +5,14 @@
 // long-running process that connects Discord to the existing task-orchestrator
 // agent runtime. Mirrors cli.ts: load dotenv BEFORE importing any lib/* or @/db
 // so env is set when the DB initialises and migrations (incl. 0018) run.
+//
+// OPERATIONAL NOTE (M5). This process is now REQUIRED for persona threads to
+// make noise. A run that a channel_threads row points at no longer gets woken by
+// the web process (lib/run-dispatch.ts defers it): its milestone turn has to run
+// where the Discord draft is, which is here. Inbox events for those runs are
+// durable and simply stay pending while the pipe is down — nothing is lost, but
+// nothing is narrated either, until it comes back and the wake pump picks them
+// up (one poll interval, TASK_ORCH_PIPE_RELAY_POLL_MS).
 
 import { config } from "dotenv";
 config({ path: ".env.local" });

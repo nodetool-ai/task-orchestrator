@@ -22,7 +22,14 @@ import { agentTurnCount, startFreshConversation } from "./carryover";
 import { ACK_REACTION, STOP_REACTION, YES_REACTION } from "./reactions";
 import { TOKEN_IN_MESSAGE_NOTICE, containsApiToken, handleCommand, isCommandText } from "./commands";
 import { TranscriptBuilder, chunkForDiscord } from "./render";
-import { currentRunId, getOrCreateRun, hasMapping, resolveUserId } from "./session-store";
+import {
+  currentRunId,
+  getOrCreateRun,
+  hasMapping,
+  resolveUserId,
+  threadOwnerExternalId,
+} from "./session-store";
+import type { ArmedCancelOutcome } from "./relay";
 import type { Channel, InboundMessage, PipeConfig } from "./types";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -44,11 +51,24 @@ export interface ReactionResolver {
   /** The run a breadcrumb message is about, or undefined if it isn't one. */
   runForBreadcrumb(messageId: string): number | undefined;
   /** Arm a confirm-gated cancel; returns the line to post. */
-  armCancel(conversationKey: string, runId: number): string;
-  /** Consume an armed cancel, if one is still live. */
-  takeArmedCancel(conversationKey: string): number | undefined;
+  armCancel(
+    conversationKey: string,
+    runId: number,
+    by: { userId: string; messageId: string }
+  ): string;
+  /** Resolve a 👍 against this conversation's armed cancels (see relay.ts). */
+  takeArmedCancel(
+    conversationKey: string,
+    by: { userId: string; isOwner?: boolean }
+  ): ArmedCancelOutcome | undefined;
   /** Cancel a confirmed run; returns the line to post. */
   confirmCancel(runId: number): Promise<string>;
+}
+
+/** The last message THIS process posted as the persona in a conversation. */
+interface OwnMessage {
+  /** Channel-native id, when the transport gave us one (absent for interaction replies). */
+  messageId?: string;
 }
 
 export class AgentLoop {
@@ -60,6 +80,12 @@ export class AgentLoop {
   // number of conversations seen since boot; entries are ~60 bytes and a
   // restart just re-checks the DB mapping, so no eviction is warranted.
   private greeted = new Set<string>();
+  // The last message this process posted as the persona, per conversation. It is
+  // what makes "👍 answers the persona's question" precise: a 👍 on ANY other
+  // message (a breadcrumb, an older reply, someone else's post) is not an answer
+  // to the open question and must not be injected as one. Bounded by the number
+  // of conversations this process has spoken in; one small record each.
+  private lastOwnMessage = new Map<string, OwnMessage>();
 
   constructor(
     private channel: Channel,
@@ -167,9 +193,20 @@ export class AgentLoop {
    *
    *   ❌ on a relay breadcrumb  → confirm-then-cancel that child run.
    *   ❌ anywhere else          → fall through as "/stop" (the M4 behavior).
-   *   👍 with a cancel armed    → the confirmation; cancel the run.
-   *   👍/👎 on a persona question → inject "yes"/"no" as an ordinary message.
-   *   👍/👎 with no question open → ignored, silently.
+   *   👍 confirming a cancel THIS user armed (or the thread owner's 👍) → cancel.
+   *   👍 confirming someone else's armed cancel → ignored.
+   *   👍 after the confirmation window closed → say it lapsed, cancel nothing.
+   *   👍/👎 ON the persona's open question → inject "yes"/"no" as a message.
+   *   👍/👎 anywhere else, or with no question open → ignored, silently.
+   *
+   * WHICH MESSAGE WAS REACTED TO IS PART OF THE MEANING (M5 review S4). The
+   * thread is full of the bot's own messages — breadcrumbs above all — and a 👍
+   * on one of THOSE is a thumbs-up, not an answer. So a yes/no injection
+   * requires the reaction to be on the persona's latest message; where this
+   * process does not know what that was (it restarted, or the reply went out as
+   * an interaction response with no addressable id) we at least refuse the
+   * messages we can positively identify as NOT questions — the relay's
+   * breadcrumbs.
    *
    * THE QUESTION HEURISTIC, stated plainly: the persona is considered to be
    * waiting on an answer when the LAST agent text on this conversation's run
@@ -188,23 +225,63 @@ export class AgentLoop {
     if (r.emoji === STOP_REACTION) {
       const runId = this.relay?.runForBreadcrumb(r.messageId);
       if (runId == null) return false; // ordinary ❌ → "/stop", handled below
-      const ask = this.relay!.armCancel(key, runId);
+      const ask = this.relay!.armCancel(key, runId, {
+        userId: msg.authorId,
+        messageId: r.messageId,
+      });
       await this.channel.send(msg.externalId, ask).catch(() => {});
       return true;
     }
 
-    if (r.emoji === YES_REACTION) {
-      const armed = this.relay?.takeArmedCancel(key);
-      if (armed != null) {
-        const line = await this.relay!.confirmCancel(armed);
+    if (r.emoji === YES_REACTION && this.relay) {
+      const owner = await threadOwnerExternalId(msg.channel, msg.externalId, msg.personaId).catch(
+        () => null
+      );
+      const armed = this.relay.takeArmedCancel(key, {
+        userId: msg.authorId,
+        isOwner: owner != null && owner === msg.authorId,
+      });
+      if (armed?.kind === "cancel") {
+        const line = await this.relay.confirmCancel(armed.runId);
         await this.channel.send(msg.externalId, line).catch(() => {});
         return true;
       }
+      if (armed?.kind === "lapsed") {
+        // Never fall through: an expired confirmation that quietly became a
+        // "yes" to whatever question happens to be open is the worst outcome.
+        await this.channel
+          .send(msg.externalId, "That cancel confirmation lapsed — react ❌ again to redo it.")
+          .catch(() => {});
+        return true;
+      }
+      // 'denied': someone else armed it. Consume the reaction (it clearly meant
+      // the cancel, not an answer) and say nothing.
+      if (armed?.kind === "denied") return true;
     }
 
-    // 👍/👎 as an answer: only when a question is actually open.
+    // 👍/👎 as an answer: only ON the persona's open question.
+    if (!this.reactedToOwnLatest(key, r.messageId)) return true; // consumed = ignored
     if (!(await this.hasOpenQuestion(msg))) return true; // consumed = ignored
     return false; // fall through: msg.text is already "yes"/"no"
+  }
+
+  /**
+   * True when a reaction landed on the persona's own latest message in this
+   * conversation — the only message a 👍/👎 can be answering.
+   *
+   * When this process knows its last message id, the check is exact. When it
+   * does not (restart, or an interaction reply with no id), we fall back to the
+   * heuristic but still reject anything the relay can identify as a breadcrumb.
+   */
+  private reactedToOwnLatest(key: string, messageId: string): boolean {
+    const own = this.lastOwnMessage.get(key);
+    if (own?.messageId) return own.messageId === messageId;
+    return this.relay?.runForBreadcrumb(messageId) == null;
+  }
+
+  /** Remember the message this turn just posted (see reactedToOwnLatest). */
+  private noteOwnMessage(key: string, messageId?: string): void {
+    this.lastOwnMessage.set(key, { messageId });
   }
 
   /**
@@ -243,6 +320,7 @@ export class AgentLoop {
   }
 
   private async runWakeTurn(externalId: string, personaId: string, channel: string): Promise<void> {
+    const key = `${channel}:${externalId}:${personaId}`;
     const runId = await currentRunId(channel, externalId, personaId);
     if (runId == null) return;
     if (runs.isLive(runId)) return;
@@ -289,9 +367,23 @@ export class AgentLoop {
 
     const text = builder.text();
     if (!text) return; // nothing to say — and no empty draft left behind
-    const chunks = chunkForDiscord(text);
-    if (draft) await draft.finalize(chunks[0]);
-    else await this.channel.send(externalId, chunks[0]);
+
+    // THE MILESTONE MENTION (PRD §9). This turn is the one message the thread is
+    // actually waiting for — "the PR is green", "the child failed" — and it
+    // arrives unprompted, possibly hours later, so it is the one message allowed
+    // to ping. The mention goes to the THREAD'S OWNER (channel_threads.user_id →
+    // their linked Discord account), and only on this send: the client-wide
+    // `parse: []` suppression stays in force for everything else, breadcrumbs
+    // included. An unlinked or unattributed thread gets no mention and no
+    // apology for it.
+    const owner = await threadOwnerExternalId(channel, externalId, personaId).catch(() => null);
+    const body = owner ? `<@${owner}> ${text}` : text;
+    const mention = owner ? { mentionUsers: [owner] } : undefined;
+
+    const chunks = chunkForDiscord(body);
+    if (draft) await draft.finalize(chunks[0], mention);
+    else await this.channel.send(externalId, chunks[0], undefined, mention);
+    this.noteOwnMessage(key, draft?.messageId);
     for (const extra of chunks.slice(1)) {
       await this.channel.send(externalId, extra).catch((err) =>
         console.error("[pipe] milestone overflow send failed:", err)
@@ -378,6 +470,7 @@ export class AgentLoop {
   }
 
   private async runTurn(msg: InboundMessage): Promise<void> {
+    const key = `${msg.channel}:${msg.externalId}:${msg.personaId}`;
     // 2. Resolve or create the persona conversation for this thread.
     //
     // This can legitimately fail — most plausibly runs.create's server-runtime
@@ -463,6 +556,10 @@ export class AgentLoop {
     const finalizeWith = async (text: string) => {
       const chunks = chunkForDiscord(text || "(no output)");
       await draft.finalize(chunks[0]);
+      // This is now the persona's latest message here — the only one a 👍/👎
+      // may answer (see reactedToOwnLatest). Overflow chunks below are part of
+      // the same answer; the FIRST chunk is the one a reader reacts to.
+      this.noteOwnMessage(key, draft.messageId);
       for (const extra of chunks.slice(1)) {
         try {
           await this.channel.send(msg.externalId, extra);
@@ -565,6 +662,7 @@ export class AgentLoop {
 
     if (errorText !== null) {
       await draft.finalize(`⚠️ ${errorText}`).catch(() => {});
+      this.noteOwnMessage(key, draft.messageId);
       return;
     }
 

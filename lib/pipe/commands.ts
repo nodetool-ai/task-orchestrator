@@ -182,14 +182,17 @@ export async function handleCommand(
     case "status": {
       // PRD J3: the digest is the answer — live state, no model call, no agent
       // turn, so it lands in well under the 5-second target. The old
-      // "is this thread's run busy?" line survives as the LAST line, because it
-      // is what tells the user whether `/stop` has anything to interrupt.
+      // "is this thread's run busy?" line survives as the digest's trailing
+      // line, because it is what tells the user whether `/stop` has anything to
+      // interrupt.
       const userId = await resolveUserId(msg.channel, msg.authorId);
-      const digest = await buildStatusDigest(personaId, userId);
 
       const id = await currentRunId(msg.channel, msg.externalId, personaId);
       if (!id) {
-        return { handled: true, reply: `${digest}\n\nThis thread has no conversation yet.` };
+        return {
+          handled: true,
+          reply: await buildStatusDigest(personaId, userId, "This thread has no conversation yet."),
+        };
       }
       const run = await runs.getRun(id);
       // A turn started here → we can stop it. A turn started in the web process
@@ -200,7 +203,9 @@ export async function handleCommand(
         : leaseLive(run)
           ? `⏳ This thread: run #${id} is working in another process (e.g. the web app); \`/stop\` can't reach it.`
           : `⚪ This thread: run #${id} idle.`;
-      return { handled: true, reply: `${digest}\n${here}` };
+      // Folded into the digest's trailing line rather than added as its own, so
+      // the whole answer keeps the PRD's ~5-lines-then-summarize shape.
+      return { handled: true, reply: await buildStatusDigest(personaId, userId, here) };
     }
 
     case "new":

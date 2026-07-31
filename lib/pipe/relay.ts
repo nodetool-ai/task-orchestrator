@@ -44,11 +44,33 @@
 // Milestone messages are NOT the relay's job: an inbox event (child.result, CI)
 // on the persona run produces an agent turn that streams to the thread through
 // the existing draft path. The relay only does the cheap signals.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// RESTART BEHAVIOUR (M5 review B3) — the relay PRIMES, it does not replay
+//
+// All of the relay's state is in memory. A restart therefore starts with an
+// empty "already posted" set, and a naive first tick would re-announce every
+// child of every owned conversation — days of history, all at once, the moment
+// the pipe comes back. So the FIRST TICK after startup is a PRIMING pass: it
+// records each child's current status as already-announced and emits nothing.
+// Only transitions observed after priming produce breadcrumbs.
+//
+// ACCEPTED TRADEOFF: a child that started, opened a PR or finished entirely
+// DURING the downtime is silently skipped — its breadcrumbs are lost, not
+// deferred. The alternative (a durable per-thread cursor over agent_events, so
+// the relay resumes exactly where it stopped) is M6 work; for one-line ambient
+// glyphs, silence about a window nobody was watching beats a wall of stale
+// announcements. Children that appear AFTER the priming tick are new to this
+// process and announce normally, so the steady-state feature is unaffected.
+//
+// The title machine has the same problem in a worse form — it would rename over
+// a title a person chose while the bot was down — and its own answer: see
+// applyTitle.
 
 import { and, count, eq, inArray } from "drizzle-orm";
 
 import { db } from "@/db";
-import { agentMessages, agentSessions, channelThreads } from "@/db/schema";
+import { agentMessages, agentSessions, channelThreads, tasks } from "@/db/schema";
 import { config } from "@/lib/config";
 import * as runs from "@/lib/runs";
 import { describe } from "@/lib/utils";
@@ -62,6 +84,16 @@ export const PROGRESS_THROTTLE_MS = 10 * 60 * 1000;
  *  collapsed into a single digest message (PRD §8 "digests over feeds"). */
 export const BATCH_THRESHOLD = 3;
 export const BATCH_WINDOW_MS = 60 * 1000;
+/**
+ * How long a finished child (or a settled thread) is kept in the in-memory maps
+ * after it goes terminal. Long enough that a late duplicate row or a reaction on
+ * its last breadcrumb still resolves; short enough that a long-lived pipe does
+ * not accumulate one entry per run it has ever seen. Re-admitting an evicted
+ * terminal child is harmless: it primes as "already announced" on sight.
+ */
+export const TERMINAL_EVICT_MS = 60 * 60 * 1000;
+/** Armed cancels expire after this; a later 👍 says so instead of falling through. */
+export const CANCEL_CONFIRM_MS = 5 * 60 * 1000;
 
 /** The breadcrumb kinds, in the order a healthy child moves through them. */
 export type Breadcrumb = "started" | "progress" | "pr" | "done" | "failed";
@@ -125,6 +157,8 @@ interface ChildState {
   lastTurnCount: number;
   /** The progress breadcrumb message, kept so the next one edits it in place. */
   progressDraft?: OutboundDraft;
+  /** When this child was first seen terminal, for map eviction. */
+  terminalAt?: number;
 }
 
 /** Per-thread state: batching window and the title machine. */
@@ -137,7 +171,29 @@ interface ThreadState {
   humanEdited: boolean;
   /** Title state last applied, so an unchanged state is not re-written. */
   titleState?: TitleState;
+  /** When this thread's children all went terminal, for map eviction. */
+  terminalAt?: number;
 }
+
+/** A cancel awaiting its 👍 confirmation (PRD §3: irreversible verbs confirm). */
+interface ArmedCancel {
+  runId: number;
+  at: number;
+  /** The user who reacted ❌ — only they (or the thread owner) may confirm. */
+  userId: string;
+  /** The breadcrumb the ❌ landed on; part of the key, so two ❌s don't merge. */
+  messageId: string;
+  conversationKey: string;
+}
+
+/** What a 👍 in a conversation with (or without) an armed cancel means. */
+export type ArmedCancelOutcome =
+  /** Confirmed by someone entitled to: cancel this run. */
+  | { kind: "cancel"; runId: number }
+  /** Armed, but the 5-minute window closed. Say so; don't silently do nothing. */
+  | { kind: "lapsed" }
+  /** Armed by someone else and the reactor is not the thread owner: ignore it. */
+  | { kind: "denied" };
 
 export interface RelayOptions {
   /** Poll interval in ms. 0 disables the relay (start() becomes a no-op). */
@@ -158,12 +214,18 @@ export class ProgressRelay {
   private threads = new Map<string, ThreadState>();
   /** Breadcrumb message id → the run it is about (❌-on-a-breadcrumb cancel). */
   private breadcrumbRuns = new Map<string, number>();
-  /** Conversations with a cancel awaiting a 👍 confirmation: key → run id. */
-  private pendingCancels = new Map<string, { runId: number; at: number }>();
+  /** Armed cancels, keyed by conversation + arming user + breadcrumb message. */
+  private pendingCancels = new Map<string, ArmedCancel>();
   private timer?: ReturnType<typeof setInterval>;
   private pollMs: number;
   private now: () => number;
   private ticking = false;
+  /**
+   * False until the first tick has completed. During that tick every child seen
+   * is PRIMED (its current status recorded as announced) and nothing is emitted
+   * — see the restart note in the header.
+   */
+  private primed = false;
 
   constructor(channels: RelayChannel[], opts: RelayOptions = {}) {
     for (const ch of channels) this.byPersona.set(ch.personaId, ch);
@@ -193,16 +255,22 @@ export class ProgressRelay {
   async tick(): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
+    // The first tick primes rather than announces (see the header). Captured
+    // before any await so a re-entrant caller cannot flip it mid-pass.
+    const priming = !this.primed;
     try {
       const conversations = await this.loadConversations();
-      if (conversations.size === 0) return;
+      if (conversations.size === 0) {
+        this.primed = true; // nothing to prime; the next tick announces normally
+        return;
+      }
       const children = await loadChildren([...conversations.keys()]);
       const byConversation = new Map<string, { conv: Conversation; lines: BreadcrumbLine[] }>();
 
       for (const child of children) {
         const conv = child.parentRunId == null ? undefined : conversations.get(child.parentRunId);
         if (!conv) continue;
-        const lines = await this.breadcrumbsFor(child);
+        const lines = await this.breadcrumbsFor(child, priming);
         if (lines.length === 0) continue;
         const key = convKey(conv);
         const bucket = byConversation.get(key) ?? { conv, lines: [] };
@@ -215,9 +283,31 @@ export class ProgressRelay {
           console.error("[pipe:relay] breadcrumb send failed:", describe(err))
         );
       }
-      await this.updateTitles(conversations, children);
+      await this.updateTitles(conversations, children, priming);
+      this.evictSettled();
+      // Only a pass that completed counts as priming: a tick that died on a DB
+      // error primed nothing, and treating it as done would let the NEXT tick
+      // announce the whole backlog — the exact failure priming exists to stop.
+      this.primed = true;
     } finally {
       this.ticking = false;
+    }
+  }
+
+  /**
+   * Drop long-settled entries so neither map grows with every run this process
+   * has ever seen. Only TERMINAL children (and threads whose children are all
+   * terminal) are evicted, and only after TERMINAL_EVICT_MS: an entry removed
+   * too early would be re-primed on the next tick, which is silent, but its
+   * progress draft and breadcrumb bookkeeping would be lost for no gain.
+   */
+  private evictSettled(): void {
+    const cutoff = this.now() - TERMINAL_EVICT_MS;
+    for (const [id, st] of this.children) {
+      if (st.terminalAt != null && st.terminalAt < cutoff) this.children.delete(id);
+    }
+    for (const [key, st] of this.threads) {
+      if (st.terminalAt != null && st.terminalAt < cutoff) this.threads.delete(key);
     }
   }
 
@@ -253,8 +343,14 @@ export class ProgressRelay {
 
   // ── breadcrumbs ──────────────────────────────────────────────────────────
 
-  /** Which breadcrumbs (if any) this child owes the thread right now. */
-  private async breadcrumbsFor(child: ChildRow): Promise<BreadcrumbLine[]> {
+  /**
+   * Which breadcrumbs (if any) this child owes the thread right now.
+   *
+   * `priming` (the first tick after startup) records the child's CURRENT status
+   * as already-announced and returns nothing, so a restart does not replay
+   * history into the thread. See the header for the tradeoff.
+   */
+  private async breadcrumbsFor(child: ChildRow, priming = false): Promise<BreadcrumbLine[]> {
     // The progress window opens when we FIRST see the run, not at epoch —
     // otherwise the very next tick after "started" is already 10 minutes past
     // zero and the throttle never applies to the first progress line.
@@ -267,10 +363,16 @@ export class ProgressRelay {
       } as ChildState);
     this.children.set(child.id, state);
 
+    if (isFailure(child.status) || child.status === "completed") {
+      state.terminalAt ??= this.now();
+    }
+
     const out: BreadcrumbLine[] = [];
     const emit = (kind: Exclude<Breadcrumb, "progress">) => {
       if (state.posted.has(kind)) return;
       state.posted.add(kind);
+      // Priming records the transition without announcing it.
+      if (priming) return;
       out.push({ kind, childId: child.id, text: formatBreadcrumb(kind, child) });
     };
 
@@ -278,6 +380,13 @@ export class ProgressRelay {
     if (child.prUrl) emit("pr");
     if (isFailure(child.status)) emit("failed");
     else if (child.status === "completed") emit("done");
+
+    if (priming) {
+      // Also anchor the progress signal, so the first post-priming progress line
+      // reports turns since the restart rather than the run's whole history.
+      state.lastTurnCount = await agentTurnCount(child.id);
+      return out;
+    }
 
     // Progress: the child produced new agent turns since the last progress
     // breadcrumb, and the 10-minute window has elapsed. Turn count is the only
@@ -328,6 +437,18 @@ export class ProgressRelay {
       const draft = await ch.openDraft(conv.externalId, fresh.map((l) => l.text).join("\n"));
       st.recentSends.push(now);
       this.registerDraft(draft, fresh);
+      // A digest message covers several runs, so it can only serve as ONE run's
+      // editable progress draft — editing it for run A would overwrite run B's
+      // line with A's text. When the batch happens to hold exactly one progress
+      // line we keep it (the common case: a progress line swept up in a burst of
+      // starts); with two or more, those runs simply post a fresh line next
+      // window instead of editing in place. Per-line edits need per-line
+      // messages, which is precisely what the digest rule exists to avoid.
+      const progress = fresh.filter((l) => l.kind === "progress");
+      if (progress.length === 1) {
+        const state = this.children.get(progress[0].childId);
+        if (state) state.progressDraft = draft;
+      }
       return;
     }
     for (const line of fresh) {
@@ -370,10 +491,16 @@ export class ProgressRelay {
    * relay stands down permanently for that thread. Someone who names a thread
    * has said what it is about, and having a bot overwrite that is worse than
    * losing a status glyph.
+   *
+   * The terminal ✅ prefers TASK state over run state where a child carries a
+   * task id: a completed run with a merged task is genuinely done, while a
+   * completed run whose task is still open is a PR waiting on a human (🔍).
+   * Run state alone cannot tell those apart — it says "the agent stopped".
    */
   private async updateTitles(
     conversations: Map<number, Conversation>,
-    children: ChildRow[]
+    children: ChildRow[],
+    priming = false
   ): Promise<void> {
     const byParent = new Map<number, ChildRow[]>();
     for (const c of children) {
@@ -382,17 +509,43 @@ export class ProgressRelay {
       list.push(c);
       byParent.set(c.parentRunId, list);
     }
+    const taskStates = await loadTaskStates(children);
     for (const [runId, conv] of conversations) {
       const kids = byParent.get(runId);
       if (!kids?.length) continue;
-      const next = titleStateFor(kids);
-      await this.applyTitle(conv, next).catch((err) =>
+      const next = titleStateFor(kids, taskStates);
+      const st = this.threadState(convKey(conv));
+      st.terminalAt =
+        next === "done" || next === "failed" ? (st.terminalAt ?? this.now()) : undefined;
+      await this.applyTitle(conv, next, priming).catch((err) =>
         console.error("[pipe:relay] thread rename failed:", describe(err))
       );
     }
   }
 
-  private async applyTitle(conv: Conversation, next: TitleState): Promise<void> {
+  /**
+   * Apply one thread's title state.
+   *
+   * OWNERSHIP AFTER A RESTART (M5 review B3). `lastSetTitle` is in-memory, so on
+   * the first application in this process we do not know whether the current
+   * title is ours or a person's. The tie-break is the glyph:
+   *
+   *   • a title that already starts with one of OUR glyphs is machine-owned —
+   *     adopt it and carry on;
+   *   • a title WITHOUT a glyph on a thread that already had children when this
+   *     process started (the priming pass) is treated as human-edited: either a
+   *     person stripped our glyph and renamed it, or an older deployment owned
+   *     it. Either way, standing down loses a glyph; renaming loses a human's
+   *     words. We stand down;
+   *   • a title without a glyph on a thread whose first children appeared while
+   *     we were WATCHING is the thread's original bot-generated name, so it is
+   *     adopted and glyphed. This is what keeps the feature working for every
+   *     conversation started after boot.
+   *
+   * Persisting title ownership (so a restart knows exactly what it last set) is
+   * M6 work; until then a stood-down thread stays stood down for this process.
+   */
+  private async applyTitle(conv: Conversation, next: TitleState, priming = false): Promise<void> {
     const ch = this.byPersona.get(conv.personaId);
     if (!ch?.renameThread || !ch.threadTitle) return;
     const st = this.threadState(convKey(conv));
@@ -400,7 +553,17 @@ export class ProgressRelay {
 
     const current = await ch.threadTitle(conv.externalId);
     if (current == null) return;
-    if (st.lastSetTitle != null && current !== st.lastSetTitle) {
+    if (st.lastSetTitle == null) {
+      // First application in this process: adopt or stand down (see above).
+      if (!TITLE_GLYPH_RE.test(current) && priming) {
+        console.log(
+          `[pipe:relay] thread ${conv.externalId} has a title we don't own ("${current}") — ` +
+            "leaving it alone"
+        );
+        st.humanEdited = true;
+        return;
+      }
+    } else if (current !== st.lastSetTitle) {
       st.humanEdited = true;
       return;
     }
@@ -432,19 +595,58 @@ export class ProgressRelay {
     return this.breadcrumbRuns.get(messageId);
   }
 
-  /** Arm a confirm-gated cancel for a conversation (PRD §3: irreversible verb). */
-  armCancel(conversationKey: string, runId: number): string {
-    this.pendingCancels.set(conversationKey, { runId, at: this.now() });
+  /**
+   * Arm a confirm-gated cancel (PRD §3: irreversible verbs confirm first).
+   *
+   * Keyed by (conversation, arming user, breadcrumb message) rather than by
+   * conversation alone: two people can ❌ two different breadcrumbs in the same
+   * thread, and a conversation-wide key would let the second arm overwrite the
+   * first — so one person's 👍 could cancel the run somebody else aimed at.
+   */
+  armCancel(
+    conversationKey: string,
+    runId: number,
+    by: { userId: string; messageId: string }
+  ): string {
+    this.pendingCancels.set(armKey(conversationKey, by.userId, by.messageId), {
+      runId,
+      at: this.now(),
+      userId: by.userId,
+      messageId: by.messageId,
+      conversationKey,
+    });
     return `Cancel run #${runId}? React 👍 to confirm. ${runLink(runId)}`;
   }
 
-  /** Consume an armed cancel, if one is live (5-minute window). */
-  takeArmedCancel(conversationKey: string): number | undefined {
-    const armed = this.pendingCancels.get(conversationKey);
-    if (!armed) return undefined;
-    this.pendingCancels.delete(conversationKey);
-    if (this.now() - armed.at > 5 * 60 * 1000) return undefined;
-    return armed.runId;
+  /**
+   * Resolve a 👍 against this conversation's armed cancels.
+   *
+   * Only the user who armed it — or the thread's owner, who is entitled to
+   * everything in their own thread — may confirm. A 👍 from anyone else is
+   * `denied` and leaves the arm intact, so the person who asked for the cancel
+   * can still confirm it. An arm past CANCEL_CONFIRM_MS is `lapsed`: the caller
+   * says so rather than letting the 👍 fall through to the yes/no path, where it
+   * would silently become a "yes" answering some unrelated question.
+   */
+  takeArmedCancel(
+    conversationKey: string,
+    by: { userId: string; isOwner?: boolean }
+  ): ArmedCancelOutcome | undefined {
+    let mine: { key: string; armed: ArmedCancel } | undefined;
+    let others = false;
+    for (const [key, armed] of this.pendingCancels) {
+      if (armed.conversationKey !== conversationKey) continue;
+      if (armed.userId === by.userId || by.isOwner) {
+        // Newest arm wins: it is the one the 👍 is answering.
+        if (!mine || armed.at >= mine.armed.at) mine = { key, armed };
+      } else {
+        others = true;
+      }
+    }
+    if (!mine) return others ? { kind: "denied" } : undefined;
+    this.pendingCancels.delete(mine.key);
+    if (this.now() - mine.armed.at > CANCEL_CONFIRM_MS) return { kind: "lapsed" };
+    return { kind: "cancel", runId: mine.armed.runId };
   }
 
   /** Cancel a run after confirmation. Returns the line to post back. */
@@ -462,6 +664,11 @@ export class ProgressRelay {
 
 export function convKey(conv: { channel: string; externalId: string; personaId: string }): string {
   return `${conv.channel}:${conv.externalId}:${conv.personaId}`;
+}
+
+/** Key for one armed cancel: conversation + who armed it + which breadcrumb. */
+function armKey(conversationKey: string, userId: string, messageId: string): string {
+  return `${conversationKey}|${userId}|${messageId}`;
 }
 
 const FAILURE_STATUSES = new Set(["failed", "cancelled", "budget_exhausted"]);
@@ -504,10 +711,33 @@ export function formatProgress(
   return `🔍 run #${child.id}: ${turns} turn${turns === 1 ? "" : "s"} in — ${runLabel(child)} · ${runLink(child.id)}`;
 }
 
-/** Aggregate child states → the thread's title glyph. */
-export function titleStateFor(children: Array<{ status: string; prUrl: string | null }>): TitleState {
+/** Task states that mean "this work landed" — the ✅ signal (lib/types.ts). */
+const DONE_TASK_STATES = new Set(["merged", "done"]);
+
+/**
+ * Aggregate child states → the thread's title glyph.
+ *
+ * `taskStates` maps a child's task id to its current tasks.state. Where a child
+ * HAS a task, that state is authoritative for the ✅/🔍 distinction: a completed
+ * run whose task merged is done, while a completed run with an open PR and a
+ * task that has not merged is in review, no matter how the run itself landed.
+ * A child with no task id (an ad-hoc run) keeps the run-state fallback: a PR on
+ * a completed run means review.
+ */
+export function titleStateFor(
+  children: Array<{ status: string; prUrl: string | null; taskId?: string | null }>,
+  taskStates: Map<string, string> = new Map()
+): TitleState {
   if (children.some((c) => isRunning(c.status) || isPending(c.status))) return "working";
-  if (children.some((c) => c.prUrl && c.status === "completed")) return "review";
+  const taskDone = (c: { taskId?: string | null }): boolean | undefined => {
+    const state = c.taskId ? taskStates.get(c.taskId) : undefined;
+    return state === undefined ? undefined : DONE_TASK_STATES.has(state);
+  };
+  const inReview = children.some((c) => {
+    if (c.status !== "completed" || !c.prUrl) return false;
+    return taskDone(c) !== true; // task known-merged ⇒ not review; else PR is open
+  });
+  if (inReview) return "review";
   if (children.every((c) => c.status === "completed")) return "done";
   if (children.some((c) => isFailure(c.status))) return "failed";
   return "working";
@@ -536,6 +766,21 @@ async function loadChildren(parentRunIds: number[]): Promise<ChildRow[]> {
     })
     .from(agentSessions)
     .where(inArray(agentSessions.parentRunId, parentRunIds));
+}
+
+/**
+ * Current state of every task the visible children carry, for the title
+ * machine's ✅ decision. One indexed `IN (...)` query per tick, skipped entirely
+ * when no child has a task id.
+ */
+async function loadTaskStates(children: ChildRow[]): Promise<Map<string, string>> {
+  const ids = [...new Set(children.map((c) => c.taskId).filter((id): id is string => !!id))];
+  if (ids.length === 0) return new Map();
+  const rows = await db
+    .select({ id: tasks.id, state: tasks.state })
+    .from(tasks)
+    .where(inArray(tasks.id, ids));
+  return new Map(rows.map((r) => [r.id, r.state as string]));
 }
 
 /** Agent turns recorded on a run — the relay's progress signal. */

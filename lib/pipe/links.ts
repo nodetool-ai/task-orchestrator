@@ -20,6 +20,8 @@ export function webLink(path: string): string {
 }
 
 export const runLink = (id: number): string => webLink(`/runs/${id}`);
+/** The runs OVERVIEW — where "…and 3 more" goes (not the first item shown). */
+export const runsLink = (): string => webLink("/runs");
 export const taskLink = (id: string): string => webLink(`/tasks/${id}`);
 export const planLink = (id: string): string => webLink(`/plans/${id}`);
 

@@ -35,9 +35,15 @@
 // NOT as an initial prompt (that is a one-shot input and would be consumed by
 // the first turn), and NOT as the M3 prompt-only injection (which is rebuilt
 // per turn and never stored). The summary is written as a `system`-role
-// agent_messages row on the new run, which is what loadPostgresContextMessages
-// feeds the model as durable context on EVERY turn of the new conversation —
-// the same mechanism lib/worktree-gc.ts uses to leave a note on a run.
+// agent_messages row on the new run — the same mechanism lib/worktree-gc.ts
+// uses to leave a note on a run.
+//
+// That row reaches the model because loadPostgresContextMessages keeps plain
+// system rows (only the inbox mirror / event digest frames are dropped) and
+// postgres-turn's reconstructContext replays each of them as a `[context]`
+// user block — the pi conversation has no system message role, so a labelled
+// user block is how durable per-run context is spoken. Both halves are needed:
+// persisting the row without the mapping is a summary the model never sees.
 
 import { and, count, eq } from "drizzle-orm";
 

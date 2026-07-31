@@ -78,6 +78,16 @@ export interface InboundMessage {
   };
 }
 
+/** Per-write options. Today: the one place mentions are deliberately allowed. */
+export interface OutboundOptions {
+  /**
+   * Channel-native user ids this ONE message may ping. The transport keeps its
+   * blanket mention suppression for everything else, so a mention is always an
+   * explicit, per-message decision rather than an ambient capability.
+   */
+  mentionUsers?: string[];
+}
+
 /**
  * A live, editable message in a channel — the streaming draft. Returned by
  * Channel.openDraft and held by the agent loop to push incremental updates.
@@ -85,8 +95,16 @@ export interface InboundMessage {
 export interface OutboundDraft {
   /** Replace the full text of this draft (in-place edit). */
   update(text: string): Promise<void>;
-  /** Final flush; same as update but marks the draft done (no more edits). */
-  finalize(text: string): Promise<void>;
+  /**
+   * Final flush; same as update but marks the draft done (no more edits).
+   *
+   * `opts.mentionUsers` opts THIS write — and only this write — out of the
+   * client-wide mention suppression, for the listed channel-native user ids. It
+   * exists for the milestone @-mention (PRD §9): a persona's own "your PR is
+   * green" narration pings the thread's owner. Breadcrumbs and ordinary replies
+   * pass nothing and stay mention-free.
+   */
+  finalize(text: string, opts?: OutboundOptions): Promise<void>;
   /**
    * Channel-native id of the message backing this draft, when there is one.
    * Absent for a draft delivered as a deferred interaction reply (an
@@ -119,7 +137,12 @@ export interface Channel {
    */
   openDraft(externalId: string, initial: string, replyToken?: string): Promise<OutboundDraft>;
   /** Send a standalone (non-streaming) message — used for command replies/errors. */
-  send(externalId: string, text: string, replyToken?: string): Promise<void>;
+  send(
+    externalId: string,
+    text: string,
+    replyToken?: string,
+    opts?: OutboundOptions
+  ): Promise<void>;
   /**
    * Add a reaction to a message (PRD §6: the 👀 "I heard you, this will take a
    * moment" ack). Optional — a transport without reactions simply has no ack.

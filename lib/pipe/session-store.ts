@@ -268,6 +268,28 @@ export async function listConversations(
     .where(and(eq(channelThreads.channel, channel), eq(channelThreads.personaId, personaId)));
 }
 
+/**
+ * The channel-native id of the conversation's OWNER — the linked user the
+ * thread is attributed to — or null when the thread is unattributed or that
+ * user has never linked this channel.
+ *
+ * Two hops, both indexed: channel_threads.user_id → users.id →
+ * channel_identities.external_user_id. Used for the milestone @-mention (PRD
+ * §9) and to let a thread's owner confirm a cancel somebody else armed. No
+ * mention (and no owner privilege) when it returns null, which is exactly the
+ * unlinked case.
+ */
+export async function threadOwnerExternalId(
+  channel: string,
+  externalId: string,
+  personaId: string
+): Promise<string | null> {
+  const mapping = await findMapping(channel, externalId, personaId);
+  if (!mapping?.userId) return null;
+  const identity = await repo.getChannelIdentityForUser(mapping.userId, channel);
+  return identity?.externalUserId ?? null;
+}
+
 /** True once this conversation has a mapping for this persona (onboarding gate). */
 export async function hasMapping(
   channel: string,

@@ -54,10 +54,31 @@ import {
   YES_REACTION,
 } from "../reactions";
 import { recentThreadIds } from "../session-store";
-import type { Channel, InboundMessage, OutboundDraft, PersonaBotConfig } from "../types";
+import type {
+  Channel,
+  InboundMessage,
+  OutboundDraft,
+  OutboundOptions,
+  PersonaBotConfig,
+} from "../types";
 
 /** Minimal structural type for a channel we can post to. */
-type Sendable = { send: (content: string) => Promise<Message> };
+type Sendable = { send: (content: string | OutboundPayload) => Promise<Message> };
+
+/** The payload shape we use when a single message needs its own mention policy. */
+type OutboundPayload = { content: string; allowedMentions: { parse: []; users: string[] } };
+
+/**
+ * Per-message payload. The client suppresses ALL mentions globally
+ * (allowedMentions: { parse: [] }); a message that is allowed to ping names the
+ * exact user ids here, and nothing else — `parse: []` stays, so @everyone/@here
+ * and role pings remain impossible even on a mentioning message.
+ */
+function payload(text: string, opts?: OutboundOptions): string | OutboundPayload {
+  const users = opts?.mentionUsers?.filter(Boolean) ?? [];
+  if (users.length === 0) return text;
+  return { content: text, allowedMentions: { parse: [], users } };
+}
 
 /** Top-level channel types we can spin a new thread off of. */
 const THREADABLE = new Set<ChannelType>([
@@ -602,9 +623,9 @@ export class DiscordChannel implements Channel {
         update: async (text) => {
           await this.tryEditReply(pending, text || "…");
         },
-        finalize: async (text) => {
-          const done = await this.tryEditReply(pending, text || "(no output)");
-          if (!done) await this.sendToChannel(externalId, text || "(no output)");
+        finalize: async (text, opts) => {
+          const done = await this.tryEditReply(pending, text || "(no output)", opts);
+          if (!done) await this.sendToChannel(externalId, text || "(no output)", opts);
         },
       };
     }
@@ -617,16 +638,21 @@ export class DiscordChannel implements Channel {
       update: async (text) => {
         await sent.edit(text || "…");
       },
-      finalize: async (text) => {
-        await sent.edit(text || "(no output)");
+      finalize: async (text, opts) => {
+        await sent.edit(payload(text || "(no output)", opts));
       },
     };
   }
 
-  async send(externalId: string, text: string, replyToken?: string): Promise<void> {
+  async send(
+    externalId: string,
+    text: string,
+    replyToken?: string,
+    opts?: OutboundOptions
+  ): Promise<void> {
     const pending = this.takeInteraction(replyToken);
-    if (pending && (await this.tryEditReply(pending, text))) return;
-    await this.sendToChannel(externalId, text);
+    if (pending && (await this.tryEditReply(pending, text, opts))) return;
+    await this.sendToChannel(externalId, text, opts);
   }
 
   /**
@@ -656,9 +682,13 @@ export class DiscordChannel implements Channel {
    * throwing) when Discord says the interaction is unknown or already
    * acknowledged, so the caller can fall back to a plain channel message.
    */
-  private async tryEditReply(i: ChatInputCommandInteraction, text: string): Promise<boolean> {
+  private async tryEditReply(
+    i: ChatInputCommandInteraction,
+    text: string,
+    opts?: OutboundOptions
+  ): Promise<boolean> {
     try {
-      await i.editReply(text);
+      await i.editReply(payload(text, opts));
       return true;
     } catch (err) {
       if (!isDeadInteraction(err)) throw err;
@@ -670,9 +700,13 @@ export class DiscordChannel implements Channel {
     }
   }
 
-  private async sendToChannel(externalId: string, text: string): Promise<void> {
+  private async sendToChannel(
+    externalId: string,
+    text: string,
+    opts?: OutboundOptions
+  ): Promise<void> {
     const ch = await this.fetchSendable(externalId);
-    await ch.send(text);
+    await ch.send(payload(text, opts));
   }
 
   private async fetchSendable(externalId: string): Promise<Sendable> {
