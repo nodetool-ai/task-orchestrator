@@ -50,6 +50,21 @@ function memorySkillDescription(personaName: string): string {
   return `Shared cross-session memory available to ${personaName} for this workspace, repo, and task.`;
 }
 
+/**
+ * Per-memory body budget for the ambient mount. The mount carries up to
+ * AMBIENT_MEMORY_TOTAL entries into EVERY request's system prompt / skill file,
+ * so an unbounded body (a pasted log, a long legacy persona_memories blob) would
+ * silently cost the same tokens on every turn forever. 600 chars is deliberately
+ * looser than the auto-recall block's INJECTED_BODY_CHARS (400): the mount is
+ * the persona's standing context, the injection is per-turn noise. Truncated
+ * notes stay findable in full through memory_search.
+ */
+const AMBIENT_BODY_CHARS = 600;
+
+function capBody(body: string): string {
+  return body.length > AMBIENT_BODY_CHARS ? `${body.slice(0, AMBIENT_BODY_CHARS)}…` : body;
+}
+
 function renderMemoryBody(
   personaName: string,
   blocks: Array<{ scope: string; body: string; keywords?: string[] }>
@@ -61,7 +76,7 @@ function renderMemoryBody(
     const keywords = b.keywords && b.keywords.length > 0
       ? `\n\nKeywords: ${b.keywords.join(", ")}`
       : "";
-    return `## ${b.scope}\n\n${b.body}${keywords}`;
+    return `## ${b.scope}\n\n${capBody(b.body)}${keywords}`;
   }).join("\n\n");
   return `# Shared memory for ${personaName}\n\n${body}`;
 }

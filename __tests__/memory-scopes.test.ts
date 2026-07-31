@@ -276,6 +276,62 @@ describe("ambient mount reserves slots for the identity scopes", () => {
   });
 });
 
+describe("search candidate pool is per scope, not one shared recency window", () => {
+  it("finds (and forgets) an old user memory buried under 60+ newer repo notes", async () => {
+    const uid = await seedUser("pool@test.local");
+    const repoRow = await repo.createRepository({ name: "loud-repo", defaultBranch: "main" });
+
+    // The one note that matters is the OLDEST row in the run's visible scopes.
+    await repo.createMemory({
+      scope: "user",
+      scopeKey: String(uid),
+      body: "works in Berlin",
+      keywords: ["berlin", "location"],
+    });
+    // Newer user notes push it out of the ambient mount as well, so search is
+    // genuinely the only way back to it.
+    for (let i = 0; i < 10; i += 1) {
+      await repo.createMemory({ scope: "user", scopeKey: String(uid), body: `user note ${i}` });
+    }
+    // A shared cross-scope recency window (the old candidate fetch) holds ~50
+    // rows, so this chatter alone made the note above unfindable.
+    for (let i = 0; i < 64; i += 1) {
+      await repo.createMemory({ scope: "repo", scopeKey: repoRow.id, body: `repo chatter ${i}` });
+    }
+
+    const run = await makeRun({ personaId: "alpha", userId: uid, repoId: repoRow.id });
+    const r = await mount(run, "alpha");
+
+    expect((await searchVia(r, "berlin")).map((h) => h.body)).toContain("works in Berlin");
+
+    // …and auto-recall, which searches the same pool, still pushes it.
+    const block = await buildMemoryInjection({
+      run: { id: run.id, personaId: "alpha", userId: uid, repoId: repoRow.id, taskId: null },
+      text: "where does she work again? berlin?",
+    });
+    expect(block).toContain("works in Berlin");
+    expect(block).toContain(`[user:${uid}]`);
+
+    // …and memory_forget can still reach it.
+    const res = await r.tools.get("memory_forget")!.execute("c", { scope: "user", match: "Berlin" });
+    expect((res.content[0] as any).text).toContain("Removed 1");
+    const left = await db.select().from(memories).where(eq(memories.scope, "user"));
+    expect(left.map((m) => m.body)).not.toContain("works in Berlin");
+    expect(left).toHaveLength(10); // the unrelated user notes survive
+  });
+});
+
+describe("ambient mount caps each rendered body", () => {
+  it("truncates a very long note instead of paying for it on every turn", async () => {
+    const long = `LONGNOTE ${"x".repeat(2000)} TAIL`;
+    await repo.createMemory({ scope: "persona", scopeKey: "alpha", body: long });
+    const r = await mount(await makeRun({ personaId: "alpha" }), "alpha");
+    expect(r.skills[0].body).toContain("LONGNOTE");
+    expect(r.skills[0].body).not.toContain("TAIL");
+    expect(r.skills[0].body).toContain("…");
+  });
+});
+
 describe("auto-recall injection", () => {
   it("builds a labelled block from the visible scopes and skips ambient duplicates", async () => {
     const uid = await seedUser("recall@test.local");
@@ -385,6 +441,50 @@ describe("auto-recall reaches the model as prompt text only", () => {
     }
     const userRow = rows.find((r) => r.role === "user");
     expect(userRow!.content).toContain("can I deploy now?");
+  });
+
+  // The hook lives in runOneTurn ABOVE the context-mode branch, so it must fire
+  // for the sdk-session path too (a worker-runtime chat driven in-process on a
+  // deployment without a remote runner — see run-runtime-server.test.ts).
+  // Gating the hook on `usePostgres` has to fail this test.
+  it("injects on the sdk-session path too, and not for an ephemeral wake", async () => {
+    const repoRow = await repo.createRepository({ name: "sdk-repo", defaultBranch: "main" });
+    await repo.createMemory({
+      scope: "repo",
+      scopeKey: repoRow.id,
+      body: "deploys must be announced in #ops first",
+      keywords: ["deploy"],
+    });
+    for (let i = 0; i < 20; i += 1) {
+      await repo.createMemory({ scope: "repo", scopeKey: repoRow.id, body: `filler ${i}` });
+    }
+    const seen = stubBackend();
+    // runtime='worker' (the default) + no worktree: the in-process append path
+    // drives it through the SDK-session context mode.
+    const run = await runs.create({
+      goal: "<chat>",
+      personaId: "alpha",
+      repoId: repoRow.id,
+      cwdStrategy: "none",
+      backend: "pi",
+    } as any);
+    expect(run.runtime).toBe("worker");
+
+    const abort = new AbortController();
+    for await (const _ of runs.sendMessageToRun({
+      runId: run.id,
+      role: "user",
+      text: "can I deploy now?",
+      abort,
+    })) {
+      // drain
+    }
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].contextKind).not.toBe("postgres");
+    expect(seen[0].prompt).toContain(MEMORY_INJECTION_HEADING);
+    expect(seen[0].prompt).toContain("deploys must be announced");
+    expect(seen[0].prompt).toContain("can I deploy now?");
   });
 
   it("injects nothing on a bare event wake", async () => {

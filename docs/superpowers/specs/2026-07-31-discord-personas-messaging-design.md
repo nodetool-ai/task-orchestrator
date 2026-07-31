@@ -231,6 +231,28 @@ when a persona spawns on a user's behalf), spawned implement runs see
 the same persona/user memories through the identical extension — the
 persona's knowledge travels into its delegated work for free.
 
+**Search pool.** `memory_search` / auto-recall / `memory_forget` build
+their BM25 candidate pool **per scope spec** (a bounded recency window
+for each visible scope, merged), not as one shared recency window across
+all scopes. A single window let a chatty `repo`/`task` scope evict old
+`user`/`persona` rows from *search* — the same eviction the ambient
+mount's per-group reservation prevents at mount time.
+
+**Known limitation — auto-recall is in-process only.** The pushed
+recalled-memory block is assembled in `lib/runs.ts#runOneTurn`, so it
+covers server-runtime (containerless) persona turns. Detached /
+containerized runs drive through `lib/worker-runtime/context.ts`
+(`driveWorkerRun`), which never calls `runOneTurn`: the worker holds no
+DB access and the `run.input` command carrying the user's text has no
+field for control-plane-computed turn context, so pushing recall there
+requires a protocol change (a recall prefix on `run.input` *and* on the
+start snapshot's `pendingInput`, surviving the `OrderedInputQueue`
+replay dedupe). Dispatched runs are therefore not memory-blind but not
+memory-*pushed*: the ambient memory mount still travels to them
+(`buildRunStart` → `memory__load` → `memoryContext`) and `memory_search`
+is callable over `tool.invoke`; only the per-message auto-recall block is
+missing. Revisit alongside the next worker-protocol revision.
+
 ### 5. Personas orchestrate: tools and progress relay
 
 **Tools.** Discord-facing personas get

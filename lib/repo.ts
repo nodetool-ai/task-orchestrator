@@ -1651,15 +1651,23 @@ export async function createMemory(input: MemoryCreate): Promise<Memory> {
   return row;
 }
 
+type MemoryScopeSpec = { scope: MemoryScope; scopeKey?: string | null };
+
+function memoryScopePredicate(s: MemoryScopeSpec) {
+  return s.scope === "global"
+    ? eq(memories.scope, "global")
+    : and(eq(memories.scope, s.scope), eq(memories.scopeKey, s.scopeKey ?? ""));
+}
+
+function byRecencyDesc(a: Memory, b: Memory): number {
+  return b.updatedAt.getTime() - a.updatedAt.getTime() || b.id - a.id;
+}
+
 export async function listRecentMemories(args: {
-  scopes: Array<{ scope: MemoryScope; scopeKey?: string | null }>;
+  scopes: MemoryScopeSpec[];
   limit?: number;
 }): Promise<Memory[]> {
-  const predicates = args.scopes.map((s) =>
-    s.scope === "global"
-      ? eq(memories.scope, "global")
-      : and(eq(memories.scope, s.scope), eq(memories.scopeKey, s.scopeKey ?? ""))
-  );
+  const predicates = args.scopes.map(memoryScopePredicate);
   if (predicates.length === 0) return [];
   return await db
     .select()
@@ -1669,6 +1677,47 @@ export async function listRecentMemories(args: {
     .limit(Math.max(1, Math.min(args.limit ?? 12, 50)));
 }
 
+/**
+ * Rows each scope spec contributes to a search/forget candidate pool.
+ *
+ * WHY PER SPEC (and not one shared recency window): listRecentMemories takes ONE
+ * `WHERE scope IN (…) ORDER BY updated_at DESC LIMIT n` across every visible
+ * scope, so the newest rows of a chatty scope evict every other scope's rows
+ * from the window. Feeding that window to BM25 made a months-old `user` note
+ * ("works in Berlin") invisible to memory_search, auto-recall AND memory_forget
+ * as soon as the repo/task scope accumulated n newer notes — the same eviction
+ * the ambient mount fixes with its per-scope-group reservation. So the pool is
+ * built per spec: each visible scope contributes its own recency window and one
+ * loud scope can no longer starve the others.
+ */
+const MEMORY_CANDIDATES_PER_SCOPE = 200;
+/** Overall pool bound (5 scopes max today), so BM25 stays cheap. */
+const MEMORY_CANDIDATES_TOTAL = 1000;
+
+/**
+ * Eviction-proof candidate pool for BM25 search / substring forget: up to
+ * MEMORY_CANDIDATES_PER_SCOPE most-recent rows FROM EACH scope spec, merged
+ * newest-first and bounded by MEMORY_CANDIDATES_TOTAL.
+ */
+async function listMemoryCandidates(scopes: MemoryScopeSpec[]): Promise<Memory[]> {
+  if (scopes.length === 0) return [];
+  const perScope = await Promise.all(
+    scopes.map((s) =>
+      db
+        .select()
+        .from(memories)
+        .where(memoryScopePredicate(s))
+        .orderBy(desc(memories.updatedAt), desc(memories.id))
+        .limit(MEMORY_CANDIDATES_PER_SCOPE)
+    )
+  );
+  // Specs are normally disjoint, but a caller may pass the same scope twice —
+  // dedupe by id so a row can't be scored (or deleted-counted) twice.
+  const byId = new Map<number, Memory>();
+  for (const row of perScope.flat()) byId.set(row.id, row);
+  return [...byId.values()].sort(byRecencyDesc).slice(0, MEMORY_CANDIDATES_TOTAL);
+}
+
 export async function searchMemories(args: {
   query: string;
   scopes: Array<{ scope: MemoryScope; scopeKey?: string | null }>;
@@ -1676,28 +1725,38 @@ export async function searchMemories(args: {
 }): Promise<MemorySearchResult[]> {
   const queryTokens = Array.from(new Set(memoryTokens(args.query)));
   if (queryTokens.length === 0) return [];
-  const candidates = await listRecentMemories({ scopes: args.scopes, limit: 500 });
+  const candidates = await listMemoryCandidates(args.scopes);
   if (candidates.length === 0) return [];
 
+  // Term frequencies are counted once per doc (and document frequencies once per
+  // term) rather than re-scanned per (doc, term) pair: the candidate pool is now
+  // per-scope and can hold ~1000 rows, where the old nested scans were
+  // quadratic in the pool size. Same BM25 math, just not O(docs² · terms).
   const docs = candidates.map((memory) => {
     const keywords = parseKeywords(memory.keywords);
     const tokens = [
       ...memoryTokens(memory.body),
       ...keywords.flatMap((k) => [k, k, k]).flatMap(memoryTokens),
     ];
-    return { memory, tokens, length: Math.max(tokens.length, 1) };
+    const tf = new Map<string, number>();
+    for (const t of tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
+    return { memory, tf, length: Math.max(tokens.length, 1) };
   });
   const avgLen = docs.reduce((sum, d) => sum + d.length, 0) / docs.length;
   const k1 = 1.2;
   const b = 0.75;
+  const df = new Map<string, number>();
+  for (const term of queryTokens) {
+    df.set(term, docs.reduce((n, d) => n + (d.tf.has(term) ? 1 : 0), 0));
+  }
 
   const scored = docs.map((doc) => {
     let score = 0;
     for (const term of queryTokens) {
-      const tf = doc.tokens.filter((t) => t === term).length;
+      const tf = doc.tf.get(term) ?? 0;
       if (tf === 0) continue;
-      const df = docs.filter((d) => d.tokens.includes(term)).length;
-      const idf = Math.log(1 + (docs.length - df + 0.5) / (df + 0.5));
+      const dfTerm = df.get(term) ?? 0;
+      const idf = Math.log(1 + (docs.length - dfTerm + 0.5) / (dfTerm + 0.5));
       score += idf * ((tf * (k1 + 1)) / (tf + k1 * (1 - b + b * (doc.length / avgLen))));
     }
     return { memory: doc.memory, score };
@@ -1713,7 +1772,9 @@ export async function removeMemoriesBySubstring(args: {
   scopes: Array<{ scope: MemoryScope; scopeKey?: string | null }>;
   match: string;
 }): Promise<number> {
-  const rows = await listRecentMemories({ scopes: args.scopes, limit: 500 });
+  // Same eviction-proof pool as search: forgetting an old note must not depend
+  // on how many newer notes other visible scopes have accumulated.
+  const rows = await listMemoryCandidates(args.scopes);
   const needle = args.match.toLowerCase();
   const matching = rows.filter((m) => m.body.toLowerCase().includes(needle));
   if (matching.length === 0) return 0;

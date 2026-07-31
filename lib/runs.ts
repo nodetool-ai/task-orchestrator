@@ -1377,6 +1377,10 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
           // context, not persisted as a user row) — postgres mode must not rewrite
           // a user row to embed it.
           ephemeralInput: input.ephemeralInput === true,
+          // Only the FIRST turn of this append recalls memory against the user's
+          // message; the continuation re-prompts below are orchestrator text and
+          // must not re-inject the same recalled block every iteration.
+          suppressRecall: prContinuations > 0,
           onSdk: (m) => {
             // forward to in-process bus consumers (SSE for /sessions UI)
             bus.emit("event", { type: "sdk", sdk: m });
@@ -3684,6 +3688,12 @@ interface RunOneTurnArgs {
   /** Postgres-mode only: id of the persisted user row this turn processes; pins
    *  context override/annotation to that row when a backlog is drained. */
   inputMessageId?: number;
+  /** Skip memory auto-recall for this turn WITHOUT touching `rawUserText` (which
+   *  still drives what gets persisted). Set by append()'s PR-continuation loop:
+   *  only the first turn of an append recalls against the user's message —
+   *  continuations are orchestrator-authored re-prompts, and re-injecting the
+   *  same block each iteration would just repeat it in the model's context. */
+  suppressRecall?: boolean;
 }
 
 interface TurnResult {
@@ -3897,18 +3907,25 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   // forget to call.
   //
   // Placement rules, both context modes:
-  //  • prompt text ONLY. The user row was already persisted by the caller
-  //    (append()); postgres mode rebuilds its context from agent_messages every
-  //    turn and embeds `rawUserText` — NOT this prompt — into that row, so the
-  //    recalled block reaches the model exactly once instead of on every later
-  //    turn. Same reasoning as the inbox digest above. On the sdk-session path
-  //    it likewise never enters the persisted transcript.
+  //  • prompt text ONLY: it never becomes an agent_messages row. In postgres
+  //    mode that means it reaches the model exactly once — the context is
+  //    rebuilt from agent_messages every turn and the user row embeds
+  //    `rawUserText`, NOT this prompt. On the sdk-session path the block is not
+  //    persisted by US either, but the BACKEND session it is spoken into keeps
+  //    it in its own history, so later resumed turns still see it. That is the
+  //    same trade-off the inbox digest above already accepts on that path;
+  //    bounded by INJECTED_MEMORY_LIMIT × INJECTED_BODY_CHARS.
   //  • only when there IS inbound user text: a bare event wake
   //    (ephemeralInput) or a synthetic kickoff/executor prompt has no user
   //    message to search with, and its digest already carries the context.
+  //    `suppressRecall` covers the same idea for a re-prompt that reuses the
+  //    original rawUserText (append()'s PR-continuation turns).
   //  • best-effort: a memory hiccup must never fail the user's turn.
   let promptWithMemory = prompt;
-  const recallText = args.ephemeralInput === true ? null : args.rawUserText?.trim() || null;
+  const recallText =
+    args.ephemeralInput === true || args.suppressRecall === true
+      ? null
+      : args.rawUserText?.trim() || null;
   if (recallText) {
     try {
       const recalled = await buildMemoryInjection({ run, text: recallText });

@@ -645,6 +645,17 @@ async function driveChatRun(context: WorkerRunContext, inputDriven: boolean): Pr
  *  worker-originated agent/tool output (synthetic ids in runModelTurn) is
  *  appended over the channel. */
 async function drainAndProcess(context: WorkerRunContext, queue: OrderedInputQueue): Promise<void> {
+  // TODO (memory auto-recall, design §4): this prompt is the user's message
+  // verbatim, with NO recalled-memory block. Auto-recall currently covers
+  // in-process turns only (lib/runs.ts#runOneTurn) — a detached/containerized
+  // worker has no DB access, and the `run.input` command that carries this text
+  // has no field for control-plane-computed turn context, so injecting here
+  // needs a protocol change (a recall/context prefix on run.input plus the
+  // snapshot's pendingInput, which the OrderedInputQueue would have to keep
+  // across a snapshot-replay dedupe). The AMBIENT memory mount does travel to
+  // workers (snapshot.memoryContext → memory__load), and memory_search remains
+  // callable over tool.invoke, so a worker is not memory-blind — it just does
+  // not get the pushed per-message block.
   for (const m of queue.drain()) {
     if (context.session.abortSignal?.aborted) return;
     const t = await runModelTurn(context, contentText(m.content) || RESUME_PROMPT);
