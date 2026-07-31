@@ -26,6 +26,8 @@ import * as repo from "@/lib/repo";
 import * as runs from "@/lib/runs";
 import { isTerminalStatus } from "@/lib/types";
 
+import { recordThreadCreated } from "./metrics";
+
 export interface GetOrCreateOptions {
   /** Provider-qualified model ("provider/id") to set on a freshly created run. */
   model?: string;
@@ -175,6 +177,10 @@ export async function getOrCreateRun(
     await db
       .insert(channelThreads)
       .values({ channel, externalId, personaId, runId: created.id, userId });
+    // PRD §11: the denominator of the zero-command-session rate. Counted on the
+    // mapping insert, so the racing loser below (which reuses the winner's run)
+    // does not double-count a conversation.
+    recordThreadCreated(personaId, userId);
     return created.id;
   } catch (err) {
     // Two near-simultaneous first messages for the same conversation can both

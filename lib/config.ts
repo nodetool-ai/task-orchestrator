@@ -378,6 +378,19 @@ export const config = Object.freeze({
       const value = intEnv("TASK_ORCH_PIPE_TURN_CAP", 60);
       return value >= 0 ? value : 60;
     },
+    /**
+     * Port for the pipe's own Prometheus endpoint (`GET /metrics`), bound to
+     * loopback. 0 (the default) disables it entirely — no listener is created.
+     *
+     * WHY IT EXISTS. The messaging metrics (PRD §11, lib/pipe/metrics.ts) are
+     * prom-client counters in the process that emits them, and the pipe is a
+     * standalone process: the web app's /api/metrics can serve the DB-derived
+     * gauges but not these. Same registry, same names, second listener.
+     */
+    get metricsPort(): number {
+      const value = intEnv("TASK_ORCH_PIPE_METRICS_PORT", 0);
+      return value > 0 && value < 65_536 ? value : 0;
+    },
   }),
 
   /** Public base URL of the web UI. Used for the deep links messaging surfaces

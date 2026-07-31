@@ -18,6 +18,7 @@ import { isLive } from "@/lib/runs";
 
 import { AgentLoop, type ReactionResolver } from "./agent-loop";
 import { MessageBus } from "./bus";
+import { recordWake } from "./metrics";
 import { listConversations } from "./session-store";
 import type { Channel, PipeConfig } from "./types";
 
@@ -94,6 +95,10 @@ export class ChannelManager {
         for (const conv of conversations) {
           if (isLive(conv.runId)) continue;
           if (!(await hasPendingInboxEvents(conv.runId))) continue;
+          // Counted on the DECISION to wake, not on the turn's outcome: a wake
+          // that finds nothing to say is still a wake this pump paid for
+          // (PRD §11 "wakes per persona").
+          recordWake(personaId);
           await loop
             .wakeConversation(conv.externalId, personaId, channel.name)
             .catch((err) => console.error("[pipe] wake failed:", err));

@@ -36,6 +36,10 @@ single Postgres database.
   Box managed runners, templates, snapshots, capacity, and rollback
 - **[docs/test-deployment.md](docs/test-deployment.md)** — full containerized
   stack (Postgres + server + Docker workers) for validating the run → PR loop
+- **[Persona bots on Discord](#persona-bots-on-discord)** — one Discord bot per
+  persona, `/link` identity, and the security posture behind them
+  ([design](docs/superpowers/specs/2026-07-31-discord-personas-messaging-design.md),
+  [PRD](docs/superpowers/specs/2026-07-31-discord-personas-messaging-prd.md))
 
 ## Run
 
@@ -424,6 +428,123 @@ the channel's `tool.invoke` command. Both ends emit structured logs
 only, never payloads or credentials — so the whole worker ⇄ server conversation
 is observable. Full protocol design:
 [docs/worker-websocket-protocol.md](docs/worker-websocket-protocol.md).
+
+## Persona bots on Discord
+
+`npm run pipe` bridges Discord to the same agent runtime the web UI drives:
+**one Discord application (and bot token) per persona**, all running inside
+that single process. A persona conversation is an `agent_runs` row with
+`goal = '<chat>'` and `runtime = 'server'` — its turns execute *in the pipe
+process*, with no container and no worktree — that spawns ordinary
+containerized worker runs to do the actual repo work. Design and UX contract:
+[design doc](docs/superpowers/specs/2026-07-31-discord-personas-messaging-design.md)
+and [PRD](docs/superpowers/specs/2026-07-31-discord-personas-messaging-prd.md).
+
+### Create one Discord app per persona
+
+1. **Create the application + bot** at
+   <https://discord.com/developers/applications> — one per persona you want on
+   Discord. The bot's name and avatar are the persona's face.
+2. **Enable the Message Content intent** (Bot → Privileged Gateway Intents →
+   *Message Content*). It is privileged and off by default; without it the bot
+   receives empty message bodies and answers nothing. The other intents the
+   client requests are not privileged and need no portal switch: `Guilds`,
+   `GuildMessages`, `DirectMessages`, `GuildMessageReactions`,
+   `DirectMessageReactions` (the last two power 👍/👎/❌ as input). The client
+   also registers `Partials.Channel / Message / Reaction`, which is what makes
+   DMs and reactions on uncached messages arrive at all.
+3. **Invite it** (OAuth2 → URL Generator) with the `bot` and
+   `applications.commands` scopes and these permissions: *Send Messages*,
+   *Read Message History*, *Create Public Threads*, *Send Messages in Threads*,
+   *Add Reactions* (👀 acks and reaction input), and *Manage Threads* if you
+   want the 🚧/🔍/✅/❌ thread-title status machine to rename threads.
+4. **Set the env vars** and start the bridge with `npm run pipe`.
+
+```bash
+DISCORD_BOT_TOKEN_CONCIERGE=...   # persona id, upper-snake (planning-agent → PLANNING_AGENT)
+DISCORD_APP_ID_CONCIERGE=...      # optional; enables slash-command registration for that bot
+DISCORD_ALLOWED_USERS=...         # MANDATORY: comma-separated Discord user ids
+DISCORD_ALLOWED_USERS_CONCIERGE=  # optional per-bot override (REPLACES the global list)
+DISCORD_ALLOWED_CHANNELS=         # optional; empty = anywhere an allow-listed user can reach it
+TASK_ORCH_PUBLIC_URL=https://tasks.example.com   # base for the deep links in every reply
+```
+
+Every `DISCORD_BOT_TOKEN_<PERSONA_ID>` must name a persona that exists in the
+`personas` table; unknown suffixes, empty allowlists and non-qualifying personas
+are **boot errors**, not warnings (see the posture below). The legacy
+single-bot `DISCORD_BOT_TOKEN` still works and binds to `DISCORD_DEFAULT_PERSONA`.
+
+### The roster today
+
+**Concierge** is the default, end-user-facing bot: intake, status, routing and
+end-to-end "just ship it" orchestration. **Executor** is the other persona that
+qualifies today (plan-driving). Adding a persona to Discord is normally *just*
+adding its token — no new files — but a persona only qualifies if its tools
+profile is **server-safe** (`lib/profiles.ts`) and its backend resolves to `pi`.
+
+The PRD's `@Rex` (the `qa` persona) does **not** qualify as shipped: its profile
+is `orchestrator,repo_read,gh_pr`, and both `repo_read` and `gh_pr` are
+server-unsafe — they would give a chat message filesystem reads and process
+spawning inside the pipe process. Setting `DISCORD_BOT_TOKEN_QA` today makes the
+pipe refuse to boot, by design and with that profile named in the error. Giving
+QA a Discord voice means giving it an orchestration-only profile (it can still
+*spawn* a containerized child that reads the repo and reviews the PR), not
+loosening the server-safety rule.
+
+### Linking your account (`/link`)
+
+Talking to a bot works unlinked; linking is what attributes the work. Mint an
+API token in the web UI, then **DM** the bot `/link <token>`. The token is
+verified, **consumed immediately** (single-use — it is a one-time proof of
+account ownership, not a standing credential), and only the resulting
+association is stored in `channel_identities`. From then on runs, threads and
+`user`-scoped memories carry your `users.id`. `/link` in a public channel is
+refused (the token would be readable by everyone), and a token-shaped string in
+any ordinary message is dropped before it can be persisted or sent to a model.
+
+Command surface (also registered as slash commands when `DISCORD_APP_ID_<ID>` is
+set): `/status`, `/new`, `/stop`, `/link`, `/whoami`, `/help` — plus 👍/👎 to
+answer a question, ❌ to stop a turn or cancel a run, and 👀 meaning "working on
+it". Everything else is just conversation.
+
+### Security posture
+
+- **No shell on the server runtime.** Persona turns run inside the pipe process,
+  next to `DATABASE_URL` and the orchestrator's own checkout, so the tool surface
+  *is* the sandbox: only server-safe profiles (orchestration, spawn, read-only
+  PR/CI) may be mounted, and `runs.create` rejects the rest per run. Repo work
+  happens in containerized children, which are isolated and branch-scoped.
+- **Allowlists are mandatory.** A persona can spawn worker runs that *do* get
+  `bypassPermissions` shells, so an open bot is an open shell one hop away. The
+  pipe refuses to start without an explicit `DISCORD_ALLOWED_USERS`.
+- **Tokens are secrets.** Bot tokens live only in the pipe's environment; the
+  metrics listener below binds to loopback for the same reason.
+
+### Operating it
+
+**The pipe is load-bearing.** Since the progress relay landed, the control plane
+*defers* wakes for mapped persona conversations to this process: their milestone
+turns have to run where the Discord draft is. Inbox events for those runs are
+durable and simply queue while the pipe is down — nothing is lost, but nothing is
+narrated either. Run it as a supervised service, not by hand.
+
+**Health signal.** Pending inbox events on a mapped conversation that are more
+than ~10 minutes old mean the pipe is not draining them — i.e. it is down or
+wedged. That is exported by the web app as
+`task_orch_pipe_stale_pending_events{persona="…"}` on `/api/metrics`; anything
+above 0 for a sustained period is the alarm.
+
+**Metrics (PRD §11).** The messaging surface emits `task_orch_pipe_*` metrics —
+time-to-first-PR per thread, user messages vs persona questions (clarify rate),
+commands vs threads (zero-command sessions), `/status` digest latency,
+breadcrumbs and wakes per persona — tagged by `persona` and, once linked, `user`.
+The counters live in the process that emits them, which is the pipe, so
+`/api/metrics` on the web app serves only the DB-derived ones
+(`task_orch_pipe_creation_share`, `task_orch_pipe_stale_pending_events`). Set
+`TASK_ORCH_PIPE_METRICS_PORT` to have the pipe expose the rest at
+`http://127.0.0.1:<port>/metrics` in the same Prometheus format. Creation share
+is reported for runs only — plans and tasks carry no creator column, so their
+messaging-vs-web split is not derivable without a schema change.
 
 ## GitHub webhooks (PR & CI feedback)
 

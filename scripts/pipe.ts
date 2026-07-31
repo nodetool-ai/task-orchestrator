@@ -17,12 +17,50 @@
 import { config } from "dotenv";
 config({ path: ".env.local" });
 
+import { createServer, type Server } from "node:http";
+
 import "../db"; // triggers migrations (incl. 0019_agent_runs_heartbeat) on import
+import { config as appConfig } from "../lib/config";
 import { ChannelManager } from "../lib/pipe/channel-manager";
 import { DiscordChannel } from "../lib/pipe/channels/discord";
 import { loadPipeConfig } from "../lib/pipe/config";
 import { ProgressRelay } from "../lib/pipe/relay";
 import { reconcileOrphanedRuns } from "../lib/runs";
+import { telemetry } from "../lib/runner/telemetry";
+
+/**
+ * Optional Prometheus listener (`TASK_ORCH_PIPE_METRICS_PORT`, off by default).
+ *
+ * The PRD §11 messaging metrics are emitted HERE — in the pipe process — so the
+ * web app's /api/metrics, which serves the same prom-client registry from a
+ * different process, cannot see them. This exposes that registry on loopback in
+ * the same exposition format, under the same metric names, for a local scraper
+ * or a sidecar. Bound to 127.0.0.1 deliberately: the pipe holds bot tokens and
+ * has no auth layer, so nothing it serves should be reachable off-box.
+ */
+function startMetricsServer(): Server | undefined {
+  const port = appConfig.pipe.metricsPort;
+  if (port <= 0) return undefined;
+  const registry = telemetry().registry;
+  const server = createServer((req, res) => {
+    if (req.method !== "GET" || !req.url?.startsWith("/metrics")) {
+      res.writeHead(404).end();
+      return;
+    }
+    registry
+      .metrics()
+      .then((body) => {
+        res.writeHead(200, { "Content-Type": registry.contentType, "Cache-Control": "no-store" });
+        res.end(body);
+      })
+      .catch(() => res.writeHead(500).end());
+  });
+  server.on("error", (err) => console.error("[pipe] metrics listener failed:", err));
+  server.listen(port, "127.0.0.1", () =>
+    console.log(`[pipe] metrics on http://127.0.0.1:${port}/metrics`)
+  );
+  return server;
+}
 
 async function main() {
   // Self-heal runs left "in flight" by a previous process that died mid-turn
@@ -50,6 +88,7 @@ async function main() {
 
   await manager.start();
   relay.start();
+  const metricsServer = startMetricsServer();
   console.log(`[pipe] ready — ${cfg.bots.map((b) => b.personaId).join(", ")}`);
 
   let shuttingDown = false;
@@ -58,6 +97,7 @@ async function main() {
     shuttingDown = true;
     console.log(`[pipe] ${sig} — shutting down`);
     relay.stop();
+    metricsServer?.close();
     await manager.stop();
     process.exit(0);
   };

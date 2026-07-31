@@ -79,6 +79,8 @@ agent_sessions           one row per pi.dev SDK run on a task
   output_tokens   INTEGER  captured from SDK result.usage
   sdk_session_id  TEXT     pi.dev: absolute path to the JSONL session file under `<cwd>/.pi/sessions/`. Used to resume.
   resume_of       INTEGER  prior agent_sessions.id this run continues
+  runtime         TEXT     NOT NULL default 'worker' — WHERE this run's turns execute: 'worker' (a detached process/container/Machine) | 'server' (in the control-plane/pipe process). See below.
+  user_id         INTEGER  FK → users.id ON DELETE SET NULL — the human this run belongs to (set from channel_identities for messaging runs)
   started_at      INTEGER  ms epoch
   completed_at    INTEGER  ms epoch, nullable
 
@@ -99,11 +101,34 @@ agent_messages           persisted assistant/tool/user message blocks
 
 For chat, `agent_messages` is the UI/streaming projection of the conversation.
 
-Every run — chats, plan executors (goal=`<execute>`), implement, and review —
-executes in an out-of-process **worker** (a detached local process, Docker
-container, or Fly/Box Machine). The worker drives its model turns over the
+Nearly every run — chats, plan executors (goal=`<execute>`), implement, and
+review — executes in an out-of-process **worker** (a detached local process,
+Docker container, or Fly/Box Machine). The worker drives its model turns over the
 WebSocket channel and resumes conversation context from its backend's SDK
 session, so no run holds the control-plane event loop or its heap.
+
+**`runtime = 'server'`** is the one exception, and it exists for persona
+conversations on messaging surfaces (`goal = '<chat>'`, mapped in
+`channel_threads`). Such a run's turns execute *inside* the process that owns the
+conversation — the pipe — with no container, no worktree and no SDK session file.
+The rules, all enforced in code:
+
+- **Internal callers only.** `runtime` is not exposed in the `POST /api/runs`
+  request schema; it is set by `runs.create` callers inside the process.
+- **Server-safe tools only.** The turns run next to `DATABASE_URL` and the
+  orchestrator's own checkout, so the tool surface is the sandbox:
+  `runs.create` rejects a `'server'` run whose profile resolves any shell,
+  filesystem or repo-write capability (`serverSafe` in `lib/profiles.ts`). The
+  pipe additionally checks this once at boot, per bot, and refuses to start.
+- **pi backend only.** A server run drives the postgres-turn loop, which the
+  claude backend cannot; `runOneTurn` rejects the combination.
+- **Excluded from dispatch.** The pending-run pump and reconciliation in
+  `lib/run-dispatch.ts` skip `runtime = 'server'` rows — nothing may dispatch
+  them to a worker — and wakes for a MAPPED conversation are deferred to the
+  pipe process, which is where the chat draft lives.
+
+A legacy `'server'` value also survives on pre-cutover rows from the retired
+in-process lightweight loop; those are inert.
 
 personas                 persona registry (seeded from lib/personas/*.ts)
   id                  TEXT  PK              e.g. 'reviewer', 'implementor'
@@ -143,6 +168,42 @@ The memory tools search scoped candidate rows with application-level BM25 over
 `body` plus boosted `keywords`. Agents and chats can write memories with
 `memory_remember`, search them with `memory_search`, and remove stale entries
 with `memory_forget`.
+
+The scope set is `global | repo | task | persona | user`. `persona` holds a
+persona's own working style (keyed by `personas.id`) and `user` holds durable
+facts about a person (keyed by `users.id`, addressable only once that person has
+linked a channel account — see `channel_identities`). Visibility is per scope
+key, so two personas — or two users — never read each other's rows. A turn mounts
+its visible scopes ambiently, with per-scope-group recency caps so repo memories
+cannot evict user/persona ones.
+
+channel_threads          a messaging conversation ↔ the run that backs it
+  id           INTEGER  AUTOINC PK
+  channel      TEXT     NOT NULL   transport name, e.g. 'discord'
+  external_id  TEXT     NOT NULL   channel-native conversation id (thread/DM/channel)
+  persona_id   TEXT     NOT NULL  FK → personas.id ON DELETE CASCADE  default 'implementor'
+  user_id      INTEGER  FK → users.id ON DELETE SET NULL — the thread's owner, backfilled on /link
+  run_id       INTEGER  NOT NULL  FK → agent_runs.id ON DELETE CASCADE  (the '<chat>' server-runtime run)
+  created_at   TIMESTAMPTZ
+  UNIQUE (channel, external_id, persona_id)
+
+channel_identities       an external chat account ↔ a local user
+  id                INTEGER  AUTOINC PK
+  channel           TEXT     NOT NULL   e.g. 'discord'
+  external_user_id  TEXT     NOT NULL   the channel-native account id (a Discord snowflake)
+  user_id           INTEGER  NOT NULL  FK → users.id ON DELETE CASCADE
+  label             TEXT               display handle at link time, for operator UIs
+  created_at        TIMESTAMPTZ
+  UNIQUE (channel, external_user_id)
+
+`persona_id` is NOT NULL (existing rows were backfilled to `'implementor'`): the
+3-tuple unique index is what lets N persona bots each hold their own
+conversation in one Discord channel, and a nullable column would make that key
+ambiguous. `user_id` on both the thread and its run stays nullable —
+attribution is opt-in and arrives later, via the one-time `/link <api-token>` DM
+(`lib/api-tokens.ts` verifies and *consumes* the token; only the association is
+stored, never the token itself). Linking upgrades attribution; it does not gate
+access — the per-bot allowlist does that.
 
 codex_credentials       The Codex (ChatGPT) OAuth credential. Singleton row.
   id                 INTEGER  PK, pinned to 1 by CHECK

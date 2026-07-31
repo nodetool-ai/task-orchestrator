@@ -21,6 +21,7 @@ import { config as appConfig } from "@/lib/config";
 import { agentTurnCount, startFreshConversation } from "./carryover";
 import { ACK_REACTION, STOP_REACTION, YES_REACTION } from "./reactions";
 import { TOKEN_IN_MESSAGE_NOTICE, containsApiToken, handleCommand, isCommandText } from "./commands";
+import { recordAgentReply, recordUserMessage } from "./metrics";
 import { TranscriptBuilder, chunkForDiscord } from "./render";
 import {
   currentRunId,
@@ -402,6 +403,10 @@ export class AgentLoop {
     // included. An unlinked or unattributed thread gets no mention and no
     // apology for it.
     const owner = await threadOwnerExternalId(channel, externalId, personaId).catch(() => null);
+    // A milestone is a persona message too, so it counts towards the clarify
+    // rate ("retry unless you object?" is a question the user has to answer).
+    // The thread owner is the only user label available on an unprompted turn.
+    recordAgentReply(personaId, text, channel, owner ?? undefined);
     const body = owner ? `<@${owner}> ${text}` : text;
     const mention = owner ? { mentionUsers: [owner] } : undefined;
 
@@ -496,6 +501,9 @@ export class AgentLoop {
 
   private async runTurn(msg: InboundMessage): Promise<void> {
     const key = `${msg.channel}:${msg.externalId}:${msg.personaId}`;
+    // PRD §11 clarify-rate denominator: one user REQUEST (commands and
+    // reactions never reach here). Fire-and-forget, by construction.
+    recordUserMessage(msg.personaId, msg.channel, msg.authorId);
     // 2. Resolve or create the persona conversation for this thread.
     //
     // This can legitimately fail — most plausibly runs.create's server-runtime
@@ -581,6 +589,10 @@ export class AgentLoop {
     const finalizeWith = async (text: string) => {
       const chunks = chunkForDiscord(text || "(no output)");
       await draft.finalize(chunks[0]);
+      // Clarify-rate numerator (PRD §11): counted on the WHOLE reply, before
+      // chunking, since "does the persona end by asking something" is a
+      // property of the answer, not of its first 2000 characters.
+      recordAgentReply(msg.personaId, text, msg.channel, msg.authorId);
       // This is now the persona's latest message here — the only one a 👍/👎
       // may answer (see reactedToOwnLatest). Overflow chunks below are part of
       // the same answer; the FIRST chunk is the one a reader reacts to.

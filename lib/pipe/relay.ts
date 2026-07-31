@@ -94,6 +94,7 @@ import * as runs from "@/lib/runs";
 import { describe } from "@/lib/utils";
 
 import { runLabel, runLink } from "./links";
+import { observeTimeToFirstPr, recordBreadcrumb } from "./metrics";
 import type { Channel, OutboundDraft } from "./types";
 
 /** ≤1 progress breadcrumb per run per 10 minutes (PRD §8 collapse rule). */
@@ -166,6 +167,10 @@ interface Conversation {
   externalId: string;
   personaId: string;
   runId: number;
+  /** When the thread was mapped — the START of the PRD §11 TTFPR clock. */
+  createdAt: Date;
+  /** The linked user the thread is attributed to, for the `user` metric label. */
+  userId: number | null;
 }
 
 /** Everything the relay remembers about one child run between ticks. */
@@ -203,6 +208,9 @@ interface ThreadState {
   humanEdited: boolean;
   /** Title state last applied, so an unchanged state is not re-written. */
   titleState?: TitleState;
+  /** True once TTFPR has been observed for this thread — it is a FIRST-PR
+   *  metric, so a second child's PR must not restart the clock. */
+  ttfprObserved?: boolean;
 }
 
 /** A cancel awaiting its 👍 confirmation (PRD §3: irreversible verbs confirm). */
@@ -358,6 +366,8 @@ export class ProgressRelay {
         externalId: channelThreads.externalId,
         personaId: channelThreads.personaId,
         runId: channelThreads.runId,
+        createdAt: channelThreads.createdAt,
+        userId: channelThreads.userId,
       })
       .from(channelThreads)
       .where(inArray(channelThreads.personaId, personaIds));
@@ -464,6 +474,20 @@ export class ProgressRelay {
     const st = this.threadState(convKey(conv));
     const now = this.now();
     st.recentSends = st.recentSends.filter((t) => now - t < BATCH_WINDOW_MS);
+
+    // PRD §11 metrics, emitted here because this is the point where a
+    // breadcrumb becomes a message the user can see — a priming pass produces
+    // no lines and so records nothing, which is what we want: the relay must
+    // not report a PR it merely re-read after a restart as "first observed now".
+    for (const line of lines) recordBreadcrumb(conv.personaId, line.kind);
+    if (!st.ttfprObserved && lines.some((l) => l.kind === "pr")) {
+      st.ttfprObserved = true;
+      observeTimeToFirstPr(
+        conv.personaId,
+        conv.userId,
+        (now - conv.createdAt.getTime()) / 1000
+      );
+    }
 
     // An in-place EDIT of the previous progress breadcrumb is not a new message
     // (PRD §8: "later breadcrumbs edit the previous one where possible"), so it

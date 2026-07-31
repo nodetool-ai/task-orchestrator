@@ -20,6 +20,7 @@ import { getUserById } from "@/lib/users";
 import { startFreshConversation } from "./carryover";
 import { buildStatusDigest } from "./digest";
 import { planLink, runLink, taskLink } from "./links";
+import { observeDigestSeconds, recordCommand } from "./metrics";
 import { currentRunId, getOrCreateRun, resolveUserId } from "./session-store";
 import type { InboundMessage, PipeConfig, SlashCommandSpec } from "./types";
 
@@ -65,14 +66,17 @@ function leaseLive(run: runs.RunRow | null): boolean {
   return run != null && isLeaseLive(run);
 }
 
+/**
+ * The cheat sheet — FIVE LINES, hard (PRD §7: "5-line cheat sheet"). Every
+ * command still fits because related ones share a line; the reactions line is
+ * there because reactions are input too (PRD §6) and are otherwise invisible.
+ * `/model` is deliberately absent (hidden power-user command).
+ */
 const HELP = [
-  "**Commands**",
-  "`/status` — what I'm working on right now",
-  "`/stop` — interrupt my current turn (aliases: `/cancel`, `/abort`, or just say \"stop\")",
-  "`/new` or `/reset` — start a fresh conversation",
+  "**Commands** · `/status` what I'm working on · `/new` start fresh · `/stop` interrupt my turn",
+  "`/whoami` who I am, who you are, what this thread is · `/help` this message",
   "`/link <token>` — link your account, in a DM (grab a token in the web UI)",
-  "`/whoami` or `/session` — who I am, who you are, what this thread is",
-  "`/help` — this message",
+  "Reactions: 👍/👎 answer my questions · ❌ stops a turn or cancels a run · 👀 = I'm on it",
   "Anything else is just talk — send it and I'll get on it.",
 ].join("\n");
 
@@ -133,7 +137,33 @@ export const TOKEN_IN_MESSAGE_NOTICE =
   "🛑 That looks like an API token — I won't process it, and I haven't stored it. " +
   "Use `/link <token>` in a DM with me, and consider revoking that token in the web UI.";
 
+/**
+ * Handle a command, and measure it (PRD §11). The metrics wrapper lives here
+ * rather than in each case so there is exactly one place that knows a command
+ * was USED (the zero-command-session counter pair) and one place that times the
+ * `/status` digest against its < 5s target. An unrecognized slash falls through
+ * un-counted — it was never a command.
+ *
+ * Emission is strictly after the fact and cannot throw (lib/pipe/metrics.ts), so
+ * a command's behaviour is byte-identical with or without it.
+ */
 export async function handleCommand(
+  msg: InboundMessage,
+  config: PipeConfig
+): Promise<CommandResult> {
+  const started = Date.now();
+  const result = await dispatchCommand(msg, config);
+  if (result.handled) {
+    const name = commandNameOf(msg.text) ?? "unknown";
+    recordCommand(msg.personaId, name, msg.channel, msg.authorId);
+    // "Digest latency" is the whole /status answer: DB reads, formatting, the
+    // liveness probe — everything but the transport send.
+    if (name === "status") observeDigestSeconds(msg.personaId, (Date.now() - started) / 1000);
+  }
+  return result;
+}
+
+async function dispatchCommand(
   msg: InboundMessage,
   config: PipeConfig
 ): Promise<CommandResult> {
