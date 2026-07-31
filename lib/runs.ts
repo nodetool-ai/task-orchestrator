@@ -391,6 +391,8 @@ declare global {
   var __runRunners: Map<number, RunnerState> | undefined;
   // eslint-disable-next-line no-var
   var __runLocks: Map<number, PerRunLock> | undefined;
+  // eslint-disable-next-line no-var
+  var __runPendingSubs: Map<number, Set<(event: unknown) => void>> | undefined;
 }
 
 const runners: Map<number, RunnerState> = globalThis.__runRunners ?? new Map();
@@ -398,6 +400,27 @@ if (!globalThis.__runRunners) globalThis.__runRunners = runners;
 
 const locks: Map<number, PerRunLock> = globalThis.__runLocks ?? new Map();
 if (!globalThis.__runLocks) globalThis.__runLocks = locks;
+
+/**
+ * Listeners that asked to hear a run's events BEFORE the run went live (see
+ * subscribeRunEvents). A run's bus only exists while a turn is in flight, so a
+ * caller that kicks a turn and then subscribes has an unavoidable race: a fast
+ * turn can register, emit and close its bus before the subscribe lands, and the
+ * caller sees nothing at all. These listeners are attached the moment a runner
+ * registers, which makes "subscribe, then start the turn" expressible.
+ */
+const pendingSubscribers: Map<number, Set<(event: unknown) => void>> =
+  globalThis.__runPendingSubs ?? new Map();
+if (!globalThis.__runPendingSubs) globalThis.__runPendingSubs = pendingSubscribers;
+
+/** The one place a run's in-process runner is published (bus + abort handle).
+ *  Routed through here so pre-subscribed listeners (above) are attached to the
+ *  bus before it can emit anything. */
+function registerRunner(runId: number, state: RunnerState): void {
+  runners.set(runId, state);
+  const waiting = pendingSubscribers.get(runId);
+  if (waiting) for (const listener of waiting) state.bus.on("event", listener);
+}
 
 function getLock(runId: number): PerRunLock {
   let l = locks.get(runId);
@@ -1281,7 +1304,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     const author = input.author ?? authorFor(run);
     const abort = input.abort ?? new AbortController();
     const bus = new EventEmitter();
-    runners.set(run.id, { abort, bus });
+    registerRunner(run.id, { abort, bus });
     ownsRunner = true;
 
     // Open the liveness lease and keep it fresh for the whole active period
@@ -1940,7 +1963,7 @@ export async function followUp(
 
   const abort = new AbortController();
   const bus = new EventEmitter();
-  runners.set(runId, { abort, bus });
+  registerRunner(runId, { abort, bus });
   // Keep the liveness lease fresh so this webhook-driven follow-up turn isn't
   // treated as an orphan by append()/reconcileOrphanedRuns() mid-turn.
   const heartbeat = startHeartbeat(runId);
@@ -2698,7 +2721,7 @@ async function runReview(
 ): Promise<void> {
   const abort = new AbortController();
   const bus = new EventEmitter();
-  runners.set(runId, { abort, bus });
+  registerRunner(runId, { abort, bus });
   // Keep the liveness lease fresh for the whole worker (prepare → turn), so an
   // append()/reconcileOrphanedRuns() can't mistake this live review for an
   // orphan and take it over / mark it failed mid-turn. The same interval polls
@@ -2876,7 +2899,7 @@ async function runExecute(
 ): Promise<void> {
   const abort = new AbortController();
   const bus = new EventEmitter();
-  runners.set(runId, { abort, bus });
+  registerRunner(runId, { abort, bus });
   // Keep the liveness lease fresh for the whole (long-running) executor turn so
   // append()/reconcileOrphanedRuns() never treat this live run as an orphan. The
   // same interval polls the cross-process cancel flag so a detached executor
@@ -4123,6 +4146,53 @@ export async function lastAgentText(runId: number): Promise<string | null> {
   return null;
 }
 
+/**
+ * The agent text a turn wrote AFTER a `streamCursor` snapshot, in order.
+ *
+ * The durable counterpart to the live event bus: a caller that snapshots
+ * `streamCursor().msgId` before driving a turn can read back exactly what that
+ * turn said, whether or not it heard a single envelope. Used by the pipe's
+ * milestone wake, where the narration IS the deliverable — losing it because a
+ * subscription attached late must not be possible (agent_messages is written
+ * before the turn returns).
+ *
+ * Rows are joined the way the Discord transcript joins assistant blocks
+ * (blank-line separated); tool-call summary lines have no durable equivalent
+ * and are simply absent from this rendering.
+ */
+export async function agentTextAfter(runId: number, afterMessageId: number): Promise<string | null> {
+  const rows = await db
+    .select({ content: agentMessages.content })
+    .from(agentMessages)
+    .where(
+      and(
+        eq(agentMessages.runId, runId),
+        eq(agentMessages.role, "agent"),
+        gt(agentMessages.id, afterMessageId)
+      )
+    )
+    .orderBy(agentMessages.id)
+    .limit(50);
+  const parts: string[] = [];
+  for (const r of rows) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(r.content);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(parsed)) continue;
+    const text = (parsed as Array<{ type?: string; text?: unknown }>)
+      .filter((b) => b?.type === "text" && typeof b.text === "string")
+      .map((b) => b.text as string)
+      .join("\n")
+      .trim();
+    if (text) parts.push(text);
+  }
+  const joined = parts.join("\n\n").trim();
+  return joined || null;
+}
+
 export interface TerminalChildEventSpec {
   type: "child.result" | "child.exception" | "child.cancelled" | "child.budget_exhausted";
   payload: Record<string, unknown>;
@@ -5263,6 +5333,40 @@ export function subscribe(runId: number, listener: (event: unknown) => void): ()
   if (!bus) return () => {};
   bus.on("event", listener);
   return () => bus.off("event", listener);
+}
+
+/**
+ * Subscribe to a run's events WITHOUT having to wait for it to be live.
+ *
+ * `subscribe` above can only attach to a bus that already exists, which forces
+ * callers that drive a turn themselves (the pipe's milestone wake) into a poll
+ * loop: kick the turn, then wait for isLive() and subscribe. That loop loses
+ * every envelope of a turn that starts and finishes inside one poll interval —
+ * silently, since the turn itself succeeds. This variant attaches immediately
+ * when the run is live and otherwise parks the listener until the run's runner
+ * registers (registerRunner), so "subscribe first, then wake" is race-free.
+ *
+ * The returned unsubscribe detaches from both places and must always be called:
+ * a parked listener is only dropped by it.
+ */
+export function subscribeRunEvents(
+  runId: number,
+  listener: (event: unknown) => void
+): () => void {
+  runners.get(runId)?.bus.on("event", listener);
+  let waiting = pendingSubscribers.get(runId);
+  if (!waiting) {
+    waiting = new Set();
+    pendingSubscribers.set(runId, waiting);
+  }
+  waiting.add(listener);
+  return () => {
+    runners.get(runId)?.bus.off("event", listener);
+    const set = pendingSubscribers.get(runId);
+    if (!set) return;
+    set.delete(listener);
+    if (set.size === 0) pendingSubscribers.delete(runId);
+  };
 }
 
 export function isLive(runId: number): boolean {

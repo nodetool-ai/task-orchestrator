@@ -1218,6 +1218,58 @@ describe("inbox-driven milestone turn", () => {
     expect(mentions[0]).toBeUndefined();
   });
 
+  // THE DELIVERY GUARANTEE. The wake CONSUMES the inbox event, so a narration
+  // that only ever existed as live envelopes is gone for good if the pipe misses
+  // them — which is exactly what used to happen when the turn registered,
+  // emitted and closed its bus inside one 20ms attach poll (a fast turn, or a
+  // loaded box where the timer fires late): no draft, no message, no error.
+  // Here the live bus is disabled outright; the milestone must still land, read
+  // back from the agent_messages the turn just wrote.
+  it("delivers the milestone from the durable tail when every live envelope is missed", async () => {
+    const runId = await getOrCreateRun("discord", "thread-1", PERSONA, { authorId: "u1" });
+    vi.spyOn(backend, "getBackend").mockResolvedValue({
+      id: "pi",
+      async runTurn(args: any) {
+        args.onEvent({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "Timer fired — the deploy finished." }] },
+        });
+        args.onEvent({ type: "result", is_error: false, result: "ok", usage: {} });
+        return {
+          summary: "ok",
+          resumeToken: null,
+          turns: 1,
+          inputTokens: 1,
+          outputTokens: 1,
+          totalCostUsd: 0,
+        };
+      },
+    } as any);
+    await emitInboxEvent({
+      targetRunId: runId,
+      type: "child.result",
+      sourceKind: "run",
+      sourceId: "997",
+      payload: { run_id: 997, outcome: "success" },
+      noWake: true,
+    });
+
+    const { channel, sends, finals } = fakeChannel();
+    (channel as any).personaId = PERSONA;
+    const loop = new AgentLoop(channel, config);
+    // Every live envelope lost: the subscription attaches to nothing.
+    const spy = vi.spyOn(runs, "subscribeRunEvents").mockReturnValue(() => {});
+    try {
+      await loop.wakeConversation("thread-1", PERSONA, "discord");
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(finals).toEqual([]); // no draft was ever opened…
+    expect(sends[0]).toContain("Timer fired — the deploy finished."); // …and it still landed
+    expect(await hasPendingInboxEvents(runId)).toBe(false);
+  });
+
   it("says nothing when there is no pending event", async () => {
     await getOrCreateRun("discord", "thread-1", PERSONA);
     const { channel, sends } = fakeChannel();

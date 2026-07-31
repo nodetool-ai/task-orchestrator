@@ -306,6 +306,14 @@ export class AgentLoop {
    * The draft is opened LAZILY, on the first envelope: a wake that turns out to
    * have nothing to say (the events were already drained) must not leave a
    * stray "…" in the thread.
+   *
+   * DELIVERY IS NOT ALLOWED TO DEPEND ON THE LIVE BUS. The wake consumes the
+   * inbox event whether or not anyone hears the envelopes, so a missed
+   * subscription used to mean the milestone was gone for good, with nothing
+   * logged. runWakeTurn therefore (1) subscribes BEFORE waking, closing the
+   * ordering race at its root, and (2) falls back to the durable agent_messages
+   * tail written by the turn when the live transcript came out empty — so the
+   * narration survives even if every envelope is missed.
    */
   async wakeConversation(externalId: string, personaId: string, channel = "discord"): Promise<void> {
     const key = `${channel}:${externalId}:${personaId}`;
@@ -348,24 +356,41 @@ export class AgentLoop {
         .catch(() => {});
     };
 
-    let settled = false;
-    let unsubscribe: () => void = () => {};
-    const attach = (async () => {
-      const deadline = Date.now() + ATTACH_POLL_TIMEOUT_MS;
-      while (!settled && !runs.isLive(runId) && Date.now() < deadline) await delay(20);
-      if (!settled && runs.isLive(runId)) unsubscribe = runs.subscribe(runId, onEvent);
-    })();
+    // SUBSCRIBE BEFORE WAKING. The old code kicked wakeServerRun and polled
+    // runs.isLive() to find the bus afterwards, which loses the whole turn when
+    // it registers, emits and closes inside one poll interval — a fast turn (a
+    // cached/short model reply, or a loaded CI box where the 20ms timer fires
+    // late) then produced no envelopes here, no lazy draft, and no error: the
+    // inbox event was consumed and its narration silently dropped.
+    // subscribeRunEvents attaches the listener the moment the run's runner
+    // registers, so there is no window to lose.
+    const unsubscribe = runs.subscribeRunEvents(runId, onEvent);
+    // Durable cursor for the fallback below, taken before the turn writes.
+    const cursor = await runs.streamCursor(runId).catch(() => null);
 
     try {
       await runs.wakeServerRun(runId);
     } finally {
-      settled = true;
-      await attach.catch(() => {});
       unsubscribe();
     }
     await pendingEdit;
 
-    const text = builder.text();
+    // THE NARRATION IS THE DELIVERABLE, so live envelopes are an optimization,
+    // never the only copy. Whatever the turn said is in agent_messages by the
+    // time wakeServerRun returns; if we heard nothing live (bus never emitted,
+    // a racing driver drove the turn, an envelope shape we don't render), read
+    // it back from the durable tail and deliver that instead. Only text written
+    // AFTER the cursor counts — the run's older replies are not this milestone.
+    let text = builder.text();
+    if (!text && cursor) {
+      text =
+        (await runs
+          .agentTextAfter(runId, cursor.msgId)
+          .catch((err) => {
+            console.error("[pipe] milestone durable read failed:", err);
+            return null;
+          })) ?? "";
+    }
     if (!text) return; // nothing to say — and no empty draft left behind
 
     // THE MILESTONE MENTION (PRD §9). This turn is the one message the thread is
