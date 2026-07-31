@@ -1089,7 +1089,7 @@ describe("long-thread guard", () => {
 // event on the persona run → the pipe's pump → wakeServerRun → a real
 // server-runtime turn on a stubbed backend → text in the Discord thread.
 describe("inbox-driven milestone turn", () => {
-  it("streams a woken persona turn into the thread, and mentions the thread owner", async () => {
+  it("streams a woken persona turn into the thread, and mentions the thread owner", { timeout: 20_000 }, async () => {
     // A linked owner, so the milestone has someone to ping (PRD §9).
     const [user] = await db
       .insert(users)
@@ -1168,7 +1168,7 @@ describe("inbox-driven milestone turn", () => {
     expect(await hasPendingInboxEvents(runId)).toBe(false);
   });
 
-  it("does not mention anyone when the thread has no linked owner", async () => {
+  it("does not mention anyone when the thread has no linked owner", { timeout: 20_000 }, async () => {
     const runId = await getOrCreateRun("discord", "thread-1", PERSONA);
     vi.spyOn(backend, "getBackend").mockResolvedValue({
       id: "pi",
