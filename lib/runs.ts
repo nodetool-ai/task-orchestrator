@@ -106,7 +106,7 @@ import {
 import { sandboxFactory } from "./extensions/sandbox";
 import { envScrubFactory } from "./extensions/env-scrub";
 import { personaPromptFactory } from "./extensions/persona-prompt";
-import { personaMemoryFactory } from "./extensions/persona-memory";
+import { buildMemoryInjection, personaMemoryFactory } from "./extensions/persona-memory";
 import { abortBridgeFactory } from "./extensions/abort-bridge";
 import { linkSharedWorktreeArtifacts } from "./worktree-env";
 import { applyPrewarmToCheckout } from "./prewarm";
@@ -3891,6 +3891,33 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
       }
     : { kind: "sdk-session" };
 
+  // Memory auto-recall (design §4): BM25-search every scope this run can see
+  // with the user's inbound text and prepend the top hits to THIS turn's prompt.
+  // Memory is pushed into context rather than left behind a tool the model may
+  // forget to call.
+  //
+  // Placement rules, both context modes:
+  //  • prompt text ONLY. The user row was already persisted by the caller
+  //    (append()); postgres mode rebuilds its context from agent_messages every
+  //    turn and embeds `rawUserText` — NOT this prompt — into that row, so the
+  //    recalled block reaches the model exactly once instead of on every later
+  //    turn. Same reasoning as the inbox digest above. On the sdk-session path
+  //    it likewise never enters the persisted transcript.
+  //  • only when there IS inbound user text: a bare event wake
+  //    (ephemeralInput) or a synthetic kickoff/executor prompt has no user
+  //    message to search with, and its digest already carries the context.
+  //  • best-effort: a memory hiccup must never fail the user's turn.
+  let promptWithMemory = prompt;
+  const recallText = args.ephemeralInput === true ? null : args.rawUserText?.trim() || null;
+  if (recallText) {
+    try {
+      const recalled = await buildMemoryInjection({ run, text: recallText });
+      if (recalled) promptWithMemory = `${recalled}\n\n${prompt}`;
+    } catch {
+      // recall is an optimization; the memory tools remain available
+    }
+  }
+
   const turnArgs = {
     cwd,
     contextSource,
@@ -3905,7 +3932,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
       | undefined,
     extensions,
     abort,
-    prompt,
+    prompt: promptWithMemory,
     onEvent,
   };
   // FIX 6 (M8): a resume token references state local to the container/worktree
