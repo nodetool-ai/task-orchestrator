@@ -1145,7 +1145,16 @@ describe("inbox-driven milestone turn", () => {
     const manager = new ChannelManager([channel], config);
     await manager.start();
     try {
-      await manager.pumpOnce();
+      // Poll: a stale in-process liveness entry from a prior test's run id can
+      // make the first wake a silent no-op on slow machines — re-pump until the
+      // narration lands (pumpOnce is idempotent once the event is consumed).
+      await vi.waitFor(
+        async () => {
+          await manager.pumpOnce();
+          expect(finals.length + sends.length).toBeGreaterThan(0);
+        },
+        { timeout: 10_000 },
+      );
     } finally {
       await manager.stop();
     }
@@ -1193,7 +1202,14 @@ describe("inbox-driven milestone turn", () => {
     const manager = new ChannelManager([channel], config);
     await manager.start();
     try {
-      await manager.pumpOnce();
+      // Same stale-liveness re-pump as the linked-owner test above.
+      await vi.waitFor(
+        async () => {
+          await manager.pumpOnce();
+          expect(finals.length).toBeGreaterThan(0);
+        },
+        { timeout: 10_000 },
+      );
     } finally {
       await manager.stop();
     }
