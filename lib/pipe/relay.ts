@@ -66,6 +66,24 @@
 // The title machine has the same problem in a worse form — it would rename over
 // a title a person chose while the bot was down — and its own answer: see
 // applyTitle.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT THE RELAY KEEPS IN MEMORY, AND WHY IT IS BOUNDED
+//
+//   • `children`: one small entry per child run of a LIVE conversation. Terminal
+//     children are evicted after TERMINAL_EVICT_MS; because the poll re-reads
+//     every child of every owned conversation, an evicted child is re-admitted
+//     on the next tick — SILENTLY, since a child first seen already terminal is
+//     primed rather than announced (breadcrumbsFor). Eviction is therefore only
+//     a real reclaim once the channel_threads row itself is gone; while the
+//     conversation lives it just resets the (cheap) bookkeeping. Bound: live
+//     conversations × their children.
+//   • `threads`: one entry per conversation this process has relayed into, and
+//     it is NEVER evicted. It carries title OWNERSHIP (humanEdited /
+//     lastSetTitle), which must survive for the whole process lifetime: dropping
+//     it would let the next tick re-adopt and rename a thread a human titled.
+//     Bound: conversations served, a handful of bytes each.
+//   • `breadcrumbRuns` / `pendingCancels`: explicitly capped / short-lived.
 
 import { and, count, eq, inArray } from "drizzle-orm";
 
@@ -85,11 +103,14 @@ export const PROGRESS_THROTTLE_MS = 10 * 60 * 1000;
 export const BATCH_THRESHOLD = 3;
 export const BATCH_WINDOW_MS = 60 * 1000;
 /**
- * How long a finished child (or a settled thread) is kept in the in-memory maps
- * after it goes terminal. Long enough that a late duplicate row or a reaction on
- * its last breadcrumb still resolves; short enough that a long-lived pipe does
- * not accumulate one entry per run it has ever seen. Re-admitting an evicted
- * terminal child is harmless: it primes as "already announced" on sight.
+ * How long a finished CHILD is kept in the in-memory child map after it goes
+ * terminal. Long enough that a late duplicate row or a reaction on its last
+ * breadcrumb still resolves; short enough that a long-lived pipe does not
+ * accumulate one entry per run it has ever seen. Re-admitting an evicted
+ * terminal child is harmless because `breadcrumbsFor` primes any child that is
+ * ALREADY terminal the first time it sees it (see "prime on resight" there).
+ *
+ * Per-THREAD state is never evicted — see ThreadState.
  */
 export const TERMINAL_EVICT_MS = 60 * 60 * 1000;
 /** Armed cancels expire after this; a later 👍 says so instead of falling through. */
@@ -161,7 +182,18 @@ interface ChildState {
   terminalAt?: number;
 }
 
-/** Per-thread state: batching window and the title machine. */
+/**
+ * Per-thread state: batching window and the title machine.
+ *
+ * NOT EVICTED, ever. This entry holds title OWNERSHIP — whether a human has
+ * retitled the thread, and what the relay last set — and applyTitle's stand-down
+ * is documented as lasting for the process's lifetime. An evicted entry would be
+ * recreated blank on the very next tick (the conversation is still in
+ * channel_threads), `humanEdited` would come back false, and the relay would
+ * happily rename "Ivo's dark mode work" to "✅ Ivo's dark mode work" an hour
+ * after standing down. The entries are tiny and bounded by the number of
+ * conversations this pipe has relayed into.
+ */
 interface ThreadState {
   /** Timestamps of breadcrumb SENDS in this thread, for the batch rule. */
   recentSends: number[];
@@ -171,8 +203,6 @@ interface ThreadState {
   humanEdited: boolean;
   /** Title state last applied, so an unchanged state is not re-written. */
   titleState?: TitleState;
-  /** When this thread's children all went terminal, for map eviction. */
-  terminalAt?: number;
 }
 
 /** A cancel awaiting its 👍 confirmation (PRD §3: irreversible verbs confirm). */
@@ -295,19 +325,19 @@ export class ProgressRelay {
   }
 
   /**
-   * Drop long-settled entries so neither map grows with every run this process
-   * has ever seen. Only TERMINAL children (and threads whose children are all
-   * terminal) are evicted, and only after TERMINAL_EVICT_MS: an entry removed
-   * too early would be re-primed on the next tick, which is silent, but its
-   * progress draft and breadcrumb bookkeeping would be lost for no gain.
+   * Drop long-settled CHILD entries so the map does not grow with every run this
+   * process has ever seen. Only TERMINAL children are evicted, and only after
+   * TERMINAL_EVICT_MS: an entry removed too early would be re-primed on the next
+   * tick, which is silent, but its progress draft and breadcrumb bookkeeping
+   * would be lost for no gain.
+   *
+   * Thread entries are deliberately NOT evicted — they carry title ownership,
+   * which must outlive the children (see ThreadState).
    */
   private evictSettled(): void {
     const cutoff = this.now() - TERMINAL_EVICT_MS;
     for (const [id, st] of this.children) {
       if (st.terminalAt != null && st.terminalAt < cutoff) this.children.delete(id);
-    }
-    for (const [key, st] of this.threads) {
-      if (st.terminalAt != null && st.terminalAt < cutoff) this.threads.delete(key);
     }
   }
 
@@ -349,13 +379,26 @@ export class ProgressRelay {
    * `priming` (the first tick after startup) records the child's CURRENT status
    * as already-announced and returns nothing, so a restart does not replay
    * history into the thread. See the header for the tradeoff.
+   *
+   * PRIME ON RESIGHT. The same silence applies, at any time, to a child seen for
+   * the FIRST TIME already in a terminal status: its whole life happened while
+   * we were not watching it, so announcing "⏳ started / ✅ done" now would be
+   * replay, not news. This is what makes TERMINAL_EVICT_MS safe — an evicted
+   * child is re-read by the very next poll (the conversation is still live) and,
+   * without this, would re-announce its breadcrumbs every hour, forever. It also
+   * hardens the relay against any other path that loses child state.
+   *
+   * The distinction that matters: a child we were ALREADY tracking when it went
+   * terminal has an entry, so the transition is genuinely observed and its
+   * terminal breadcrumb is emitted exactly once, as before.
    */
   private async breadcrumbsFor(child: ChildRow, priming = false): Promise<BreadcrumbLine[]> {
     // The progress window opens when we FIRST see the run, not at epoch —
     // otherwise the very next tick after "started" is already 10 minutes past
     // zero and the throttle never applies to the first progress line.
+    const known = this.children.get(child.id);
     const state =
-      this.children.get(child.id) ??
+      known ??
       ({
         posted: new Set<Breadcrumb>(),
         lastProgressAt: this.now(),
@@ -363,16 +406,19 @@ export class ProgressRelay {
       } as ChildState);
     this.children.set(child.id, state);
 
-    if (isFailure(child.status) || child.status === "completed") {
-      state.terminalAt ??= this.now();
-    }
+    const terminal = isFailure(child.status) || child.status === "completed";
+    if (terminal) state.terminalAt ??= this.now();
+
+    // Record without announcing: the startup priming pass, or a child that was
+    // already terminal the first time we laid eyes on it (see above).
+    const silent = priming || (!known && terminal);
 
     const out: BreadcrumbLine[] = [];
     const emit = (kind: Exclude<Breadcrumb, "progress">) => {
       if (state.posted.has(kind)) return;
       state.posted.add(kind);
       // Priming records the transition without announcing it.
-      if (priming) return;
+      if (silent) return;
       out.push({ kind, childId: child.id, text: formatBreadcrumb(kind, child) });
     };
 
@@ -381,10 +427,11 @@ export class ProgressRelay {
     if (isFailure(child.status)) emit("failed");
     else if (child.status === "completed") emit("done");
 
-    if (priming) {
+    if (silent) {
       // Also anchor the progress signal, so the first post-priming progress line
-      // reports turns since the restart rather than the run's whole history.
-      state.lastTurnCount = await agentTurnCount(child.id);
+      // reports turns since the restart rather than the run's whole history. A
+      // terminal child will never post progress, so it is not worth the query.
+      if (!terminal) state.lastTurnCount = await agentTurnCount(child.id);
       return out;
     }
 
@@ -514,9 +561,6 @@ export class ProgressRelay {
       const kids = byParent.get(runId);
       if (!kids?.length) continue;
       const next = titleStateFor(kids, taskStates);
-      const st = this.threadState(convKey(conv));
-      st.terminalAt =
-        next === "done" || next === "failed" ? (st.terminalAt ?? this.now()) : undefined;
       await this.applyTitle(conv, next, priming).catch((err) =>
         console.error("[pipe:relay] thread rename failed:", describe(err))
       );

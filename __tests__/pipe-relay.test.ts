@@ -59,6 +59,7 @@ import {
   BATCH_THRESHOLD,
   PROGRESS_THROTTLE_MS,
   ProgressRelay,
+  TERMINAL_EVICT_MS,
   formatBreadcrumb,
   titleStateFor,
   withGlyph,
@@ -599,6 +600,98 @@ describe("thread title", () => {
     ).toBe("working");
     expect(withGlyph("🚧 Ship it", "done")).toBe("✅ Ship it");
     expect(withGlyph("Ship it", "working")).toBe("🚧 Ship it");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// Terminal eviction (TERMINAL_EVICT_MS)
+// ──────────────────────────────────────────────────────────
+
+describe("terminal eviction", () => {
+  it("re-admits an evicted terminal child SILENTLY instead of replaying it hourly", async () => {
+    const parent = await makeConversation("thread-1");
+    let now = 1_000_000;
+    const ch = fakeRelayChannel();
+    const relay = await primedRelay([ch.channel], { now: () => now });
+    const child = await makeChild(parent);
+
+    await relay.tick(); // ⏳ started
+    await setChild(child, { status: "completed" });
+    await relay.tick(); // ✅ done
+    expect(ch.posts).toHaveLength(2);
+
+    // An hour later the child's in-memory state is evicted — but the row is
+    // still a child of a LIVE conversation, so the next poll reads it again.
+    // Without prime-on-resight this re-announced started+done every hour.
+    now += TERMINAL_EVICT_MS + 1;
+    await relay.tick();
+    await relay.tick();
+    await relay.tick();
+    expect(ch.posts).toHaveLength(2);
+
+    // And again the following hour: the re-admitted entry evicts once more.
+    now += TERMINAL_EVICT_MS + 1;
+    await relay.tick();
+    await relay.tick();
+    expect(ch.posts).toHaveLength(2);
+  });
+
+  it("keeps a human-titled thread stood down across eviction", async () => {
+    const parent = await makeConversation("thread-1");
+    let now = 1_000_000;
+    const ch = fakeRelayChannel();
+    const relay = await primedRelay([ch.channel], { now: () => now });
+    const child = await makeChild(parent);
+    await relay.tick();
+    expect(ch.renames).toEqual(["🚧 Dark-mode toggle"]);
+
+    ch.setTitle("Ivo's dark mode work"); // a human renamed it
+    await setChild(child, { status: "completed" });
+    await relay.tick(); // notices the edit, stands down
+    expect(ch.renames).toHaveLength(1);
+
+    // Title ownership is per-thread and must outlive the children: an hour on,
+    // the relay must NOT resurrect the machine and write "✅ Ivo's dark mode work".
+    now += TERMINAL_EVICT_MS + 1;
+    await relay.tick();
+    await relay.tick();
+    expect(ch.renames).toHaveLength(1);
+    expect(ch.title).toBe("Ivo's dark mode work");
+  });
+
+  it("still announces exactly once for a child that goes terminal while tracked", async () => {
+    const parent = await makeConversation("thread-1");
+    let now = 1_000_000;
+    const ch = fakeRelayChannel();
+    const relay = await primedRelay([ch.channel], { now: () => now });
+    const child = await makeChild(parent);
+
+    await relay.tick(); // ⏳ started — now tracked
+    now += TERMINAL_EVICT_MS * 3; // it ran for a long time; nothing evicts it
+    await relay.tick();
+    await setChild(child, { status: "completed" });
+    await relay.tick(); // the transition IS observed → ✅ done, once
+
+    const done = ch.posts.filter((p) => p.text.includes("done"));
+    expect(done).toHaveLength(1);
+    expect(ch.posts).toHaveLength(2);
+  });
+
+  it("says nothing about a child first seen already terminal, mid-session", async () => {
+    const parent = await makeConversation("thread-1");
+    const ch = fakeRelayChannel();
+    const relay = await primedRelay([ch.channel], { now: () => 1000 });
+
+    // Not the priming pass: the relay has been up for a while and this child
+    // appeared, ran and finished entirely between two polls (or was inserted
+    // terminal). Its breadcrumbs are history, not news.
+    await makeChild(parent, { status: "completed", prUrl: "https://gh/pr/3" });
+    await relay.tick();
+    await relay.tick();
+    expect(ch.posts).toEqual([]);
+
+    // But the thread title still tracks it — silence is about breadcrumbs only.
+    expect(ch.title).toBe("🔍 Dark-mode toggle");
   });
 });
 
