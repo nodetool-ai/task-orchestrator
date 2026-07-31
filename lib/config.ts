@@ -347,6 +347,59 @@ export const config = Object.freeze({
     },
   }),
 
+  /** Channel bridge (`npm run pipe`). The Discord-specific vars are NOT here:
+   *  they are per-persona-bot secrets discovered by name at boot
+   *  (lib/pipe/config.ts), not deployment-wide settings. */
+  pipe: Object.freeze({
+    /** Throttle for the in-place draft edits a streaming reply makes, in ms. */
+    get editThrottleMs(): number {
+      const value = intEnv("TASK_ORCH_PIPE_EDIT_MS", 750);
+      return value > 0 ? value : 750;
+    },
+    /** How long a turn may run before the persona acks it with 👀. 0 disables. */
+    get ackAfterMs(): number {
+      const value = intEnv("TASK_ORCH_PIPE_ACK_MS", 5000);
+      return value >= 0 ? value : 5000;
+    },
+    /**
+     * Breadcrumb-relay poll interval, in ms. 0 disables the relay — AND the
+     * wake pump that shares it (ChannelManager), which since M5 is the only
+     * thing that drives a mapped persona conversation's milestone turn: the
+     * control plane defers those wakes to this process. Zero it and threads go
+     * quiet on everything but typed messages.
+     */
+    get relayPollMs(): number {
+      const value = intEnv("TASK_ORCH_PIPE_RELAY_POLL_MS", 15_000);
+      return value >= 0 ? value : 15_000;
+    },
+    /** Agent turns a persona conversation may accumulate before the
+     *  long-thread guard resets it with a carried-over summary. 0 disables. */
+    get turnCap(): number {
+      const value = intEnv("TASK_ORCH_PIPE_TURN_CAP", 60);
+      return value >= 0 ? value : 60;
+    },
+    /**
+     * Port for the pipe's own Prometheus endpoint (`GET /metrics`), bound to
+     * loopback. 0 (the default) disables it entirely — no listener is created.
+     *
+     * WHY IT EXISTS. The messaging metrics (PRD §11, lib/pipe/metrics.ts) are
+     * prom-client counters in the process that emits them, and the pipe is a
+     * standalone process: the web app's /api/metrics can serve the DB-derived
+     * gauges but not these. Same registry, same names, second listener.
+     */
+    get metricsPort(): number {
+      const value = intEnv("TASK_ORCH_PIPE_METRICS_PORT", 0);
+      return value > 0 && value < 65_536 ? value : 0;
+    },
+  }),
+
+  /** Public base URL of the web UI. Used for the deep links messaging surfaces
+   *  put next to every task/plan/run id (PRD §8 "links, not dumps"). Empty when
+   *  unset, in which case callers emit bare paths. */
+  get publicUrl(): string {
+    return strEnv("TASK_ORCH_PUBLIC_URL", "").replace(/\/+$/, "");
+  },
+
   /** Feature gates. */
   features: Object.freeze({
     get autoLaunch(): boolean {

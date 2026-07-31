@@ -3,7 +3,7 @@ import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { eq, and, or, isNull, ne } from "drizzle-orm";
+import { eq, and, or, isNull, ne, like } from "drizzle-orm";
 import * as schema from "./schema";
 import { config } from "@/lib/config";
 import { PERSONAS } from "@/lib/personas";
@@ -253,6 +253,20 @@ export async function seedRequiredPersonas(): Promise<void> {
     }));
     if (rows.length) {
       await db.insert(schema.personas).values(rows).onConflictDoNothing();
+      // Migration 0023 may have inserted a placeholder implementor row (marked
+      // by its system_prompt) to satisfy the channel_threads FK on legacy data;
+      // onConflictDoNothing skips it, so replace it with the real definition.
+      for (const row of rows) {
+        await db
+          .update(schema.personas)
+          .set(row)
+          .where(
+            and(
+              eq(schema.personas.id, row.id),
+              like(schema.personas.systemPrompt, "Placeholder row inserted by migration 0023%"),
+            ),
+          );
+      }
     }
   } catch (err) {
     console.warn("db: failed to seed required personas:", err);

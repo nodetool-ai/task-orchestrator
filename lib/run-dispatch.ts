@@ -19,7 +19,9 @@ import {
   floatEnv,
   runnerProviderKind,
 } from "./config";
+import { runHasChannelThread } from "./repo";
 import { isWorkerLive } from "./run-liveness";
+import { isServerRuntimeRun } from "./run-runtime";
 import { runNonce } from "./run-nonce";
 import { HARD_TERMINAL_STATUSES } from "./run-state";
 import {
@@ -69,7 +71,11 @@ export type DispatchResult =
   | "already-claimed"
   | "not-found"
   | "spawn-failed"
-  | "deferred";
+  | "deferred"
+  /** The run is `runtime='server'`: it has no worker tier. Dispatch handed the
+   *  wake to the in-process turn driver (runs.wakeServerRun) instead of
+   *  spawning anything. */
+  | "server-runtime";
 
 // Late-bound bridge back into lib/runs (avoids a static import cycle; runs.ts
 // injects these on load). See the longer note kept from the systemd era.
@@ -101,6 +107,10 @@ type RunsApi = {
    *  already checks this before insert, but a worker writing rows directly
    *  would bypass that. */
   checkTreeLimits: (runId: number) => Promise<string | null>;
+  /** Drive one in-process turn for a woken `runtime='server'` run (persona
+   *  chats). Server runs have no worker tier, so dispatchRun delegates every
+   *  wake it receives for one of them to this instead of spawning. */
+  wakeServerRun: (runId: number) => Promise<void>;
 };
 let runsApi: RunsApi | null = null;
 export function __setRunsApi(api: RunsApi): void {
@@ -331,6 +341,32 @@ function withAdmissionLock<T>(fn: () => Promise<T>): Promise<T> {
   return result;
 }
 
+/**
+ * "I deferred this wake to the pipe", logged at most once a minute per run.
+ *
+ * The parked wake sweep re-dispatches every parked run with pending events on
+ * every pump tick, so an unthrottled line here would repeat for as long as the
+ * pipe takes to pick the events up — and forever if the pipe is down, which is
+ * exactly when the operator needs the log readable. Bounded by the number of
+ * mapped runs seen in the last minute.
+ */
+const deferredWakeLoggedAt = new Map<number, number>();
+const DEFER_LOG_EVERY_MS = 60_000;
+
+function logDeferredWake(runId: number): void {
+  const now = Date.now();
+  const last = deferredWakeLoggedAt.get(runId);
+  if (last != null && now - last < DEFER_LOG_EVERY_MS) return;
+  deferredWakeLoggedAt.set(runId, now);
+  for (const [id, at] of deferredWakeLoggedAt) {
+    if (now - at > DEFER_LOG_EVERY_MS * 10) deferredWakeLoggedAt.delete(id);
+  }
+  console.log(
+    `[dispatch] run ${runId} is a pipe-owned conversation — deferring its wake to the ` +
+      "pipe's pump (inbox events left pending; the pipe must be running)"
+  );
+}
+
 export async function dispatchRun(
   runId: number,
   opts: { spawn?: SpawnFn; admit?: AdmitFn; providerAdmit?: ProviderAdmitFn } = {}
@@ -351,6 +387,60 @@ export async function dispatchRun(
   // worker). The emit-time inbox wakes (lib/inbox) and the pump's parked-wake
   // sweep both call dispatchRun, so they inherit this routing for free — no
   // per-caller placement logic.
+
+  // Placement gate (design §3): a `runtime='server'` run has NO worker tier —
+  // its turns execute in this process. Every wake path funnels through
+  // dispatchRun (inbox emit-time wake, the pump's parked sweep, fired timers via
+  // their inbox event, reconcile's redispatch), so intercepting here is what
+  // keeps a woken persona chat from spawning a container that would find no
+  // worktree, no checkout, and no reason to exist. The turn is kicked off in the
+  // background: callers of dispatchRun (the pump loop, emit-time wakes) expect a
+  // placement decision back promptly, not a whole model turn. Concurrency is
+  // safe — wakeServerRun no-ops on a live lease / in-process runner, and the
+  // pump's sweep re-drives anything it skipped because the inbox events stay
+  // pending until a turn claims them.
+  {
+    const placement = await runs().get(runId);
+    if (!placement) return finish("not-found");
+    // isServerRuntimeRun, not the raw column: a legacy row with a server
+    // placement but a shell/fs/repo-write profile is demoted to worker
+    // (lib/run-runtime.ts) and falls through to the normal claim + spawn below,
+    // which is exactly how it behaved before M2.
+    if (isServerRuntimeRun(placement)) {
+      // PERSONA CONVERSATIONS DEFER THEIR WAKE TO THE PIPE (M5 review B2).
+      //
+      // A worker child's terminal status is finalized in the WEB process, which
+      // emits the inbox event and lands here. Waking the run *here* would drive
+      // the persona's whole milestone turn in a process where no Discord draft
+      // exists: the narration is persisted and then invisible, and the pipe's
+      // pump — which polls for PENDING events — finds nothing and stays silent.
+      // The milestone never reaches the thread.
+      //
+      // So a run that a pipe owns (it has a channel_threads mapping) is NOT
+      // woken here. The events stay pending, and the pipe's wake pump picks them
+      // up within one poll interval (≤15s) and drives the turn WITH a draft, in
+      // the process that can stream it. Every wake path funnels through this
+      // gate — emit-time wakes, fired timers (timer.fired), the pump's parked
+      // sweep, reconcile's redispatch — so they all defer identically; none of
+      // them can consume the events out from under the pipe.
+      //
+      // OPERATIONAL CONSEQUENCE, stated plainly: the web process no longer wakes
+      // mapped persona runs. If the pipe is down, their inbox events simply stay
+      // pending (durable, nothing lost) until it comes back — a deployment that
+      // runs persona bots must run the pipe.
+      if (await runHasChannelThread(runId)) {
+        logDeferredWake(runId);
+        return finish("server-runtime");
+      }
+      void runs()
+        .wakeServerRun(runId)
+        .catch(() => {
+          // Best-effort: the pending inbox events survive, so the pump's wake
+          // sweep retries on the next tick.
+        });
+      return finish("server-runtime");
+    }
+  }
 
   // Critical section: decide admission, then atomically claim. Serialized so the
   // reservation count seen by the next caller already includes this claim. The
@@ -1675,10 +1765,11 @@ export async function sweepWorkerContainers(dockerArg?: DockerLike): Promise<voi
     return;
   }
   for (const run of leased) {
-    // Only worker-runtime claims correspond to containers. Legacy non-worker
-    // rows (a pre-retirement 'server' placement) have no container, so
-    // "container doesn't exist" is meaningless for them — skip.
-    if (run.runtime !== "worker") continue;
+    // Only worker-runtime claims correspond to containers. A true server-runtime
+    // row has no container, so "container doesn't exist" is meaningless for it —
+    // skip. A DEMOTED legacy row (server placement, unsafe profile) does run in a
+    // container, so the predicate deliberately keeps it in this sweep.
+    if (isServerRuntimeRun(run)) continue;
     if (!run.workerScope || liveNames.has(run.workerScope)) continue;
     const lastSeen = run.heartbeatAt?.getTime() ?? 0;
     if (now - lastSeen < SWEEP_MIN_SILENCE_MS) continue;

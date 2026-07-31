@@ -231,13 +231,49 @@ function fallbackToolResultMessage(row: PostgresMessageRow): ToolResultMessage |
 }
 
 /**
+ * Model-visible context from a plain `system`-role row.
+ *
+ * A system row on a run is durable CONTEXT the run must carry on every later
+ * turn — the `/new` carry-over summary (lib/pipe/carryover.ts), a worktree-gc
+ * note, any future "here is something you should know" frame. The pi
+ * conversation has no system MESSAGE role (the system prompt is a separate
+ * Context field, assembled per turn from the extensions), so the only way such
+ * a row can reach the model at all is as a labelled context block on a
+ * user-role message. That is what this does — generically, for any plain system
+ * row, not for one writer's format.
+ *
+ * The two frames that must NOT come back this way are the inbox_event mirror
+ * (a UI-only artifact) and the event_digest (already delivered to the model as
+ * prompt text by claimInboxDigest — re-feeding it would double it).
+ * loadPostgresContextMessages drops both before we ever see them; the check is
+ * repeated here so the mapping is safe for any caller of reconstructContext.
+ */
+function systemContextMessage(row: PostgresMessageRow): UserMessage | null {
+  const first = row.content[0] as { type?: string } | undefined;
+  if (first?.type === "inbox_event" || first?.type === "event_digest") return null;
+  const text = row.content
+    .filter(
+      (block): block is { type: "text"; text: string } =>
+        block.type === "text" && typeof (block as { text?: unknown }).text === "string"
+    )
+    .map((block) => block.text.trim())
+    .filter(Boolean)
+    .join("\n\n");
+  if (!text) return null;
+  return { role: "user", content: `[context]\n${text}`, timestamp: row.createdAt };
+}
+
+/**
  * Rebuild the pi conversation from the persisted rows. A row a prior postgres
  * turn wrote carries an embedded pi Message (embeddedPiMessage) we replay
  * verbatim; older / cross-path rows are reconstructed from their SDK blocks via
  * the fallback builders. The final user turn's content is overridden with the
  * live prompt (currentInputText) — or appended as an ephemeral message.
+ *
+ * Exported so the row → model-context mapping (notably the system-row rule
+ * above) is testable without a model call.
  */
-function reconstructContext(
+export function reconstructContext(
   rows: PostgresMessageRow[],
   model: { provider: string; id: string },
   currentInputText: string,
@@ -278,6 +314,9 @@ function reconstructContext(
     } else if (row.role === "tool") {
       const toolResult = fallbackToolResultMessage(row);
       if (toolResult) messages.push(toolResult);
+    } else if (row.role === "system") {
+      const context = systemContextMessage(row);
+      if (context) messages.push(context);
     }
   }
   if (ephemeralInput) {

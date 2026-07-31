@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach } from "vitest";
 import { db } from "../db";
 import { apiTokens, users } from "../db/schema";
 import {
+  consumeToken,
   createToken,
   verifyToken,
   listTokens,
@@ -78,6 +79,22 @@ describe("api tokens", () => {
     // No plaintext leaks through the summary type:
     expect(Object.keys(list[0])).not.toContain("token");
     expect(Object.keys(list[0])).not.toContain("tokenHash");
+  });
+
+  it("consumeToken burns a token exactly once (single-use link tokens)", async () => {
+    const t = await createToken(userId, "link");
+    // No owning-user argument: the caller proved possession of the plaintext,
+    // it isn't acting as the logged-in owner (see /link, design §2).
+    expect(await consumeToken(t.id)).toBe(true);
+    expect(await consumeToken(t.id)).toBe(false); // a replay claims nothing
+    expect(await verifyToken(t.token)).toBeNull();
+    expect((await listTokens(userId))[0].revokedAt).toBeInstanceOf(Date);
+  });
+
+  it("consumeToken lets exactly one of two racing claims win", async () => {
+    const t = await createToken(userId, "race");
+    const results = await Promise.all([consumeToken(t.id), consumeToken(t.id)]);
+    expect(results.filter(Boolean)).toHaveLength(1);
   });
 
   it("revokeToken only works for the owning user", async () => {

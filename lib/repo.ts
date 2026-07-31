@@ -4,6 +4,8 @@ import {
   acceptanceCriteria,
   agentSessions,
   attachments,
+  channelIdentities,
+  channelThreads,
   memories,
   personaMemories,
   personas as personasTable,
@@ -14,6 +16,7 @@ import {
   taskNotes,
   tasks,
   type Attachment as AttachmentRow,
+  type ChannelIdentity,
   type Memory,
   type Persona,
   type Plan as PlanRow,
@@ -1571,7 +1574,24 @@ export async function upsertPersona(p: PersonaUpsert): Promise<void> {
 // Shared memory
 // ──────────────────────────────────────────────────────────
 
-export type MemoryScope = "global" | "repo" | "task";
+// Shared-memory scopes. `persona`/`user` were added for the Discord persona bots
+// (spec 2026-07-31-discord-personas-messaging-design.md §4): scopeKey is the
+// persona id / the users.id. There is no DB CHECK constraint on memories.scope —
+// this union plus the memory tool schemas in lib/extensions/persona-memory.ts are
+// the whole validation surface.
+export type MemoryScope = "global" | "repo" | "task" | "persona" | "user";
+
+export const MEMORY_SCOPES: readonly MemoryScope[] = [
+  "global",
+  "repo",
+  "task",
+  "persona",
+  "user",
+] as const;
+
+export function isMemoryScope(value: string): value is MemoryScope {
+  return (MEMORY_SCOPES as readonly string[]).includes(value);
+}
 
 export interface MemoryCreate {
   scope: MemoryScope;
@@ -1632,15 +1652,23 @@ export async function createMemory(input: MemoryCreate): Promise<Memory> {
   return row;
 }
 
+type MemoryScopeSpec = { scope: MemoryScope; scopeKey?: string | null };
+
+function memoryScopePredicate(s: MemoryScopeSpec) {
+  return s.scope === "global"
+    ? eq(memories.scope, "global")
+    : and(eq(memories.scope, s.scope), eq(memories.scopeKey, s.scopeKey ?? ""));
+}
+
+function byRecencyDesc(a: Memory, b: Memory): number {
+  return b.updatedAt.getTime() - a.updatedAt.getTime() || b.id - a.id;
+}
+
 export async function listRecentMemories(args: {
-  scopes: Array<{ scope: MemoryScope; scopeKey?: string | null }>;
+  scopes: MemoryScopeSpec[];
   limit?: number;
 }): Promise<Memory[]> {
-  const predicates = args.scopes.map((s) =>
-    s.scope === "global"
-      ? eq(memories.scope, "global")
-      : and(eq(memories.scope, s.scope), eq(memories.scopeKey, s.scopeKey ?? ""))
-  );
+  const predicates = args.scopes.map(memoryScopePredicate);
   if (predicates.length === 0) return [];
   return await db
     .select()
@@ -1650,6 +1678,47 @@ export async function listRecentMemories(args: {
     .limit(Math.max(1, Math.min(args.limit ?? 12, 50)));
 }
 
+/**
+ * Rows each scope spec contributes to a search/forget candidate pool.
+ *
+ * WHY PER SPEC (and not one shared recency window): listRecentMemories takes ONE
+ * `WHERE scope IN (…) ORDER BY updated_at DESC LIMIT n` across every visible
+ * scope, so the newest rows of a chatty scope evict every other scope's rows
+ * from the window. Feeding that window to BM25 made a months-old `user` note
+ * ("works in Berlin") invisible to memory_search, auto-recall AND memory_forget
+ * as soon as the repo/task scope accumulated n newer notes — the same eviction
+ * the ambient mount fixes with its per-scope-group reservation. So the pool is
+ * built per spec: each visible scope contributes its own recency window and one
+ * loud scope can no longer starve the others.
+ */
+const MEMORY_CANDIDATES_PER_SCOPE = 200;
+/** Overall pool bound (5 scopes max today), so BM25 stays cheap. */
+const MEMORY_CANDIDATES_TOTAL = 1000;
+
+/**
+ * Eviction-proof candidate pool for BM25 search / substring forget: up to
+ * MEMORY_CANDIDATES_PER_SCOPE most-recent rows FROM EACH scope spec, merged
+ * newest-first and bounded by MEMORY_CANDIDATES_TOTAL.
+ */
+async function listMemoryCandidates(scopes: MemoryScopeSpec[]): Promise<Memory[]> {
+  if (scopes.length === 0) return [];
+  const perScope = await Promise.all(
+    scopes.map((s) =>
+      db
+        .select()
+        .from(memories)
+        .where(memoryScopePredicate(s))
+        .orderBy(desc(memories.updatedAt), desc(memories.id))
+        .limit(MEMORY_CANDIDATES_PER_SCOPE)
+    )
+  );
+  // Specs are normally disjoint, but a caller may pass the same scope twice —
+  // dedupe by id so a row can't be scored (or deleted-counted) twice.
+  const byId = new Map<number, Memory>();
+  for (const row of perScope.flat()) byId.set(row.id, row);
+  return [...byId.values()].sort(byRecencyDesc).slice(0, MEMORY_CANDIDATES_TOTAL);
+}
+
 export async function searchMemories(args: {
   query: string;
   scopes: Array<{ scope: MemoryScope; scopeKey?: string | null }>;
@@ -1657,28 +1726,38 @@ export async function searchMemories(args: {
 }): Promise<MemorySearchResult[]> {
   const queryTokens = Array.from(new Set(memoryTokens(args.query)));
   if (queryTokens.length === 0) return [];
-  const candidates = await listRecentMemories({ scopes: args.scopes, limit: 500 });
+  const candidates = await listMemoryCandidates(args.scopes);
   if (candidates.length === 0) return [];
 
+  // Term frequencies are counted once per doc (and document frequencies once per
+  // term) rather than re-scanned per (doc, term) pair: the candidate pool is now
+  // per-scope and can hold ~1000 rows, where the old nested scans were
+  // quadratic in the pool size. Same BM25 math, just not O(docs² · terms).
   const docs = candidates.map((memory) => {
     const keywords = parseKeywords(memory.keywords);
     const tokens = [
       ...memoryTokens(memory.body),
       ...keywords.flatMap((k) => [k, k, k]).flatMap(memoryTokens),
     ];
-    return { memory, tokens, length: Math.max(tokens.length, 1) };
+    const tf = new Map<string, number>();
+    for (const t of tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
+    return { memory, tf, length: Math.max(tokens.length, 1) };
   });
   const avgLen = docs.reduce((sum, d) => sum + d.length, 0) / docs.length;
   const k1 = 1.2;
   const b = 0.75;
+  const df = new Map<string, number>();
+  for (const term of queryTokens) {
+    df.set(term, docs.reduce((n, d) => n + (d.tf.has(term) ? 1 : 0), 0));
+  }
 
   const scored = docs.map((doc) => {
     let score = 0;
     for (const term of queryTokens) {
-      const tf = doc.tokens.filter((t) => t === term).length;
+      const tf = doc.tf.get(term) ?? 0;
       if (tf === 0) continue;
-      const df = docs.filter((d) => d.tokens.includes(term)).length;
-      const idf = Math.log(1 + (docs.length - df + 0.5) / (df + 0.5));
+      const dfTerm = df.get(term) ?? 0;
+      const idf = Math.log(1 + (docs.length - dfTerm + 0.5) / (dfTerm + 0.5));
       score += idf * ((tf * (k1 + 1)) / (tf + k1 * (1 - b + b * (doc.length / avgLen))));
     }
     return { memory: doc.memory, score };
@@ -1694,7 +1773,9 @@ export async function removeMemoriesBySubstring(args: {
   scopes: Array<{ scope: MemoryScope; scopeKey?: string | null }>;
   match: string;
 }): Promise<number> {
-  const rows = await listRecentMemories({ scopes: args.scopes, limit: 500 });
+  // Same eviction-proof pool as search: forgetting an old note must not depend
+  // on how many newer notes other visible scopes have accumulated.
+  const rows = await listMemoryCandidates(args.scopes);
   const needle = args.match.toLowerCase();
   const matching = rows.filter((m) => m.body.toLowerCase().includes(needle));
   if (matching.length === 0) return 0;
@@ -1748,6 +1829,132 @@ export async function removePersonaMemoryLine(
     .set({ body: kept.join("\n"), updatedAt: now })
     .where(and(eq(personaMemories.personaId, personaId), eq(personaMemories.scope, scope)));
   return removed;
+}
+
+// ──────────────────────────────────────────────────────────
+// Channel identities
+// ──────────────────────────────────────────────────────────
+
+// Maps an external chat account (channel + provider user id, e.g.
+// 'discord' + a snowflake) onto a local users row. Written by the pipe's
+// `/link <api-token>` DM command after the token verifies; read on every inbound
+// message to attribute the conversation's run. Unlinked users simply have no
+// row — attribution is an upgrade, not an access gate.
+
+export interface ChannelIdentityUpsert {
+  channel: string;
+  externalUserId: string;
+  userId: number;
+  /** Display handle at link time (e.g. the Discord username). */
+  label?: string | null;
+}
+
+export async function getChannelIdentity(
+  channel: string,
+  externalUserId: string
+): Promise<ChannelIdentity | null> {
+  const row = (await db
+    .select()
+    .from(channelIdentities)
+    .where(
+      and(
+        eq(channelIdentities.channel, channel),
+        eq(channelIdentities.externalUserId, externalUserId)
+      )
+    ))[0];
+  return row ?? null;
+}
+
+/**
+ * The external account a local user holds on ONE channel — the reverse of
+ * getChannelIdentity. Used to turn a thread's owner (channel_threads.user_id)
+ * back into the id a transport can @-mention (design §9: a milestone message
+ * pings the person who asked for it). Null when the user has never linked this
+ * channel, which is the "no mention" case.
+ */
+export async function getChannelIdentityForUser(
+  userId: number,
+  channel: string
+): Promise<ChannelIdentity | null> {
+  const row = (await db
+    .select()
+    .from(channelIdentities)
+    .where(and(eq(channelIdentities.userId, userId), eq(channelIdentities.channel, channel)))
+    .orderBy(asc(channelIdentities.id))
+    .limit(1))[0];
+  return row ?? null;
+}
+
+/**
+ * True when a run is a PIPE-OWNED CONVERSATION: some channel_threads row points
+ * at it, i.e. a persona bot is holding a Discord thread for it.
+ *
+ * One indexed lookup (channel_threads_run_idx). It exists for the dispatch gate
+ * in lib/run-dispatch.ts: a server-runtime run with a thread must have its wake
+ * driven by the pipe process (which holds the draft the narration streams into),
+ * not by whichever process happened to emit the inbox event.
+ */
+export async function runHasChannelThread(runId: number): Promise<boolean> {
+  const row = (await db
+    .select({ id: channelThreads.id })
+    .from(channelThreads)
+    .where(eq(channelThreads.runId, runId))
+    .limit(1))[0];
+  return row !== undefined;
+}
+
+/** All identities linked to a local user (one per channel account). */
+export async function listChannelIdentitiesForUser(userId: number): Promise<ChannelIdentity[]> {
+  return await db
+    .select()
+    .from(channelIdentities)
+    .where(eq(channelIdentities.userId, userId))
+    .orderBy(asc(channelIdentities.id));
+}
+
+/**
+ * Link (or re-link) an external account. Re-running `/link` with a token for a
+ * different user re-points the existing row, so a mistaken link is fixable
+ * without an admin: the unique key is (channel, externalUserId).
+ */
+export async function upsertChannelIdentity(
+  input: ChannelIdentityUpsert
+): Promise<ChannelIdentity> {
+  const channel = input.channel.trim();
+  const externalUserId = input.externalUserId.trim();
+  if (!channel) throw new RepoError("Channel is required.", 400);
+  if (!externalUserId) throw new RepoError("External user id is required.", 400);
+  const row = (await db
+    .insert(channelIdentities)
+    .values({
+      channel,
+      externalUserId,
+      userId: input.userId,
+      label: input.label ?? null,
+    })
+    .onConflictDoUpdate({
+      target: [channelIdentities.channel, channelIdentities.externalUserId],
+      set: { userId: input.userId, label: input.label ?? null },
+    })
+    .returning())[0];
+  return row;
+}
+
+/** Unlink an external account. Returns true when a row was removed. */
+export async function deleteChannelIdentity(
+  channel: string,
+  externalUserId: string
+): Promise<boolean> {
+  const removed = await db
+    .delete(channelIdentities)
+    .where(
+      and(
+        eq(channelIdentities.channel, channel),
+        eq(channelIdentities.externalUserId, externalUserId)
+      )
+    )
+    .returning({ id: channelIdentities.id });
+  return removed.length > 0;
 }
 
 // ──────────────────────────────────────────────────────────

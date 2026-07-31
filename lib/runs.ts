@@ -78,8 +78,15 @@ import {
   isResumableDeadRun,
   decideDeadRunPolicy,
 } from "./run-liveness";
+import { isServerRuntimeRun } from "./run-runtime";
 import { isTransientNetworkError } from "./transient-errors";
-import { resolveProfiles, alwaysOnExtensions, type ProfileContext } from "./profiles";
+import {
+  resolveProfiles,
+  alwaysOnExtensions,
+  listServerSafeProfiles,
+  serverUnsafeProfiles,
+  type ProfileContext,
+} from "./profiles";
 import { type RunEnvelope } from "./pi-event-mapper";
 import { estimateCostUsd } from "./pricing";
 import { getBackend, resolveBackendId, type ContextSource, type Extension } from "./agent-backend";
@@ -88,6 +95,7 @@ import {
   cancelTimersByCorrelation,
   claimInboxEventsTx,
   emitInboxEvent,
+  hasPendingInboxEvents,
   pendingOwnerCount,
   quarantineEvent,
   setClaimTurn,
@@ -98,7 +106,7 @@ import {
 import { sandboxFactory } from "./extensions/sandbox";
 import { envScrubFactory } from "./extensions/env-scrub";
 import { personaPromptFactory } from "./extensions/persona-prompt";
-import { personaMemoryFactory } from "./extensions/persona-memory";
+import { buildMemoryInjection, personaMemoryFactory } from "./extensions/persona-memory";
 import { abortBridgeFactory } from "./extensions/abort-bridge";
 import { linkSharedWorktreeArtifacts } from "./worktree-env";
 import { applyPrewarmToCheckout } from "./prewarm";
@@ -144,6 +152,7 @@ runDispatch.__setRunsApi({
   listLeasedRuns,
   handleWorkerDeath,
   checkTreeLimits,
+  wakeServerRun,
 });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -200,6 +209,22 @@ export interface CreateRunInput {
   initialPrompt?: string | null;
   /** If true, do NOT kick off the worker on create; useful for chats. */
   defer?: boolean;
+  /**
+   * Execution placement for this run. Default 'worker': a detached process /
+   * container / Machine, the tier every repo-touching run uses.
+   *
+   * 'server' means the run's turns execute IN this process (the web server or
+   * the pipe) through the postgres-turn loop — no container, no worktree, no
+   * SDK session file. It exists for persona chats (docs/superpowers/specs/
+   * 2026-07-31-discord-personas-messaging-design.md §3): a chat turn per
+   * Discord message is the wrong shape for a Fly Machine.
+   *
+   * DELIBERATELY NOT EXPOSED on POST /api/runs — an external caller must not be
+   * able to opt a run into the server process. Internal callers only (the pipe's
+   * session store). Guarded further at create time: server runtime requires the
+   * pi backend and a tools profile with no shell/fs/repo-write capability.
+   */
+  runtime?: "worker" | "server";
 }
 
 // /runs UI distinguishes task-derived runs from chat-derived runs.
@@ -221,9 +246,18 @@ export interface RunRow {
   parentRunId: number | null;
   toolsProfile: string;
   cwdStrategy: CwdStrategy;
-  /** Execution placement. Always 'worker' for new runs — a detached
-   *  process/container/Machine. The legacy 'server' value is retained only for
-   *  pre-retirement rows. */
+  /** Execution placement, chosen per run at create time (design §3).
+   *  'worker' (the default) is a detached process/container/Machine; 'server'
+   *  means the turn runs in-process through the postgres-turn loop — persona
+   *  chats only, internal callers only. Legacy pre-retirement rows may also
+   *  carry 'server', paired with an unsafe tools profile that create() would
+   *  refuse today.
+   *
+   *  NEVER branch on this column directly. Every turn-time placement decision
+   *  goes through `isServerRuntimeRun` (lib/run-runtime.ts), which requires the
+   *  placement AND the tool surface to agree and demotes a legacy row to worker
+   *  otherwise. A raw `runtime === 'server'` read would hand those rows the
+   *  unsandboxed, unscrubbed in-process path. */
   runtime: "server" | "worker";
   model: string | null;
   /** Agent backend this run executes on ('pi'|'claude'), or null for the
@@ -357,6 +391,8 @@ declare global {
   var __runRunners: Map<number, RunnerState> | undefined;
   // eslint-disable-next-line no-var
   var __runLocks: Map<number, PerRunLock> | undefined;
+  // eslint-disable-next-line no-var
+  var __runPendingSubs: Map<number, Set<(event: unknown) => void>> | undefined;
 }
 
 const runners: Map<number, RunnerState> = globalThis.__runRunners ?? new Map();
@@ -364,6 +400,27 @@ if (!globalThis.__runRunners) globalThis.__runRunners = runners;
 
 const locks: Map<number, PerRunLock> = globalThis.__runLocks ?? new Map();
 if (!globalThis.__runLocks) globalThis.__runLocks = locks;
+
+/**
+ * Listeners that asked to hear a run's events BEFORE the run went live (see
+ * subscribeRunEvents). A run's bus only exists while a turn is in flight, so a
+ * caller that kicks a turn and then subscribes has an unavoidable race: a fast
+ * turn can register, emit and close its bus before the subscribe lands, and the
+ * caller sees nothing at all. These listeners are attached the moment a runner
+ * registers, which makes "subscribe, then start the turn" expressible.
+ */
+const pendingSubscribers: Map<number, Set<(event: unknown) => void>> =
+  globalThis.__runPendingSubs ?? new Map();
+if (!globalThis.__runPendingSubs) globalThis.__runPendingSubs = pendingSubscribers;
+
+/** The one place a run's in-process runner is published (bus + abort handle).
+ *  Routed through here so pre-subscribed listeners (above) are attached to the
+ *  bus before it can emit anything. */
+function registerRunner(runId: number, state: RunnerState): void {
+  runners.set(runId, state);
+  const waiting = pendingSubscribers.get(runId);
+  if (waiting) for (const listener of waiting) state.bus.on("event", listener);
+}
 
 function getLock(runId: number): PerRunLock {
   let l = locks.get(runId);
@@ -581,6 +638,72 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
       : "orchestrator,repo_write");
   const initialStatus: SessionStatus =
     input.defer || goal === "<chat>" || goal === "<plan>" ? "idle" : "pending";
+  const runtime: "worker" | "server" = input.runtime ?? "worker";
+
+  // Server-runtime guardrail (design §3/§6). A server-runtime turn executes in
+  // THIS process — no container, no worktree, the server's own uid, DATABASE_URL
+  // and credentials in reach — so the tool surface is the whole sandbox. Reject
+  // any profile that can reach a shell, the filesystem, or a repo write BEFORE
+  // the insert (same reasoning as the worktree/plan invariants below: a rejection
+  // after the insert leaves an undriveable ghost row).
+  if (runtime === "server") {
+    // No worktree, no checkout: a server-runtime turn has nothing to contain a
+    // working copy with, and the kickoff/dispatch branches below are worker-only.
+    // §3: persona chats are `cwdStrategy: 'none'`.
+    if (cwdStrategy !== "none") {
+      throw new repo.RepoError(
+        `runtime='server' requires cwdStrategy='none' (got '${cwdStrategy}'): an in-process run ` +
+          `has no container to hold a checkout. Spawn a worker run for repo-backed work.`,
+        400
+      );
+    }
+    // No tier would ever drive this row (M2 review finding 3). initialStatus is
+    // 'pending' for any non-deferred goal that isn't <chat>/<plan>, and 'pending'
+    // on a SERVER row is a dead end: listPendingRunIds is the worker dispatch
+    // queue (so no pump retry and no max-defer failer), it isn't 'parked' (so no
+    // inbox wake sweep), and it holds no lease (so reconcile never sees it) —
+    // the run sits at 'pending' forever with nothing watching it.
+    //
+    // We reject rather than silently flipping to 'idle': the caller asked for a
+    // run that STARTS, and 'idle' would quietly turn it into one that waits for a
+    // message that may never come. Server runtime is message/event-driven by
+    // construction (design §3: persona chats), so the honest answer is a 400 that
+    // names the two ways out.
+    //
+    // NO carve-out for goal '<execute>' + planId (M2 re-verification, residual 1).
+    // That branch only self-drives in the NON-detached else-branch below, where
+    // create() takes the turn in-process under withServerClaim. Under
+    // detachedRunsEnabled() — forced true on fly/box (lib/config.ts) — the same
+    // branch goes launchDetached → dispatchRun → (server placement) wakeServerRun,
+    // which finds no pending inbox events on a brand-new run and no-ops. The row
+    // is then left at 'pending' on a true-server placement: outside every belt
+    // (listPendingRunIds skips server rows, no lease for reconcile, not 'parked'
+    // for the wake sweep) — exactly the stranded ghost this check exists to
+    // prevent, and undetectable in dev where the in-process branch runs instead.
+    // The Discord persona plan needs only '<chat>' (and defer), so the honest
+    // answer for every pending-producing goal is the same clear 400.
+    if (initialStatus === "pending") {
+      throw new repo.RepoError(
+        `runtime='server' cannot start goal '${goal}': an in-process run has no worker tier to ` +
+          `dispatch a kickoff turn to, and the row would sit at status 'pending' with nothing to ` +
+          `drive it. Server runtime supports message- and event-driven goals only — use ` +
+          `goal '<chat>'/'<plan>', pass defer: true and send the run a message, or create the run ` +
+          `with runtime 'worker'.`,
+        400
+      );
+    }
+    const unsafe = serverUnsafeProfiles(toolsProfile);
+    if (unsafe.length > 0) {
+      throw new repo.RepoError(
+        `runtime='server' refuses tools profile '${toolsProfile}': ${unsafe.join(", ")} ` +
+          `${unsafe.length === 1 ? "is" : "are"} not server-safe (shell/filesystem/repo-write capable, or unknown). ` +
+          `A server-runtime run executes inside the orchestrator process; only tool-mediated ` +
+          `orchestration profiles may run there (${listServerSafeProfiles().join(", ")}). ` +
+          `Ask the persona to spawn a containerized worker run for repo work instead.`,
+        400
+      );
+    }
+  }
 
   // Resolve repo: explicit > task's repo > plan's first repo > defaultRepo.
   // We don't error on missing repo at create time for chat-style runs; the
@@ -699,6 +822,22 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   // deployment default before selecting a context mode.
   const persistedBackend = resolveBackendId(backend);
 
+  // Server runtime implies the postgres context mode (runOneTurn), which is a
+  // pi-only capability: claude-backend throws on contextSource='postgres' and the
+  // Claude Agent SDK has no equivalent of the in-process loop. Fail HERE rather
+  // than at turn time — a persona whose backend resolves to claude would
+  // otherwise create fine, accept messages, and die on every single turn.
+  // resolveBackendId already folded in the persona's pick and the deployment
+  // default, so this catches "claude-default deployment, backend left null" too.
+  if (runtime === "server" && persistedBackend !== "pi") {
+    throw new repo.RepoError(
+      `runtime='server' requires the 'pi' backend (resolved '${persistedBackend}'): the in-process ` +
+        `postgres-turn loop is pi-only — the Claude backend rejects contextSource='postgres'. ` +
+        `Set backend: 'pi' on the run or on persona '${personaId}'.`,
+      400
+    );
+  }
+
   const insertValues = {
     goal,
     taskId: input.taskId ?? null,
@@ -707,9 +846,10 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     parentRunId: input.parentRunId ?? null,
     toolsProfile,
     cwdStrategy,
-    // Every run executes in an out-of-process worker; the runtime column is
-    // retained for legacy rows but is always 'worker' for new runs.
-    runtime: "worker",
+    // Placement is a per-run property again (design §3): 'worker' (the default,
+    // an out-of-process container/Machine) or 'server' (in-process persona
+    // turns, internal callers only — see CreateRunInput.runtime).
+    runtime,
     model: effectiveModel,
     backend: persistedBackend,
     thinkingLevel: input.thinkingLevel ?? null,
@@ -1041,6 +1181,11 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
   // early-return reject path (run missing / already in flight / terminal) never
   // deletes a runner owned by another worker (runReview/runExecute/followUp).
   let ownsRunner = false;
+  // The server-turn claim THIS append took (residual 2, below), if any. Released
+  // — and its 'preparing' stamp rolled back if the turn never got going — in the
+  // finally, exactly like withServerClaim does for the wake path.
+  let serverScope: string | null = null;
+  let serverPrevStatus: SessionStatus | null = null;
 
   try {
     let run = await get(input.runId);
@@ -1089,6 +1234,41 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       return;
     }
 
+    // ── Server-runtime turns take the SAME single-owner claim the wake path
+    // takes (M2 re-verification, residual 2). The guard above is a SNAPSHOT: a
+    // pipe user-message append can read the run as 'idle' with no worker_scope,
+    // pass it, and only then start writing — while in the web process an inbox
+    // wake's claimServerTurn CAS succeeds against that same still-idle row. Both
+    // then drive an in-process postgres turn and interleave agent_messages into
+    // one conversation. Nothing above serializes them: a server row holds no
+    // worker claim of its own, the per-run lock is in-process only, and 'idle' is
+    // not a lease status so isLeaseLive is false for both.
+    //
+    // So: claim BEFORE the first write, with the same CAS on the same columns
+    // (worker_scope 'server-<nonce>' + heartbeat) — whoever wins drives, and the
+    // loser gets today's "already in flight" rejection VERBATIM, from before any
+    // mutation (no persisted user row, no status change), which is the contract
+    // lib/pipe/agent-loop.ts already handles: an `error` frame finalizes the draft
+    // with "⚠️ …" and the per-conversation queue moves on to the next message
+    // instead of wedging.
+    //
+    // Skipped for `takeover` (wakeServerRun / a dispatched worker already HOLDS
+    // the claim it made for this call — re-claiming would deadlock against
+    // ourselves) and for every worker-runtime / demoted-legacy row, which reach
+    // this line on exactly the path they did before.
+    if (isServerRuntimeRun(run) && input.takeover !== true) {
+      const claim = await claimServerTurn(input.runId, { takeoverStale: true });
+      if (!claim.claimed) {
+        yield {
+          type: "error",
+          error: `Run ${input.runId} is already in flight (status=${run.status}).`,
+        };
+        return;
+      }
+      serverScope = claim.scope;
+      serverPrevStatus = claim.previousStatus;
+    }
+
     // persistUser===false: the server already inserted this user message (to fire
     // run_input and wake this worker), so re-inserting would duplicate the row and
     // re-stream the user_message frame the server already relayed. Skip both.
@@ -1124,7 +1304,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     const author = input.author ?? authorFor(run);
     const abort = input.abort ?? new AbortController();
     const bus = new EventEmitter();
-    runners.set(run.id, { abort, bus });
+    registerRunner(run.id, { abort, bus });
     ownsRunner = true;
 
     // Open the liveness lease and keep it fresh for the whole active period
@@ -1220,6 +1400,10 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
           // context, not persisted as a user row) — postgres mode must not rewrite
           // a user row to embed it.
           ephemeralInput: input.ephemeralInput === true,
+          // Only the FIRST turn of this append recalls memory against the user's
+          // message; the continuation re-prompts below are orchestrator text and
+          // must not re-inject the same recalled block every iteration.
+          suppressRecall: prContinuations > 0,
           onSdk: (m) => {
             // forward to in-process bus consumers (SSE for /sessions UI)
             bus.emit("event", { type: "sdk", sdk: m });
@@ -1431,6 +1615,27 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // but only if THIS append created it. Leaving it set would make the guard
     // above reject the next message with a false "already in flight".
     if (ownsRunner) runners.delete(input.runId);
+    // Release the server-turn claim this append took, on every exit path
+    // (success, error, abort, or a consumer abandoning the generator) — the same
+    // finally-release discipline withServerClaim applies to the wake path. The
+    // restore is guarded on (still 'preparing' AND still our scope), so it only
+    // fires when the turn never advanced past the claim; a landed turn's status
+    // is left exactly as it wrote it. Best-effort: a DB blip here must not mask
+    // the turn's own outcome (the stale-heartbeat takeover above, and reconcile,
+    // both recover a scope that failed to release).
+    if (serverScope) {
+      const scope = serverScope;
+      try {
+        await restoreClaimedStatus(input.runId, scope, serverPrevStatus);
+      } catch {
+        // fall through to the release
+      }
+      try {
+        await releaseServerTurn(input.runId, scope);
+      } catch {
+        // reconcile / the stale-claim takeover recover this
+      }
+    }
     release();
     lock.busy = null;
     // Make eslint happy about unused binder; actually exposed above as fallback.
@@ -1758,7 +1963,7 @@ export async function followUp(
 
   const abort = new AbortController();
   const bus = new EventEmitter();
-  runners.set(runId, { abort, bus });
+  registerRunner(runId, { abort, bus });
   // Keep the liveness lease fresh so this webhook-driven follow-up turn isn't
   // treated as an orphan by append()/reconcileOrphanedRuns() mid-turn.
   const heartbeat = startHeartbeat(runId);
@@ -2516,7 +2721,7 @@ async function runReview(
 ): Promise<void> {
   const abort = new AbortController();
   const bus = new EventEmitter();
-  runners.set(runId, { abort, bus });
+  registerRunner(runId, { abort, bus });
   // Keep the liveness lease fresh for the whole worker (prepare → turn), so an
   // append()/reconcileOrphanedRuns() can't mistake this live review for an
   // orphan and take it over / mark it failed mid-turn. The same interval polls
@@ -2694,7 +2899,7 @@ async function runExecute(
 ): Promise<void> {
   const abort = new AbortController();
   const bus = new EventEmitter();
-  runners.set(runId, { abort, bus });
+  registerRunner(runId, { abort, bus });
   // Keep the liveness lease fresh for the whole (long-running) executor turn so
   // append()/reconcileOrphanedRuns() never treat this live run as an orphan. The
   // same interval polls the cross-process cancel flag so a detached executor
@@ -2877,14 +3082,33 @@ function serverTurnNonce(): string {
  * sweep retries anything it missed).
  */
 export async function claimServerTurn(
-  runId: number
+  runId: number,
+  opts: { takeoverStale?: boolean } = {}
 ): Promise<{ claimed: boolean; scope: string; previousStatus: SessionStatus | null }> {
   const scope = serverTurnNonce();
+  // WHO MAY TAKE THE CLAIM. Default: an unowned run only (worker_scope IS NULL),
+  // byte-identical to dispatchRun's worker claim — a wake that loses is a clean
+  // no-op, so waiting for the owner is always correct there.
+  //
+  // takeoverStale (append's path only): a run whose claim-holder's heartbeat has
+  // gone stale is an ORPHAN, and append has always taken those over — its
+  // in-flight guard deliberately falls through on a stale lease so a crashed
+  // web/pipe process can't wedge a conversation until the reaper runs. Without
+  // this, adding the claim to append would REMOVE that recovery (worker_scope
+  // survives a process death; nothing clears it for a server row until
+  // reconcileOrphanedRuns). Same stale window as every other liveness decision.
+  const claimable = opts.takeoverStale
+    ? or(
+        isNull(agentSessions.workerScope),
+        isNull(agentSessions.heartbeatAt),
+        lt(agentSessions.heartbeatAt, new Date(Date.now() - HEARTBEAT_STALE_MS))
+      )!
+    : isNull(agentSessions.workerScope);
   const prior = (
     await db
       .select({ status: agentSessions.status })
       .from(agentSessions)
-      .where(and(eq(agentSessions.id, runId), isNull(agentSessions.workerScope)))
+      .where(and(eq(agentSessions.id, runId), claimable))
       .limit(1)
   )[0];
   if (!prior || HARD_TERMINAL_STATUSES.includes(prior.status as SessionStatus)) {
@@ -2896,7 +3120,7 @@ export async function claimServerTurn(
     .where(
       and(
         eq(agentSessions.id, runId),
-        isNull(agentSessions.workerScope),
+        claimable,
         eq(agentSessions.status, prior.status),
         notInArray(agentSessions.status, HARD_TERMINAL_STATUSES)
       )
@@ -2923,30 +3147,56 @@ export async function releaseServerTurn(runId: number, scope: string): Promise<v
     .where(and(eq(agentSessions.id, runId), eq(agentSessions.workerScope, scope)));
 }
 
+/**
+ * Undo claimServerTurn's `status='preparing'` stamp when the claim ends WITHOUT
+ * the turn having written any lifecycle state of its own — a throw before the
+ * drive got going, or a drive that declined to take a turn after all. Guarded on
+ * (still 'preparing') AND (still our scope), so it is a no-op the moment the turn
+ * advanced the row (running/idle/parked/…) or a false-death reaper handed the run
+ * to someone else. Without it, a declining claimant would release the scope and
+ * leave the row stuck at 'preparing' with nothing driving it.
+ */
+async function restoreClaimedStatus(
+  runId: number,
+  scope: string,
+  previousStatus: SessionStatus | null
+): Promise<void> {
+  if (!previousStatus) return;
+  await db
+    .update(agentSessions)
+    .set({ status: previousStatus })
+    .where(
+      and(
+        eq(agentSessions.id, runId),
+        eq(agentSessions.status, "preparing"),
+        eq(agentSessions.workerScope, scope)
+      )
+    );
+}
+
 /** Claim → drive one in-process turn → release (in finally). A lost claim race
  *  is a clean no-op (drive is skipped). Shared by create()'s in-process launch
- *  and dispatchRun's server-resume front door. */
-export async function withServerClaim(runId: number, drive: () => Promise<void>): Promise<void> {
+ *  and dispatchRun's server-resume front door.
+ *
+ *  `drive` may return `false` to mean "claim won, but on a second look there is
+ *  nothing to do" — the status stamped by the claim is then rolled back along
+ *  with the release, so declining costs the run nothing (see wakeServerRun's
+ *  post-claim re-check). Any other return value means the drive owned the turn
+ *  and wrote its own landing. */
+export async function withServerClaim(
+  runId: number,
+  drive: () => Promise<void | boolean>
+): Promise<void> {
   const { claimed, scope, previousStatus } = await claimServerTurn(runId);
   if (!claimed) return;
   try {
-    await drive();
+    const drove = await drive();
+    if (drove === false) await restoreClaimedStatus(runId, scope, previousStatus);
   } catch (err) {
     // A pre-drive read can fail before the turn writes its own lifecycle state.
     // Restore the state claimed from only while this exact claim still owns a
     // preparing row, before releasing the scope to any subsequent claimant.
-    if (previousStatus) {
-      await db
-        .update(agentSessions)
-        .set({ status: previousStatus })
-        .where(
-          and(
-            eq(agentSessions.id, runId),
-            eq(agentSessions.status, "preparing"),
-            eq(agentSessions.workerScope, scope)
-          )
-        );
-    }
+    await restoreClaimedStatus(runId, scope, previousStatus);
     throw err;
   } finally {
     await releaseServerTurn(runId, scope);
@@ -2979,11 +3229,18 @@ export async function* sendMessageToRun(opts: {
     yield { type: "error", error: `Run ${runId} not found` };
     return;
   }
-  // Remote runner deployments (Docker worker image or Fly/Box provider) force
-  // turns through out-of-process workers; plain dev/test with no remote runner
-  // keeps the in-process streaming path (append) so a single-process dev server
-  // still drives turns.
-  if (!runDispatch.remoteRunnerEnabled()) {
+  // Placement is a per-run property (design §3). A server-runtime run ALWAYS
+  // takes the in-process streaming path, even on a deployment with a remote
+  // runner configured — that is the whole point: persona chat turns must not
+  // pay for a container. Worker-runtime rows keep the previous behavior exactly,
+  // including the global fallback that lets a single-process dev server (no
+  // remote runner) drive turns in-process for legacy/worker rows.
+  //
+  // isServerRuntimeRun, NOT `runtime === 'server'`: a legacy row carrying the
+  // retired tier's placement together with a shell/fs/repo-write profile is
+  // demoted to worker here, so it dispatches remotely exactly as it did before
+  // M2 instead of being forced in-process (lib/run-runtime.ts).
+  if (isServerRuntimeRun(run) || !runDispatch.remoteRunnerEnabled()) {
     yield* append({ runId, role, text, author, abort });
     return;
   }
@@ -3076,6 +3333,93 @@ export async function* sendMessageToRun(opts: {
   }
 
   yield* relayRunStream(runId, from, abort, ownMsg.id);
+}
+
+/** Prompt for an unattended server-runtime wake: the turn was triggered by an
+ *  inbox event (child.result, CI, a fired timer), not by a human message. The
+ *  digest of those events is prefixed by append()'s claimInboxDigest, so this is
+ *  only the "and now act on it" instruction. */
+const SERVER_WAKE_PROMPT =
+  "You were woken by the events above. Handle them and report back to the conversation.";
+
+/**
+ * Drive one in-process turn for a woken server-runtime run.
+ *
+ * A server-runtime run has no worker to dispatch to, so every wake that a
+ * worker-runtime run would satisfy with dispatchRun (an inbox event's emit-time
+ * wake, a fired timer, the pump's wake sweep) lands here instead — run-dispatch
+ * routes it in dispatchRun(). The turn goes through append() so it shares the
+ * per-run lock, the liveness lease, the inbox-digest claim and the postgres
+ * context mode with a user-prompted turn; `persistUser: false` +
+ * `ephemeralInput: true` keep the synthetic prompt out of the transcript and out
+ * of the rebuilt model history (the digest frame append() claims IS the durable
+ * record of the wake).
+ *
+ * Best-effort and quiet: nobody is streaming this turn. If the run is missing,
+ * already in flight (a live lease, or an in-process runner), or hard-terminal,
+ * it no-ops — the pump's wake sweep re-drives it on a later tick because the
+ * pending inbox events stay pending.
+ *
+ * TWO no-op gates, both load-bearing (M2 review finding 2):
+ *
+ *  (b) NOTHING TO WAKE FOR. Every server-runtime wake is event-driven — an
+ *      inbox emit, a fired timer's event, the pump's parked sweep over rows WITH
+ *      pending events. When the run has no pending, non-control, owner/
+ *      supervisor-audience event left, the wake has already been serviced: the
+ *      emit-time wake and the ≤15s pump sweep both call dispatchRun, and the
+ *      loser used to find the digest already claimed and burn a whole model turn
+ *      on the bare SERVER_WAKE_PROMPT with no events attached. Check first, and
+ *      no-op — a wake with nothing to say is not a turn.
+ *
+ *  (a) SOMEONE ELSE IS DRIVING. The isLive/isLeaseLive reads below are a
+ *      snapshot; two processes (a pipe user turn and a web-process inbox wake,
+ *      or two wakes) could both pass them and then both drive a turn,
+ *      interleaving agent_messages. The turn is therefore taken under
+ *      withServerClaim — the SAME worker_scope/heartbeat CAS dispatchRun's
+ *      worker path uses (claimServerTurn stamps status='preparing' +
+ *      'server-<nonce>' scope while worker_scope IS NULL). Exactly one caller
+ *      wins; the loser returns without a turn. append() is then handed
+ *      `takeover: true`, which is how a dispatched worker adopts the 'preparing'
+ *      claim made for it — without it append's own isLeaseLive guard would
+ *      reject the very claim we just took. append()'s heartbeat interval keeps
+ *      the claim fresh for the whole turn, and withServerClaim releases the
+ *      scope in a finally, so a user message arriving after the turn lands is
+ *      never starved (and one arriving DURING it hits append's normal
+ *      "already in flight" guard, as it would against any live turn).
+ */
+export async function wakeServerRun(runId: number): Promise<void> {
+  const run = await get(runId);
+  if (!run || !isServerRuntimeRun(run)) return;
+  if (isLive(runId) || isLeaseLive(run)) return;
+  if (isTerminalStatus(run.status) && run.status !== "idle" && !isResumableRun(run)) return;
+  // (b), cheap pre-check: no pending events ⇒ the wake was already serviced by a
+  // racing driver. Advisory only — it saves a claim round-trip in the common
+  // case; the AUTHORITATIVE check is the re-check below, inside the claim.
+  if (!(await hasPendingInboxEvents(runId))) return;
+  // (a): single-owner CAS. A lost race is a clean no-op — the winner's turn
+  // drains the same pending events through its digest claim.
+  await withServerClaim(runId, async () => {
+    // (b) again, now that we hold the claim. The pre-check above is a snapshot:
+    // a user turn or sibling wake could have claimed the digest in the window
+    // between it and our CAS, in which case driving now would burn a whole model
+    // turn on the bare SERVER_WAKE_PROMPT with no events attached — the exact
+    // waste gate (b) exists to prevent. Returning false rolls the claim's
+    // 'preparing' stamp back and releases the scope, so the run is left exactly
+    // as we found it.
+    if (!(await hasPendingInboxEvents(runId))) return false;
+    for await (const ev of append({
+      runId,
+      role: "system",
+      text: SERVER_WAKE_PROMPT,
+      persistUser: false,
+      ephemeralInput: true,
+      takeover: true,
+    })) {
+      // Drain: append() persists everything it produces; the pipe/UI read the run
+      // stream. An error frame is already recorded on the row by append().
+      void ev;
+    }
+  });
 }
 
 /** Terminal error frame for a synchronous dispatch failure — the failure was
@@ -3367,6 +3711,12 @@ interface RunOneTurnArgs {
   /** Postgres-mode only: id of the persisted user row this turn processes; pins
    *  context override/annotation to that row when a backlog is drained. */
   inputMessageId?: number;
+  /** Skip memory auto-recall for this turn WITHOUT touching `rawUserText` (which
+   *  still drives what gets persisted). Set by append()'s PR-continuation loop:
+   *  only the first turn of an append recalls against the user's message —
+   *  continuations are orchestrator-authored re-prompts, and re-injecting the
+   *  same block each iteration would just repeat it in the model's context. */
+  suppressRecall?: boolean;
 }
 
 interface TurnResult {
@@ -3386,11 +3736,23 @@ interface TurnResult {
 async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   const { run, cwd, prompt, abort, author, onSdk } = args;
 
-  // Every run resumes an SDK session file ('sdk-session' contextSource). The
-  // pi backend's 'postgres' context mode was only ever selected for the retired
-  // in-process lightweight tier; now that all runs execute in workers, runOneTurn
-  // never selects it (the backend capability remains for potential future use).
-  const usePostgres = false;
+  // Context mode follows placement (design §3). A worker-runtime run resumes an
+  // SDK session file ('sdk-session'); a SERVER-runtime run rebuilds its
+  // conversation from agent_messages every turn ('postgres',
+  // lib/agent-backend/postgres-turn.ts) — so a persona chat survives a process
+  // restart, needs no session file on disk, and never needs a worktree.
+  //
+  // Pi-only: claude-backend throws on contextSource='postgres'. create() rejects
+  // a server-runtime run whose backend resolves to claude, so this AND is only
+  // load-bearing for legacy rows (runtime='server' predates that check) — those
+  // fall back to the SDK-session path rather than failing every turn.
+  //
+  // isServerRuntimeRun (not the raw column) is what keeps a legacy row with an
+  // unsafe profile OUT of postgres mode: postgres mode deliberately skips the
+  // sandbox and env-scrub interceptors below, which is only sound for a
+  // tool-mediated profile. A demoted row takes the sdk-session path WITH those
+  // interceptors, exactly as it did before M2.
+  const usePostgres = isServerRuntimeRun(run) && resolveBackendId(run.backend) === "pi";
 
   const persona = await (await runTransport()).getPersona(run.personaId ?? "implementor");
   if (!persona) {
@@ -3562,6 +3924,40 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
       }
     : { kind: "sdk-session" };
 
+  // Memory auto-recall (design §4): BM25-search every scope this run can see
+  // with the user's inbound text and prepend the top hits to THIS turn's prompt.
+  // Memory is pushed into context rather than left behind a tool the model may
+  // forget to call.
+  //
+  // Placement rules, both context modes:
+  //  • prompt text ONLY: it never becomes an agent_messages row. In postgres
+  //    mode that means it reaches the model exactly once — the context is
+  //    rebuilt from agent_messages every turn and the user row embeds
+  //    `rawUserText`, NOT this prompt. On the sdk-session path the block is not
+  //    persisted by US either, but the BACKEND session it is spoken into keeps
+  //    it in its own history, so later resumed turns still see it. That is the
+  //    same trade-off the inbox digest above already accepts on that path;
+  //    bounded by INJECTED_MEMORY_LIMIT × INJECTED_BODY_CHARS.
+  //  • only when there IS inbound user text: a bare event wake
+  //    (ephemeralInput) or a synthetic kickoff/executor prompt has no user
+  //    message to search with, and its digest already carries the context.
+  //    `suppressRecall` covers the same idea for a re-prompt that reuses the
+  //    original rawUserText (append()'s PR-continuation turns).
+  //  • best-effort: a memory hiccup must never fail the user's turn.
+  let promptWithMemory = prompt;
+  const recallText =
+    args.ephemeralInput === true || args.suppressRecall === true
+      ? null
+      : args.rawUserText?.trim() || null;
+  if (recallText) {
+    try {
+      const recalled = await buildMemoryInjection({ run, text: recallText });
+      if (recalled) promptWithMemory = `${recalled}\n\n${prompt}`;
+    } catch {
+      // recall is an optimization; the memory tools remain available
+    }
+  }
+
   const turnArgs = {
     cwd,
     contextSource,
@@ -3576,7 +3972,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
       | undefined,
     extensions,
     abort,
-    prompt,
+    prompt: promptWithMemory,
     onEvent,
   };
   // FIX 6 (M8): a resume token references state local to the container/worktree
@@ -3748,6 +4144,53 @@ export async function lastAgentText(runId: number): Promise<string | null> {
     if (text) return text;
   }
   return null;
+}
+
+/**
+ * The agent text a turn wrote AFTER a `streamCursor` snapshot, in order.
+ *
+ * The durable counterpart to the live event bus: a caller that snapshots
+ * `streamCursor().msgId` before driving a turn can read back exactly what that
+ * turn said, whether or not it heard a single envelope. Used by the pipe's
+ * milestone wake, where the narration IS the deliverable — losing it because a
+ * subscription attached late must not be possible (agent_messages is written
+ * before the turn returns).
+ *
+ * Rows are joined the way the Discord transcript joins assistant blocks
+ * (blank-line separated); tool-call summary lines have no durable equivalent
+ * and are simply absent from this rendering.
+ */
+export async function agentTextAfter(runId: number, afterMessageId: number): Promise<string | null> {
+  const rows = await db
+    .select({ content: agentMessages.content })
+    .from(agentMessages)
+    .where(
+      and(
+        eq(agentMessages.runId, runId),
+        eq(agentMessages.role, "agent"),
+        gt(agentMessages.id, afterMessageId)
+      )
+    )
+    .orderBy(agentMessages.id)
+    .limit(50);
+  const parts: string[] = [];
+  for (const r of rows) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(r.content);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(parsed)) continue;
+    const text = (parsed as Array<{ type?: string; text?: unknown }>)
+      .filter((b) => b?.type === "text" && typeof b.text === "string")
+      .map((b) => b.text as string)
+      .join("\n")
+      .trim();
+    if (text) parts.push(text);
+  }
+  const joined = parts.join("\n\n").trim();
+  return joined || null;
 }
 
 export interface TerminalChildEventSpec {
@@ -4406,11 +4849,20 @@ export async function reconcileOrphanedRuns(): Promise<number> {
       row.goal === "<execute>" && !!row.planId && runDispatch.detachedRunsEnabled();
     // The sweep has no OOM signal (it only sees a stale heartbeat), so oom=false:
     // a resumable orphan always re-dispatches here, exactly as before R8.
-    const policy = decideDeadRunPolicy({
-      goal: row.goal,
-      resumable: resumable || executorResumable,
-      oom: false,
-    });
+    // Server-runtime rows are never redispatched or failed by the reaper: they
+    // have no worker whose death needs a policy, and "the process that was
+    // driving this turn went away" (a web/pipe restart) is exactly the case the
+    // 'idle' policy describes — the next inbound message or inbox wake resumes
+    // them in-process. Failing them would kill a live Discord conversation on
+    // every deploy; redispatching them would spawn a container for a run that
+    // has no worktree to work in.
+    const policy = isServerRuntimeRun(row)
+      ? "idle"
+      : decideDeadRunPolicy({
+          goal: row.goal,
+          resumable: resumable || executorResumable,
+          oom: false,
+        });
     // BUG 6b: atomically take this orphan out of any worker's hands before acting
     // on it — the shared ownership token, mirroring handleWorkerDeath's guarded
     // claim release. Clearing heartbeatAt too is what lets a redispatch actually
@@ -4602,17 +5054,26 @@ export async function countInFlightWorkers(): Promise<number> {
   // regardless of status. A long-lived chat worker parked at 'idle' between turns
   // still holds a resident container + its memory, so it must count against the
   // admission budget; a dead worker's stale claim (expired heartbeat) must not.
+  // Placement is decided by the isServerRuntimeRun predicate, not the raw
+  // column: a demoted legacy row (server placement + unsafe profile) really does
+  // get a container, so it must be charged for one — while a true server-runtime
+  // turn holds a 'server-<nonce>' worker_scope with no container behind it and
+  // must not be. Hence the widened SQL + predicate filter.
   const rows = await db
-    .select({ id: agentSessions.id })
+    .select({
+      id: agentSessions.id,
+      runtime: agentSessions.runtime,
+      toolsProfile: agentSessions.toolsProfile,
+    })
     .from(agentSessions)
     .where(
       and(
-        eq(agentSessions.runtime, "worker"),
+        inArray(agentSessions.runtime, ["worker", "server"]),
         isNotNull(agentSessions.workerScope),
         gt(agentSessions.heartbeatAt, new Date(Date.now() - HEARTBEAT_STALE_MS))
       )
     );
-  return rows.length;
+  return rows.filter((r) => !isServerRuntimeRun(r)).length;
 }
 
 const pendingParent = alias(agentSessions, "pending_parent");
@@ -4640,17 +5101,32 @@ export async function listPendingRunIds(): Promise<number[]> {
   const rows = await db
     .select({
       id: agentSessions.id,
+      runtime: agentSessions.runtime,
+      toolsProfile: agentSessions.toolsProfile,
       parentWorkerScope: pendingParent.workerScope,
       parentHeartbeatAt: pendingParent.heartbeatAt,
     })
     .from(agentSessions)
     .leftJoin(pendingParent, eq(agentSessions.parentRunId, pendingParent.id))
-    .where(eq(agentSessions.status, "pending"))
+    // Worker-runtime rows only: this IS the dispatch queue (admission, host
+    // memory, worker slots), and a server-runtime run never occupies any of
+    // that — it is driven by inbound messages and inbox-event wakes, not by the
+    // pump. (Its own wake belt is pumpTick's parked sweep, which routes through
+    // dispatchRun's server-runtime branch.)
+    //
+    // The placement filter is the isServerRuntimeRun PREDICATE, applied below
+    // rather than as a `runtime = 'worker'` SQL clause: a legacy row with a
+    // server placement and an unsafe profile is a worker row for every purpose,
+    // and must get the pump belt back (retry AND the max-defer failer) instead
+    // of sitting at 'pending' forever with no tier watching it. The pending
+    // queue is small, so the extra rows cost nothing.
+    .where(and(eq(agentSessions.status, "pending"), inArray(agentSessions.runtime, ["worker", "server"])))
     .orderBy(asc(agentSessions.id));
 
   const liveParentChildren: number[] = [];
   const rest: number[] = [];
   for (const r of rows) {
+    if (isServerRuntimeRun(r)) continue;
     const parentLive = isWorkerLive({ workerScope: r.parentWorkerScope, heartbeatAt: r.parentHeartbeatAt });
     (parentLive ? liveParentChildren : rest).push(r.id);
   }
@@ -4857,6 +5333,40 @@ export function subscribe(runId: number, listener: (event: unknown) => void): ()
   if (!bus) return () => {};
   bus.on("event", listener);
   return () => bus.off("event", listener);
+}
+
+/**
+ * Subscribe to a run's events WITHOUT having to wait for it to be live.
+ *
+ * `subscribe` above can only attach to a bus that already exists, which forces
+ * callers that drive a turn themselves (the pipe's milestone wake) into a poll
+ * loop: kick the turn, then wait for isLive() and subscribe. That loop loses
+ * every envelope of a turn that starts and finishes inside one poll interval —
+ * silently, since the turn itself succeeds. This variant attaches immediately
+ * when the run is live and otherwise parks the listener until the run's runner
+ * registers (registerRunner), so "subscribe first, then wake" is race-free.
+ *
+ * The returned unsubscribe detaches from both places and must always be called:
+ * a parked listener is only dropped by it.
+ */
+export function subscribeRunEvents(
+  runId: number,
+  listener: (event: unknown) => void
+): () => void {
+  runners.get(runId)?.bus.on("event", listener);
+  let waiting = pendingSubscribers.get(runId);
+  if (!waiting) {
+    waiting = new Set();
+    pendingSubscribers.set(runId, waiting);
+  }
+  waiting.add(listener);
+  return () => {
+    runners.get(runId)?.bus.off("event", listener);
+    const set = pendingSubscribers.get(runId);
+    if (!set) return;
+    set.delete(listener);
+    if (set.size === 0) pendingSubscribers.delete(runId);
+  };
 }
 
 export function isLive(runId: number): boolean {
