@@ -69,7 +69,11 @@ export type DispatchResult =
   | "already-claimed"
   | "not-found"
   | "spawn-failed"
-  | "deferred";
+  | "deferred"
+  /** The run is `runtime='server'`: it has no worker tier. Dispatch handed the
+   *  wake to the in-process turn driver (runs.wakeServerRun) instead of
+   *  spawning anything. */
+  | "server-runtime";
 
 // Late-bound bridge back into lib/runs (avoids a static import cycle; runs.ts
 // injects these on load). See the longer note kept from the systemd era.
@@ -101,6 +105,10 @@ type RunsApi = {
    *  already checks this before insert, but a worker writing rows directly
    *  would bypass that. */
   checkTreeLimits: (runId: number) => Promise<string | null>;
+  /** Drive one in-process turn for a woken `runtime='server'` run (persona
+   *  chats). Server runs have no worker tier, so dispatchRun delegates every
+   *  wake it receives for one of them to this instead of spawning. */
+  wakeServerRun: (runId: number) => Promise<void>;
 };
 let runsApi: RunsApi | null = null;
 export function __setRunsApi(api: RunsApi): void {
@@ -351,6 +359,31 @@ export async function dispatchRun(
   // worker). The emit-time inbox wakes (lib/inbox) and the pump's parked-wake
   // sweep both call dispatchRun, so they inherit this routing for free — no
   // per-caller placement logic.
+
+  // Placement gate (design §3): a `runtime='server'` run has NO worker tier —
+  // its turns execute in this process. Every wake path funnels through
+  // dispatchRun (inbox emit-time wake, the pump's parked sweep, fired timers via
+  // their inbox event, reconcile's redispatch), so intercepting here is what
+  // keeps a woken persona chat from spawning a container that would find no
+  // worktree, no checkout, and no reason to exist. The turn is kicked off in the
+  // background: callers of dispatchRun (the pump loop, emit-time wakes) expect a
+  // placement decision back promptly, not a whole model turn. Concurrency is
+  // safe — wakeServerRun no-ops on a live lease / in-process runner, and the
+  // pump's sweep re-drives anything it skipped because the inbox events stay
+  // pending until a turn claims them.
+  {
+    const placement = await runs().get(runId);
+    if (!placement) return finish("not-found");
+    if (placement.runtime === "server") {
+      void runs()
+        .wakeServerRun(runId)
+        .catch(() => {
+          // Best-effort: the pending inbox events survive, so the pump's wake
+          // sweep retries on the next tick.
+        });
+      return finish("server-runtime");
+    }
+  }
 
   // Critical section: decide admission, then atomically claim. Serialized so the
   // reservation count seen by the next caller already includes this claim. The

@@ -79,7 +79,13 @@ import {
   decideDeadRunPolicy,
 } from "./run-liveness";
 import { isTransientNetworkError } from "./transient-errors";
-import { resolveProfiles, alwaysOnExtensions, type ProfileContext } from "./profiles";
+import {
+  resolveProfiles,
+  alwaysOnExtensions,
+  listServerSafeProfiles,
+  serverUnsafeProfiles,
+  type ProfileContext,
+} from "./profiles";
 import { type RunEnvelope } from "./pi-event-mapper";
 import { estimateCostUsd } from "./pricing";
 import { getBackend, resolveBackendId, type ContextSource, type Extension } from "./agent-backend";
@@ -144,6 +150,7 @@ runDispatch.__setRunsApi({
   listLeasedRuns,
   handleWorkerDeath,
   checkTreeLimits,
+  wakeServerRun,
 });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -200,6 +207,22 @@ export interface CreateRunInput {
   initialPrompt?: string | null;
   /** If true, do NOT kick off the worker on create; useful for chats. */
   defer?: boolean;
+  /**
+   * Execution placement for this run. Default 'worker': a detached process /
+   * container / Machine, the tier every repo-touching run uses.
+   *
+   * 'server' means the run's turns execute IN this process (the web server or
+   * the pipe) through the postgres-turn loop — no container, no worktree, no
+   * SDK session file. It exists for persona chats (docs/superpowers/specs/
+   * 2026-07-31-discord-personas-messaging-design.md §3): a chat turn per
+   * Discord message is the wrong shape for a Fly Machine.
+   *
+   * DELIBERATELY NOT EXPOSED on POST /api/runs — an external caller must not be
+   * able to opt a run into the server process. Internal callers only (the pipe's
+   * session store). Guarded further at create time: server runtime requires the
+   * pi backend and a tools profile with no shell/fs/repo-write capability.
+   */
+  runtime?: "worker" | "server";
 }
 
 // /runs UI distinguishes task-derived runs from chat-derived runs.
@@ -221,9 +244,11 @@ export interface RunRow {
   parentRunId: number | null;
   toolsProfile: string;
   cwdStrategy: CwdStrategy;
-  /** Execution placement. Always 'worker' for new runs — a detached
-   *  process/container/Machine. The legacy 'server' value is retained only for
-   *  pre-retirement rows. */
+  /** Execution placement, chosen per run at create time (design §3).
+   *  'worker' (the default) is a detached process/container/Machine; 'server'
+   *  means the turn runs in-process through the postgres-turn loop — persona
+   *  chats only, internal callers only. Legacy pre-retirement rows may also
+   *  carry 'server'. */
   runtime: "server" | "worker";
   model: string | null;
   /** Agent backend this run executes on ('pi'|'claude'), or null for the
@@ -581,6 +606,37 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
       : "orchestrator,repo_write");
   const initialStatus: SessionStatus =
     input.defer || goal === "<chat>" || goal === "<plan>" ? "idle" : "pending";
+  const runtime: "worker" | "server" = input.runtime ?? "worker";
+
+  // Server-runtime guardrail (design §3/§6). A server-runtime turn executes in
+  // THIS process — no container, no worktree, the server's own uid, DATABASE_URL
+  // and credentials in reach — so the tool surface is the whole sandbox. Reject
+  // any profile that can reach a shell, the filesystem, or a repo write BEFORE
+  // the insert (same reasoning as the worktree/plan invariants below: a rejection
+  // after the insert leaves an undriveable ghost row).
+  if (runtime === "server") {
+    // No worktree, no checkout: a server-runtime turn has nothing to contain a
+    // working copy with, and the kickoff/dispatch branches below are worker-only.
+    // §3: persona chats are `cwdStrategy: 'none'`.
+    if (cwdStrategy !== "none") {
+      throw new repo.RepoError(
+        `runtime='server' requires cwdStrategy='none' (got '${cwdStrategy}'): an in-process run ` +
+          `has no container to hold a checkout. Spawn a worker run for repo-backed work.`,
+        400
+      );
+    }
+    const unsafe = serverUnsafeProfiles(toolsProfile);
+    if (unsafe.length > 0) {
+      throw new repo.RepoError(
+        `runtime='server' refuses tools profile '${toolsProfile}': ${unsafe.join(", ")} ` +
+          `${unsafe.length === 1 ? "is" : "are"} not server-safe (shell/filesystem/repo-write capable, or unknown). ` +
+          `A server-runtime run executes inside the orchestrator process; only tool-mediated ` +
+          `orchestration profiles may run there (${listServerSafeProfiles().join(", ")}). ` +
+          `Ask the persona to spawn a containerized worker run for repo work instead.`,
+        400
+      );
+    }
+  }
 
   // Resolve repo: explicit > task's repo > plan's first repo > defaultRepo.
   // We don't error on missing repo at create time for chat-style runs; the
@@ -699,6 +755,22 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   // deployment default before selecting a context mode.
   const persistedBackend = resolveBackendId(backend);
 
+  // Server runtime implies the postgres context mode (runOneTurn), which is a
+  // pi-only capability: claude-backend throws on contextSource='postgres' and the
+  // Claude Agent SDK has no equivalent of the in-process loop. Fail HERE rather
+  // than at turn time — a persona whose backend resolves to claude would
+  // otherwise create fine, accept messages, and die on every single turn.
+  // resolveBackendId already folded in the persona's pick and the deployment
+  // default, so this catches "claude-default deployment, backend left null" too.
+  if (runtime === "server" && persistedBackend !== "pi") {
+    throw new repo.RepoError(
+      `runtime='server' requires the 'pi' backend (resolved '${persistedBackend}'): the in-process ` +
+        `postgres-turn loop is pi-only — the Claude backend rejects contextSource='postgres'. ` +
+        `Set backend: 'pi' on the run or on persona '${personaId}'.`,
+      400
+    );
+  }
+
   const insertValues = {
     goal,
     taskId: input.taskId ?? null,
@@ -707,9 +779,10 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     parentRunId: input.parentRunId ?? null,
     toolsProfile,
     cwdStrategy,
-    // Every run executes in an out-of-process worker; the runtime column is
-    // retained for legacy rows but is always 'worker' for new runs.
-    runtime: "worker",
+    // Placement is a per-run property again (design §3): 'worker' (the default,
+    // an out-of-process container/Machine) or 'server' (in-process persona
+    // turns, internal callers only — see CreateRunInput.runtime).
+    runtime,
     model: effectiveModel,
     backend: persistedBackend,
     thinkingLevel: input.thinkingLevel ?? null,
@@ -2979,11 +3052,13 @@ export async function* sendMessageToRun(opts: {
     yield { type: "error", error: `Run ${runId} not found` };
     return;
   }
-  // Remote runner deployments (Docker worker image or Fly/Box provider) force
-  // turns through out-of-process workers; plain dev/test with no remote runner
-  // keeps the in-process streaming path (append) so a single-process dev server
-  // still drives turns.
-  if (!runDispatch.remoteRunnerEnabled()) {
+  // Placement is a per-run property (design §3). A server-runtime run ALWAYS
+  // takes the in-process streaming path, even on a deployment with a remote
+  // runner configured — that is the whole point: persona chat turns must not
+  // pay for a container. Worker-runtime rows keep the previous behavior exactly,
+  // including the global fallback that lets a single-process dev server (no
+  // remote runner) drive turns in-process for legacy/worker rows.
+  if (run.runtime === "server" || !runDispatch.remoteRunnerEnabled()) {
     yield* append({ runId, role, text, author, abort });
     return;
   }
@@ -3076,6 +3151,49 @@ export async function* sendMessageToRun(opts: {
   }
 
   yield* relayRunStream(runId, from, abort, ownMsg.id);
+}
+
+/** Prompt for an unattended server-runtime wake: the turn was triggered by an
+ *  inbox event (child.result, CI, a fired timer), not by a human message. The
+ *  digest of those events is prefixed by append()'s claimInboxDigest, so this is
+ *  only the "and now act on it" instruction. */
+const SERVER_WAKE_PROMPT =
+  "You were woken by the events above. Handle them and report back to the conversation.";
+
+/**
+ * Drive one in-process turn for a woken server-runtime run.
+ *
+ * A server-runtime run has no worker to dispatch to, so every wake that a
+ * worker-runtime run would satisfy with dispatchRun (an inbox event's emit-time
+ * wake, a fired timer, the pump's wake sweep) lands here instead — run-dispatch
+ * routes it in dispatchRun(). The turn goes through append() so it shares the
+ * per-run lock, the liveness lease, the inbox-digest claim and the postgres
+ * context mode with a user-prompted turn; `persistUser: false` +
+ * `ephemeralInput: true` keep the synthetic prompt out of the transcript and out
+ * of the rebuilt model history (the digest frame append() claims IS the durable
+ * record of the wake).
+ *
+ * Best-effort and quiet: nobody is streaming this turn. If the run is missing,
+ * already in flight (a live lease, or an in-process runner), or hard-terminal,
+ * it no-ops — the pump's wake sweep re-drives it on a later tick because the
+ * pending inbox events stay pending.
+ */
+export async function wakeServerRun(runId: number): Promise<void> {
+  const run = await get(runId);
+  if (!run || run.runtime !== "server") return;
+  if (isLive(runId) || isLeaseLive(run)) return;
+  if (isTerminalStatus(run.status) && run.status !== "idle" && !isResumableRun(run)) return;
+  for await (const ev of append({
+    runId,
+    role: "system",
+    text: SERVER_WAKE_PROMPT,
+    persistUser: false,
+    ephemeralInput: true,
+  })) {
+    // Drain: append() persists everything it produces; the pipe/UI read the run
+    // stream. An error frame is already recorded on the row by append().
+    void ev;
+  }
 }
 
 /** Terminal error frame for a synchronous dispatch failure — the failure was
@@ -3386,11 +3504,17 @@ interface TurnResult {
 async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   const { run, cwd, prompt, abort, author, onSdk } = args;
 
-  // Every run resumes an SDK session file ('sdk-session' contextSource). The
-  // pi backend's 'postgres' context mode was only ever selected for the retired
-  // in-process lightweight tier; now that all runs execute in workers, runOneTurn
-  // never selects it (the backend capability remains for potential future use).
-  const usePostgres = false;
+  // Context mode follows placement (design §3). A worker-runtime run resumes an
+  // SDK session file ('sdk-session'); a SERVER-runtime run rebuilds its
+  // conversation from agent_messages every turn ('postgres',
+  // lib/agent-backend/postgres-turn.ts) — so a persona chat survives a process
+  // restart, needs no session file on disk, and never needs a worktree.
+  //
+  // Pi-only: claude-backend throws on contextSource='postgres'. create() rejects
+  // a server-runtime run whose backend resolves to claude, so this AND is only
+  // load-bearing for legacy rows (runtime='server' predates that check) — those
+  // fall back to the SDK-session path rather than failing every turn.
+  const usePostgres = run.runtime === "server" && resolveBackendId(run.backend) === "pi";
 
   const persona = await (await runTransport()).getPersona(run.personaId ?? "implementor");
   if (!persona) {
@@ -4406,11 +4530,20 @@ export async function reconcileOrphanedRuns(): Promise<number> {
       row.goal === "<execute>" && !!row.planId && runDispatch.detachedRunsEnabled();
     // The sweep has no OOM signal (it only sees a stale heartbeat), so oom=false:
     // a resumable orphan always re-dispatches here, exactly as before R8.
-    const policy = decideDeadRunPolicy({
-      goal: row.goal,
-      resumable: resumable || executorResumable,
-      oom: false,
-    });
+    // Server-runtime rows are never redispatched or failed by the reaper: they
+    // have no worker whose death needs a policy, and "the process that was
+    // driving this turn went away" (a web/pipe restart) is exactly the case the
+    // 'idle' policy describes — the next inbound message or inbox wake resumes
+    // them in-process. Failing them would kill a live Discord conversation on
+    // every deploy; redispatching them would spawn a container for a run that
+    // has no worktree to work in.
+    const policy = row.runtime === "server"
+      ? "idle"
+      : decideDeadRunPolicy({
+          goal: row.goal,
+          resumable: resumable || executorResumable,
+          oom: false,
+        });
     // BUG 6b: atomically take this orphan out of any worker's hands before acting
     // on it — the shared ownership token, mirroring handleWorkerDeath's guarded
     // claim release. Clearing heartbeatAt too is what lets a redispatch actually
@@ -4645,7 +4778,12 @@ export async function listPendingRunIds(): Promise<number[]> {
     })
     .from(agentSessions)
     .leftJoin(pendingParent, eq(agentSessions.parentRunId, pendingParent.id))
-    .where(eq(agentSessions.status, "pending"))
+    // Worker-runtime rows only: this IS the dispatch queue (admission, host
+    // memory, worker slots), and a server-runtime run never occupies any of
+    // that — it is driven by inbound messages and inbox-event wakes, not by the
+    // pump. (Its own wake belt is pumpTick's parked sweep, which routes through
+    // dispatchRun's server-runtime branch.)
+    .where(and(eq(agentSessions.status, "pending"), eq(agentSessions.runtime, "worker")))
     .orderBy(asc(agentSessions.id));
 
   const liveParentChildren: number[] = [];
