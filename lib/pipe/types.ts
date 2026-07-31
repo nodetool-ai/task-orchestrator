@@ -158,8 +158,9 @@ export interface Channel {
 
 /**
  * One persona bot: a Discord application + token bound to a persona id
- * (design §1). Binding is CONFIG, not schema — tokens are secrets and don't
- * belong in Postgres — so this whole struct comes out of the environment.
+ * (design §1). Assembled either from a `discord_bots` row (Settings → Discord,
+ * which is the preferred path) or from the DISCORD_* environment, which still
+ * works and is merged in as a fallback — see lib/pipe/config.ts.
  */
 export interface PersonaBotConfig {
   /** Persona id this bot speaks as; validated against the personas table at boot. */
@@ -180,6 +181,13 @@ export interface PersonaBotConfig {
    * the actual lever a legacy deployment has (design §1 / Migration).
    */
   fromLegacyToken?: boolean;
+  /**
+   * Where the bot came from: a `discord_bots` row written in Settings → Discord
+   * ('db') or the DISCORD_* environment ('env', the default when unset). It
+   * decides the posture on a validation failure — an env bot refuses boot, a DB
+   * bot is skipped and flagged in Settings (lib/pipe/config.ts).
+   */
+  source?: "db" | "env";
 }
 
 /** Back-compat alias: the adapter's config slice IS a persona bot's config. */

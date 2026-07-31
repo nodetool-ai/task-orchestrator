@@ -681,6 +681,9 @@ export const channelIdentities = pgTable(
       t.externalUserId
     ),
     userIdx: index("channel_identities_user_idx").on(t.userId),
+    // The Discord bots' user allowlist is "every identity on this channel"
+    // (lib/pipe/config.ts), read on every pipe config load.
+    channelIdx: index("channel_identities_channel_idx").on(t.channel),
   })
 );
 
@@ -788,6 +791,42 @@ export const codexLoginAttempts = pgTable(
   })
 );
 
+// One Discord persona bot, configured through Settings → Discord instead of
+// DISCORD_BOT_TOKEN_<PERSONA_ID>. The env vars still work and are merged in as a
+// fallback (lib/pipe/config.ts) — a row here simply wins for its persona.
+//
+// The token is stored as-is. There is no encryption precedent in this schema
+// (codex_credentials holds plaintext OAuth tokens) and the pipe process needs
+// the literal value at boot; the control-plane DB is the trust boundary. The
+// token never leaves the server in full: the API masks it to its last 4 chars.
+//
+// Deliberately NO allowed_users column: the user allowlist is derived from
+// channel_identities, where each person links their OWN Discord id in Settings.
+export const discordBots = pgTable(
+  "discord_bots",
+  {
+    id: serial("id").primaryKey(),
+    // One bot per persona — the pipe binds a gateway connection to a persona id.
+    personaId: text("persona_id")
+      .notNull()
+      .references(() => personas.id, { onDelete: "cascade" }),
+    token: text("token").notNull(),
+    // Optional; without it the bot still works over the gateway and only
+    // slash-command registration is skipped.
+    applicationId: text("application_id"),
+    // JSON string array, like personas.skill_paths / memories.keywords. Empty ⇒
+    // any channel an allow-listed user can reach the bot in.
+    allowedChannels: text("allowed_channels").notNull().default("[]"),
+    // Disabled rows stay configured but are skipped at pipe boot.
+    enabled: boolean("enabled").notNull().default(true),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    personaUniq: uniqueIndex("discord_bots_persona_uniq").on(t.personaId),
+  })
+);
+
 export const apiTokens = pgTable(
   "api_tokens",
   {
@@ -809,6 +848,7 @@ export const apiTokens = pgTable(
 );
 
 export type ApiToken = typeof apiTokens.$inferSelect;
+export type DiscordBot = typeof discordBots.$inferSelect;
 
 export type User = typeof users.$inferSelect;
 export type Plan = typeof plans.$inferSelect;

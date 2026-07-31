@@ -440,7 +440,29 @@ containerized worker runs to do the actual repo work. Design and UX contract:
 [design doc](docs/superpowers/specs/2026-07-31-discord-personas-messaging-design.md)
 and [PRD](docs/superpowers/specs/2026-07-31-discord-personas-messaging-prd.md).
 
-### Create one Discord app per persona
+### Configure bots in Settings (preferred)
+
+**Settings → Discord** is the supported way to add a persona bot: a guided
+wizard picks the persona (flagging any whose tools profile or backend does not
+qualify), links out to the Discord developer portal, **verifies the pasted bot
+token server-side**, generates the OAuth2 invite URL with the right permission
+bits, and stores the bot in the `discord_bots` table. Tokens are never returned
+to the browser — the UI only ever sees the last four characters.
+
+Who may talk to the bots is **self-service**: every person links their own
+Discord user id in the same tab ("Your Discord account"), which writes a
+`channel_identities` row — the same table `/link` uses for attribution. The
+effective allowlist is the union of those linked ids and any legacy
+`DISCORD_ALLOWED_USERS` env values; nobody curates a list of other people's
+snowflakes. A bot nobody can reach is refused, as it always was.
+
+The pipe reads its configuration **once at boot** and there is no live-reload
+channel between the web server and that process, so restart `npm run pipe` after
+changing anything here. The env vars below keep working and are merged in as a
+fallback: a `discord_bots` row wins for its persona, env-only personas still
+start.
+
+### Create one Discord app per persona (env vars)
 
 1. **Create the application + bot** at
    <https://discord.com/developers/applications> — one per persona you want on
@@ -473,6 +495,10 @@ Every `DISCORD_BOT_TOKEN_<PERSONA_ID>` must name a persona that exists in the
 `personas` table; unknown suffixes, empty allowlists and non-qualifying personas
 are **boot errors**, not warnings (see the posture below). The legacy
 single-bot `DISCORD_BOT_TOKEN` still works and binds to `DISCORD_DEFAULT_PERSONA`.
+A bot configured in Settings → Discord is validated the same way, but a failure
+there **skips that bot with a warning** instead of stopping the process: it is
+editable in the UI, and one bad save must not lock the operator out of a running
+pipe. Settings flags the same problem per bot.
 
 ### The roster today
 
