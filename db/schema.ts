@@ -619,23 +619,68 @@ export const resourceLocks = pgTable("resource_locks", {
 
 // Maps an external chat conversation (e.g. a Discord DM or guild channel/thread)
 // to a chat run (agent_runs row, goal='<chat>'). One row per (channel,
-// external_id) so the channel bridge (lib/pipe) can resume the same conversation
-// across restarts. ON DELETE CASCADE: deleting the run drops the mapping and the
-// bridge lazily creates a fresh run on the next message.
+// external_id, persona_id) so the channel bridge (lib/pipe) can resume the same
+// conversation across restarts — and so two persona bots can each hold their own
+// conversation in the same Discord channel. ON DELETE CASCADE: deleting the run
+// drops the mapping and the bridge lazily creates a fresh run on the next
+// message.
+//
+// persona_id is NOT NULL (default 'implementor', the legacy single-bot persona)
+// so the unique index is meaningful: Postgres treats NULLs as distinct, and a
+// nullable persona column would silently allow duplicate (channel, external_id)
+// rows. user_id stays nullable — attribution is opt-in via /link
+// (channel_identities); unlinked users keep talking anonymously as today.
 export const channelThreads = pgTable(
   "channel_threads",
   {
     id: serial("id").primaryKey(),
     channel: text("channel").notNull(),
     externalId: text("external_id").notNull(),
+    personaId: text("persona_id")
+      .notNull()
+      .default("implementor")
+      .references(() => personas.id, { onDelete: "cascade" }),
+    userId: integer("user_id").references(() => users.id, { onDelete: "set null" }),
     runId: integer("run_id")
       .notNull()
       .references(() => agentSessions.id, { onDelete: "cascade" }),
     createdAt: ts("created_at").notNull().defaultNow(),
   },
   (t) => ({
-    uniq: uniqueIndex("channel_threads_channel_external_uniq").on(t.channel, t.externalId),
+    uniq: uniqueIndex("channel_threads_channel_external_persona_uniq").on(
+      t.channel,
+      t.externalId,
+      t.personaId
+    ),
     runIdx: index("channel_threads_run_idx").on(t.runId),
+  })
+);
+
+// Links an external chat account (a Discord snowflake) to a local users row.
+// Created by the one-time `/link <api-token>` DM command in the pipe: the token
+// is verified via lib/api-tokens.ts and only the resulting association is
+// stored, never the token. Linking upgrades attribution (runs get a user_id,
+// `user`-scoped memories become addressable); it does not gate access — the
+// per-bot allowlist still does that.
+export const channelIdentities = pgTable(
+  "channel_identities",
+  {
+    id: serial("id").primaryKey(),
+    channel: text("channel").notNull(),
+    externalUserId: text("external_user_id").notNull(),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    // Display handle at link time (e.g. the Discord username), for operator UIs.
+    label: text("label"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    uniq: uniqueIndex("channel_identities_channel_external_user_uniq").on(
+      t.channel,
+      t.externalUserId
+    ),
+    userIdx: index("channel_identities_user_idx").on(t.userId),
   })
 );
 
@@ -778,6 +823,7 @@ export type WorkerChannelReceipt = typeof workerChannelReceipts.$inferSelect;
 export type AgentEvent = typeof agentEvents.$inferSelect;
 export type AgentMessage = typeof agentMessages.$inferSelect;
 export type ChannelThread = typeof channelThreads.$inferSelect;
+export type ChannelIdentity = typeof channelIdentities.$inferSelect;
 export type Repository = typeof repositories.$inferSelect;
 export type Persona = typeof personas.$inferSelect;
 export type PersonaMemory = typeof personaMemories.$inferSelect;

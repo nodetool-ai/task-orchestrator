@@ -4,6 +4,7 @@ import {
   acceptanceCriteria,
   agentSessions,
   attachments,
+  channelIdentities,
   memories,
   personaMemories,
   personas as personasTable,
@@ -14,6 +15,7 @@ import {
   taskNotes,
   tasks,
   type Attachment as AttachmentRow,
+  type ChannelIdentity,
   type Memory,
   type Persona,
   type Plan as PlanRow,
@@ -1571,7 +1573,24 @@ export async function upsertPersona(p: PersonaUpsert): Promise<void> {
 // Shared memory
 // ──────────────────────────────────────────────────────────
 
-export type MemoryScope = "global" | "repo" | "task";
+// Shared-memory scopes. `persona`/`user` were added for the Discord persona bots
+// (spec 2026-07-31-discord-personas-messaging-design.md §4): scopeKey is the
+// persona id / the users.id. There is no DB CHECK constraint on memories.scope —
+// this union plus the memory tool schemas in lib/extensions/persona-memory.ts are
+// the whole validation surface.
+export type MemoryScope = "global" | "repo" | "task" | "persona" | "user";
+
+export const MEMORY_SCOPES: readonly MemoryScope[] = [
+  "global",
+  "repo",
+  "task",
+  "persona",
+  "user",
+] as const;
+
+export function isMemoryScope(value: string): value is MemoryScope {
+  return (MEMORY_SCOPES as readonly string[]).includes(value);
+}
 
 export interface MemoryCreate {
   scope: MemoryScope;
@@ -1748,6 +1767,94 @@ export async function removePersonaMemoryLine(
     .set({ body: kept.join("\n"), updatedAt: now })
     .where(and(eq(personaMemories.personaId, personaId), eq(personaMemories.scope, scope)));
   return removed;
+}
+
+// ──────────────────────────────────────────────────────────
+// Channel identities
+// ──────────────────────────────────────────────────────────
+
+// Maps an external chat account (channel + provider user id, e.g.
+// 'discord' + a snowflake) onto a local users row. Written by the pipe's
+// `/link <api-token>` DM command after the token verifies; read on every inbound
+// message to attribute the conversation's run. Unlinked users simply have no
+// row — attribution is an upgrade, not an access gate.
+
+export interface ChannelIdentityUpsert {
+  channel: string;
+  externalUserId: string;
+  userId: number;
+  /** Display handle at link time (e.g. the Discord username). */
+  label?: string | null;
+}
+
+export async function getChannelIdentity(
+  channel: string,
+  externalUserId: string
+): Promise<ChannelIdentity | null> {
+  const row = (await db
+    .select()
+    .from(channelIdentities)
+    .where(
+      and(
+        eq(channelIdentities.channel, channel),
+        eq(channelIdentities.externalUserId, externalUserId)
+      )
+    ))[0];
+  return row ?? null;
+}
+
+/** All identities linked to a local user (one per channel account). */
+export async function listChannelIdentitiesForUser(userId: number): Promise<ChannelIdentity[]> {
+  return await db
+    .select()
+    .from(channelIdentities)
+    .where(eq(channelIdentities.userId, userId))
+    .orderBy(asc(channelIdentities.id));
+}
+
+/**
+ * Link (or re-link) an external account. Re-running `/link` with a token for a
+ * different user re-points the existing row, so a mistaken link is fixable
+ * without an admin: the unique key is (channel, externalUserId).
+ */
+export async function upsertChannelIdentity(
+  input: ChannelIdentityUpsert
+): Promise<ChannelIdentity> {
+  const channel = input.channel.trim();
+  const externalUserId = input.externalUserId.trim();
+  if (!channel) throw new RepoError("Channel is required.", 400);
+  if (!externalUserId) throw new RepoError("External user id is required.", 400);
+  const row = (await db
+    .insert(channelIdentities)
+    .values({
+      channel,
+      externalUserId,
+      userId: input.userId,
+      label: input.label ?? null,
+    })
+    .onConflictDoUpdate({
+      target: [channelIdentities.channel, channelIdentities.externalUserId],
+      set: { userId: input.userId, label: input.label ?? null },
+    })
+    .returning())[0];
+  return row;
+}
+
+/** Unlink an external account. Returns true when a row was removed. */
+export async function deleteChannelIdentity(
+  channel: string,
+  externalUserId: string
+): Promise<boolean> {
+  const removed = await db
+    .delete(channelIdentities)
+    .where(
+      and(
+        eq(channelIdentities.channel, channel),
+        eq(channelIdentities.externalUserId, externalUserId)
+      )
+    )
+    .returning({ id: channelIdentities.id });
+  return removed.length > 0;
 }
 
 // ──────────────────────────────────────────────────────────

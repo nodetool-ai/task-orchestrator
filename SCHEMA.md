@@ -129,8 +129,9 @@ persona_memories         per-persona cross-session notes
 
 memories                 shared long-term memory for chats and agents
   id                 INTEGER  AUTOINC PK
-  scope              TEXT     NOT NULL       'global' | 'repo' | 'task'
-  scope_key          TEXT                    NULL for global, repo_id/task_id otherwise
+  scope              TEXT     NOT NULL       'global' | 'repo' | 'task' | 'persona' | 'user'
+  scope_key          TEXT                    NULL for global; repo_id / task_id /
+                                             persona_id / users.id otherwise
   body               TEXT     NOT NULL
   keywords           TEXT     NOT NULL       JSON array used for BM25 search
   author             TEXT     NOT NULL

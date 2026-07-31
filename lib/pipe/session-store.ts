@@ -22,6 +22,15 @@ export interface GetOrCreateOptions {
 }
 
 /**
+ * The persona dimension of a channel_threads row. `channel_threads` is unique on
+ * (channel, external_id, persona_id) so N persona bots can each hold their own
+ * conversation in one Discord channel; the single-bot bridge shipping today is
+ * implicitly the implementor persona, so every lookup and insert here pins that
+ * value. Milestone 4 threads a real persona id through these helpers.
+ */
+export const DEFAULT_PERSONA_ID = "implementor";
+
+/**
  * A run the bridge can no longer resume: runs.append would hard-reject it
  * (closed/cancelled, or any other non-resumable terminal state). Mirrors the
  * resumability guard in runs.append so getOrCreateRun recreates exactly when a
@@ -47,7 +56,13 @@ async function findMapping(
     await db
       .select()
       .from(channelThreads)
-      .where(and(eq(channelThreads.channel, channel), eq(channelThreads.externalId, externalId)))
+      .where(
+        and(
+          eq(channelThreads.channel, channel),
+          eq(channelThreads.externalId, externalId),
+          eq(channelThreads.personaId, DEFAULT_PERSONA_ID)
+        )
+      )
   )[0];
 }
 
@@ -88,12 +103,15 @@ export async function getOrCreateRun(
   const created = await chat.createChat(null, opts.title, await repo.defaultRepoId());
   if (opts.model) await chat.updateChatSettings(created.id, { model: opts.model });
   try {
-    await db.insert(channelThreads).values({ channel, externalId, runId: created.id });
+    await db
+      .insert(channelThreads)
+      .values({ channel, externalId, personaId: DEFAULT_PERSONA_ID, runId: created.id });
     return created.id;
   } catch (err) {
     // Two near-simultaneous first messages for the same conversation can both
     // get past the `existing` check above and both createChat before either
-    // inserts the mapping — the unique index on (channel, externalId) then
+    // inserts the mapping — the unique index on (channel, externalId, personaId)
+    // then
     // makes the loser's insert throw. AgentLoop's per-conversation queue (M9a)
     // makes this vanish for the normal Discord path, but getOrCreateRun is
     // called directly by commands.ts too, so stay robust regardless: re-read
@@ -112,7 +130,13 @@ export async function getOrCreateRun(
 export async function resetThread(channel: string, externalId: string): Promise<void> {
   await db
     .delete(channelThreads)
-    .where(and(eq(channelThreads.channel, channel), eq(channelThreads.externalId, externalId)));
+    .where(
+      and(
+        eq(channelThreads.channel, channel),
+        eq(channelThreads.externalId, externalId),
+        eq(channelThreads.personaId, DEFAULT_PERSONA_ID)
+      )
+    );
 }
 
 /** Current run id for a conversation, or null if none is mapped yet. */
@@ -124,7 +148,13 @@ export async function currentRunId(
     await db
       .select({ runId: channelThreads.runId })
       .from(channelThreads)
-      .where(and(eq(channelThreads.channel, channel), eq(channelThreads.externalId, externalId)))
+      .where(
+        and(
+          eq(channelThreads.channel, channel),
+          eq(channelThreads.externalId, externalId),
+          eq(channelThreads.personaId, DEFAULT_PERSONA_ID)
+        )
+      )
   )[0];
   return row?.runId ?? null;
 }
