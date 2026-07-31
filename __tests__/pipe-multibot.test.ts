@@ -83,16 +83,25 @@ const msg = (over: Partial<InboundMessage> = {}): InboundMessage => ({
   ...over,
 });
 
-/** A stub Channel that records sends and draft writes. */
-function makeChannel(): { channel: Channel; sends: string[]; finals: string[] } {
+/** A stub Channel that records sends (with their reply claims) and draft writes. */
+function makeChannel(): {
+  channel: Channel;
+  sends: string[];
+  claims: (string | undefined)[];
+  finals: string[];
+  drafts: number;
+} {
   const sends: string[] = [];
+  const claims: (string | undefined)[] = [];
   const finals: string[] = [];
+  const state = { drafts: 0 };
   const channel: Channel = {
     name: "discord",
     async start() {},
     async stop() {},
     onMessage() {},
     async openDraft(): Promise<OutboundDraft> {
+      state.drafts++;
       return {
         async update() {},
         async finalize(text) {
@@ -100,11 +109,20 @@ function makeChannel(): { channel: Channel; sends: string[]; finals: string[] } 
         },
       };
     },
-    async send(_externalId, text) {
+    async send(_externalId, text, replyToken) {
       sends.push(text);
+      claims.push(replyToken);
     },
   };
-  return { channel, sends, finals };
+  return {
+    channel,
+    sends,
+    claims,
+    finals,
+    get drafts() {
+      return state.drafts;
+    },
+  };
 }
 
 beforeEach(async () => {
@@ -235,6 +253,24 @@ describe("loadPipeConfig boot validation", () => {
     await expect(
       loadPipeConfig({ DISCORD_BOT_TOKEN_CLAUDIA: "t", DISCORD_ALLOWED_USERS: "u1" })
     ).rejects.toThrow(/resolves to the 'claude' backend/);
+  });
+
+  it("names DISCORD_DEFAULT_PERSONA when a LEGACY token lands on an unsafe persona", async () => {
+    // The real upgrade path for a pre-M4 deployment: DISCORD_BOT_TOKEN with no
+    // DISCORD_DEFAULT_PERSONA defaults to the seeded 'implementor', whose
+    // profile is repo_write. That deployment now refuses to boot (deliberate,
+    // design §6) — so the error has to name the one lever it actually has.
+    const boot = loadPipeConfig({ DISCORD_BOT_TOKEN: "legacy", DISCORD_ALLOWED_USERS: "u1" });
+    await expect(boot).rejects.toThrow(/implementor/);
+    await expect(boot).rejects.toThrow(/not\s+server-safe/);
+    await expect(boot).rejects.toThrow(/DISCORD_DEFAULT_PERSONA=/);
+    await expect(boot).rejects.toThrow(/executor/); // a persona that qualifies today
+  });
+
+  it("does not blame DISCORD_DEFAULT_PERSONA when the bot has an explicit token", async () => {
+    await expect(
+      loadPipeConfig({ DISCORD_BOT_TOKEN_HANDS: "t", DISCORD_ALLOWED_USERS: "u1" })
+    ).rejects.toThrow(/^(?!.*DISCORD_DEFAULT_PERSONA)[\s\S]*$/);
   });
 
   it("refuses every bot, not just the first — one bad persona stops the process", async () => {
@@ -406,6 +442,110 @@ describe("onboarding (PRD J1)", () => {
     const { channel, sends } = makeChannel();
     await new AgentLoop(channel, config).handle(msg({ text: "hi" }));
     expect(sends).toEqual([]);
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// Token-shaped messages never reach the agent (M4 review F5)
+// ──────────────────────────────────────────────────────────
+
+describe("token-shaped inbound text", () => {
+  // Shape-valid but not a real token: the guard is pre-verification on purpose,
+  // because a leaked-but-invalid token is still a secret in someone's DM.
+  const TOKEN = `tot_${"a".repeat(43)}`;
+
+  it("refuses a typo'd /lnik <token>: no turn, no run, no persistence, no echo", async () => {
+    const { channel, sends, drafts } = makeChannel();
+    await new AgentLoop(channel, config).handle(msg({ text: `/lnik ${TOKEN}` }));
+
+    expect(startedTurns).toEqual([]); // never forwarded to runs/append
+    expect(drafts).toBe(0); // no draft, so nothing was even attempted
+    expect(await db.select().from(channelThreads)).toHaveLength(0); // nothing persisted
+    expect(await db.select().from(agentSessions)).toHaveLength(0);
+
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).toMatch(/API token/i);
+    expect(sends[0]).toMatch(/\/link/);
+    expect(sends[0]).toMatch(/revok/i);
+    expect(sends[0]).not.toContain(TOKEN); // the notice must not echo the secret
+    expect(sends[0]).not.toContain(TOKEN.slice(4, 20));
+  });
+
+  it("refuses a token pasted mid-sentence, in a guild too", async () => {
+    const { channel, sends } = makeChannel();
+    await new AgentLoop(channel, config).handle(
+      msg({ text: `here you go ${TOKEN} thanks`, isDirectMessage: false, externalId: "guild-1" })
+    );
+    expect(startedTurns).toEqual([]);
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).not.toContain(TOKEN);
+  });
+
+  it("leaves ordinary text alone, including the word 'token'", async () => {
+    const { channel } = makeChannel();
+    await new AgentLoop(channel, config).handle(msg({ text: "mint me an api token please" }));
+    expect(startedTurns).toEqual(["mint me an api token please"]);
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// Failures are never silent (PRD §10; M4 review F4/F9)
+// ──────────────────────────────────────────────────────────
+
+describe("errors reach the user", () => {
+  /** Edit the persona out from under the running process, as an operator could. */
+  async function makeUnsafe(id: string): Promise<void> {
+    await db
+      .update(personasTable)
+      .set({ toolsProfile: "orchestrator,repo_write" })
+      .where(eq(personasTable.id, id));
+  }
+
+  it("tells the user when the conversation can't be created (create guardrail)", async () => {
+    const { channel, sends, finals } = makeChannel();
+    await makeUnsafe(ARIA); // server-runtime guardrail will now reject the run
+
+    await new AgentLoop(channel, config).handle(
+      msg({ text: "ship it", isDirectMessage: false, externalId: "guild-1" })
+    );
+
+    expect(finals).toEqual([]); // it fails BEFORE any draft exists
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).toMatch(/couldn't start a turn/i);
+    expect(sends[0]).toMatch(/server-safe|repo_write/);
+    expect(startedTurns).toEqual([]);
+  });
+
+  it("answers (and so releases the interaction) when a command itself throws", async () => {
+    const { channel, sends, claims } = makeChannel();
+    await makeUnsafe(ARIA); // /new creates a run → same guardrail, inside a command
+
+    await new AgentLoop(channel, config).handle(
+      msg({ text: "/new", isDirectMessage: false, externalId: "guild-1", replyToken: "i-1" })
+    );
+
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).toMatch(/command failed/i);
+    // Delivered through the command's own claim, so the deferred slash reply is
+    // edited rather than left hanging.
+    expect(claims).toEqual(["i-1"]);
+  });
+
+  it("carries the reply claim into a normal turn's draft", async () => {
+    const { channel } = makeChannel();
+    const seen: (string | undefined)[] = [];
+    const spy: Channel = {
+      ...channel,
+      async openDraft(_externalId, _initial, replyToken) {
+        seen.push(replyToken);
+        return { async update() {}, async finalize() {} };
+      },
+    };
+    await new AgentLoop(spy, config).handle(
+      msg({ text: "/frobnicate", isDirectMessage: false, externalId: "guild-1", replyToken: "i-2" })
+    );
+    expect(startedTurns).toEqual(["/frobnicate"]); // unknown slash → a real turn
+    expect(seen).toEqual(["i-2"]);
   });
 });
 

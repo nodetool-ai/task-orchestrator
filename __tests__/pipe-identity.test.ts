@@ -13,6 +13,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { db } from "../db";
 import {
   agentSessions,
+  apiTokens,
   channelIdentities,
   channelThreads,
   personas as personasTable,
@@ -84,6 +85,39 @@ describe("/link", () => {
       .where(eq(channelIdentities.externalUserId, "u1"));
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ channel: "discord", userId, label: "tester" });
+  });
+
+  it("consumes the token: it is revoked on use and says so", async () => {
+    const userId = await freshUser("matti@example.com");
+    const created = await createToken(userId, "discord");
+
+    const r = await handleCommand(msg({ text: `/link ${created.token}` }), config);
+    expect(r.reply).toMatch(/revoked|used up/i);
+
+    const row = (await db.select().from(apiTokens).where(eq(apiTokens.id, created.id)))[0];
+    expect(row.revokedAt).not.toBeNull();
+  });
+
+  it("cannot be replayed: a second /link with the same token fails, identity unchanged", async () => {
+    // The hijack this closes: whoever later reads the token (scrollback, shell
+    // history, a backup) pastes it from THEIR Discord account and silently
+    // re-points this identity at the victim's user.
+    const victim = await freshUser("victim@example.com");
+    const { token } = await createToken(victim, "discord");
+    await handleCommand(msg({ text: `/link ${token}` }), config);
+
+    const replay = await handleCommand(
+      msg({ text: `/link ${token}`, authorId: "attacker", authorName: "attacker" }),
+      config
+    );
+    expect(replay.handled).toBe(true);
+    expect(replay.reply).toMatch(/didn't verify|already been used/i);
+    expect(replay.reply).not.toContain(token);
+
+    // Exactly one identity, still the original Discord account.
+    const rows = await db.select().from(channelIdentities);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ externalUserId: "u1", userId: victim });
   });
 
   it("never echoes the token back", async () => {
@@ -174,6 +208,32 @@ describe("/whoami", () => {
     expect(r.reply).toContain(`run #${runId}`);
     expect(r.reply).toContain(`/runs/${runId}`);
     expect(r.reply).not.toMatch(/not linked/i);
+  });
+
+  it("omits the linked email in a guild, and says only that the account is linked", async () => {
+    // A text `/whoami` in a channel is an ordinary public message: the email
+    // would land in the room's scrollback. (The slash-command path additionally
+    // defers /whoami ephemerally — see the adapter tests.)
+    const userId = await freshUser("matti@example.com");
+    const { token } = await createToken(userId, "discord");
+    await handleCommand(msg({ text: `/link ${token}` }), config);
+
+    const r = await handleCommand(
+      msg({ text: "/whoami", isDirectMessage: false, externalId: "guild-1" }),
+      config
+    );
+    expect(r.reply).not.toContain("matti@example.com");
+    expect(r.reply).not.toContain("@example.com");
+    expect(r.reply).toMatch(/linked/i);
+    expect(r.reply).toContain("Aria"); // everything else is unchanged
+  });
+
+  it("still says 'not linked' in a guild for an unlinked author", async () => {
+    const r = await handleCommand(
+      msg({ text: "/whoami", isDirectMessage: false, externalId: "guild-1" }),
+      config
+    );
+    expect(r.reply).toMatch(/not linked/i);
   });
 
   it("names the task when the thread's run is task-scoped", async () => {

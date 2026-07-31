@@ -15,7 +15,7 @@ import type { RunEnvelope } from "@/lib/pi-event-mapper";
 
 import * as repo from "@/lib/repo";
 
-import { handleCommand, isCommandText } from "./commands";
+import { TOKEN_IN_MESSAGE_NOTICE, containsApiToken, handleCommand, isCommandText } from "./commands";
 import { TranscriptBuilder, chunkForDiscord } from "./render";
 import { getOrCreateRun, hasMapping, resolveUserId } from "./session-store";
 import type { Channel, InboundMessage, PipeConfig } from "./types";
@@ -56,13 +56,39 @@ export class AgentLoop {
     // otherwise it would sit behind the turn the user is trying to abort and
     // arrive as a prompt after it finished.
     if (isCommandText(msg.text)) {
-      const result = await handleCommand(msg, this.config);
+      let result;
+      try {
+        result = await handleCommand(msg, this.config);
+      } catch (err) {
+        // A command that throws after its slash interaction was deferred would
+        // otherwise leave the user staring at "thinking…" forever and leak the
+        // pending interaction. Answer with the error — which also consumes the
+        // claim, so nothing is left dangling (PRD §10: never silent).
+        console.error("[pipe] command failed:", err);
+        await this.channel
+          .send(msg.externalId, `⚠️ That command failed: ${describe(err)}`, msg.replyToken)
+          .catch(() => {});
+        return;
+      }
       if (result.handled) {
-        if (result.reply) await this.channel.send(msg.externalId, result.reply);
+        if (result.reply) await this.channel.send(msg.externalId, result.reply, msg.replyToken);
         return; // command consumed the message
       }
       // else fall through: an unrecognized "/x" is treated as a normal prompt,
       // so it enqueues below like any other message.
+    }
+
+    // 1a. Token-shaped text never reaches the agent (M4 review F5). A mistyped
+    // `/lnik tot_…` (or a token pasted into ordinary conversation) would
+    // otherwise be persisted verbatim in agent_messages and shipped to a model
+    // provider. Refuse pre-queue, before anything is written, and say so without
+    // echoing the token. A well-formed `/link` was already handled above, so
+    // this only ever catches the cases where the secret is about to be leaked.
+    if (containsApiToken(msg.text)) {
+      await this.channel
+        .send(msg.externalId, TOKEN_IN_MESSAGE_NOTICE, msg.replyToken)
+        .catch((err) => console.error("[pipe] token-notice send failed:", err));
+      return;
     }
 
     // 1b. Onboarding (PRD J1). The very first DM from an allowlisted user —
@@ -132,18 +158,34 @@ export class AgentLoop {
 
   private async runTurn(msg: InboundMessage): Promise<void> {
     // 2. Resolve or create the persona conversation for this thread.
-    const runId = await getOrCreateRun(msg.channel, msg.externalId, msg.personaId, {
-      model: this.config.defaultModel,
-      authorId: msg.authorId,
-    });
+    //
+    // This can legitimately fail — most plausibly runs.create's server-runtime
+    // guardrail rejecting a persona whose tools profile was edited to something
+    // unsafe after the pipe booted, but also a deleted persona or a DB blip. It
+    // happens BEFORE openDraft, so there is no draft to finalize an error into:
+    // without this catch the failure is console-only and the user gets silence
+    // (PRD §10 "never silent").
+    let runId: number;
+    try {
+      runId = await getOrCreateRun(msg.channel, msg.externalId, msg.personaId, {
+        model: this.config.defaultModel,
+        authorId: msg.authorId,
+      });
+    } catch (err) {
+      console.error("[pipe] failed to open the conversation:", err);
+      await this.channel
+        .send(msg.externalId, `⚠️ I couldn't start a turn here: ${describe(err)}`, msg.replyToken)
+        .catch(() => {});
+      return;
+    }
 
     // 3. Open the streaming draft and run the turn.
     let draft;
     try {
-      draft = await this.channel.openDraft(msg.externalId, "…");
+      draft = await this.channel.openDraft(msg.externalId, "…", msg.replyToken);
     } catch (err) {
       console.error("[pipe] failed to open draft:", err);
-      await this.channel.send(msg.externalId, `⚠️ ${describe(err)}`).catch(() => {});
+      await this.channel.send(msg.externalId, `⚠️ ${describe(err)}`, msg.replyToken).catch(() => {});
       return;
     }
 

@@ -129,8 +129,38 @@ serialization) is already per-instance and needs no change.
 
 Multiple gateway clients in one process is fine (discord.js clients are
 independent); each bot only sees messages in channels it was invited
-to, and the existing "respond only in DMs / when mentioned / in own
-thread" rules keep two personas in one channel from double-answering.
+to, and the trigger rules keep two personas in one channel from
+double-answering. `DiscordChannel` enforces them at the boundary
+(PRD §6 is the contract; `lib/pipe/channels/discord.ts` is the
+implementation):
+
+- **DM** → always process.
+- **Guild channel** → process only when the bot is @-mentioned
+  (mention of the bot *user*; roles and `@everyone` don't count), then
+  auto-thread the reply as before.
+- **Thread the bot itself created** → process every message, no
+  re-mention; ownership is `thread.ownerId === client.user.id`, with
+  the ids `startThread` returned as a fast path.
+- **Anything else** → ignored silently: no reply, no reaction. Two
+  bots both answer only when both are mentioned.
+
+The ❌ reaction is the same pre-queue interrupt as typing "stop"
+(PRD §6): the adapter carries `GuildMessageReactions` /
+`DirectMessageReactions` + `Partials.Reaction`, and an ❌ from an
+allowlisted user on one of the bot's own messages (or in its DM/own
+thread) is emitted as the text `/stop`, so there is exactly one abort
+implementation. The rest of reactions-as-input is M5.
+
+**Boot refusal is deliberate, and legacy deployments feel it.** A
+pre-M4 single-bot deployment sets `DISCORD_BOT_TOKEN` and gets the
+default persona `implementor`, whose profile is
+`orchestrator,repo_write,gh_pr,gh_ci` — not server-safe. Under the §3
+guardrail that bot now **refuses to boot** rather than starting and
+failing on every message. That is the §6 posture working as designed:
+"chat = full shell in the server checkout" is retired. The fix is one
+env var — `DISCORD_DEFAULT_PERSONA=<a server-safe, user-facing
+persona>` (`executor` today, `concierge` once it ships) — and the
+refusal message names it.
 
 ### 2. Conversation identity and attribution
 
@@ -159,6 +189,17 @@ the pipe verifies it via `lib/api-tokens.ts` and inserts the identity
 row. Unlinked users can still talk (allowlist permitting) but their
 runs stay unattributed, exactly like today — linking upgrades
 attribution, it doesn't gate access.
+
+**Consume-on-link.** A successful `/link` immediately revokes the token
+it consumed (`consumeToken`, an atomic `revoked_at IS NULL` update), and
+the confirmation says so. A link token is a one-time proof of account
+ownership, not a standing credential: without this, anyone who later
+reads it — DM scrollback on a shared or stolen device, shell history, a
+backup, the web UI's own "show once" panel left open — could paste it
+from *their* Discord account and re-point that identity at the victim's
+user, silently inheriting attribution for every run, plan and memory
+they create from then on. Single-use closes that hijack; re-linking
+costs one fresh token.
 
 `lib/pipe/session-store.ts#getOrCreateRun` gains `personaId` and looks
 up `userId` from `channel_identities`, then creates the conversation
@@ -306,7 +347,12 @@ mid-thread compaction is follow-up work.
   the persona to spawn a run — which is containerized, branch-isolated,
   and PR-reviewed like all agent work.
 - `/link` consumes a bearer token over DM only (never guild channels)
-  and stores only the hash-verified association, not the token.
+  and stores only the hash-verified association, not the token. The
+  token is revoked on use (see §2), so it is single-use.
+- Token-shaped text (`tot_` + 43 chars) in *any* inbound message is
+  refused pre-queue: never forwarded to a model, never written to
+  `agent_messages`. The usual source is a typo'd command
+  (`/lnik tot_…`), and the reply says to revoke it without echoing it.
 - Memory writes attribute `author` from the linked user or
   `discord:<username>`, unchanged.
 
@@ -324,8 +370,22 @@ mid-thread compaction is follow-up work.
    `toolsProfile: "orchestrator,spawn"`, `backend: "pi"`, and a system
    prompt oriented at end users rather than contributors.
 
-Existing single-bot deployments keep working throughout (legacy env
-mapping, backfilled persona id, unchanged worker tier).
+Existing single-bot deployments keep working throughout at the *config*
+level — the legacy `DISCORD_BOT_TOKEN` still maps to a persona, the
+`persona_id` backfill keeps their threads, and the worker tier is
+unchanged — **but a legacy deployment left pointing at `implementor`
+now refuses to boot**, because that persona's `repo_write` profile is
+not server-safe (§3 guardrail, §6 posture). This is intended, not a
+regression: the alternative is a bot that boots and then errors on
+every single message. Upgrade step:
+
+```
+DISCORD_DEFAULT_PERSONA=executor   # server-safe today; use `concierge` once M5 seeds it
+```
+
+The boot error names `DISCORD_DEFAULT_PERSONA` as the fix, lists the
+server-safe profiles, and mentions the per-persona
+`DISCORD_BOT_TOKEN_<PERSONA_ID>` alternative.
 
 ## Open questions
 

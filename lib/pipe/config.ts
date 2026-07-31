@@ -98,10 +98,11 @@ function discoverBots(env: Env, bySuffix: Map<string, string>): PersonaBotConfig
   const known = () => [...bySuffix.values()].join(", ") || "(none)";
   const bots = new Map<string, PersonaBotConfig>();
 
-  const add = (personaId: string, suffix: string, token: string) => {
+  const add = (personaId: string, suffix: string, token: string, fromLegacyToken = false) => {
     bots.set(personaId, {
       personaId,
       token,
+      fromLegacyToken,
       // A per-bot override REPLACES the global list (it does not extend it): the
       // point of DISCORD_ALLOWED_USERS_QA is "only these people get the QA bot".
       allowedUsers: csvOr(env[`DISCORD_ALLOWED_USERS_${suffix}`], globalUsers),
@@ -143,16 +144,36 @@ function discoverBots(env: Env, bySuffix: Map<string, string>): PersonaBotConfig
           `explicit ${TOKEN_PREFIX}${suffix}.`
       );
     } else {
-      add(personaId, suffix, legacyToken);
+      add(personaId, suffix, legacyToken, true);
     }
   }
 
   return [...bots.values()].sort((a, b) => a.personaId.localeCompare(b.personaId));
 }
 
+/**
+ * The fix line appended to a refusal for a bot that came from the LEGACY
+ * `DISCORD_BOT_TOKEN` (design §1, Migration/rollout). Such a deployment has no
+ * `DISCORD_BOT_TOKEN_<PERSONA>` to edit — its one lever is which persona the
+ * legacy token binds to, so name that lever explicitly. This is the expected
+ * upgrade experience for a pre-M4 deployment whose default persona
+ * (`implementor`) is a repo-writing contributor profile: it refuses to boot on
+ * purpose (§6 posture), and the fix is one env var.
+ */
+function legacyFix(personaId: string): string {
+  return (
+    ` FIX: this bot comes from the legacy DISCORD_BOT_TOKEN, which is bound to persona ` +
+    `'${personaId}' (DISCORD_DEFAULT_PERSONA, defaulting to '${DEFAULT_PERSONA_ID}'). Set ` +
+    `DISCORD_DEFAULT_PERSONA=<a server-safe, user-facing persona> — 'executor' today, ` +
+    `'concierge' once it ships — or give the bot an explicit ` +
+    `${TOKEN_PREFIX}<PERSONA_ID> for a persona that qualifies.`
+  );
+}
+
 /** Allowlist + server-safety + backend checks for one bot. Throws to refuse boot. */
 async function validateBot(bot: PersonaBotConfig): Promise<void> {
   const suffix = personaEnvSuffix(bot.personaId);
+  const fix = bot.fromLegacyToken ? legacyFix(bot.personaId) : "";
 
   if (bot.allowedUsers.length === 0) {
     throw new Error(
@@ -177,7 +198,8 @@ async function validateBot(bot: PersonaBotConfig): Promise<void> {
         `are runtime='server' runs: their turns execute inside the pipe process, so shell, ` +
         `filesystem and repo-write tools are not available there (design §3/§6). Server-safe ` +
         `profiles: ${listServerSafeProfiles().join(", ")}. Give the persona an orchestration-only ` +
-        `profile (it can still spawn containerized worker runs), or drop its bot token.`
+        `profile (it can still spawn containerized worker runs), or drop its bot token.` +
+        fix
     );
   }
 
@@ -195,7 +217,8 @@ async function validateBot(bot: PersonaBotConfig): Promise<void> {
       `Persona '${bot.personaId}' resolves to the '${backend}' backend — refusing to start. ` +
         "Discord persona conversations run in-process through the pi-only postgres-turn loop; " +
         "the Claude backend rejects contextSource='postgres'. Set backend 'pi' on the persona, " +
-        "or change the deployment default (TASK_ORCH_AGENT_BACKEND)."
+        "or change the deployment default (TASK_ORCH_AGENT_BACKEND)." +
+        fix
     );
   }
 }

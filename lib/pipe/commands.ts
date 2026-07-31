@@ -10,7 +10,7 @@
 // incoming interaction is flattened back into "/name args" before it gets
 // here). Deliberately transport-free — no discord.js import.
 
-import { verifyToken } from "@/lib/api-tokens";
+import { consumeToken, verifyToken } from "@/lib/api-tokens";
 import * as chat from "@/lib/chat";
 import * as repo from "@/lib/repo";
 import { isLeaseLive } from "@/lib/run-liveness";
@@ -87,6 +87,24 @@ export function isPlainStop(text: string): boolean {
 export function isCommandText(text: string): boolean {
   return text.trim().startsWith("/") || isPlainStop(text);
 }
+
+/**
+ * An API token (`tot_` + 43 base64url chars, see lib/api-tokens.ts) anywhere in
+ * the text. Used pre-queue to refuse forwarding the message at all: the usual
+ * way a token ends up in an ordinary message is a typo'd command (`/lnik tot_…`,
+ * `link tot_…`), and forwarding it would persist the secret in agent_messages
+ * and hand it to a model provider — neither of which can be walked back.
+ */
+const API_TOKEN_RE = /tot_[A-Za-z0-9_-]{43}/;
+
+export function containsApiToken(text: string): boolean {
+  return API_TOKEN_RE.test(text);
+}
+
+/** The refusal for a token-shaped message. Deliberately does not echo the text. */
+export const TOKEN_IN_MESSAGE_NOTICE =
+  "🛑 That looks like an API token — I won't process it, and I haven't stored it. " +
+  "Use `/link <token>` in a DM with me, and consider revoking that token in the web UI.";
 
 export async function handleCommand(
   msg: InboundMessage,
@@ -221,6 +239,23 @@ export async function handleCommand(
             "Mint a fresh one in the web UI and try again.",
         };
       }
+      // CONSUME-ON-LINK (design §2). The token is revoked the moment it is
+      // accepted, BEFORE the identity row is written: a link token is a
+      // one-time proof of account ownership, not a standing credential. Anyone
+      // who later reads it (channel scrollback, a shell history, a leaked
+      // backup) would otherwise be able to replay it from their own Discord
+      // account and re-point this identity at the victim's user — silently
+      // inheriting attribution for everything that account does here.
+      // Conditional-and-atomic (revokedAt IS NULL in the WHERE clause), so two
+      // racing /link calls with the same token cannot both win.
+      if (!(await consumeToken(verified.tokenId))) {
+        return {
+          handled: true,
+          reply:
+            "That token has already been used — link tokens are single-use. " +
+            "Mint a fresh one in the web UI and try again.",
+        };
+      }
       await repo.upsertChannelIdentity({
         channel: msg.channel,
         externalUserId: msg.authorId,
@@ -232,7 +267,9 @@ export async function handleCommand(
         handled: true,
         reply:
           `✅ Linked to **${user?.email ?? `user #${verified.userId}`}**. ` +
-          "Everything we do together is yours in the web UI from now on.",
+          "Everything we do together is yours in the web UI from now on. " +
+          "That token is now used up (I revoked it), so it can't be replayed — " +
+          "mint a new one if you ever need to re-link.",
       };
     }
 
@@ -241,8 +278,15 @@ export async function handleCommand(
       const persona = await repo.getPersona(personaId);
       const identity = await repo.getChannelIdentity(msg.channel, msg.authorId);
       const user = identity ? await getUserById(identity.userId) : undefined;
+      // The linked email is personal data, so it is only ever printed in a DM.
+      // In a guild the answer is just linked / not linked — the slash-command
+      // path also defers /whoami ephemerally, but a TEXT `/whoami` typed in a
+      // channel is an ordinary public message and would put the address in the
+      // room's scrollback.
       const account = identity
-        ? `**${user?.email ?? `user #${identity.userId}`}**`
+        ? msg.isDirectMessage
+          ? `**${user?.email ?? `user #${identity.userId}`}**`
+          : "linked (DM me `/whoami` to see which account)"
         : "not linked — `/link <token>` in a DM to attribute your work";
 
       const lines = [

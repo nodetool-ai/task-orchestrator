@@ -11,11 +11,21 @@
 // persona id — the dimension that keeps two personas in one channel on separate
 // conversations.
 //
-// Two inbound shapes converge on the same InboundMessage: gateway messages, and
-// registered application ("slash") commands. An interaction is deferred, its
-// options flattened back into "/name arg" text, and the pending interaction is
-// stashed by channel id so the first outbound chunk goes out as the deferred
-// reply (see pendingInteractions below).
+// Three inbound shapes converge on the same InboundMessage: gateway messages,
+// registered application ("slash") commands, and the ❌ reaction (a pre-queue
+// interrupt, routed as "/stop"). An interaction is deferred, its options
+// flattened back into "/name arg" text, and the pending interaction is stashed
+// under a single-use claim carried on the message it belongs to, so the first
+// outbound write of THAT turn goes out as the deferred reply (see
+// pendingInteractions / InboundMessage.replyToken below).
+//
+// WHERE A PERSONA LISTENS (PRD §6, design §1) — enforced in onDiscordMessage:
+//   • DM                        → always.
+//   • guild channel             → only when @-mentioned (then auto-threaded).
+//   • thread the bot itself made → always, no re-mention needed.
+//   • anything else             → ignored, silently.
+// The mention requirement is what keeps two persona bots sitting in one channel
+// from both answering an unaddressed message.
 
 import {
   ChannelType,
@@ -28,6 +38,11 @@ import {
   ThreadAutoArchiveDuration,
   type ChatInputCommandInteraction,
   type Message,
+  type MessageReaction,
+  type PartialMessageReaction,
+  type PartialUser,
+  type ThreadChannel,
+  type User,
 } from "discord.js";
 
 import { SLASH_COMMANDS } from "../commands";
@@ -45,6 +60,42 @@ const THREADABLE = new Set<ChannelType>([
 /** PRD §10: the one-and-only reply a non-allowlisted user ever gets, in DM. */
 export const NOT_ENABLED =
   "I'm not enabled for you — ask the operator to add your Discord account to the allowlist.";
+
+/** The ❌ reaction: a pre-queue interrupt, identical to typing "stop" (PRD §6). */
+export const STOP_REACTION = "❌";
+
+/**
+ * Discord API error codes we treat as "this interaction is gone": the 15-minute
+ * webhook token expired (10062 Unknown interaction) or something already
+ * consumed it (40060 Interaction has already been acknowledged). Either way the
+ * reply must fall back to an ordinary channel send rather than throw away the
+ * turn's output.
+ */
+function isDeadInteraction(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === 10062 || code === 40060;
+}
+
+/**
+ * Insertion-ordered set with a hard cap — used for the thread ids this bot
+ * created. Same tradeoff as OneTimeNotices: a fixed memory cost, and a forgotten
+ * id just falls back to the authoritative check (thread.ownerId).
+ */
+export class BoundedIdSet {
+  private ids = new Set<string>();
+  constructor(private max = 2000) {}
+  add(id: string): void {
+    this.ids.delete(id);
+    this.ids.add(id);
+    if (this.ids.size > this.max) {
+      const oldest = this.ids.values().next().value as string | undefined;
+      if (oldest !== undefined) this.ids.delete(oldest);
+    }
+  }
+  has(id: string): boolean {
+    return this.ids.has(id);
+  }
+}
 
 /**
  * Bounded "have I already told this user?" memory, so the not-enabled reply
@@ -83,13 +134,38 @@ export class DiscordChannel implements Channel {
   private notices = new OneTimeNotices();
   /**
    * Deferred slash-command interactions awaiting their first outbound message,
-   * keyed by the channel the command was invoked in. Discord requires the FIRST
-   * response to a command to go through the interaction (an ordinary channel
-   * send leaves it showing "the application did not respond"), so openDraft and
-   * send consume the pending entry and use editReply for chunk one; everything
-   * after that is a normal channel send.
+   * keyed by INTERACTION ID. Discord requires the FIRST response to a command to
+   * go through the interaction (an ordinary channel send leaves it showing "the
+   * application did not respond"), so openDraft and send consume the entry named
+   * by the turn's replyToken and use editReply for chunk one; everything after
+   * that is a normal channel send.
+   *
+   * Keyed by interaction id, NOT by channel id (M4 review F4): a channel-keyed
+   * map is ambient state that whichever turn writes first consumes — two
+   * concurrent slash commands in one channel cross their replies, and an
+   * ordinary message that happens to run alongside a command eats the command's
+   * deferred reply. The id is handed to exactly one InboundMessage as its
+   * `replyToken`, so the claim is explicit and single-use.
    */
   private pendingInteractions = new Map<string, ChatInputCommandInteraction>();
+  /**
+   * Thread ids this bot created (auto-thread). The authoritative "is this my
+   * thread?" check is `thread.ownerId === me`; this is the cheap path that
+   * avoids a fetch, and stays correct if a thread's owner is unreadable.
+   */
+  private ownThreads = new BoundedIdSet();
+  /**
+   * Most recent auto-thread per parent channel (M4 review F8). A slash command
+   * invoked in the PARENT channel almost always means "the conversation we're
+   * having in the thread over there", so /stop, /status and /whoami resolve to
+   * it. Per-process and best-effort: after a restart the lookup falls back to
+   * the parent channel id, which is the pre-F8 behavior.
+   *
+   * TODO(M5): back this with the channel_threads rows (thread → parent) so the
+   * resolution survives a restart and covers text commands typed in the parent
+   * channel too, which still auto-thread as before.
+   */
+  private lastThreadByParent = new Map<string, string>();
 
   constructor(private cfg: PersonaBotConfig) {
     this.personaId = cfg.personaId;
@@ -99,8 +175,12 @@ export class DiscordChannel implements Channel {
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent, // privileged — enable in the Dev Portal
         GatewayIntentBits.DirectMessages,
+        // ❌-as-stop (PRD §6). Reactions are their own intents, and a reaction on
+        // a message the bot never cached arrives partial — hence Partials below.
+        GatewayIntentBits.GuildMessageReactions,
+        GatewayIntentBits.DirectMessageReactions,
       ],
-      partials: [Partials.Channel], // required to receive DMs
+      partials: [Partials.Channel, Partials.Message, Partials.Reaction], // DMs + uncached reactions
       // Never let agent-generated text ping anyone: suppress @everyone/@here and
       // user/role mentions on every outbound send + edit. The bridge never
       // intentionally mentions, so a blanket default is safe.
@@ -122,6 +202,11 @@ export class DiscordChannel implements Channel {
       if (!i.isChatInputCommand()) return;
       void this.onInteraction(i).catch((err) =>
         console.error(`[pipe:${this.personaId}] interaction handler error:`, err)
+      );
+    });
+    this.client.on(Events.MessageReactionAdd, (reaction, user) => {
+      void this.onReactionAdd(reaction, user).catch((err) =>
+        console.error(`[pipe:${this.personaId}] reaction handler error:`, err)
       );
     });
     await new Promise<void>((resolve, reject) => {
@@ -188,10 +273,13 @@ export class DiscordChannel implements Channel {
       return;
     }
 
-    // /link carries a bearer token: keep its deferred reply ephemeral so the
-    // confirmation isn't posted publicly. The option value is never logged.
-    await i.deferReply({ ephemeral: i.commandName === "link" });
-    this.pendingInteractions.set(i.channelId, i);
+    // /link and /whoami both print account-identifying material (the token's
+    // owner, i.e. the linked email), so their deferred replies are ephemeral —
+    // visible to the invoker only. The /link option value is never logged.
+    const ephemeral = i.commandName === "link" || i.commandName === "whoami";
+    await i.deferReply({ ephemeral });
+    // The claim: this interaction is owned by exactly the message emitted below.
+    this.pendingInteractions.set(i.id, i);
 
     const args = i.options.data
       .map((o) => (o.value === undefined || o.value === null ? "" : String(o.value)))
@@ -201,14 +289,30 @@ export class DiscordChannel implements Channel {
 
     this.handler?.({
       channel: this.name,
-      externalId: i.channelId,
+      externalId: this.resolveCommandConversation(i),
       text,
       authorId: i.user.id,
       authorLabel: `discord:${i.user.username}`,
       authorName: i.user.username,
       personaId: this.personaId,
       isDirectMessage: i.guildId == null,
+      replyToken: i.id,
     });
+  }
+
+  /**
+   * Which conversation a slash command is about (M4 review F8). In a thread or a
+   * DM it is that channel. In a guild PARENT channel the user almost certainly
+   * means the auto-thread this bot opened off it — `/stop` typed in #dev is
+   * aimed at the turn running in the thread below, not at the (usually
+   * nonexistent) conversation keyed on #dev itself. Conversation-scoped commands
+   * therefore resolve to the most recent such thread when we have one.
+   */
+  private resolveCommandConversation(i: ChatInputCommandInteraction): string {
+    const scoped = new Set(["stop", "cancel", "abort", "status", "whoami", "session"]);
+    if (i.guildId == null || i.channel?.isThread()) return i.channelId;
+    if (!scoped.has(i.commandName)) return i.channelId;
+    return this.lastThreadByParent.get(i.channelId) ?? i.channelId;
   }
 
   private async onDiscordMessage(m: Message): Promise<void> {
@@ -232,6 +336,14 @@ export class DiscordChannel implements Channel {
       return;
     }
 
+    // WHERE A PERSONA LISTENS (PRD §6). A DM is always for this bot. In a guild
+    // the bot must be addressed: an @-mention in a channel, or any message in a
+    // thread this bot opened (the thread IS the address). Everything else is
+    // ignored SILENTLY — no reply, no reaction, no log — which is what keeps two
+    // persona bots in one channel from both answering an unaddressed message,
+    // and why "both mentioned" is the only way to get both to answer.
+    if (!isDm && !(await this.isAddressed(m))) return;
+
     const text = stripSelfMention(m.content, this.client.user?.id).trim();
     if (!text) return;
 
@@ -246,6 +358,11 @@ export class DiscordChannel implements Channel {
           autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
         });
         externalId = thread.id;
+        // Remember it twice over: as "mine" (so later messages in it need no
+        // re-mention even if ownerId is unreadable) and as this channel's
+        // current conversation (so a slash command in the parent lands here).
+        this.ownThreads.add(thread.id);
+        this.lastThreadByParent.set(m.channelId, thread.id);
       } catch (err) {
         console.error(
           `[pipe:${this.personaId}] failed to open thread; falling back to channel:`,
@@ -266,18 +383,107 @@ export class DiscordChannel implements Channel {
     });
   }
 
-  async openDraft(externalId: string, initial: string): Promise<OutboundDraft> {
-    const pending = this.takeInteraction(externalId);
-    if (pending) {
-      // The deferred reply IS the draft: editReply replaces its content in
-      // place, exactly like editing a message.
-      await pending.editReply(initial || "…");
+  /**
+   * Is this guild message addressed to this bot? True for an @-mention, or for
+   * any message inside a thread this bot owns.
+   */
+  private async isAddressed(m: Message): Promise<boolean> {
+    if (this.mentionsSelf(m)) return true;
+    const ch = m.channel;
+    if (ch.isThread()) return await this.ownsThread(ch);
+    return false;
+  }
+
+  /** True when the message @-mentions this bot's user (roles/@everyone don't count). */
+  private mentionsSelf(m: Message): boolean {
+    const selfId = this.client.user?.id;
+    if (!selfId) return false;
+    // mentions.users is authoritative; the raw-content check is the fallback for
+    // shapes where the collection isn't populated.
+    if (m.mentions?.users?.has?.(selfId)) return true;
+    return new RegExp(`<@!?${selfId}>`).test(m.content ?? "");
+  }
+
+  /**
+   * Does this bot own the thread? `ownerId` (the account that created the
+   * thread) is the robust check and survives restarts — the remembered-id set is
+   * only a fast path. A thread another bot opened therefore never matches, which
+   * is what stops a persona from answering inside a sibling persona's thread.
+   */
+  private async ownsThread(ch: ThreadChannel): Promise<boolean> {
+    const selfId = this.client.user?.id;
+    if (!selfId) return false;
+    if (ch.ownerId) return ch.ownerId === selfId;
+    if (this.ownThreads.has(ch.id)) return true;
+    try {
+      const fetched = await ch.fetch();
+      return fetched.ownerId === selfId;
+    } catch {
+      return false; // unreadable owner → not ours; silence is the safe default
+    }
+  }
+
+  /**
+   * ❌ on one of this bot's messages = "stop" (PRD §6, pre-queue interrupt). It
+   * is deliberately routed as the text "/stop" through the same inbound path as
+   * everything else, so there is exactly ONE abort implementation
+   * (commands.ts:/stop) rather than a second, parallel one here.
+   *
+   * M5 owns the rest of reactions-as-input (👍/👎 answers, 👀 acks, breadcrumb
+   * cancel-with-confirmation).
+   */
+  private async onReactionAdd(
+    reaction: MessageReaction | PartialMessageReaction,
+    user: User | PartialUser
+  ): Promise<void> {
+    if (user.bot) return;
+    if (reaction.emoji?.name !== STOP_REACTION) return;
+    if (!this.cfg.allowedUsers.includes(user.id)) return; // same allowlist as messages
+
+    const message = reaction.message;
+    const isDm = message.guildId == null;
+    // Only the bot's own messages (breadcrumbs, drafts, replies) and the bot's
+    // own conversations count — an ❌ on someone else's message elsewhere is not
+    // aimed at this persona.
+    const mine = message.author?.id != null && message.author.id === this.client.user?.id;
+    const ch = message.channel;
+    const inOwnConversation =
+      isDm || (ch?.isThread?.() ? await this.ownsThread(ch as ThreadChannel) : false);
+    if (!mine && !inOwnConversation) return;
+
+    const gateId = ch?.isThread?.() ? (ch as ThreadChannel).parentId ?? message.channelId : message.channelId;
+    if (this.cfg.allowedChannels.length && !this.cfg.allowedChannels.includes(gateId)) return;
+
+    const username = "username" in user && user.username ? user.username : user.id;
+    this.handler?.({
+      channel: this.name,
+      externalId: message.channelId,
+      text: "/stop",
+      authorId: user.id,
+      authorLabel: `discord:${username}`,
+      authorName: username,
+      personaId: this.personaId,
+      isDirectMessage: isDm,
+    });
+  }
+
+  async openDraft(
+    externalId: string,
+    initial: string,
+    replyToken?: string
+  ): Promise<OutboundDraft> {
+    const pending = this.takeInteraction(replyToken);
+    // The deferred reply IS the draft: editReply replaces its content in place,
+    // exactly like editing a message. If the interaction has expired we fall
+    // through to an ordinary channel message rather than losing the turn.
+    if (pending && (await this.tryEditReply(pending, initial || "…"))) {
       return {
         update: async (text) => {
-          await pending.editReply(text || "…");
+          await this.tryEditReply(pending, text || "…");
         },
         finalize: async (text) => {
-          await pending.editReply(text || "(no output)");
+          const done = await this.tryEditReply(pending, text || "(no output)");
+          if (!done) await this.sendToChannel(externalId, text || "(no output)");
         },
       };
     }
@@ -293,22 +499,56 @@ export class DiscordChannel implements Channel {
     };
   }
 
-  async send(externalId: string, text: string): Promise<void> {
-    const pending = this.takeInteraction(externalId);
-    if (pending) {
-      await pending.editReply(text);
-      return;
-    }
-    const ch = await this.fetchSendable(externalId);
-    await ch.send(text);
+  async send(externalId: string, text: string, replyToken?: string): Promise<void> {
+    const pending = this.takeInteraction(replyToken);
+    if (pending && (await this.tryEditReply(pending, text))) return;
+    await this.sendToChannel(externalId, text);
   }
 
-  /** Consume the pending interaction for a channel, if one still owes a reply. */
-  private takeInteraction(externalId: string): ChatInputCommandInteraction | undefined {
-    const pending = this.pendingInteractions.get(externalId);
+  /**
+   * Consume the interaction a turn holds a claim on. Returns undefined when the
+   * turn has no claim (an ordinary message) or already spent it — so an
+   * interaction is answered exactly once, by its own turn.
+   */
+  private takeInteraction(replyToken?: string): ChatInputCommandInteraction | undefined {
+    if (!replyToken) return undefined;
+    const pending = this.pendingInteractions.get(replyToken);
     if (!pending) return undefined;
-    this.pendingInteractions.delete(externalId);
+    this.pendingInteractions.delete(replyToken);
     return pending;
+  }
+
+  /**
+   * Drop a claim without answering it — used when the reply is going out some
+   * other way. (The interaction then times out on Discord's side; a caller that
+   * has text to deliver should use send/openDraft instead.)
+   */
+  private forgetInteraction(replyToken?: string): void {
+    if (replyToken) this.pendingInteractions.delete(replyToken);
+  }
+
+  /**
+   * editReply, tolerant of a dead interaction. Returns false (rather than
+   * throwing) when Discord says the interaction is unknown or already
+   * acknowledged, so the caller can fall back to a plain channel message.
+   */
+  private async tryEditReply(i: ChatInputCommandInteraction, text: string): Promise<boolean> {
+    try {
+      await i.editReply(text);
+      return true;
+    } catch (err) {
+      if (!isDeadInteraction(err)) throw err;
+      console.warn(
+        `[pipe:${this.personaId}] interaction ${i.id} expired before its reply — falling back to a channel message`
+      );
+      this.forgetInteraction(i.id);
+      return false;
+    }
+  }
+
+  private async sendToChannel(externalId: string, text: string): Promise<void> {
+    const ch = await this.fetchSendable(externalId);
+    await ch.send(text);
   }
 
   private async fetchSendable(externalId: string): Promise<Sendable> {

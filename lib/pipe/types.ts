@@ -38,6 +38,20 @@ export interface InboundMessage {
   /** Channel-native display handle (e.g. the Discord username), stored as the
    *  channel_identities label at `/link` time. */
   authorName?: string;
+  /**
+   * Opaque, single-use claim on a transport-level reply slot owned by THIS
+   * message (M4 review F4). Discord sets it to the id of the deferred slash
+   * interaction that produced the message: the first outbound write for this
+   * turn — and only for this turn — is delivered as that interaction's reply.
+   *
+   * Why a claim rather than "the pending interaction for this channel": two
+   * slash commands can be in flight in one channel at once, and an ordinary
+   * message turn running alongside them must never steal a command's deferred
+   * reply (which would leave the command showing "the application did not
+   * respond" and post the wrong text to the wrong user). The claim travels with
+   * the message it belongs to, so ownership is explicit instead of ambient.
+   */
+  replyToken?: string;
 }
 
 /**
@@ -65,10 +79,15 @@ export interface Channel {
    * Open a new streaming draft in the given conversation and return a handle.
    * `initial` is the placeholder text (e.g. "…"). The adapter sends one message
    * and returns a draft bound to it.
+   *
+   * `replyToken` is the inbound message's single-use reply claim (see
+   * InboundMessage.replyToken): pass it through and the adapter delivers the
+   * draft as that interaction's deferred reply; omit it (or pass the token of a
+   * turn that already consumed it) and the draft is an ordinary channel message.
    */
-  openDraft(externalId: string, initial: string): Promise<OutboundDraft>;
+  openDraft(externalId: string, initial: string, replyToken?: string): Promise<OutboundDraft>;
   /** Send a standalone (non-streaming) message — used for command replies/errors. */
-  send(externalId: string, text: string): Promise<void>;
+  send(externalId: string, text: string, replyToken?: string): Promise<void>;
 }
 
 /**
@@ -88,6 +107,13 @@ export interface PersonaBotConfig {
   /** Discord application id (`DISCORD_APP_ID_<PERSONA_ID>`). Without it the bot
    *  still works over the gateway; only slash-command registration is skipped. */
   applicationId?: string;
+  /**
+   * True when this bot came from the legacy single-bot `DISCORD_BOT_TOKEN`
+   * rather than an explicit `DISCORD_BOT_TOKEN_<PERSONA_ID>`. Config-load only:
+   * it lets a boot refusal name `DISCORD_DEFAULT_PERSONA` as the fix, which is
+   * the actual lever a legacy deployment has (design §1 / Migration).
+   */
+  fromLegacyToken?: boolean;
 }
 
 /** Back-compat alias: the adapter's config slice IS a persona bot's config. */

@@ -125,6 +125,24 @@ export async function revokeToken(id: number, userId: number): Promise<boolean> 
   return result.count > 0;
 }
 
+/**
+ * Revoke a token on behalf of the SYSTEM — no owning-user check, because the
+ * caller has already proven possession of the plaintext (verifyToken) rather
+ * than being the logged-in owner. Used by consume-on-link (`/link` in the
+ * Discord pipe): a link token is a one-time proof, so it is burned as it is
+ * accepted and can never be replayed to re-point the identity.
+ *
+ * Atomic claim: the `revoked_at IS NULL` predicate lives in the WHERE clause, so
+ * exactly one of two concurrent consumers gets `true`.
+ */
+export async function consumeToken(id: number): Promise<boolean> {
+  const result = await db
+    .update(apiTokens)
+    .set({ revokedAt: new Date() })
+    .where(and(eq(apiTokens.id, id), isNull(apiTokens.revokedAt)));
+  return result.count > 0;
+}
+
 export async function getToken(id: number, userId: number): Promise<ApiToken | null> {
   const row = (await db
     .select()
