@@ -266,11 +266,14 @@ describe("dispatch never gives a server-runtime run a worker", () => {
     // model turn; it still lands an in-process turn.
     await vi.waitFor(async () => expect(await agentTexts(run.id)).toHaveLength(1));
     expect(seen).toHaveLength(1);
-    const after = await get(run.id);
-    // The server-turn claim (worker_scope 'server-<nonce>') is released in a
-    // finally once the turn lands.
-    expect(after!.workerScope).toBeNull();
-    expect(after!.status).toBe("idle");
+    // The wake runs in the background: the message persists mid-turn but the
+    // server-turn claim (worker_scope 'server-<nonce>') is only released in a
+    // finally after the turn fully lands — poll instead of reading once.
+    await vi.waitFor(async () => {
+      const after = await get(run.id);
+      expect(after!.workerScope).toBeNull();
+      expect(after!.status).toBe("idle");
+    });
   });
 
   it("still spawns a worker for a worker-runtime run", async () => {
@@ -305,8 +308,8 @@ describe("dispatch never gives a server-runtime run a worker", () => {
     expect(seen[0].contextKind).toBe("postgres");
     // The digest of the event reached the model as prompt text.
     expect(seen[0].prompt).toMatch(/child\.result/);
-    const after = await get(run.id);
-    expect(after!.workerScope).toBeNull();
+    // Background wake: the claim release lands after the turn completes — poll.
+    await vi.waitFor(async () => expect((await get(run.id))!.workerScope).toBeNull());
   });
 
   it("keeps server-runtime rows out of the pending-run pump queue", async () => {
