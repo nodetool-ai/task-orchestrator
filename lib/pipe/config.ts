@@ -1,7 +1,14 @@
 // lib/pipe/config.ts
 //
-// Load the channel-bridge config from the environment. Follows the project's
-// TASK_ORCH_* / dotenv convention (see cli.ts and .env.example).
+// Load the channel-bridge config. Bots come from TWO places, in this order:
+//
+//   1. The `discord_bots` table, written by Settings → Discord (the guided setup
+//      wizard). This is the preferred path — no redeploy to add a bot.
+//   2. The DISCORD_* environment, unchanged and fully supported, merged in as a
+//      fallback. A DB row WINS for its persona; env-only personas still boot.
+//
+// Env discovery follows the project's TASK_ORCH_* / dotenv convention (see
+// cli.ts and .env.example).
 //
 // Since M4 the bridge is MULTI-BOT (design §1): one Discord application + token
 // per persona, discovered from `DISCORD_BOT_TOKEN_<PERSONA_ID>` env vars, all
@@ -71,24 +78,102 @@ export async function loadPipeConfig(env: Env = process.env): Promise<PipeConfig
   const bySuffix = new Map<string, string>();
   for (const id of personaIds) bySuffix.set(personaEnvSuffix(id), id);
 
-  const bots = discoverBots(env, bySuffix);
+  // Who may talk to the bots is DERIVED, not configured: every Discord account
+  // someone linked in Settings (channel_identities), unioned with the legacy
+  // DISCORD_ALLOWED_USERS env vars. It applies to env-discovered bots too, so a
+  // deployment that adopts self-service linking does not have to keep editing
+  // its env to add people.
+  const linked = await repo.listChannelIdentityExternalIds("discord");
+  const envBots = discoverBots(env, bySuffix).map((bot) => ({
+    ...bot,
+    allowedUsers: [...new Set([...linked, ...bot.allowedUsers])],
+  }));
+  const dbBots = await discoverDbBots(env, linked);
+  const bots = mergeBots(dbBots, envBots);
   if (bots.length === 0) {
     throw new Error(
-      "No Discord bot tokens found — refusing to start. Set DISCORD_BOT_TOKEN_<PERSONA_ID> " +
+      "No Discord bot tokens found — refusing to start. Configure a bot in Settings → Discord, " +
+        "or set DISCORD_BOT_TOKEN_<PERSONA_ID> " +
         `(e.g. DISCORD_BOT_TOKEN_${personaEnvSuffix(DEFAULT_PERSONA_ID)}) for each persona bot, ` +
         "or the legacy DISCORD_BOT_TOKEN for a single-bot deployment."
     );
   }
-  for (const bot of bots) await validateBot(bot);
+
+  // Env-sourced bots keep the historical posture: any problem is a boot
+  // refusal (see the security note above). DB-sourced bots are edited in the
+  // UI, where a bad save must not lock the operator out of a running pipe — the
+  // offending bot is skipped with a loud warning instead, and Settings surfaces
+  // the same problem through /api/discord/bots.
+  const usable: PersonaBotConfig[] = [];
+  for (const bot of bots) {
+    if (bot.source !== "db") {
+      await validateBot(bot);
+      usable.push(bot);
+      continue;
+    }
+    const problems = await botProblems(bot);
+    if (problems.length === 0) {
+      usable.push(bot);
+      continue;
+    }
+    console.warn(
+      `[pipe] skipping the '${bot.personaId}' bot configured in Settings → Discord: ` +
+        `${problems.join(" ")} Fix it in Settings and restart the pipe.`
+    );
+  }
+  if (usable.length === 0) {
+    throw new Error(
+      "Every configured Discord bot failed validation — refusing to start. See the warnings " +
+        "above, or open Settings → Discord, which flags the same problems per bot."
+    );
+  }
 
   // The DISCORD_* vars come from `env` (injectable, so discovery is testable
   // without mutating the process environment); the TASK_ORCH_* tunables come
   // from lib/config, which is the one place allowed to read them (R6 guard).
   return {
-    bots,
+    bots: usable,
     defaultModel: config.agent.chatModel ?? "openai/gpt-5.6-sol",
     editThrottleMs: config.pipe.editThrottleMs,
   };
+}
+
+/**
+ * DB discovery: the enabled discord_bots rows written by Settings → Discord.
+ *
+ * The user allowlist is the linked-identity set unioned with the legacy
+ * DISCORD_ALLOWED_USERS env vars (global plus this bot's suffix) — self-service
+ * by design: nobody curates a list of other people's snowflakes, you link your
+ * own id and the bots answer you. Channels come from the row, falling back to
+ * the DISCORD_ALLOWED_CHANNELS env global.
+ */
+async function discoverDbBots(env: Env, linked: string[]): Promise<PersonaBotConfig[]> {
+  const rows = (await repo.listDiscordBots()).filter((row) => row.enabled);
+  if (rows.length === 0) return [];
+  const channels = csv(env.DISCORD_ALLOWED_CHANNELS);
+  return rows.map((row) => ({
+    personaId: row.personaId,
+    token: row.token,
+    source: "db" as const,
+    allowedUsers: [
+      ...new Set([
+        ...linked,
+        ...csv(env.DISCORD_ALLOWED_USERS),
+        ...csv(env[`DISCORD_ALLOWED_USERS_${personaEnvSuffix(row.personaId)}`]),
+      ]),
+    ],
+    // A per-bot channel list REPLACES the global one, matching the env rule.
+    allowedChannels: row.allowedChannels.length ? row.allowedChannels : channels,
+    applicationId: row.applicationId ?? undefined,
+  }));
+}
+
+/** DB rows win per persona; env-only personas are merged in as a fallback. */
+function mergeBots(dbBots: PersonaBotConfig[], envBots: PersonaBotConfig[]): PersonaBotConfig[] {
+  const byPersona = new Map<string, PersonaBotConfig>();
+  for (const bot of envBots) byPersona.set(bot.personaId, { ...bot, source: "env" });
+  for (const bot of dbBots) byPersona.set(bot.personaId, bot);
+  return [...byPersona.values()].sort((a, b) => a.personaId.localeCompare(b.personaId));
 }
 
 /** Env discovery only (no DB): DISCORD_BOT_TOKEN_* plus the legacy mapping. */
@@ -177,9 +262,11 @@ async function validateBot(bot: PersonaBotConfig): Promise<void> {
 
   if (bot.allowedUsers.length === 0) {
     throw new Error(
-      `No allowed users for the '${bot.personaId}' bot (DISCORD_ALLOWED_USERS_${suffix} or ` +
-        "DISCORD_ALLOWED_USERS) — refusing to start. Persona conversations can spawn agent runs " +
-        "with full shell/fs access; an explicit allowlist of Discord user ids is mandatory."
+      `No allowed users for the '${bot.personaId}' bot — refusing to start. Nobody has linked ` +
+        "a Discord account in Settings → Discord, and neither " +
+        `DISCORD_ALLOWED_USERS_${suffix} nor DISCORD_ALLOWED_USERS is set. Persona conversations ` +
+        "can spawn agent runs with full shell/fs access; an explicit allowlist of Discord user " +
+        "ids is mandatory."
     );
   }
 
@@ -221,6 +308,125 @@ async function validateBot(bot: PersonaBotConfig): Promise<void> {
         fix
     );
   }
+}
+
+/**
+ * The same three checks `validateBot` enforces, reported as a list instead of
+ * thrown. This is the form Settings → Discord needs: a bot the operator is
+ * still assembling should be FLAGGED in the UI, not turned into a 500.
+ *
+ * Deliberately worded for the UI (no env-var names, no legacy fix line) —
+ * validateBot keeps the boot-refusal prose, which names the env lever the
+ * deployment actually has.
+ */
+export async function botProblems(bot: PersonaBotConfig): Promise<string[]> {
+  const problems: string[] = [];
+
+  if (bot.allowedUsers.length === 0) {
+    problems.push(
+      "Nobody can talk to this bot yet: no one has linked a Discord account in Settings and " +
+        "DISCORD_ALLOWED_USERS is unset. Persona conversations can spawn agent runs with full " +
+        "shell/fs access, so an explicit allowlist is mandatory."
+    );
+  }
+
+  const persona = await repo.getPersona(bot.personaId);
+  if (!persona) {
+    problems.push(`Persona '${bot.personaId}' no longer exists.`);
+    return problems;
+  }
+
+  const unsafe = serverUnsafeProfiles(persona.toolsProfile);
+  if (unsafe.length > 0) {
+    problems.push(
+      `Persona '${bot.personaId}' has tools profile '${persona.toolsProfile}', which is not ` +
+        `server-safe (${unsafe.join(", ")}). Discord persona conversations run inside the pipe ` +
+        `process, so shell, filesystem and repo-write tools are unavailable there. Server-safe ` +
+        `profiles: ${listServerSafeProfiles().join(", ")}.`
+    );
+  }
+
+  try {
+    const backend = resolveBackendId(persona.backend);
+    if (backend !== "pi") {
+      problems.push(
+        `Persona '${bot.personaId}' resolves to the '${backend}' backend. Discord persona ` +
+          "conversations run through the pi-only postgres-turn loop; set backend 'pi' on the " +
+          "persona."
+      );
+    }
+  } catch (err) {
+    problems.push(
+      `Persona '${bot.personaId}' has an invalid backend: ` +
+        `${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+
+  return problems;
+}
+
+/** One configured DB bot plus the validation verdict Settings renders. */
+export interface DiscordBotStatus {
+  personaId: string;
+  personaName: string | null;
+  enabled: boolean;
+  applicationId: string | null;
+  /** Last 4 characters of the stored token; the full value never leaves here. */
+  tokenLast4: string;
+  /** Who may talk to the bot: linked identities ∪ the DISCORD_ALLOWED_USERS env. */
+  allowedUsers: string[];
+  /** How many of those came from a user linking their own id in Settings. */
+  linkedUserCount: number;
+  allowedChannels: string[];
+  problems: string[];
+  updatedAt: string;
+}
+
+/**
+ * Every DB-configured bot with its effective allowlist and validation problems.
+ * Powers GET /api/discord/bots — the web server has no pipe process to ask, so
+ * it recomputes the same verdict the pipe would reach at boot.
+ */
+export async function discordBotStatuses(env: Env = process.env): Promise<DiscordBotStatus[]> {
+  const [rows, personas, linked] = await Promise.all([
+    repo.listDiscordBots(),
+    repo.listPersonas(),
+    repo.listChannelIdentityExternalIds("discord"),
+  ]);
+  const nameById = new Map(personas.map((p) => [p.id, p.name]));
+  const envChannels = csv(env.DISCORD_ALLOWED_CHANNELS);
+
+  const out: DiscordBotStatus[] = [];
+  for (const row of rows) {
+    const allowedUsers = [
+      ...new Set([
+        ...linked,
+        ...csv(env.DISCORD_ALLOWED_USERS),
+        ...csv(env[`DISCORD_ALLOWED_USERS_${personaEnvSuffix(row.personaId)}`]),
+      ]),
+    ];
+    const bot: PersonaBotConfig = {
+      personaId: row.personaId,
+      token: row.token,
+      source: "db",
+      allowedUsers,
+      allowedChannels: row.allowedChannels.length ? row.allowedChannels : envChannels,
+      applicationId: row.applicationId ?? undefined,
+    };
+    out.push({
+      personaId: row.personaId,
+      personaName: nameById.get(row.personaId) ?? null,
+      enabled: row.enabled,
+      applicationId: row.applicationId,
+      tokenLast4: row.token.slice(-4),
+      allowedUsers,
+      linkedUserCount: linked.length,
+      allowedChannels: bot.allowedChannels,
+      problems: await botProblems(bot),
+      updatedAt: row.updatedAt.toISOString(),
+    });
+  }
+  return out;
 }
 
 function str(v: string | undefined): string | undefined {

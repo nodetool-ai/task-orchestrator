@@ -10,6 +10,7 @@ const TABS = [
   { id: "environments", label: "Environments" },
   { id: "tokens", label: "API tokens" },
   { id: "codex", label: "Codex" },
+  { id: "discord", label: "Discord" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -25,6 +26,7 @@ export function SettingsTabs({
   environments,
   tokens,
   codex,
+  discord,
 }: {
   initialTab?: string;
   repos: React.ReactNode;
@@ -32,6 +34,7 @@ export function SettingsTabs({
   environments: React.ReactNode;
   tokens: React.ReactNode;
   codex: React.ReactNode;
+  discord: React.ReactNode;
 }) {
   const router = useRouter();
   const [active, setActive] = React.useState<TabId>(isTabId(initialTab) ? initialTab : "repos");
@@ -41,7 +44,14 @@ export function SettingsTabs({
     router.replace(`/settings?tab=${id}`, { scroll: false });
   }
 
-  const content: Record<TabId, React.ReactNode> = { repos, personas, environments, tokens, codex };
+  const content: Record<TabId, React.ReactNode> = {
+    repos,
+    personas,
+    environments,
+    tokens,
+    codex,
+    discord,
+  };
 
   return (
     <div className="space-y-6">

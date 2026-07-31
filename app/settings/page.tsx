@@ -5,12 +5,15 @@ import { NewRepositoryForm } from "@/components/repositories/repository-form";
 import { PersonaEditor, type PersonaDto } from "@/components/persona-editor";
 import { ApiTokensManager } from "@/components/api-tokens-manager";
 import { CodexLoginPanel } from "@/components/settings/codex-login";
+import { DiscordSettings } from "@/components/settings/discord-settings";
+import type { DiscordPersonaOption } from "@/components/settings/discord-setup-wizard";
 import { CodeBlock } from "@/components/ui/code-block";
 import { EmptyState } from "@/components/ui/empty-state";
 import { formatDate, relativeDate } from "@/lib/utils";
 import { SettingsTabs } from "@/components/settings/settings-tabs";
 import { listEnvironments, registerConfiguredEnvironments } from "@/lib/runner/environments";
 import { EnvironmentsView } from "@/components/environments/environments-view";
+import { serverUnsafeProfiles } from "@/lib/profiles";
 
 export const dynamic = "force-dynamic";
 
@@ -40,6 +43,25 @@ export default async function SettingsPage({
     budgetMaxTurns: p.budgetMaxTurns,
     budgetMaxSeconds: p.budgetMaxSeconds,
   }));
+
+  // Which personas can host a Discord bot. Decided here because it needs
+  // lib/profiles.ts, which is server code — the browser only sees the verdict.
+  const discordPersonas: DiscordPersonaOption[] = personaRows.map((p) => {
+    const unsafe = serverUnsafeProfiles(p.toolsProfile);
+    const backend = p.backend ?? "pi";
+    return {
+      id: p.id,
+      name: p.name,
+      toolsProfile: p.toolsProfile,
+      backend: p.backend,
+      blocked:
+        unsafe.length > 0
+          ? `Tools profile is not server-safe (${unsafe.join(", ")}).`
+          : backend !== "pi"
+            ? `Backend is '${backend}'; Discord conversations need 'pi'.`
+            : null,
+    };
+  });
 
   return (
     <div style={{ padding: "20px 20px 80px", maxWidth: 1480, margin: "0 auto" }}>
@@ -211,6 +233,20 @@ export default async function SettingsPage({
               </p>
             </header>
             <CodexLoginPanel />
+          </div>
+        }
+        discord={
+          <div className="space-y-6">
+            <header className="space-y-1">
+              <h2 className="text-base font-semibold tracking-tight">Discord persona bots</h2>
+              <p className="text-sm text-muted-foreground">
+                One Discord application (and bot token) per persona, bridged by{" "}
+                <code>npm run pipe</code>. Configure them here instead of{" "}
+                <code>DISCORD_BOT_TOKEN_&lt;PERSONA_ID&gt;</code> — the env vars still work and
+                are merged in as a fallback.
+              </p>
+            </header>
+            <DiscordSettings personas={discordPersonas} />
           </div>
         }
       />

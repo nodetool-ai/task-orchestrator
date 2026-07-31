@@ -6,6 +6,7 @@ import {
   attachments,
   channelIdentities,
   channelThreads,
+  discordBots,
   memories,
   personaMemories,
   personas as personasTable,
@@ -17,6 +18,7 @@ import {
   tasks,
   type Attachment as AttachmentRow,
   type ChannelIdentity,
+  type DiscordBot as DiscordBotDbRow,
   type Memory,
   type Persona,
   type Plan as PlanRow,
@@ -1903,6 +1905,22 @@ export async function runHasChannelThread(runId: number): Promise<boolean> {
   return row !== undefined;
 }
 
+/**
+ * Every external account linked on ONE channel. This is the Discord bots' USER
+ * ALLOWLIST: rather than an admin curating a list of snowflakes, each person
+ * links their own id in Settings → Discord, and the union of those ids (plus
+ * the legacy DISCORD_ALLOWED_USERS env vars) is who the bots answer. Read on
+ * every pipe config load, so it is indexed by channel.
+ */
+export async function listChannelIdentityExternalIds(channel: string): Promise<string[]> {
+  const rows = await db
+    .select({ externalUserId: channelIdentities.externalUserId })
+    .from(channelIdentities)
+    .where(eq(channelIdentities.channel, channel))
+    .orderBy(asc(channelIdentities.id));
+  return [...new Set(rows.map((r) => r.externalUserId))];
+}
+
 /** All identities linked to a local user (one per channel account). */
 export async function listChannelIdentitiesForUser(userId: number): Promise<ChannelIdentity[]> {
   return await db
@@ -1983,4 +2001,145 @@ export async function setPlanningStage(runId: number, stage: PlanningStage): Pro
   await db.update(agentSessions)
     .set({ planningStage: stage })
     .where(eq(agentSessions.id, runId));
+}
+
+// ──────────────────────────────────────────────────────────
+// Discord persona bots
+// ──────────────────────────────────────────────────────────
+
+// The DB half of the pipe's bot config (lib/pipe/config.ts). Written by
+// Settings → Discord; read at pipe boot, where it is merged with the
+// DISCORD_BOT_TOKEN_<PERSONA_ID> env vars (a row wins for its persona).
+//
+// There is no allowed-users column on purpose: WHO may talk to the bots comes
+// from channel_identities — every person links their own Discord id in Settings
+// — unioned with the legacy DISCORD_ALLOWED_USERS env vars.
+
+export interface DiscordBotUpsert {
+  personaId: string;
+  token: string;
+  applicationId?: string | null;
+  allowedChannels?: string[];
+  enabled?: boolean;
+}
+
+/** A discord_bots row with its channel list parsed. */
+export interface DiscordBotRow {
+  id: number;
+  personaId: string;
+  token: string;
+  applicationId: string | null;
+  allowedChannels: string[];
+  enabled: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Tolerant JSON-array read: a legacy/hand-edited CSV value still parses. */
+function parseStringList(value: string | null | undefined): string[] {
+  const raw = (value ?? "").trim();
+  if (!raw) return [];
+  if (raw.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed.map((v) => String(v).trim()).filter(Boolean);
+      }
+    } catch {
+      // fall through to the CSV reading below
+    }
+  }
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function normalizeStringList(values: string[] | undefined): string[] {
+  const seen = new Set<string>();
+  for (const v of values ?? []) {
+    const trimmed = v.trim();
+    if (trimmed) seen.add(trimmed);
+  }
+  return [...seen];
+}
+
+function toDiscordBotRow(row: DiscordBotDbRow): DiscordBotRow {
+  return {
+    id: row.id,
+    personaId: row.personaId,
+    token: row.token,
+    applicationId: row.applicationId,
+    allowedChannels: parseStringList(row.allowedChannels),
+    enabled: row.enabled,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+export async function listDiscordBots(): Promise<DiscordBotRow[]> {
+  const rows = await db.select().from(discordBots).orderBy(asc(discordBots.personaId));
+  return rows.map(toDiscordBotRow);
+}
+
+export async function getDiscordBot(personaId: string): Promise<DiscordBotRow | null> {
+  const row = (await db
+    .select()
+    .from(discordBots)
+    .where(eq(discordBots.personaId, personaId)))[0];
+  return row ? toDiscordBotRow(row) : null;
+}
+
+/**
+ * Create or replace the bot for a persona. Keyed on persona_id, so saving the
+ * wizard twice edits the same bot rather than stacking gateway connections.
+ */
+export async function upsertDiscordBot(input: DiscordBotUpsert): Promise<DiscordBotRow> {
+  const personaId = input.personaId.trim();
+  const token = input.token.trim();
+  if (!personaId) throw new RepoError("Persona id is required.", 400);
+  if (!token) throw new RepoError("Bot token is required.", 400);
+  if (!(await getPersona(personaId))) {
+    throw new RepoError(`Persona '${personaId}' not found.`, 404);
+  }
+  const now = new Date();
+  const values = {
+    token,
+    applicationId: input.applicationId?.trim() || null,
+    allowedChannels: JSON.stringify(normalizeStringList(input.allowedChannels)),
+    enabled: input.enabled ?? true,
+    updatedAt: now,
+  };
+  const row = (await db
+    .insert(discordBots)
+    .values({ personaId, createdAt: now, ...values })
+    .onConflictDoUpdate({ target: discordBots.personaId, set: values })
+    .returning())[0];
+  return toDiscordBotRow(row);
+}
+
+/** Partial edit. Omitted fields keep their stored value — notably the token. */
+export async function updateDiscordBot(
+  personaId: string,
+  patch: Partial<Omit<DiscordBotUpsert, "personaId">>
+): Promise<DiscordBotRow | null> {
+  const existing = await getDiscordBot(personaId);
+  if (!existing) return null;
+  return await upsertDiscordBot({
+    personaId,
+    token: patch.token?.trim() ? patch.token : existing.token,
+    applicationId:
+      patch.applicationId !== undefined ? patch.applicationId : existing.applicationId,
+    allowedChannels: patch.allowedChannels ?? existing.allowedChannels,
+    enabled: patch.enabled ?? existing.enabled,
+  });
+}
+
+/** Remove a bot. Returns true when a row was removed. */
+export async function deleteDiscordBot(personaId: string): Promise<boolean> {
+  const removed = await db
+    .delete(discordBots)
+    .where(eq(discordBots.personaId, personaId))
+    .returning({ id: discordBots.id });
+  return removed.length > 0;
 }
