@@ -78,6 +78,7 @@ import {
   isResumableDeadRun,
   decideDeadRunPolicy,
 } from "./run-liveness";
+import { isServerRuntimeRun } from "./run-runtime";
 import { isTransientNetworkError } from "./transient-errors";
 import {
   resolveProfiles,
@@ -94,6 +95,7 @@ import {
   cancelTimersByCorrelation,
   claimInboxEventsTx,
   emitInboxEvent,
+  hasPendingInboxEvents,
   pendingOwnerCount,
   quarantineEvent,
   setClaimTurn,
@@ -248,7 +250,14 @@ export interface RunRow {
    *  'worker' (the default) is a detached process/container/Machine; 'server'
    *  means the turn runs in-process through the postgres-turn loop — persona
    *  chats only, internal callers only. Legacy pre-retirement rows may also
-   *  carry 'server'. */
+   *  carry 'server', paired with an unsafe tools profile that create() would
+   *  refuse today.
+   *
+   *  NEVER branch on this column directly. Every turn-time placement decision
+   *  goes through `isServerRuntimeRun` (lib/run-runtime.ts), which requires the
+   *  placement AND the tool surface to agree and demotes a legacy row to worker
+   *  otherwise. A raw `runtime === 'server'` read would hand those rows the
+   *  unsandboxed, unscrubbed in-process path. */
   runtime: "server" | "worker";
   model: string | null;
   /** Agent backend this run executes on ('pi'|'claude'), or null for the
@@ -622,6 +631,33 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
       throw new repo.RepoError(
         `runtime='server' requires cwdStrategy='none' (got '${cwdStrategy}'): an in-process run ` +
           `has no container to hold a checkout. Spawn a worker run for repo-backed work.`,
+        400
+      );
+    }
+    // No tier would ever drive this row (M2 review finding 3). initialStatus is
+    // 'pending' for any non-deferred goal that isn't <chat>/<plan>, and 'pending'
+    // on a SERVER row is a dead end: listPendingRunIds is the worker dispatch
+    // queue (so no pump retry and no max-defer failer), it isn't 'parked' (so no
+    // inbox wake sweep), and it holds no lease (so reconcile never sees it) —
+    // the run sits at 'pending' forever with nothing watching it.
+    //
+    // We reject rather than silently flipping to 'idle': the caller asked for a
+    // run that STARTS, and 'idle' would quietly turn it into one that waits for a
+    // message that may never come. Server runtime is message/event-driven by
+    // construction (design §3: persona chats), so the honest answer is a 400 that
+    // names the two ways out.
+    //
+    // Carve-out: goal '<execute>' with a planId is genuinely self-driving — the
+    // executor branch below fires and takes the turn under withServerClaim, so
+    // that row never sits at 'pending' unattended.
+    const selfDriving = goal === "<execute>" && !!input.planId;
+    if (initialStatus === "pending" && !selfDriving) {
+      throw new repo.RepoError(
+        `runtime='server' cannot start goal '${goal}': an in-process run has no worker tier to ` +
+          `dispatch a kickoff turn to, and the row would sit at status 'pending' with nothing to ` +
+          `drive it. Server runtime supports message- and event-driven goals only — use ` +
+          `goal '<chat>'/'<plan>', pass defer: true and send the run a message, or create the run ` +
+          `with runtime 'worker'.`,
         400
       );
     }
@@ -3058,7 +3094,12 @@ export async function* sendMessageToRun(opts: {
   // pay for a container. Worker-runtime rows keep the previous behavior exactly,
   // including the global fallback that lets a single-process dev server (no
   // remote runner) drive turns in-process for legacy/worker rows.
-  if (run.runtime === "server" || !runDispatch.remoteRunnerEnabled()) {
+  //
+  // isServerRuntimeRun, NOT `runtime === 'server'`: a legacy row carrying the
+  // retired tier's placement together with a shell/fs/repo-write profile is
+  // demoted to worker here, so it dispatches remotely exactly as it did before
+  // M2 instead of being forced in-process (lib/run-runtime.ts).
+  if (isServerRuntimeRun(run) || !runDispatch.remoteRunnerEnabled()) {
     yield* append({ runId, role, text, author, abort });
     return;
   }
@@ -3177,23 +3218,57 @@ const SERVER_WAKE_PROMPT =
  * already in flight (a live lease, or an in-process runner), or hard-terminal,
  * it no-ops — the pump's wake sweep re-drives it on a later tick because the
  * pending inbox events stay pending.
+ *
+ * TWO no-op gates, both load-bearing (M2 review finding 2):
+ *
+ *  (b) NOTHING TO WAKE FOR. Every server-runtime wake is event-driven — an
+ *      inbox emit, a fired timer's event, the pump's parked sweep over rows WITH
+ *      pending events. When the run has no pending, non-control, owner/
+ *      supervisor-audience event left, the wake has already been serviced: the
+ *      emit-time wake and the ≤15s pump sweep both call dispatchRun, and the
+ *      loser used to find the digest already claimed and burn a whole model turn
+ *      on the bare SERVER_WAKE_PROMPT with no events attached. Check first, and
+ *      no-op — a wake with nothing to say is not a turn.
+ *
+ *  (a) SOMEONE ELSE IS DRIVING. The isLive/isLeaseLive reads below are a
+ *      snapshot; two processes (a pipe user turn and a web-process inbox wake,
+ *      or two wakes) could both pass them and then both drive a turn,
+ *      interleaving agent_messages. The turn is therefore taken under
+ *      withServerClaim — the SAME worker_scope/heartbeat CAS dispatchRun's
+ *      worker path uses (claimServerTurn stamps status='preparing' +
+ *      'server-<nonce>' scope while worker_scope IS NULL). Exactly one caller
+ *      wins; the loser returns without a turn. append() is then handed
+ *      `takeover: true`, which is how a dispatched worker adopts the 'preparing'
+ *      claim made for it — without it append's own isLeaseLive guard would
+ *      reject the very claim we just took. append()'s heartbeat interval keeps
+ *      the claim fresh for the whole turn, and withServerClaim releases the
+ *      scope in a finally, so a user message arriving after the turn lands is
+ *      never starved (and one arriving DURING it hits append's normal
+ *      "already in flight" guard, as it would against any live turn).
  */
 export async function wakeServerRun(runId: number): Promise<void> {
   const run = await get(runId);
-  if (!run || run.runtime !== "server") return;
+  if (!run || !isServerRuntimeRun(run)) return;
   if (isLive(runId) || isLeaseLive(run)) return;
   if (isTerminalStatus(run.status) && run.status !== "idle" && !isResumableRun(run)) return;
-  for await (const ev of append({
-    runId,
-    role: "system",
-    text: SERVER_WAKE_PROMPT,
-    persistUser: false,
-    ephemeralInput: true,
-  })) {
-    // Drain: append() persists everything it produces; the pipe/UI read the run
-    // stream. An error frame is already recorded on the row by append().
-    void ev;
-  }
+  // (b): no pending events ⇒ the wake was already serviced by a racing driver.
+  if (!(await hasPendingInboxEvents(runId))) return;
+  // (a): single-owner CAS. A lost race is a clean no-op — the winner's turn
+  // drains the same pending events through its digest claim.
+  await withServerClaim(runId, async () => {
+    for await (const ev of append({
+      runId,
+      role: "system",
+      text: SERVER_WAKE_PROMPT,
+      persistUser: false,
+      ephemeralInput: true,
+      takeover: true,
+    })) {
+      // Drain: append() persists everything it produces; the pipe/UI read the run
+      // stream. An error frame is already recorded on the row by append().
+      void ev;
+    }
+  });
 }
 
 /** Terminal error frame for a synchronous dispatch failure — the failure was
@@ -3514,7 +3589,13 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   // a server-runtime run whose backend resolves to claude, so this AND is only
   // load-bearing for legacy rows (runtime='server' predates that check) — those
   // fall back to the SDK-session path rather than failing every turn.
-  const usePostgres = run.runtime === "server" && resolveBackendId(run.backend) === "pi";
+  //
+  // isServerRuntimeRun (not the raw column) is what keeps a legacy row with an
+  // unsafe profile OUT of postgres mode: postgres mode deliberately skips the
+  // sandbox and env-scrub interceptors below, which is only sound for a
+  // tool-mediated profile. A demoted row takes the sdk-session path WITH those
+  // interceptors, exactly as it did before M2.
+  const usePostgres = isServerRuntimeRun(run) && resolveBackendId(run.backend) === "pi";
 
   const persona = await (await runTransport()).getPersona(run.personaId ?? "implementor");
   if (!persona) {
@@ -4537,7 +4618,7 @@ export async function reconcileOrphanedRuns(): Promise<number> {
     // them in-process. Failing them would kill a live Discord conversation on
     // every deploy; redispatching them would spawn a container for a run that
     // has no worktree to work in.
-    const policy = row.runtime === "server"
+    const policy = isServerRuntimeRun(row)
       ? "idle"
       : decideDeadRunPolicy({
           goal: row.goal,
@@ -4735,17 +4816,26 @@ export async function countInFlightWorkers(): Promise<number> {
   // regardless of status. A long-lived chat worker parked at 'idle' between turns
   // still holds a resident container + its memory, so it must count against the
   // admission budget; a dead worker's stale claim (expired heartbeat) must not.
+  // Placement is decided by the isServerRuntimeRun predicate, not the raw
+  // column: a demoted legacy row (server placement + unsafe profile) really does
+  // get a container, so it must be charged for one — while a true server-runtime
+  // turn holds a 'server-<nonce>' worker_scope with no container behind it and
+  // must not be. Hence the widened SQL + predicate filter.
   const rows = await db
-    .select({ id: agentSessions.id })
+    .select({
+      id: agentSessions.id,
+      runtime: agentSessions.runtime,
+      toolsProfile: agentSessions.toolsProfile,
+    })
     .from(agentSessions)
     .where(
       and(
-        eq(agentSessions.runtime, "worker"),
+        inArray(agentSessions.runtime, ["worker", "server"]),
         isNotNull(agentSessions.workerScope),
         gt(agentSessions.heartbeatAt, new Date(Date.now() - HEARTBEAT_STALE_MS))
       )
     );
-  return rows.length;
+  return rows.filter((r) => !isServerRuntimeRun(r)).length;
 }
 
 const pendingParent = alias(agentSessions, "pending_parent");
@@ -4773,6 +4863,8 @@ export async function listPendingRunIds(): Promise<number[]> {
   const rows = await db
     .select({
       id: agentSessions.id,
+      runtime: agentSessions.runtime,
+      toolsProfile: agentSessions.toolsProfile,
       parentWorkerScope: pendingParent.workerScope,
       parentHeartbeatAt: pendingParent.heartbeatAt,
     })
@@ -4783,12 +4875,20 @@ export async function listPendingRunIds(): Promise<number[]> {
     // that — it is driven by inbound messages and inbox-event wakes, not by the
     // pump. (Its own wake belt is pumpTick's parked sweep, which routes through
     // dispatchRun's server-runtime branch.)
-    .where(and(eq(agentSessions.status, "pending"), eq(agentSessions.runtime, "worker")))
+    //
+    // The placement filter is the isServerRuntimeRun PREDICATE, applied below
+    // rather than as a `runtime = 'worker'` SQL clause: a legacy row with a
+    // server placement and an unsafe profile is a worker row for every purpose,
+    // and must get the pump belt back (retry AND the max-defer failer) instead
+    // of sitting at 'pending' forever with no tier watching it. The pending
+    // queue is small, so the extra rows cost nothing.
+    .where(and(eq(agentSessions.status, "pending"), inArray(agentSessions.runtime, ["worker", "server"])))
     .orderBy(asc(agentSessions.id));
 
   const liveParentChildren: number[] = [];
   const rest: number[] = [];
   for (const r of rows) {
+    if (isServerRuntimeRun(r)) continue;
     const parentLive = isWorkerLive({ workerScope: r.parentWorkerScope, heartbeatAt: r.parentHeartbeatAt });
     (parentLive ? liveParentChildren : rest).push(r.id);
   }

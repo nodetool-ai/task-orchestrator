@@ -20,6 +20,7 @@ import {
   runnerProviderKind,
 } from "./config";
 import { isWorkerLive } from "./run-liveness";
+import { isServerRuntimeRun } from "./run-runtime";
 import { runNonce } from "./run-nonce";
 import { HARD_TERMINAL_STATUSES } from "./run-state";
 import {
@@ -374,7 +375,11 @@ export async function dispatchRun(
   {
     const placement = await runs().get(runId);
     if (!placement) return finish("not-found");
-    if (placement.runtime === "server") {
+    // isServerRuntimeRun, not the raw column: a legacy row with a server
+    // placement but a shell/fs/repo-write profile is demoted to worker
+    // (lib/run-runtime.ts) and falls through to the normal claim + spawn below,
+    // which is exactly how it behaved before M2.
+    if (isServerRuntimeRun(placement)) {
       void runs()
         .wakeServerRun(runId)
         .catch(() => {
@@ -1708,10 +1713,11 @@ export async function sweepWorkerContainers(dockerArg?: DockerLike): Promise<voi
     return;
   }
   for (const run of leased) {
-    // Only worker-runtime claims correspond to containers. Legacy non-worker
-    // rows (a pre-retirement 'server' placement) have no container, so
-    // "container doesn't exist" is meaningless for them — skip.
-    if (run.runtime !== "worker") continue;
+    // Only worker-runtime claims correspond to containers. A true server-runtime
+    // row has no container, so "container doesn't exist" is meaningless for it —
+    // skip. A DEMOTED legacy row (server placement, unsafe profile) does run in a
+    // container, so the predicate deliberately keeps it in this sweep.
+    if (isServerRuntimeRun(run)) continue;
     if (!run.workerScope || liveNames.has(run.workerScope)) continue;
     const lastSeen = run.heartbeatAt?.getTime() ?? 0;
     if (now - lastSeen < SWEEP_MIN_SILENCE_MS) continue;

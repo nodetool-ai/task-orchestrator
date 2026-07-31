@@ -543,6 +543,37 @@ export async function quarantineEvent(
 }
 
 /** Pending owner-audience count for a run (UI badges, wake decisions). */
+/**
+ * Does this run have at least one event a wake would actually deliver? Same
+ * predicate as claimInboxEventsTx's default claim set (pending, owner/supervisor
+ * audience, non-control type) and as parkedRunsWithPendingEvents's EXISTS
+ * clause — deliberately, because "would a turn have anything to inject?" must
+ * not disagree with what the digest claim then injects.
+ *
+ * Used by runs.wakeServerRun to no-op a wake whose events another driver already
+ * claimed (M2 review finding 2b): an emit-time wake and the pump's parked sweep
+ * both call dispatchRun, and the loser would otherwise burn a full model turn on
+ * a bare wake prompt with an empty digest.
+ */
+export async function hasPendingInboxEvents(runId: number): Promise<boolean> {
+  const rows = await db
+    .select({ id: inboxEvents.id })
+    .from(inboxEvents)
+    .where(
+      and(
+        eq(inboxEvents.targetRunId, runId),
+        eq(inboxEvents.status, "pending"),
+        inArray(inboxEvents.audience, ["owner", "supervisor"]),
+        sql`${inboxEvents.type} NOT IN (${sql.join(
+          [...CONTROL_TYPES].map((t) => sql`${t}`),
+          sql`, `
+        )})`
+      )
+    )
+    .limit(1);
+  return rows.length > 0;
+}
+
 export async function pendingOwnerCount(runId: number): Promise<number> {
   const rows = await db
     .select({ n: sql<number>`count(*)::int` })

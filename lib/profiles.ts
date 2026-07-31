@@ -9,9 +9,13 @@
 // 'repo_write' / 'repo_read' mount narrow read-only repo helper tools; full
 // backend runs also have their SDK built-in fs tools.
 // 'gh_pr', 'gh_ci' mount the GitHub PR / CI helper extensions.
-// 'gh_pr_ro' mounts the read-only subset of gh_pr (view/diff/comment/review
-// without approve — no pr_merge). Used for review runs, which check out an
-// untrusted third-party PR and must not be able to merge or approve it.
+// 'gh_pr_ro' mounts the subset of gh_pr that is read-only TO THE REPO:
+// view/diff/checks plus the PR comment tool and the pr_review verdict tool with
+// allowApprove=false (comment / request-changes only, no approve, no pr_merge).
+// It is not GitHub-write-free — comments and verdicts are posted under the
+// server's own credentials — it just cannot approve, merge, or land code. Used
+// for review runs, which check out an untrusted third-party PR and must not be
+// able to merge or approve it.
 // 'spawn' mounts the child-spawn extension.
 // Brave Search is always-on for chat/agent runs rather than a profile entry:
 // web lookup is broadly useful, read-only, and the tool itself fails closed
@@ -64,9 +68,21 @@ interface ProfileDef {
    *                          are worker-runtime (containerized) by default. The
    *                          shell the persona wants lives in the child's
    *                          container, which is exactly the intended split.
-   *   gh_pr_ro      SAFE   — lib/extensions/gh-pr.ts read-only subset, Octokit
-   *                          only (view/diff/comments/checks); no approve, no
-   *                          merge, no local git, no fs.
+   *   gh_pr_ro      SAFE   — lib/extensions/gh-pr.ts, Octokit only: reads
+   *                          (view/diff/checks) PLUS the two GitHub-WRITING
+   *                          tools it deliberately keeps — pr_comment and the
+   *                          non-approving pr_review verdict (registerReviewTool
+   *                          with allowApprove:false). So it is not write-free:
+   *                          it can post comments and request changes as the
+   *                          server's GitHub identity. Still server-SAFE, because
+   *                          the line §6 draws is "can this reach the host or
+   *                          land code?" — it cannot approve, cannot merge, runs
+   *                          no local git and touches no filesystem, and every
+   *                          write is a reviewable comment a human can delete.
+   *                          (gh_pr's merge/approve is the write that crosses
+   *                          that line; see below.) ghPrStrictReadOnlyExtension
+   *                          exists if a genuinely write-free GitHub surface is
+   *                          ever wanted.
    *   gh_ci         SAFE   — lib/extensions/gh-ci.ts, Octokit only (runs/logs/
    *                          rerun). ci_rerun re-triggers an existing workflow;
    *                          it cannot introduce code or touch the host.
