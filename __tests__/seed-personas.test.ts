@@ -13,14 +13,14 @@ describe("seedPersonas", () => {
   it("inserts all personas on first call", async () => {
     await seedPersonas();
     expect((await listPersonaIds()).sort()).toEqual(
-      ["designer", "executor", "implementor", "planner", "planning-agent", "qa"]
+      ["concierge", "designer", "executor", "implementor", "planner", "planning-agent", "qa"]
     );
   });
 
   it("is idempotent — second call is a no-op semantically", async () => {
     await seedPersonas();
     await seedPersonas();
-    expect(await listPersonaIds()).toHaveLength(6);
+    expect(await listPersonaIds()).toHaveLength(7);
   });
 
   it("does NOT overwrite a UI-edited persona on subsequent seeds", async () => {

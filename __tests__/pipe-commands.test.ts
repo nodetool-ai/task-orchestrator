@@ -143,9 +143,12 @@ describe("/stop", () => {
 });
 
 describe("/status", () => {
-  it("says there's no conversation before the first message", async () => {
+  it("answers with the digest and says the thread has no conversation yet", async () => {
+    // M5: /status IS the J3 digest. The per-thread liveness line survives as the
+    // last line, because it's what says whether /stop has anything to interrupt.
     const r = await handleCommand(msg("/status"), config);
-    expect(r.reply).toMatch(/no active conversation/i);
+    expect(r.reply).toMatch(/nothing in flight/i);
+    expect(r.reply).toMatch(/no conversation yet/i);
   });
 
   it("reports idle for a mapped run with no turn in flight", async () => {

@@ -17,7 +17,10 @@ import { isLeaseLive } from "@/lib/run-liveness";
 import * as runs from "@/lib/runs";
 import { getUserById } from "@/lib/users";
 
-import { currentRunId, getOrCreateRun, resetThread } from "./session-store";
+import { startFreshConversation } from "./carryover";
+import { buildStatusDigest } from "./digest";
+import { planLink, runLink, taskLink } from "./links";
+import { currentRunId, getOrCreateRun, resolveUserId } from "./session-store";
 import type { InboundMessage, PipeConfig, SlashCommandSpec } from "./types";
 
 export interface CommandResult {
@@ -89,6 +92,30 @@ export function isCommandText(text: string): boolean {
 }
 
 /**
+ * Commands that are about the CONVERSATION rather than the channel they were
+ * typed in. Invoked in a guild parent channel these mean "the thread this
+ * persona has open below" (M4 review F8) — `/stop` typed in #dev is aimed at
+ * the turn running in the thread, not at the channel itself.
+ */
+// `/new` is deliberately NOT here: "start a fresh conversation" typed in a
+// channel most plausibly means "here", and silently resetting the thread below
+// would throw away a conversation the user wasn't looking at.
+const CONVERSATION_SCOPED = new Set(["stop", "cancel", "abort", "status", "whoami", "session"]);
+
+export function isConversationScopedCommand(name: string): boolean {
+  return CONVERSATION_SCOPED.has(name.toLowerCase());
+}
+
+/** The command name in a line of text ("/status now" → "status"), or null. */
+export function commandNameOf(text: string): string | null {
+  const raw = text.trim();
+  if (isPlainStop(raw)) return "stop";
+  if (!raw.startsWith("/")) return null;
+  const name = raw.slice(1).split(/\s+/)[0];
+  return name ? name.toLowerCase() : null;
+}
+
+/**
  * An API token (`tot_` + 43 base64url chars, see lib/api-tokens.ts) anywhere in
  * the text. Used pre-queue to refuse forwarding the message at all: the usual
  * way a token ends up in an ordinary message is a typo'd command (`/lnik tot_…`,
@@ -153,41 +180,47 @@ export async function handleCommand(
     }
 
     case "status": {
+      // PRD J3: the digest is the answer — live state, no model call, no agent
+      // turn, so it lands in well under the 5-second target. The old
+      // "is this thread's run busy?" line survives as the LAST line, because it
+      // is what tells the user whether `/stop` has anything to interrupt.
+      const userId = await resolveUserId(msg.channel, msg.authorId);
+      const digest = await buildStatusDigest(personaId, userId);
+
       const id = await currentRunId(msg.channel, msg.externalId, personaId);
       if (!id) {
-        return { handled: true, reply: "No active conversation yet — send a message to start one." };
+        return { handled: true, reply: `${digest}\n\nThis thread has no conversation yet.` };
       }
       const run = await runs.getRun(id);
-      const model = (await chat.getChat(id))?.model ?? run?.model ?? config.defaultModel;
       // A turn started here → we can stop it. A turn started in the web process
       // shows a live DB lease but no local runner → report it, but be honest
       // that /stop won't reach it. Otherwise the run is idle.
-      if (runs.isLive(id)) {
-        return {
-          handled: true,
-          reply: `🟢 Working on run #${id} (model \`${model}\`). Send \`/stop\` to interrupt.`,
-        };
-      }
-      if (leaseLive(run)) {
-        return {
-          handled: true,
-          reply: `🟢 Working on run #${id} (model \`${model}\`) in another process (e.g. the web app). \`/stop\` can only interrupt turns started here.`,
-        };
-      }
-      return {
-        handled: true,
-        reply: `⚪ Idle — run #${id}, model \`${model}\`. Send a message to start a turn.`,
-      };
+      const here = runs.isLive(id)
+        ? `⏳ This thread: working on run #${id} — \`/stop\` to interrupt.`
+        : leaseLive(run)
+          ? `⏳ This thread: run #${id} is working in another process (e.g. the web app); \`/stop\` can't reach it.`
+          : `⚪ This thread: run #${id} idle.`;
+      return { handled: true, reply: `${digest}\n${here}` };
     }
 
     case "new":
     case "reset": {
-      await resetThread(msg.channel, msg.externalId, personaId);
-      const runId = await getOrCreateRun(msg.channel, msg.externalId, personaId, {
-        model: config.defaultModel,
+      // `/new` is not amnesia: the fresh run starts with a short carried-over
+      // summary of the old thread (PRD §10), assembled without a model call.
+      // Durable facts already live in memory and travel on their own.
+      const { runId, summary } = await startFreshConversation({
+        channel: msg.channel,
+        externalId: msg.externalId,
+        personaId,
         authorId: msg.authorId,
+        model: config.defaultModel,
       });
-      return { handled: true, reply: `Started a fresh conversation (run #${runId}).` };
+      return {
+        handled: true,
+        reply:
+          `Started a fresh conversation (run #${runId}).` +
+          (summary ? " I kept a short summary of what we were doing." : ""),
+      };
     }
 
     case "model": {
@@ -302,10 +335,10 @@ export async function handleCommand(
       const run = await runs.getRun(id);
       const model = (await chat.getChat(id))?.model ?? run?.model ?? config.defaultModel;
       lines.push(
-        `This thread: run #${id}${run?.taskId ? ` · task \`${run.taskId}\`` : ""}` +
-          `${run?.planId ? ` · plan \`${run.planId}\`` : ""} · model \`${model}\``
+        `This thread: run #${id}${run?.taskId ? ` · task ${taskLink(run.taskId)}` : ""}` +
+          `${run?.planId ? ` · plan ${planLink(run.planId)}` : ""} · model \`${model}\``
       );
-      lines.push(`Details: /runs/${id}`);
+      lines.push(`Details: ${runLink(id)}`);
       return { handled: true, reply: lines.join("\n") };
     }
 

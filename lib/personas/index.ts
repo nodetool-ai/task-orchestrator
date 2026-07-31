@@ -5,6 +5,7 @@ import { designer } from "./designer";
 import { qa } from "./qa";
 import { planningAgent } from "./planning-agent";
 import { executor } from "./executor";
+import { concierge } from "./concierge";
 
 export type { Persona };
 export const PERSONAS: ReadonlyArray<Persona> = [
@@ -14,4 +15,5 @@ export const PERSONAS: ReadonlyArray<Persona> = [
   qa,
   planningAgent,
   executor,
+  concierge,
 ];

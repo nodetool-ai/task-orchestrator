@@ -52,6 +52,30 @@ export interface InboundMessage {
    * the message it belongs to, so ownership is explicit instead of ambient.
    */
   replyToken?: string;
+  /**
+   * Channel-native id of the message this inbound came from, when it has one.
+   * Used for the 👀 ack (react on the user's own message while a slow turn
+   * runs) — absent for slash interactions, which is fine: a command that
+   * deferred already shows "thinking…".
+   */
+  messageId?: string;
+  /**
+   * Set when this message was produced by a REACTION rather than typing (PRD
+   * §6, "reactions as input"). The adapter still fills `text` with the
+   * equivalent typed input ("/stop", "yes", "no") so the normal path applies,
+   * but the loop needs the extra context to decide whether the reaction means
+   * anything here at all — a 👍 is only "yes" when the persona actually asked
+   * something, and an ❌ on a relay BREADCRUMB is a run cancel rather than a
+   * turn interrupt.
+   */
+  reaction?: {
+    /** The emoji as its unicode name, e.g. "👍". */
+    emoji: string;
+    /** Id of the message that was reacted to. */
+    messageId: string;
+    /** True when the reacted-to message was posted by this bot. */
+    ownMessage: boolean;
+  };
 }
 
 /**
@@ -63,6 +87,14 @@ export interface OutboundDraft {
   update(text: string): Promise<void>;
   /** Final flush; same as update but marks the draft done (no more edits). */
   finalize(text: string): Promise<void>;
+  /**
+   * Channel-native id of the message backing this draft, when there is one.
+   * Absent for a draft delivered as a deferred interaction reply (an
+   * interaction response has no id the gateway will report reactions against).
+   * The relay uses it to resolve an ❌ reaction back to the run a breadcrumb is
+   * about (lib/pipe/relay.ts).
+   */
+  readonly messageId?: string;
 }
 
 /** The neutral interface every channel adapter implements. */
@@ -88,6 +120,17 @@ export interface Channel {
   openDraft(externalId: string, initial: string, replyToken?: string): Promise<OutboundDraft>;
   /** Send a standalone (non-streaming) message — used for command replies/errors. */
   send(externalId: string, text: string, replyToken?: string): Promise<void>;
+  /**
+   * Add a reaction to a message (PRD §6: the 👀 "I heard you, this will take a
+   * moment" ack). Optional — a transport without reactions simply has no ack.
+   */
+  react?(externalId: string, messageId: string, emoji: string): Promise<void>;
+  /** Remove a reaction this bot added. Best-effort counterpart of `react`. */
+  unreact?(externalId: string, messageId: string, emoji: string): Promise<void>;
+  /** Rename a thread (the title status machine, PRD J2). Optional. */
+  renameThread?(externalId: string, title: string): Promise<void>;
+  /** Current title of a thread, or null when it is not a thread / unreadable. */
+  threadTitle?(externalId: string): Promise<string | null>;
 }
 
 /**

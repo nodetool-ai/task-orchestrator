@@ -45,7 +45,15 @@ import {
   type User,
 } from "discord.js";
 
-import { SLASH_COMMANDS } from "../commands";
+import { SLASH_COMMANDS, commandNameOf, isConversationScopedCommand } from "../commands";
+import {
+  ACK_REACTION,
+  INPUT_REACTIONS,
+  NO_REACTION,
+  STOP_REACTION,
+  YES_REACTION,
+} from "../reactions";
+import { recentThreadIds } from "../session-store";
 import type { Channel, InboundMessage, OutboundDraft, PersonaBotConfig } from "../types";
 
 /** Minimal structural type for a channel we can post to. */
@@ -61,8 +69,9 @@ const THREADABLE = new Set<ChannelType>([
 export const NOT_ENABLED =
   "I'm not enabled for you — ask the operator to add your Discord account to the allowlist.";
 
-/** The ❌ reaction: a pre-queue interrupt, identical to typing "stop" (PRD §6). */
-export const STOP_REACTION = "❌";
+// The reaction vocabulary itself lives in lib/pipe/reactions.ts (transport-free
+// so the agent loop can share it); re-exported here for the existing importers.
+export { ACK_REACTION, NO_REACTION, STOP_REACTION, YES_REACTION };
 
 /**
  * Discord API error codes we treat as "this interaction is gone": the 15-minute
@@ -161,9 +170,12 @@ export class DiscordChannel implements Channel {
    * it. Per-process and best-effort: after a restart the lookup falls back to
    * the parent channel id, which is the pre-F8 behavior.
    *
-   * TODO(M5): back this with the channel_threads rows (thread → parent) so the
-   * resolution survives a restart and covers text commands typed in the parent
-   * channel too, which still auto-thread as before.
+   * M5: this is now a CACHE in front of channel_threads, not the only record.
+   * On a miss (a restart, or a thread this process never opened)
+   * resolveParentConversation walks the persona's recent conversation ids from
+   * the DB and asks Discord which of them hangs off this channel — so the
+   * resolution survives a restart, and text commands typed in the parent get
+   * the same treatment as slash commands instead of opening a new thread.
    */
   private lastThreadByParent = new Map<string, string>();
 
@@ -289,7 +301,7 @@ export class DiscordChannel implements Channel {
 
     this.handler?.({
       channel: this.name,
-      externalId: this.resolveCommandConversation(i),
+      externalId: await this.resolveCommandConversation(i),
       text,
       authorId: i.user.id,
       authorLabel: `discord:${i.user.username}`,
@@ -308,11 +320,42 @@ export class DiscordChannel implements Channel {
    * nonexistent) conversation keyed on #dev itself. Conversation-scoped commands
    * therefore resolve to the most recent such thread when we have one.
    */
-  private resolveCommandConversation(i: ChatInputCommandInteraction): string {
-    const scoped = new Set(["stop", "cancel", "abort", "status", "whoami", "session"]);
+  private async resolveCommandConversation(i: ChatInputCommandInteraction): Promise<string> {
     if (i.guildId == null || i.channel?.isThread()) return i.channelId;
-    if (!scoped.has(i.commandName)) return i.channelId;
-    return this.lastThreadByParent.get(i.channelId) ?? i.channelId;
+    if (!isConversationScopedCommand(i.commandName)) return i.channelId;
+    return this.resolveParentConversation(i.channelId);
+  }
+
+  /**
+   * The conversation a parent guild channel currently stands for: the most
+   * recent thread this persona owns underneath it. In-memory cache first (the
+   * threads this process opened), then the persona's recent channel_threads
+   * rows — the DB knows the conversation ids, and Discord knows which of them
+   * is a thread of THIS channel. Falls back to the channel itself, which is the
+   * pre-M4 behavior and always safe.
+   */
+  private async resolveParentConversation(parentChannelId: string): Promise<string> {
+    const cached = this.lastThreadByParent.get(parentChannelId);
+    if (cached) return cached;
+    let candidates: string[];
+    try {
+      candidates = await recentThreadIds(this.name, this.personaId);
+    } catch (err) {
+      console.error(`[pipe:${this.personaId}] thread lookup failed:`, err);
+      return parentChannelId;
+    }
+    for (const id of candidates) {
+      try {
+        const ch = await this.client.channels.fetch(id);
+        if (ch?.isThread?.() && (ch as ThreadChannel).parentId === parentChannelId) {
+          this.lastThreadByParent.set(parentChannelId, id);
+          return id;
+        }
+      } catch {
+        // Deleted/unreachable thread — try the next candidate.
+      }
+    }
+    return parentChannelId;
   }
 
   private async onDiscordMessage(m: Message): Promise<void> {
@@ -352,6 +395,25 @@ export class DiscordChannel implements Channel {
     // id). DMs and messages already inside a thread stay where they are.
     let externalId = m.channelId;
     if (!m.channel.isThread() && THREADABLE.has(m.channel.type)) {
+      // A conversation-scoped COMMAND typed in the parent channel is about the
+      // thread below, exactly like the slash-command path (F8) — opening a
+      // brand-new thread to answer "/stop" would be absurd. Everything else
+      // starts a fresh conversation, which is the auto-thread behavior.
+      const scoped = commandNameOf(text);
+      if (scoped && isConversationScopedCommand(scoped)) {
+        this.handler?.({
+          channel: this.name,
+          externalId: await this.resolveParentConversation(m.channelId),
+          text,
+          authorId: m.author.id,
+          authorLabel: `discord:${m.author.username}`,
+          authorName: m.author.username,
+          personaId: this.personaId,
+          isDirectMessage: isDm,
+          messageId: m.id,
+        });
+        return;
+      }
       try {
         const thread = await m.startThread({
           name: threadName(text, m.author.username),
@@ -380,6 +442,7 @@ export class DiscordChannel implements Channel {
       authorName: m.author.username,
       personaId: this.personaId,
       isDirectMessage: isDm,
+      messageId: m.id,
     });
   }
 
@@ -429,15 +492,22 @@ export class DiscordChannel implements Channel {
    * everything else, so there is exactly ONE abort implementation
    * (commands.ts:/stop) rather than a second, parallel one here.
    *
-   * M5 owns the rest of reactions-as-input (👍/👎 answers, 👀 acks, breadcrumb
-   * cancel-with-confirmation).
+   * M5 adds the other two input reactions, on the same rails: 👍/👎 on one of
+   * the bot's own messages become the text "yes"/"no". The adapter deliberately
+   * does NOT decide whether that answer is meaningful — whether the persona
+   * actually asked a question, and whether an ❌ landed on a relay breadcrumb
+   * (cancel a run) rather than on a reply (interrupt the turn) — because both
+   * need the run's state. It stamps `reaction` on the message and lets the
+   * agent loop decide (lib/pipe/agent-loop.ts).
    */
   private async onReactionAdd(
     reaction: MessageReaction | PartialMessageReaction,
     user: User | PartialUser
   ): Promise<void> {
     if (user.bot) return;
-    if (reaction.emoji?.name !== STOP_REACTION) return;
+    const emoji = reaction.emoji?.name ?? "";
+    const asText = INPUT_REACTIONS.get(emoji);
+    if (!asText) return;
     if (!this.cfg.allowedUsers.includes(user.id)) return; // same allowlist as messages
 
     const message = reaction.message;
@@ -454,17 +524,68 @@ export class DiscordChannel implements Channel {
     const gateId = ch?.isThread?.() ? (ch as ThreadChannel).parentId ?? message.channelId : message.channelId;
     if (this.cfg.allowedChannels.length && !this.cfg.allowedChannels.includes(gateId)) return;
 
+    // 👍/👎 only ever mean anything on one of the BOT's own messages — they are
+    // an answer to something the persona said. On a user's own message they are
+    // ordinary chat reactions between humans and must stay silent.
+    if (emoji !== STOP_REACTION && !mine) return;
+
     const username = "username" in user && user.username ? user.username : user.id;
     this.handler?.({
       channel: this.name,
       externalId: message.channelId,
-      text: "/stop",
+      text: asText,
       authorId: user.id,
       authorLabel: `discord:${username}`,
       authorName: username,
       personaId: this.personaId,
       isDirectMessage: isDm,
+      reaction: { emoji, messageId: message.id, ownMessage: mine },
     });
+  }
+
+  /** Add a reaction to a message (the 👀 ack). Best-effort: a missing
+   *  "Add Reactions" permission must never break the turn it decorates. */
+  async react(externalId: string, messageId: string, emoji: string): Promise<void> {
+    const msg = await this.fetchMessage(externalId, messageId);
+    await msg?.react(emoji);
+  }
+
+  /** Remove one of this bot's own reactions. Best-effort, same reasoning. */
+  async unreact(externalId: string, messageId: string, emoji: string): Promise<void> {
+    const msg = await this.fetchMessage(externalId, messageId);
+    const selfId = this.client.user?.id;
+    if (!msg || !selfId) return;
+    await msg.reactions?.cache?.get?.(emoji)?.users?.remove?.(selfId);
+  }
+
+  private async fetchMessage(externalId: string, messageId: string): Promise<Message | null> {
+    try {
+      const ch = await this.client.channels.fetch(externalId);
+      if (!ch || !ch.isTextBased()) return null;
+      return await (ch as unknown as { messages: { fetch(id: string): Promise<Message> } }).messages.fetch(
+        messageId
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /** Current title of a thread, or null when the channel isn't a thread. */
+  async threadTitle(externalId: string): Promise<string | null> {
+    try {
+      const ch = await this.client.channels.fetch(externalId);
+      if (!ch || !ch.isThread()) return null;
+      return (ch as ThreadChannel).name ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Rename a thread (the relay's title status machine). */
+  async renameThread(externalId: string, title: string): Promise<void> {
+    const ch = await this.client.channels.fetch(externalId);
+    if (!ch || !ch.isThread()) return;
+    await (ch as ThreadChannel).setName(title);
   }
 
   async openDraft(
@@ -490,6 +611,9 @@ export class DiscordChannel implements Channel {
     const ch = await this.fetchSendable(externalId);
     const sent = await ch.send(initial || "…");
     return {
+      // The relay resolves an ❌ reaction on a breadcrumb back to its run by
+      // this id, so a plain (non-interaction) draft carries it.
+      messageId: sent.id,
       update: async (text) => {
         await sent.edit(text || "…");
       },

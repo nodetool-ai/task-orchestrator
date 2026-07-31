@@ -16,7 +16,7 @@
 // unique on (channel, external_id, persona_id), so N persona bots each hold
 // their own conversation in one Discord channel.
 
-import { and, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 
 import { db } from "@/db";
 import { agentSessions, channelThreads, type ChannelThread } from "@/db/schema";
@@ -230,6 +230,42 @@ export async function currentRunId(
       )
   )[0];
   return row?.runId ?? null;
+}
+
+/**
+ * The conversation ids this persona has mapped on a channel, newest first.
+ *
+ * Backs the Discord adapter's "a command typed in the parent channel means the
+ * thread below" resolution ACROSS RESTARTS (the M4 in-memory
+ * `lastThreadByParent` forgot everything on boot). The DB cannot answer "which
+ * thread hangs off channel X" on its own — channel_threads stores the
+ * conversation id, not its parent — so this returns the candidate set and the
+ * transport (which knows what a thread's parent is) picks. Bounded by `limit`
+ * so the caller's per-candidate lookup stays cheap.
+ */
+export async function recentThreadIds(
+  channel: string,
+  personaId: string,
+  limit = 25
+): Promise<string[]> {
+  const rows = await db
+    .select({ externalId: channelThreads.externalId })
+    .from(channelThreads)
+    .where(and(eq(channelThreads.channel, channel), eq(channelThreads.personaId, personaId)))
+    .orderBy(desc(channelThreads.id))
+    .limit(limit);
+  return rows.map((r) => r.externalId);
+}
+
+/** Every conversation this persona holds on a channel (the wake pump's input). */
+export async function listConversations(
+  channel: string,
+  personaId: string
+): Promise<Array<{ externalId: string; runId: number }>> {
+  return db
+    .select({ externalId: channelThreads.externalId, runId: channelThreads.runId })
+    .from(channelThreads)
+    .where(and(eq(channelThreads.channel, channel), eq(channelThreads.personaId, personaId)));
 }
 
 /** True once this conversation has a mapping for this persona (onboarding gate). */

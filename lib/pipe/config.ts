@@ -164,8 +164,8 @@ function legacyFix(personaId: string): string {
   return (
     ` FIX: this bot comes from the legacy DISCORD_BOT_TOKEN, which is bound to persona ` +
     `'${personaId}' (DISCORD_DEFAULT_PERSONA, defaulting to '${DEFAULT_PERSONA_ID}'). Set ` +
-    `DISCORD_DEFAULT_PERSONA=<a server-safe, user-facing persona> — 'executor' today, ` +
-    `'concierge' once it ships — or give the bot an explicit ` +
+    `DISCORD_DEFAULT_PERSONA=<a server-safe, user-facing persona> — 'concierge' is the ` +
+    `end-user-facing default, 'executor' the plan-driving one — or give the bot an explicit ` +
     `${TOKEN_PREFIX}<PERSONA_ID> for a persona that qualifies.`
   );
 }

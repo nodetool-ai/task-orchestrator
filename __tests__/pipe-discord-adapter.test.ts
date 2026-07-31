@@ -450,12 +450,17 @@ describe("slash commands in a guild parent channel", () => {
     expect(inbound[0].externalId).toBe("chan-1");
   });
 
-  it("TODO(M5): a TEXT command in the parent channel still auto-threads (unchanged)", async () => {
-    // Documented current behavior, asserted so a future change is deliberate:
-    // the parent-channel resolution above covers slash commands only.
+  it("routes a TEXT conversation command in the parent to the thread, not a new one", async () => {
+    // M5: text commands get the same F8 treatment as slash commands. Opening a
+    // brand-new thread to answer "/status" was the pre-M5 behavior and was
+    // absurd; a non-command message still auto-threads (tests above).
     const { chan, inbound } = harness();
+    await deliver(chan, fakeMessage({ content: `<@${BOT}> go`, mentions: [BOT] }));
+    expect(inbound[0].externalId).toBe("thread-1");
+    const opened = startedThreads.length;
     await deliver(chan, fakeMessage({ content: `<@${BOT}> /status`, mentions: [BOT] }));
-    expect(inbound[0]).toMatchObject({ externalId: "thread-1", text: "/status" });
+    expect(inbound[1]).toMatchObject({ externalId: "thread-1", text: "/status" });
+    expect(startedThreads.length).toBe(opened); // no second thread
   });
 });
 
@@ -495,11 +500,31 @@ describe("❌ reaction (pre-queue stop)", () => {
     expect(inbound).toEqual([]);
   });
 
-  it("ignores any other emoji", async () => {
+  it("ignores emoji outside the input vocabulary", async () => {
     const { chan, inbound } = harness();
-    for (const emoji of ["👍", "👎", "👀", "🛑"]) {
+    for (const emoji of ["👀", "🛑", "🎉"]) {
       await deliverReaction(chan, reaction(emoji), allowlisted);
     }
+    expect(inbound).toEqual([]);
+  });
+
+  it("routes 👍/👎 on the bot's own message as yes/no, tagged as a reaction", async () => {
+    const { chan, inbound } = harness();
+    await deliverReaction(chan, reaction("👍", botMessage({ id: "m-1" })), allowlisted);
+    await deliverReaction(chan, reaction("👎", botMessage({ id: "m-1" })), allowlisted);
+    expect(inbound.map((m) => m.text)).toEqual(["yes", "no"]);
+    // The `reaction` stamp is what lets the loop decide whether the answer
+    // means anything (was a question open?) — the adapter does not know.
+    expect(inbound[0].reaction).toEqual({ emoji: "👍", messageId: "m-1", ownMessage: true });
+  });
+
+  it("ignores 👍 on a message the bot did not write", async () => {
+    const { chan, inbound } = harness();
+    await deliverReaction(
+      chan,
+      reaction("👍", botMessage({ id: "m-2", author: { id: "u1" } })),
+      allowlisted
+    );
     expect(inbound).toEqual([]);
   });
 

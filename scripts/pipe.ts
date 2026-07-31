@@ -13,6 +13,7 @@ import "../db"; // triggers migrations (incl. 0019_agent_runs_heartbeat) on impo
 import { ChannelManager } from "../lib/pipe/channel-manager";
 import { DiscordChannel } from "../lib/pipe/channels/discord";
 import { loadPipeConfig } from "../lib/pipe/config";
+import { ProgressRelay } from "../lib/pipe/relay";
 import { reconcileOrphanedRuns } from "../lib/runs";
 
 async function main() {
@@ -31,9 +32,16 @@ async function main() {
   // client concurrently; stop() destroys all of them.
   const cfg = await loadPipeConfig();
   const channels = cfg.bots.map((bot) => new DiscordChannel(bot));
-  const manager = new ChannelManager(channels, cfg);
+  // The breadcrumb relay is constructed HERE, from the channels array, rather
+  // than inside ChannelManager: it needs the channel handles (to post into a
+  // thread) and the manager deliberately does not expose them — it owns loops,
+  // not transports. The relay is handed back to the manager so the agent loops
+  // can ask it what a reacted-to breadcrumb was about (❌ = cancel that run).
+  const relay = new ProgressRelay(channels);
+  const manager = new ChannelManager(channels, cfg, relay);
 
   await manager.start();
+  relay.start();
   console.log(`[pipe] ready — ${cfg.bots.map((b) => b.personaId).join(", ")}`);
 
   let shuttingDown = false;
@@ -41,6 +49,7 @@ async function main() {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[pipe] ${sig} — shutting down`);
+    relay.stop();
     await manager.stop();
     process.exit(0);
   };

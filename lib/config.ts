@@ -356,7 +356,30 @@ export const config = Object.freeze({
       const value = intEnv("TASK_ORCH_PIPE_EDIT_MS", 750);
       return value > 0 ? value : 750;
     },
+    /** How long a turn may run before the persona acks it with 👀. 0 disables. */
+    get ackAfterMs(): number {
+      const value = intEnv("TASK_ORCH_PIPE_ACK_MS", 5000);
+      return value >= 0 ? value : 5000;
+    },
+    /** Breadcrumb-relay poll interval, in ms. 0 disables the relay. */
+    get relayPollMs(): number {
+      const value = intEnv("TASK_ORCH_PIPE_RELAY_POLL_MS", 15_000);
+      return value >= 0 ? value : 15_000;
+    },
+    /** Agent turns a persona conversation may accumulate before the
+     *  long-thread guard resets it with a carried-over summary. 0 disables. */
+    get turnCap(): number {
+      const value = intEnv("TASK_ORCH_PIPE_TURN_CAP", 60);
+      return value >= 0 ? value : 60;
+    },
   }),
+
+  /** Public base URL of the web UI. Used for the deep links messaging surfaces
+   *  put next to every task/plan/run id (PRD §8 "links, not dumps"). Empty when
+   *  unset, in which case callers emit bare paths. */
+  get publicUrl(): string {
+    return strEnv("TASK_ORCH_PUBLIC_URL", "").replace(/\/+$/, "");
+  },
 
   /** Feature gates. */
   features: Object.freeze({

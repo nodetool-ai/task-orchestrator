@@ -9,15 +9,20 @@
 // composer turn: same tools, same persistence, same per-run lock.
 
 import * as chat from "@/lib/chat";
+import { hasPendingInboxEvents } from "@/lib/inbox";
 import * as runs from "@/lib/runs";
 import { describe } from "@/lib/utils";
 import type { RunEnvelope } from "@/lib/pi-event-mapper";
 
 import * as repo from "@/lib/repo";
 
+import { config as appConfig } from "@/lib/config";
+
+import { agentTurnCount, startFreshConversation } from "./carryover";
+import { ACK_REACTION, STOP_REACTION, YES_REACTION } from "./reactions";
 import { TOKEN_IN_MESSAGE_NOTICE, containsApiToken, handleCommand, isCommandText } from "./commands";
 import { TranscriptBuilder, chunkForDiscord } from "./render";
-import { getOrCreateRun, hasMapping, resolveUserId } from "./session-store";
+import { currentRunId, getOrCreateRun, hasMapping, resolveUserId } from "./session-store";
 import type { Channel, InboundMessage, PipeConfig } from "./types";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -29,6 +34,22 @@ const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // for the whole turn; the bound plus the sawGeneratorFrame bailout (below) keep
 // it cheap there.
 const ATTACH_POLL_TIMEOUT_MS = 3000;
+
+/**
+ * The subset of the relay the loop needs to resolve reactions (PRD §6). Kept as
+ * a narrow structural type rather than importing ProgressRelay so the loop
+ * stays testable without a relay and the dependency points one way.
+ */
+export interface ReactionResolver {
+  /** The run a breadcrumb message is about, or undefined if it isn't one. */
+  runForBreadcrumb(messageId: string): number | undefined;
+  /** Arm a confirm-gated cancel; returns the line to post. */
+  armCancel(conversationKey: string, runId: number): string;
+  /** Consume an armed cancel, if one is still live. */
+  takeArmedCancel(conversationKey: string): number | undefined;
+  /** Cancel a confirmed run; returns the line to post. */
+  confirmCancel(runId: number): Promise<string>;
+}
 
 export class AgentLoop {
   // Per-conversation handling chains (see M9a below), keyed by
@@ -42,10 +63,25 @@ export class AgentLoop {
 
   constructor(
     private channel: Channel,
-    private config: PipeConfig
+    private config: PipeConfig,
+    /** Optional: present once scripts/pipe.ts has built the breadcrumb relay. */
+    private relay?: ReactionResolver
   ) {}
 
   async handle(msg: InboundMessage): Promise<void> {
+    // 0. Reactions-as-input (PRD §6). Resolved BEFORE commands, because the
+    // meaning of the reaction decides which path it takes: ❌ on a relay
+    // breadcrumb cancels that child run (with a confirmation) instead of
+    // interrupting this thread's turn, and 👍/👎 only mean yes/no when the
+    // persona actually left a question hanging.
+    if (msg.reaction) {
+      const consumed = await this.handleReaction(msg).catch((err) => {
+        console.error("[pipe] reaction handling failed:", err);
+        return true; // never fall through to a turn on an error
+      });
+      if (consumed) return;
+    }
+
     // 1. Command interception (before any LLM call, and BEFORE the
     // per-conversation queue below). Commands run immediately, out of band:
     // /stop's whole point is interrupting a turn that's already in flight, so
@@ -126,6 +162,152 @@ export class AgentLoop {
   }
 
   /**
+   * Reactions as input (PRD §6). Returns true when the reaction was fully
+   * handled here and must NOT continue into the normal message path.
+   *
+   *   ❌ on a relay breadcrumb  → confirm-then-cancel that child run.
+   *   ❌ anywhere else          → fall through as "/stop" (the M4 behavior).
+   *   👍 with a cancel armed    → the confirmation; cancel the run.
+   *   👍/👎 on a persona question → inject "yes"/"no" as an ordinary message.
+   *   👍/👎 with no question open → ignored, silently.
+   *
+   * THE QUESTION HEURISTIC, stated plainly: the persona is considered to be
+   * waiting on an answer when the LAST agent text on this conversation's run
+   * ends with "?". That is crude — a message ending in a rhetorical question
+   * counts, and a question phrased as "let me know either way" does not — but
+   * it needs no new state, no model call and no schema, and its failure modes
+   * are both harmless: a stray "yes" the persona can absorb, or a 👍 that does
+   * nothing (the user types "yes" instead). A structured pending-question
+   * signal already exists for RUNS (`pending_question`), but a persona chat
+   * asking conversationally never sets it.
+   */
+  private async handleReaction(msg: InboundMessage): Promise<boolean> {
+    const r = msg.reaction!;
+    const key = `${msg.channel}:${msg.externalId}:${msg.personaId}`;
+
+    if (r.emoji === STOP_REACTION) {
+      const runId = this.relay?.runForBreadcrumb(r.messageId);
+      if (runId == null) return false; // ordinary ❌ → "/stop", handled below
+      const ask = this.relay!.armCancel(key, runId);
+      await this.channel.send(msg.externalId, ask).catch(() => {});
+      return true;
+    }
+
+    if (r.emoji === YES_REACTION) {
+      const armed = this.relay?.takeArmedCancel(key);
+      if (armed != null) {
+        const line = await this.relay!.confirmCancel(armed);
+        await this.channel.send(msg.externalId, line).catch(() => {});
+        return true;
+      }
+    }
+
+    // 👍/👎 as an answer: only when a question is actually open.
+    if (!(await this.hasOpenQuestion(msg))) return true; // consumed = ignored
+    return false; // fall through: msg.text is already "yes"/"no"
+  }
+
+  /**
+   * Drive a turn the USER did not ask for: a persona conversation with pending
+   * inbox events (`child.result`, `gh.pr.merged`, `timer.fired`) whose narration
+   * is the milestone message the thread is waiting for (design §5 "inbox echo").
+   *
+   * WHY THIS EXISTS AT ALL. The design says the inbox-driven turn "already
+   * works because injection goes through the same append() path". It does not,
+   * quite: append() streams to whoever is holding a draft, and on an
+   * inbox-driven turn nobody is — the pipe only opens a draft when it handles an
+   * inbound message. So the pipe drives the wake ITSELF (rather than letting the
+   * control plane's pump do it) and holds the draft while it runs. Because
+   * wakeServerRun's append() executes IN THIS PROCESS, the run lands in the
+   * local `runners` map and runs.subscribe carries its envelopes here.
+   *
+   * SERIALIZATION: enqueued on the same per-conversation chain as user turns, so
+   * a milestone can't interleave with a message the user just sent — and
+   * wakeServerRun itself takes the server claim, so a wake racing the web
+   * process is a clean no-op rather than a double turn.
+   *
+   * The draft is opened LAZILY, on the first envelope: a wake that turns out to
+   * have nothing to say (the events were already drained) must not leave a
+   * stray "…" in the thread.
+   */
+  async wakeConversation(externalId: string, personaId: string, channel = "discord"): Promise<void> {
+    const key = `${channel}:${externalId}:${personaId}`;
+    const prior = this.queues.get(key) ?? Promise.resolve();
+    const turn = prior.then(() => this.runWakeTurn(externalId, personaId, channel));
+    const settled = turn.catch((err) => console.error("[pipe] wake turn failed:", err));
+    this.queues.set(key, settled);
+    void settled.finally(() => {
+      if (this.queues.get(key) === settled) this.queues.delete(key);
+    });
+    return settled;
+  }
+
+  private async runWakeTurn(externalId: string, personaId: string, channel: string): Promise<void> {
+    const runId = await currentRunId(channel, externalId, personaId);
+    if (runId == null) return;
+    if (runs.isLive(runId)) return;
+    if (!(await hasPendingInboxEvents(runId))) return;
+
+    const builder = new TranscriptBuilder();
+    let draft: Awaited<ReturnType<Channel["openDraft"]>> | undefined;
+    let lastEdit = 0;
+    let pendingEdit: Promise<void> = Promise.resolve();
+
+    const onEvent = (event: unknown) => {
+      const e = event as { type?: string; sdk?: RunEnvelope };
+      if (e.type !== "sdk" || !e.sdk) return;
+      builder.push(e.sdk);
+      const now = Date.now();
+      if (now - lastEdit < this.config.editThrottleMs) return;
+      lastEdit = now;
+      const text = builder.text();
+      if (!text) return;
+      pendingEdit = pendingEdit
+        .then(async () => {
+          draft ??= await this.channel.openDraft(externalId, chunkForDiscord(text)[0]);
+          await draft.update(chunkForDiscord(text)[0]);
+        })
+        .catch(() => {});
+    };
+
+    let settled = false;
+    let unsubscribe: () => void = () => {};
+    const attach = (async () => {
+      const deadline = Date.now() + ATTACH_POLL_TIMEOUT_MS;
+      while (!settled && !runs.isLive(runId) && Date.now() < deadline) await delay(20);
+      if (!settled && runs.isLive(runId)) unsubscribe = runs.subscribe(runId, onEvent);
+    })();
+
+    try {
+      await runs.wakeServerRun(runId);
+    } finally {
+      settled = true;
+      await attach.catch(() => {});
+      unsubscribe();
+    }
+    await pendingEdit;
+
+    const text = builder.text();
+    if (!text) return; // nothing to say — and no empty draft left behind
+    const chunks = chunkForDiscord(text);
+    if (draft) await draft.finalize(chunks[0]);
+    else await this.channel.send(externalId, chunks[0]);
+    for (const extra of chunks.slice(1)) {
+      await this.channel.send(externalId, extra).catch((err) =>
+        console.error("[pipe] milestone overflow send failed:", err)
+      );
+    }
+  }
+
+  /** True when the persona's last word on this conversation was a question. */
+  private async hasOpenQuestion(msg: InboundMessage): Promise<boolean> {
+    const runId = await currentRunId(msg.channel, msg.externalId, msg.personaId);
+    if (runId == null) return false;
+    const text = await runs.lastAgentText(runId);
+    return text != null && text.trimEnd().endsWith("?");
+  }
+
+  /**
    * PRD J1: a 3-line intro on the first-ever DM with this persona — who I am,
    * one example ask, and (only when unlinked) the `/link` nudge sold by its
    * benefit. Sent once per conversation: the `greeted` set covers two messages
@@ -156,6 +338,45 @@ export class AgentLoop {
     await this.channel.send(msg.externalId, lines.join("\n"));
   }
 
+  /**
+   * Long-thread guard (PRD §10). A persona conversation rebuilds its model
+   * context from agent_messages every turn, so an unbounded thread eventually
+   * rebuilds an unbounded prompt. Past the turn cap the persona SAYS SO and the
+   * conversation continues in a fresh run seeded with a carried-over summary
+   * (lib/pipe/carryover.ts — assembled without a model call).
+   *
+   * Announced before the reset, never after: "this thread's getting long, I'll
+   * keep the summary and start fresh here" is information the user needs to
+   * interpret the persona's suddenly shorter memory. Any failure leaves the old
+   * run in place — a too-long conversation still works, so this must never be
+   * the thing that eats a message.
+   */
+  private async guardLongThread(msg: InboundMessage, runId: number): Promise<number> {
+    const cap = appConfig.pipe.turnCap;
+    if (cap <= 0) return runId;
+    try {
+      if ((await agentTurnCount(runId)) < cap) return runId;
+      await this.channel
+        .send(
+          msg.externalId,
+          "This thread's getting long — I'll keep a summary and start fresh from here. " +
+            "Anything you've taught me is remembered."
+        )
+        .catch(() => {});
+      const fresh = await startFreshConversation({
+        channel: msg.channel,
+        externalId: msg.externalId,
+        personaId: msg.personaId,
+        authorId: msg.authorId,
+        model: this.config.defaultModel,
+      });
+      return fresh.runId;
+    } catch (err) {
+      console.error("[pipe] long-thread reset failed; continuing on the old run:", err);
+      return runId;
+    }
+  }
+
   private async runTurn(msg: InboundMessage): Promise<void> {
     // 2. Resolve or create the persona conversation for this thread.
     //
@@ -171,6 +392,7 @@ export class AgentLoop {
         model: this.config.defaultModel,
         authorId: msg.authorId,
       });
+      runId = await this.guardLongThread(msg, runId);
     } catch (err) {
       console.error("[pipe] failed to open the conversation:", err);
       await this.channel
@@ -179,12 +401,38 @@ export class AgentLoop {
       return;
     }
 
+    // 2b. 👀 ack (PRD §6). Fired 5s into the turn — we cannot know in advance
+    // that a reply will be slow, so we start the clock and let it prove itself.
+    // Deliberately minimal: one reaction on the user's own message, removed
+    // when the turn ends, and every failure swallowed. A missing "Add
+    // Reactions" permission must never cost the user their answer.
+    // The threshold is TASK_ORCH_PIPE_ACK_MS (default 5s, PRD §6: "> ~5s"). We
+    // cannot know in advance that a reply will be slow, so we start the clock
+    // and let the turn prove itself.
+    const ackAfterMs = appConfig.pipe.ackAfterMs;
+    let acked = false;
+    const ackTimer = msg.messageId && ackAfterMs > 0
+      ? setTimeout(() => {
+          acked = true;
+          void this.channel
+            .react?.(msg.externalId, msg.messageId!, ACK_REACTION)
+            .catch(() => {});
+        }, ackAfterMs)
+      : undefined;
+    const clearAck = () => {
+      if (ackTimer) clearTimeout(ackTimer);
+      if (acked && msg.messageId) {
+        void this.channel.unreact?.(msg.externalId, msg.messageId, ACK_REACTION).catch(() => {});
+      }
+    };
+
     // 3. Open the streaming draft and run the turn.
     let draft;
     try {
       draft = await this.channel.openDraft(msg.externalId, "…", msg.replyToken);
     } catch (err) {
       console.error("[pipe] failed to open draft:", err);
+      clearAck();
       await this.channel.send(msg.externalId, `⚠️ ${describe(err)}`, msg.replyToken).catch(() => {});
       return;
     }
@@ -312,6 +560,7 @@ export class AgentLoop {
       settled = true;
       await attach.catch(() => {});
       unsubscribe();
+      clearAck();
     }
 
     if (errorText !== null) {

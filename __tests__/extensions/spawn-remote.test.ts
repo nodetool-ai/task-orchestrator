@@ -215,3 +215,48 @@ describe("get_run → lastAgentText reports the LATEST agent text (ORDER BY id)"
     expect(body.last_text).toBe("latest answer");
   });
 });
+
+// ──────────────────────────────────────────────────────────
+// M5: attribution travels onto spawned children
+// ──────────────────────────────────────────────────────────
+//
+// Memory scopes (M3) are resolved from the CHILD's own run row: `user:<user_id>`
+// and `persona:<persona_id>`. So whether a concierge's knowledge reaches the
+// implementor it spawns is decided entirely by what spawn_agent copies onto the
+// new row. The contract, asserted here so it can't silently regress:
+//
+//   • user_id is INHERITED from the spawning run — the child's work is the same
+//     person's work, and the user-scope memories must follow it;
+//   • persona_id is the child's OWN persona (the `persona` argument), NOT the
+//     parent's. That is deliberate: an implementor must read the implementor's
+//     working-style memories, not the concierge's. Persona knowledge is meant to
+//     be per-role; user knowledge is meant to be per-person and cross-role.
+describe("spawn_agent attribution (M5)", () => {
+  it("inherits the spawner's user_id and stamps the child's own persona", async () => {
+    await seedPersonas();
+    const created: any[] = [];
+    vi.spyOn(runs, "create").mockImplementation(async (input: any) => {
+      created.push(input);
+      return { id: 424242, status: "pending", parentRunId: input.parentRunId } as any;
+    });
+    vi.spyOn(runs, "get").mockImplementation(
+      async () => ({ ...CALLER_ROW, personaId: "concierge", userId: 77, repoId: "r1" }) as any
+    );
+
+    const tools = registerTools(CALLER_ROW.id);
+    const res = await tools.get("spawn__spawn_agent")!.execute("c", {
+      goal: "add a dark-mode toggle",
+      persona: "implementor",
+      tools_profile: "orchestrator,repo_write",
+      cwd_strategy: "worktree",
+      task_id: "T-20260731-0012",
+    });
+    expect(res.isError ?? false).toBe(false);
+
+    expect(created).toHaveLength(1);
+    expect(created[0].userId).toBe(77);
+    expect(created[0].personaId).toBe("implementor");
+    expect(created[0].parentRunId).toBe(CALLER_ROW.id);
+    expect(created[0].repoId).toBe("r1"); // repo inherits too
+  });
+});
