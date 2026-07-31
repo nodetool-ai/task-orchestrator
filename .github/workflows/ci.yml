@@ -5,9 +5,12 @@ name: CI
 #
 #   quality (typecheck + full vitest)          ← the gate everything waits on
 #     └─► server / runner deploys              ← push to main + code changed
-#           └─► warm-box-template              ← pre-build the box template for
-#                                                the freshly deployed SHA so no
-#                                                first dispatch waits ~15 min
+#           ├─► warm-box-template              ← pre-build the box template for
+#           │                                    the freshly deployed SHA so no
+#           │                                    first dispatch waits ~15 min
+#           └─► pipe deploy                    ← the Discord bridge, when the
+#                                                deployment has one (skips
+#                                                without FLY_PIPE_API_TOKEN)
 #
 # quality is also the check the GitHub-driven task lifecycle keys off
 # (testing -> passing/failing) and the gate `gh pr merge --auto` waits on.
@@ -93,9 +96,11 @@ jobs:
   #   • server — releases the web/control-plane app (fly.toml)
   #   • runner — rebuilds + pushes the per-run worker image (fly.runner.toml,
   #     registry.fly.io/task-orchestrator-runners:latest). build-only.
+  #   • pipe   — releases the Discord bridge (fly.pipe.toml), when deployed.
   # App-scoped deploy tokens:
   #   fly tokens create deploy -a task-orchestrator          -> FLY_API_TOKEN
   #   fly tokens create deploy -a task-orchestrator-runners  -> FLY_RUNNER_API_TOKEN
+  #   fly tokens create deploy -a task-orchestrator-pipe     -> FLY_PIPE_API_TOKEN
   server:
     name: Deploy server
     runs-on: ubuntu-latest
@@ -108,6 +113,48 @@ jobs:
         run: flyctl deploy --config fly.toml --remote-only --ha=false --build-arg GIT_SHA=${{ github.sha }}
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+  # The Discord bridge (docs/fly-deployment.md §20). Optional: a deployment
+  # without persona bots has no pipe app, so this job is a no-op unless the
+  # FLY_PIPE_API_TOKEN secret exists. That check has to live in a STEP, not in
+  # `if:` — the `secrets` context isn't available to a job-level condition.
+  #
+  # Runs after `server` on purpose. Both processes migrate on boot, but keeping
+  # the order the deploy script uses means the web app owns the schema move and
+  # the bridge comes up behind it; a failed server deploy also holds the bridge
+  # back rather than pointing it at a half-shipped release.
+  #
+  # --ha=false is load-bearing, not a cost knob: Discord permits ONE gateway
+  # session per bot token, so a second Machine makes every bot answer every
+  # message twice. Note the deploy restarts the bridge, which is also how a
+  # Settings → Discord bot change takes effect (it reads bot config at boot).
+  pipe:
+    name: Deploy Discord pipe
+    runs-on: ubuntu-latest
+    needs: [quality, changes, server]
+    if: needs.changes.outputs.code == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - id: guard
+        env:
+          FLY_PIPE_API_TOKEN: ${{ secrets.FLY_PIPE_API_TOKEN }}
+        run: |
+          if [ -z "$FLY_PIPE_API_TOKEN" ]; then
+            echo "FLY_PIPE_API_TOKEN not set — this deployment has no Discord pipe app. Skipping."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+        if: steps.guard.outputs.deploy == 'true'
+      - name: fly deploy (pipe)
+        if: steps.guard.outputs.deploy == 'true'
+        run: |
+          flyctl deploy --config fly.pipe.toml \
+            --app "${{ vars.FLY_PIPE_APP || 'task-orchestrator-pipe' }}" \
+            --remote-only --ha=false --build-arg GIT_SHA=${{ github.sha }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_PIPE_API_TOKEN }}
 
   runner:
     name: Build + push runner image

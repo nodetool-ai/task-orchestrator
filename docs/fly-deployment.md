@@ -813,6 +813,22 @@ no Machine, no cost.
 Everything is idempotent, so a later `FLY_PIPE=1 ./scripts/fly-deploy.sh`
 redeploys the web app *and* the pipe together.
 
+### Continuous deployment
+
+Once the app exists, push-to-main deploys it like the other Fly apps. The
+`pipe` job in `.github/workflows/ci.yml` runs after `quality` **and** after the
+server deploy, and is gated on one repo secret:
+
+| GitHub setting | Kind | Purpose |
+| --- | --- | --- |
+| `FLY_PIPE_API_TOKEN` | Actions **secret** | Deploy token for the pipe app: `fly tokens create deploy -a <app>-pipe`. **Absent ⇒ the job skips**, which is how a deployment with no persona bots opts out. |
+| `FLY_PIPE_APP` | Actions **variable** | App name, if it isn't `task-orchestrator-pipe`. |
+
+Note that every code deploy restarts the bridge — which is also the moment a
+bot added in Settings → Discord takes effect, since config is read at boot.
+Docs-only pushes skip all deploys (the `changes` job), so a README edit won't
+bounce your bots.
+
 ### Configure the bots
 
 Bot tokens live in the `discord_bots` table, not in the Fly config: add each
