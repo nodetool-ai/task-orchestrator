@@ -647,11 +647,19 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     // construction (design §3: persona chats), so the honest answer is a 400 that
     // names the two ways out.
     //
-    // Carve-out: goal '<execute>' with a planId is genuinely self-driving — the
-    // executor branch below fires and takes the turn under withServerClaim, so
-    // that row never sits at 'pending' unattended.
-    const selfDriving = goal === "<execute>" && !!input.planId;
-    if (initialStatus === "pending" && !selfDriving) {
+    // NO carve-out for goal '<execute>' + planId (M2 re-verification, residual 1).
+    // That branch only self-drives in the NON-detached else-branch below, where
+    // create() takes the turn in-process under withServerClaim. Under
+    // detachedRunsEnabled() — forced true on fly/box (lib/config.ts) — the same
+    // branch goes launchDetached → dispatchRun → (server placement) wakeServerRun,
+    // which finds no pending inbox events on a brand-new run and no-ops. The row
+    // is then left at 'pending' on a true-server placement: outside every belt
+    // (listPendingRunIds skips server rows, no lease for reconcile, not 'parked'
+    // for the wake sweep) — exactly the stranded ghost this check exists to
+    // prevent, and undetectable in dev where the in-process branch runs instead.
+    // The Discord persona plan needs only '<chat>' (and defer), so the honest
+    // answer for every pending-producing goal is the same clear 400.
+    if (initialStatus === "pending") {
       throw new repo.RepoError(
         `runtime='server' cannot start goal '${goal}': an in-process run has no worker tier to ` +
           `dispatch a kickoff turn to, and the row would sit at status 'pending' with nothing to ` +
@@ -1150,6 +1158,11 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
   // early-return reject path (run missing / already in flight / terminal) never
   // deletes a runner owned by another worker (runReview/runExecute/followUp).
   let ownsRunner = false;
+  // The server-turn claim THIS append took (residual 2, below), if any. Released
+  // — and its 'preparing' stamp rolled back if the turn never got going — in the
+  // finally, exactly like withServerClaim does for the wake path.
+  let serverScope: string | null = null;
+  let serverPrevStatus: SessionStatus | null = null;
 
   try {
     let run = await get(input.runId);
@@ -1196,6 +1209,41 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
           : `is in terminal status '${run.status}'; cannot resume`;
       yield { type: "error", error: `Run ${input.runId} ${why}.` };
       return;
+    }
+
+    // ── Server-runtime turns take the SAME single-owner claim the wake path
+    // takes (M2 re-verification, residual 2). The guard above is a SNAPSHOT: a
+    // pipe user-message append can read the run as 'idle' with no worker_scope,
+    // pass it, and only then start writing — while in the web process an inbox
+    // wake's claimServerTurn CAS succeeds against that same still-idle row. Both
+    // then drive an in-process postgres turn and interleave agent_messages into
+    // one conversation. Nothing above serializes them: a server row holds no
+    // worker claim of its own, the per-run lock is in-process only, and 'idle' is
+    // not a lease status so isLeaseLive is false for both.
+    //
+    // So: claim BEFORE the first write, with the same CAS on the same columns
+    // (worker_scope 'server-<nonce>' + heartbeat) — whoever wins drives, and the
+    // loser gets today's "already in flight" rejection VERBATIM, from before any
+    // mutation (no persisted user row, no status change), which is the contract
+    // lib/pipe/agent-loop.ts already handles: an `error` frame finalizes the draft
+    // with "⚠️ …" and the per-conversation queue moves on to the next message
+    // instead of wedging.
+    //
+    // Skipped for `takeover` (wakeServerRun / a dispatched worker already HOLDS
+    // the claim it made for this call — re-claiming would deadlock against
+    // ourselves) and for every worker-runtime / demoted-legacy row, which reach
+    // this line on exactly the path they did before.
+    if (isServerRuntimeRun(run) && input.takeover !== true) {
+      const claim = await claimServerTurn(input.runId, { takeoverStale: true });
+      if (!claim.claimed) {
+        yield {
+          type: "error",
+          error: `Run ${input.runId} is already in flight (status=${run.status}).`,
+        };
+        return;
+      }
+      serverScope = claim.scope;
+      serverPrevStatus = claim.previousStatus;
     }
 
     // persistUser===false: the server already inserted this user message (to fire
@@ -1540,6 +1588,27 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // but only if THIS append created it. Leaving it set would make the guard
     // above reject the next message with a false "already in flight".
     if (ownsRunner) runners.delete(input.runId);
+    // Release the server-turn claim this append took, on every exit path
+    // (success, error, abort, or a consumer abandoning the generator) — the same
+    // finally-release discipline withServerClaim applies to the wake path. The
+    // restore is guarded on (still 'preparing' AND still our scope), so it only
+    // fires when the turn never advanced past the claim; a landed turn's status
+    // is left exactly as it wrote it. Best-effort: a DB blip here must not mask
+    // the turn's own outcome (the stale-heartbeat takeover above, and reconcile,
+    // both recover a scope that failed to release).
+    if (serverScope) {
+      const scope = serverScope;
+      try {
+        await restoreClaimedStatus(input.runId, scope, serverPrevStatus);
+      } catch {
+        // fall through to the release
+      }
+      try {
+        await releaseServerTurn(input.runId, scope);
+      } catch {
+        // reconcile / the stale-claim takeover recover this
+      }
+    }
     release();
     lock.busy = null;
     // Make eslint happy about unused binder; actually exposed above as fallback.
@@ -2986,14 +3055,33 @@ function serverTurnNonce(): string {
  * sweep retries anything it missed).
  */
 export async function claimServerTurn(
-  runId: number
+  runId: number,
+  opts: { takeoverStale?: boolean } = {}
 ): Promise<{ claimed: boolean; scope: string; previousStatus: SessionStatus | null }> {
   const scope = serverTurnNonce();
+  // WHO MAY TAKE THE CLAIM. Default: an unowned run only (worker_scope IS NULL),
+  // byte-identical to dispatchRun's worker claim — a wake that loses is a clean
+  // no-op, so waiting for the owner is always correct there.
+  //
+  // takeoverStale (append's path only): a run whose claim-holder's heartbeat has
+  // gone stale is an ORPHAN, and append has always taken those over — its
+  // in-flight guard deliberately falls through on a stale lease so a crashed
+  // web/pipe process can't wedge a conversation until the reaper runs. Without
+  // this, adding the claim to append would REMOVE that recovery (worker_scope
+  // survives a process death; nothing clears it for a server row until
+  // reconcileOrphanedRuns). Same stale window as every other liveness decision.
+  const claimable = opts.takeoverStale
+    ? or(
+        isNull(agentSessions.workerScope),
+        isNull(agentSessions.heartbeatAt),
+        lt(agentSessions.heartbeatAt, new Date(Date.now() - HEARTBEAT_STALE_MS))
+      )!
+    : isNull(agentSessions.workerScope);
   const prior = (
     await db
       .select({ status: agentSessions.status })
       .from(agentSessions)
-      .where(and(eq(agentSessions.id, runId), isNull(agentSessions.workerScope)))
+      .where(and(eq(agentSessions.id, runId), claimable))
       .limit(1)
   )[0];
   if (!prior || HARD_TERMINAL_STATUSES.includes(prior.status as SessionStatus)) {
@@ -3005,7 +3093,7 @@ export async function claimServerTurn(
     .where(
       and(
         eq(agentSessions.id, runId),
-        isNull(agentSessions.workerScope),
+        claimable,
         eq(agentSessions.status, prior.status),
         notInArray(agentSessions.status, HARD_TERMINAL_STATUSES)
       )
@@ -3032,30 +3120,56 @@ export async function releaseServerTurn(runId: number, scope: string): Promise<v
     .where(and(eq(agentSessions.id, runId), eq(agentSessions.workerScope, scope)));
 }
 
+/**
+ * Undo claimServerTurn's `status='preparing'` stamp when the claim ends WITHOUT
+ * the turn having written any lifecycle state of its own — a throw before the
+ * drive got going, or a drive that declined to take a turn after all. Guarded on
+ * (still 'preparing') AND (still our scope), so it is a no-op the moment the turn
+ * advanced the row (running/idle/parked/…) or a false-death reaper handed the run
+ * to someone else. Without it, a declining claimant would release the scope and
+ * leave the row stuck at 'preparing' with nothing driving it.
+ */
+async function restoreClaimedStatus(
+  runId: number,
+  scope: string,
+  previousStatus: SessionStatus | null
+): Promise<void> {
+  if (!previousStatus) return;
+  await db
+    .update(agentSessions)
+    .set({ status: previousStatus })
+    .where(
+      and(
+        eq(agentSessions.id, runId),
+        eq(agentSessions.status, "preparing"),
+        eq(agentSessions.workerScope, scope)
+      )
+    );
+}
+
 /** Claim → drive one in-process turn → release (in finally). A lost claim race
  *  is a clean no-op (drive is skipped). Shared by create()'s in-process launch
- *  and dispatchRun's server-resume front door. */
-export async function withServerClaim(runId: number, drive: () => Promise<void>): Promise<void> {
+ *  and dispatchRun's server-resume front door.
+ *
+ *  `drive` may return `false` to mean "claim won, but on a second look there is
+ *  nothing to do" — the status stamped by the claim is then rolled back along
+ *  with the release, so declining costs the run nothing (see wakeServerRun's
+ *  post-claim re-check). Any other return value means the drive owned the turn
+ *  and wrote its own landing. */
+export async function withServerClaim(
+  runId: number,
+  drive: () => Promise<void | boolean>
+): Promise<void> {
   const { claimed, scope, previousStatus } = await claimServerTurn(runId);
   if (!claimed) return;
   try {
-    await drive();
+    const drove = await drive();
+    if (drove === false) await restoreClaimedStatus(runId, scope, previousStatus);
   } catch (err) {
     // A pre-drive read can fail before the turn writes its own lifecycle state.
     // Restore the state claimed from only while this exact claim still owns a
     // preparing row, before releasing the scope to any subsequent claimant.
-    if (previousStatus) {
-      await db
-        .update(agentSessions)
-        .set({ status: previousStatus })
-        .where(
-          and(
-            eq(agentSessions.id, runId),
-            eq(agentSessions.status, "preparing"),
-            eq(agentSessions.workerScope, scope)
-          )
-        );
-    }
+    await restoreClaimedStatus(runId, scope, previousStatus);
     throw err;
   } finally {
     await releaseServerTurn(runId, scope);
@@ -3251,11 +3365,21 @@ export async function wakeServerRun(runId: number): Promise<void> {
   if (!run || !isServerRuntimeRun(run)) return;
   if (isLive(runId) || isLeaseLive(run)) return;
   if (isTerminalStatus(run.status) && run.status !== "idle" && !isResumableRun(run)) return;
-  // (b): no pending events ⇒ the wake was already serviced by a racing driver.
+  // (b), cheap pre-check: no pending events ⇒ the wake was already serviced by a
+  // racing driver. Advisory only — it saves a claim round-trip in the common
+  // case; the AUTHORITATIVE check is the re-check below, inside the claim.
   if (!(await hasPendingInboxEvents(runId))) return;
   // (a): single-owner CAS. A lost race is a clean no-op — the winner's turn
   // drains the same pending events through its digest claim.
   await withServerClaim(runId, async () => {
+    // (b) again, now that we hold the claim. The pre-check above is a snapshot:
+    // a user turn or sibling wake could have claimed the digest in the window
+    // between it and our CAS, in which case driving now would burn a whole model
+    // turn on the bare SERVER_WAKE_PROMPT with no events attached — the exact
+    // waste gate (b) exists to prevent. Returning false rolls the claim's
+    // 'preparing' stamp back and releases the scope, so the run is left exactly
+    // as we found it.
+    if (!(await hasPendingInboxEvents(runId))) return false;
     for await (const ev of append({
       runId,
       role: "system",

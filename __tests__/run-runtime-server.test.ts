@@ -21,8 +21,18 @@ import { agentMessages, agentSessions } from "../db/schema";
 import * as backend from "../lib/agent-backend";
 import * as dispatch from "../lib/run-dispatch";
 import { __resetDemotionWarnings, isServerRuntimeRun } from "../lib/run-runtime";
+import * as inbox from "../lib/inbox";
 import { emitInboxEvent, hasPendingInboxEvents } from "../lib/inbox";
-import { create, get, listPendingRunIds, reconcileOrphanedRuns, sendMessageToRun, wakeServerRun } from "../lib/runs";
+import * as repo from "../lib/repo";
+import {
+  append,
+  create,
+  get,
+  listPendingRunIds,
+  reconcileOrphanedRuns,
+  sendMessageToRun,
+  wakeServerRun,
+} from "../lib/runs";
 
 const ENV_KEYS = [
   "TASK_ORCH_DETACHED_RUNS",
@@ -149,6 +159,36 @@ describe("runs.create() placement", () => {
     // defer:true is the documented way out — the row lands 'idle' and waits for
     // its first message.
     const deferred = await create({ ...SERVER_CHAT, goal: "<implement>", defer: true });
+    expect(deferred.status).toBe("idle");
+    expect(deferred.runtime).toBe("server");
+  });
+
+  it("rejects a server-runtime plan executor too — it does NOT self-drive when detached", async () => {
+    // There used to be a carve-out here for goal '<execute>' + planId, on the
+    // theory that create()'s executor branch takes the turn itself. It only does
+    // so in the NON-detached branch: with TASK_ORCH_DETACHED_RUNS on (forced on
+    // fly/box) the same branch goes launchDetached → dispatchRun → wakeServerRun,
+    // which finds no pending inbox events on a fresh run and no-ops — leaving a
+    // true-server row at 'pending' outside every belt. Same 400 as any other
+    // pending-producing goal now.
+    const plan = await repo.createPlan({ title: "Server Executor", date: "2026-07-31" });
+    await expect(
+      create({ ...SERVER_CHAT, goal: "<execute>", planId: plan.id })
+    ).rejects.toThrow(/pending/);
+
+    process.env.TASK_ORCH_DETACHED_RUNS = "1";
+    await expect(
+      create({ ...SERVER_CHAT, goal: "<execute>", planId: plan.id })
+    ).rejects.toThrow(/pending/);
+
+    // No ghost row was inserted for either attempt.
+    expect(
+      await db.select().from(agentSessions).where(eq(agentSessions.planId, plan.id))
+    ).toHaveLength(0);
+
+    // defer:true remains the way to make one: it lands 'idle' and waits for a
+    // message, which the server tier can actually drive.
+    const deferred = await create({ ...SERVER_CHAT, goal: "<execute>", planId: plan.id, defer: true });
     expect(deferred.status).toBe("idle");
     expect(deferred.runtime).toBe("server");
   });
@@ -439,6 +479,42 @@ describe("wakeServerRun is single-owner and event-driven", () => {
     expect(await hasPendingInboxEvents(run.id)).toBe(true);
   });
 
+  it("releases the claim without a turn when the events go away after the pre-check", async () => {
+    // Residual 3: the pending-events check used to run ONLY before the claim, so
+    // a driver that claimed the digest in the window between that snapshot and
+    // our CAS left this wake to burn a whole model turn on the bare wake prompt
+    // with nothing attached. Simulate exactly that window: pending on the
+    // pre-check, empty by the time we hold the claim.
+    const seen = stubBackend();
+    const run = await create(SERVER_CHAT);
+    await emitInboxEvent({
+      targetRunId: run.id,
+      type: "child.result",
+      sourceKind: "run",
+      sourceId: String(run.id),
+      payload: { summary: "child finished" },
+    });
+
+    let calls = 0;
+    const spy = vi
+      .spyOn(inbox, "hasPendingInboxEvents")
+      .mockImplementation(async () => ++calls === 1);
+
+    await wakeServerRun(run.id);
+    spy.mockRestore();
+
+    // Both gates ran (pre-check + post-claim re-check) and no turn was taken.
+    expect(calls).toBe(2);
+    expect(seen).toHaveLength(0);
+    expect(await agentTexts(run.id)).toHaveLength(0);
+    // The claim was released AND its 'preparing' stamp rolled back — the row is
+    // exactly as we found it, so the real event is still there for its real owner.
+    const after = await get(run.id);
+    expect(after!.workerScope).toBeNull();
+    expect(after!.status).toBe("idle");
+    expect(await hasPendingInboxEvents(run.id)).toBe(true);
+  });
+
   it("lets exactly ONE of two concurrent wakes drive a turn (server-turn CAS)", async () => {
     // Both wakes pass the isLive/isLeaseLive snapshot before either commits a
     // status — the race finding 2a describes. The claimServerTurn CAS (the same
@@ -480,6 +556,98 @@ describe("wakeServerRun is single-owner and event-driven", () => {
     expect(await agentTexts(run.id)).toHaveLength(1);
     // Claim released in a finally, so the next user message is not starved.
     expect((await get(run.id))!.workerScope).toBeNull();
+  });
+});
+
+describe("a server-runtime append takes the same single-owner claim", () => {
+  it("rejects a user append while another process holds the run's claim", async () => {
+    // The cross-process half of residual 2: the row is 'idle' (not a lease
+    // status, so isLeaseLive is false) and there is no in-process runner, so
+    // append's snapshot guard passes — only the claim CAS stops this second turn.
+    const seen = stubBackend();
+    const run = await create(SERVER_CHAT);
+    await db
+      .update(agentSessions)
+      .set({ workerScope: "server-someone-else", heartbeatAt: new Date() })
+      .where(eq(agentSessions.id, run.id));
+
+    const events: any[] = [];
+    for await (const ev of append({ runId: run.id, role: "user", text: "hi" })) events.push(ev);
+
+    // Today's "already in flight" contract, verbatim: an error frame and nothing
+    // else. lib/pipe/agent-loop.ts finalizes the draft with it and the
+    // per-conversation queue moves on — no half-written turn to unwind.
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe("error");
+    expect(events[0].error).toMatch(/already in flight/);
+    expect(seen).toHaveLength(0);
+    // No user row persisted, no status change, and the other owner's claim intact.
+    expect(await db.select().from(agentMessages).where(eq(agentMessages.runId, run.id))).toHaveLength(0);
+    const after = await get(run.id);
+    expect(after!.status).toBe("idle");
+    expect(after!.workerScope).toBe("server-someone-else");
+  });
+
+  it("still takes over a STALE claim (a crashed process must not wedge the chat)", async () => {
+    const seen = stubBackend();
+    const run = await create(SERVER_CHAT);
+    await db
+      .update(agentSessions)
+      .set({ workerScope: "server-dead-process", heartbeatAt: new Date(Date.now() - 30 * 60_000) })
+      .where(eq(agentSessions.id, run.id));
+
+    for await (const ev of append({ runId: run.id, role: "user", text: "hi" })) void ev;
+
+    expect(seen).toHaveLength(1);
+    const after = await get(run.id);
+    expect(after!.status).toBe("idle");
+    // Our claim was released in the finally; the dead owner's scope is gone.
+    expect(after!.workerScope).toBeNull();
+  });
+
+  it("lets exactly ONE of a user append and a concurrent wake drive a turn", async () => {
+    // The full residual-2 race: a pipe user message and a web-process inbox wake
+    // both pass their snapshot gates on an 'idle', unclaimed server row. Whoever
+    // wins the claim drives; the loser rejects/no-ops. Either order is fine — what
+    // must never happen is two turns interleaving into agent_messages.
+    let releaseTurn!: () => void;
+    const turnStarted: number[] = [];
+    const gate = new Promise<void>((res) => { releaseTurn = res; });
+    vi.spyOn(backend, "getBackend").mockResolvedValue({
+      id: "pi",
+      async runTurn(args: any) {
+        turnStarted.push(Date.now());
+        await gate;
+        args.onEvent({ type: "assistant", message: { content: [{ type: "text", text: "ok" }] } });
+        args.onEvent({ type: "result", is_error: false, result: "ok", usage: {} });
+        return { summary: "ok", resumeToken: null, turns: 1, inputTokens: 1, outputTokens: 1, totalCostUsd: 0 };
+      },
+    } as any);
+
+    // 'idle', so emitInboxEvent's own emit-time wake (parked rows only) stays out
+    // of it and the two drivers below are the whole race.
+    const run = await create(SERVER_CHAT);
+    await emitInboxEvent({
+      targetRunId: run.id,
+      type: "child.result",
+      sourceKind: "run",
+      sourceId: String(run.id),
+      payload: { summary: "child finished" },
+    });
+
+    const drain = async () => {
+      for await (const ev of append({ runId: run.id, role: "user", text: "hi" })) void ev;
+    };
+    const both = Promise.all([drain(), wakeServerRun(run.id)]);
+    await vi.waitFor(() => expect(turnStarted.length).toBeGreaterThan(0));
+    releaseTurn();
+    await both;
+
+    expect(turnStarted).toHaveLength(1);
+    expect(await agentTexts(run.id)).toHaveLength(1);
+    const after = await get(run.id);
+    expect(after!.workerScope).toBeNull();
+    expect(after!.status).toBe("idle");
   });
 });
 

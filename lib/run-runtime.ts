@@ -29,11 +29,19 @@
 import { serverUnsafeProfiles } from "./profiles";
 
 /** The columns the placement decision reads. Structural so it accepts a RunRow,
- *  a partial `db.select()` projection, and a dispatch-side snapshot alike. */
+ *  a partial `db.select()` projection, and a dispatch-side snapshot alike.
+ *
+ *  toolsProfile is REQUIRED (nullable, not optional) on purpose: the whole point
+ *  of this predicate is that placement and tool surface must AGREE, and an
+ *  optional field lets a future projection quietly omit the column — at which
+ *  point `serverUnsafeProfiles(undefined ?? "")` finds nothing unsafe and a
+ *  legacy repo_write row typechecks its way into the in-process, no-sandbox
+ *  path. Making it required turns that mistake into a compile error; a caller
+ *  that genuinely has no profile must say `toolsProfile: null` deliberately. */
 export interface RunPlacementRow {
   id: number;
   runtime: string;
-  toolsProfile?: string | null;
+  toolsProfile: string | null;
 }
 
 /** Runs already warned about, so a demoted legacy row logs once per process
