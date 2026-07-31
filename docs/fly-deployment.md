@@ -28,7 +28,8 @@ and no single box to size for peak concurrency.
 - [17. Troubleshooting](#17-troubleshooting)
 - [18. Upgrading & redeploying](#18-upgrading--redeploying)
 - [19. Teardown](#19-teardown)
-- [20. FAQ](#20-faq)
+- [20. The Discord pipe (persona bots)](#20-the-discord-pipe-persona-bots)
+- [21. FAQ](#21-faq)
 
 ---
 
@@ -84,15 +85,16 @@ command.
 > **[worker-websocket-protocol.md](./worker-websocket-protocol.md)** for the
 > protocol.
 
-### The three apps
+### The apps
 
 | App | Role | Machines | Image |
 | --- | --- | --- | --- |
 | `task-orchestrator` | **Control plane.** Serves the dashboard/API, owns the DB schema (migrates on boot), and drives run scheduling + lifecycle. | 1, always on | `Dockerfile.server` |
 | `task-orchestrator-runners` | **Runner pool.** Its registry holds the runner image; it hosts one Machine + Volume per agent run. | 0..N, ephemeral | `Dockerfile.fly-runner` |
 | `task-orchestrator-db` | **Database.** Postgres over the org's private network. | 1 (or an HA cluster) | Fly Postgres |
+| `task-orchestrator-pipe` | **Discord bridge** (optional, `FLY_PIPE=1`). Runs the persona bots: one gateway connection per bot, the progress relay, and the wake pump. See [§20](#20-the-discord-pipe-persona-bots). | 1, always on | `Dockerfile.server` |
 
-All three live in one Fly organization and talk over Fly's private **6PN**
+They all live in one Fly organization and talk over Fly's private **6PN**
 network (`.flycast`/`.internal`), so the database is never exposed to the public
 internet — only the web app's `http_service` is.
 
@@ -206,6 +208,9 @@ values have defaults; credentials are prompted for interactively if unset.
 | `CLAUDE_CODE_OAUTH_TOKEN` | *(prompted)* | claude.ai subscription token from `claude setup-token`. |
 | `GITHUB_WEBHOOK_SECRET` | *(unset)* | If set, staged so the webhook endpoint verifies signatures. |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | *(unset)* | If both set, the script creates this first dashboard login over SSH. |
+| `FLY_PIPE` | `0` | Set to `1` to also deploy the Discord bridge ([§20](#20-the-discord-pipe-persona-bots)). |
+| `FLY_PIPE_APP` | `${FLY_APP}-pipe` | Discord bridge app name. Setting it implies `FLY_PIPE=1`. |
+| `DISCORD_BOT_TOKEN` / `DISCORD_ALLOWED_USERS` / … | *(unset)* | Legacy env-configured bots, staged on the pipe app when set. The supported path is Settings → Discord. |
 
 ### 5.2 Runtime secrets (staged on the web app)
 
@@ -268,12 +273,13 @@ Full descriptions are in `.env.docker.example`.
 
 ## 6. What the deploy script does
 
-`scripts/fly-deploy.sh` runs six idempotent stages. Understanding them makes
-troubleshooting and manual operation straightforward.
+`scripts/fly-deploy.sh` runs six idempotent stages — seven with `FLY_PIPE=1`.
+Understanding them makes troubleshooting and manual operation straightforward.
 
 1. **Preflight** — resolves `fly`/`flyctl`, confirms you're logged in, prints the
-   plan, and syncs `primary_region` in `fly.toml` / `fly.runner.toml` to
-   `FLY_REGION`. Prompts for any missing `GH_TOKEN` / Claude credential.
+   plan, and syncs `primary_region` in `fly.toml` / `fly.runner.toml` /
+   `fly.pipe.toml` to `FLY_REGION`. Prompts for any missing `GH_TOKEN` / Claude
+   credential.
 2. **Apps** — `fly apps create` for the web and runner apps (skips existing ones).
 3. **Database** — if `DATABASE_URL` is set it's staged as a secret; otherwise the
    script runs `fly postgres create` (single node, `shared-cpu-1x`, 10 GB) and
@@ -288,8 +294,10 @@ troubleshooting and manual operation straightforward.
 5. **Secrets** — mints an app-scoped `FLY_API_TOKEN` for the runner app
    (`fly tokens create deploy`) and stages every secret from §5.2 on the web app.
 6. **Server deploy** — `fly deploy --config fly.toml`; migrations apply on boot.
-   If `ADMIN_EMAIL` + `ADMIN_PASSWORD` are set, it creates that login over
-   `fly ssh console`.
+7. **Pipe deploy** *(only with `FLY_PIPE=1`)* — `fly deploy --config
+   fly.pipe.toml --ha=false` for the Discord bridge, after the server so the
+   schema is already migrated. Finally, if `ADMIN_EMAIL` + `ADMIN_PASSWORD` are
+   set, the script creates that login over `fly ssh console`.
 
 Because every stage is a no-op when its resource already exists, re-running the
 script is a safe redeploy.
@@ -772,6 +780,7 @@ fly machine list -a my-orch-runners
 fly volume  list -a my-orch-runners
 
 fly apps destroy my-orch-runners --yes
+fly apps destroy my-orch-pipe     --yes     # only if you deployed the Discord bridge
 fly apps destroy my-orch-db       --yes     # deletes all data
 fly apps destroy my-orch          --yes
 ```
@@ -781,7 +790,96 @@ the web Machine) and let the lifecycle policy clean up idle runners.
 
 ---
 
-## 20. FAQ
+## 20. The Discord pipe (persona bots)
+
+The channel bridge (`npm run pipe`) is **optional and opt-in**: it runs the
+persona bots described in the [README](../README.md#persona-bots-on-discord).
+On Fly it is a **fourth app** (`fly.pipe.toml`), built from the same
+`Dockerfile.server` image as the web app and pointed at the same database.
+
+### Deploy it
+
+```bash
+FLY_PIPE=1 ./scripts/fly-deploy.sh              # adds the pipe app to a deploy
+FLY_PIPE_APP=my-bots ./scripts/fly-deploy.sh    # …with a custom name (implies FLY_PIPE=1)
+```
+
+The script creates `${FLY_APP}-pipe`, attaches it to the **same** Postgres
+database with its own role, stages its secrets (its own runner
+`FLY_API_TOKEN`, the model/GitHub credentials, `TASK_ORCH_PUBLIC_URL`), and
+deploys it with `--ha=false`. Without `FLY_PIPE=1` nothing changes — no app,
+no Machine, no cost.
+
+Everything is idempotent, so a later `FLY_PIPE=1 ./scripts/fly-deploy.sh`
+redeploys the web app *and* the pipe together.
+
+### Configure the bots
+
+Bot tokens live in the `discord_bots` table, not in the Fly config: add each
+persona bot from **Settings → Discord** on the deployed dashboard (the wizard
+verifies the token server-side and generates the invite URL). Then restart the
+bridge so it picks them up:
+
+```bash
+fly machine restart -a my-orch-pipe
+```
+
+**The bridge reads its bot config once, at boot** — there is no live-reload
+channel between the dashboard and the pipe process, so every change in
+Settings → Discord needs a restart or redeploy. If no bot is configured yet, or
+every configured bot fails validation, the pipe **exits on purpose** with the
+reason in `fly logs -a my-orch-pipe`; the Machine retries ten times and then
+stops. Configure a bot, restart, and it comes up.
+
+The legacy `DISCORD_BOT_TOKEN` / `DISCORD_ALLOWED_USERS` env path still works
+and is staged by the deploy script when those variables are set in your deploy
+environment.
+
+### Why a separate app
+
+- **One gateway session per bot token.** Two live processes on one token means
+  every Discord message is answered twice. A dedicated single-Machine app keeps
+  that constraint local: the web app's rolling deploys (which briefly overlap
+  two Machines) can't cause it, and pipe deploys don't restart the dashboard.
+- **Persona turns execute in-process.** A Discord conversation is an
+  `agent_runs` row with `runtime = 'server'`, so its turns run inside the pipe
+  Machine's memory and CPU rather than competing with Next SSR.
+
+### Operating it
+
+| | |
+| --- | --- |
+| Logs | `fly logs -a my-orch-pipe` |
+| Restart (after a Settings change) | `fly machine restart -a my-orch-pipe` |
+| Stop the bots without destroying anything | `fly scale count 0 -a my-orch-pipe` |
+| Liveness | `task_orch_pipe_stale_pending_events` on the **web** app's `/api/metrics` |
+
+The pipe exposes no HTTP surface, so Fly can't health-check it. The liveness
+signal is that DB-derived gauge on the web app: it counts persona inbox events
+that have been pending for more than ~10 minutes, which is exactly what a dead
+bridge produces. Alert on anything above 0. Nothing is lost while it's down —
+events are durable and drain when it returns — but threads stay silent.
+
+### Runner interaction
+
+The pipe dispatches the child worker runs its personas spawn, using its own
+`FLY_API_TOKEN` against the same runner app. One caveat: `TASK_ORCH_MAX_MACHINES`
+is enforced per process (`lib/run-dispatch.ts` serializes admission in-process
+on the assumption of a single dispatcher), so with the pipe deployed the
+effective ceiling is that cap per dispatching process, not globally. Size it
+with that in mind, or watch `fly machine list -a my-orch-runners`.
+
+### Teardown
+
+```bash
+fly apps destroy my-orch-pipe --yes
+```
+
+The bots go offline; all conversation history stays in Postgres.
+
+---
+
+## 21. FAQ
 
 **Can the server and runners be the same app?**
 Not recommended. Keeping them separate lets `fly deploy` manage the web Machine
@@ -806,10 +904,9 @@ In Postgres (attachments as `bytea`, capped at 25 MiB each), so they survive
 runner destruction and web redeploys.
 
 **Is the Discord pipe supported on Fly?**
-The core deploy covers the web server, runners, and database. The optional
-Discord `pipe` service can be run as a separate Fly app from the same
-`Dockerfile.server` image with `command = ["npm", "run", "pipe"]` and the
-`DISCORD_*` secrets; it isn't part of the one-command script.
+Yes — as an opt-in fourth app. Run `FLY_PIPE=1 ./scripts/fly-deploy.sh` and see
+[§20](#20-the-discord-pipe-persona-bots). Bot tokens are configured in
+Settings → Discord rather than in the Fly config.
 
 ---
 

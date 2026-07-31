@@ -552,7 +552,16 @@ it". Everything else is just conversation.
 *defers* wakes for mapped persona conversations to this process: their milestone
 turns have to run where the Discord draft is. Inbox events for those runs are
 durable and simply queue while the pipe is down — nothing is lost, but nothing is
-narrated either. Run it as a supervised service, not by hand.
+narrated either. Run it as a supervised service, not by hand:
+
+| Deployment | How the pipe runs |
+| --- | --- |
+| Docker Compose | The `pipe` service in `docker-compose.yml` (`restart: unless-stopped`), brought up by `./deploy.sh` — it starts with the Docker daemon, so it survives a host reboot. |
+| Bare metal | `./scripts/install-pipe-service.sh` installs a **user** systemd unit. It only survives a reboot with lingering on: `sudo loginctl enable-linger $USER`. |
+| Fly.io | An opt-in fourth app: `FLY_PIPE=1 ./scripts/fly-deploy.sh` (`fly.pipe.toml`). See [docs/fly-deployment.md §20](docs/fly-deployment.md#20-the-discord-pipe-persona-bots). |
+
+Whichever it is, one process per bot token — Discord permits a single gateway
+session per token, and a second one makes every message get answered twice.
 
 **Health signal.** Pending inbox events on a mapped conversation that are more
 than ~10 minutes old mean the pipe is not draining them — i.e. it is down or
