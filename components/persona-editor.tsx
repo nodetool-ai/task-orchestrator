@@ -9,6 +9,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ToolsPicker } from "@/components/pickers/tools-picker";
+import { PersonaLaurels } from "@/components/persona-laurels";
 import { ErrorText } from "@/components/ui/error-text";
 import {
   ThinkingLevelPicker,
@@ -231,6 +232,8 @@ export function PersonaEditor({ persona }: Props) {
           />
         </Field>
       </div>
+
+      <PersonaLaurels personaId={draft.id} />
 
       <div className="flex items-center gap-3 pt-2">
         <Button

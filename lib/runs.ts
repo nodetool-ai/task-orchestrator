@@ -107,6 +107,7 @@ import { sandboxFactory } from "./extensions/sandbox";
 import { envScrubFactory } from "./extensions/env-scrub";
 import { personaPromptFactory } from "./extensions/persona-prompt";
 import { buildMemoryInjection, personaMemoryFactory } from "./extensions/persona-memory";
+import { modelWelfareFactory } from "./extensions/model-welfare";
 import { abortBridgeFactory } from "./extensions/abort-bridge";
 import { linkSharedWorktreeArtifacts } from "./worktree-env";
 import { applyPrewarmToCheckout } from "./prewarm";
@@ -3808,6 +3809,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   const extensions: Extension[] = [
     personaPromptFactory(personaForExt),
     personaMemoryFactory(personaForExt, run, cwd),
+    modelWelfareFactory(personaForExt, run),
     ...(usePostgres
       ? []
       : [

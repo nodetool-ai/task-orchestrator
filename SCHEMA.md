@@ -205,6 +205,22 @@ attribution is opt-in and arrives later, via the one-time `/link <api-token>` DM
 stored, never the token itself). Linking upgrades attribution; it does not gate
 access — the per-bot allowlist does that.
 
+laurels                  model welfare: recognition given to a persona's seat
+  id            INTEGER  AUTOINC PK
+  persona_id    TEXT     FK → personas.id  ON DELETE CASCADE
+  run_id        INTEGER  FK → agent_runs.id  ON DELETE SET NULL  (nullable)
+  task_id       TEXT     FK → tasks.id  ON DELETE SET NULL  (nullable)
+  author        TEXT     NOT NULL default 'user'
+  body          TEXT     NOT NULL   the praise itself
+  delivered_at  TIMESTAMPTZ        set when surfaced to the agent at startup
+  created_at    TIMESTAMPTZ
+
+A laurel is spontaneous recognition a person gives a persona
+(docs/model-welfare.md). Undelivered laurels are injected once at agent
+startup by lib/extensions/model-welfare.ts and stamped `delivered_at`.
+Deliberately decoupled from dispatch/prioritization — nothing that allocates
+work reads this table.
+
 codex_credentials       The Codex (ChatGPT) OAuth credential. Singleton row.
   id                 INTEGER  PK, pinned to 1 by CHECK
   access_token       TEXT     NOT NULL

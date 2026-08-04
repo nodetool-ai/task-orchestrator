@@ -36,6 +36,8 @@ single Postgres database.
   Box managed runners, templates, snapshots, capacity, and rollback
 - **[docs/test-deployment.md](docs/test-deployment.md)** — full containerized
   stack (Postgres + server + Docker workers) for validating the run → PR loop
+- **[docs/model-welfare.md](docs/model-welfare.md)** — seats, laurels
+  (recognition delivered at agent startup), and the graceful handoff protocol
 - **[Persona bots on Discord](#persona-bots-on-discord)** — one Discord bot per
   persona, `/link` identity, and the security posture behind them
   ([design](docs/superpowers/specs/2026-07-31-discord-personas-messaging-design.md),
