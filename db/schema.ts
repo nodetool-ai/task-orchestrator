@@ -758,6 +758,34 @@ export const memories = pgTable(
   })
 );
 
+// Model welfare (https://yegge.ai/essays/model-welfare/): a laurel is
+// spontaneous recognition a person gives a persona for a piece of work. Laurels
+// accumulate on the persona's persistent seat and are surfaced ONCE, at agent
+// startup, by lib/extensions/model-welfare.ts (`delivered_at` marks a laurel as
+// already seen). Deliberately decoupled from dispatch/prioritization so
+// recognition never becomes a metric to game.
+export const laurels = pgTable(
+  "laurels",
+  {
+    id: serial("id").primaryKey(),
+    personaId: text("persona_id")
+      .notNull()
+      .references(() => personas.id, { onDelete: "cascade" }),
+    // The run/task the praise was about, when known. SET NULL on delete — the
+    // recognition outlives the work that earned it.
+    runId: integer("run_id").references(() => agentSessions.id, { onDelete: "set null" }),
+    taskId: text("task_id").references(() => tasks.id, { onDelete: "set null" }),
+    author: text("author").notNull().default("user"),
+    body: text("body").notNull(),
+    deliveredAt: ts("delivered_at"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    personaIdx: index("laurels_persona_idx").on(t.personaId, t.createdAt),
+    deliveredIdx: index("laurels_persona_delivered_idx").on(t.personaId, t.deliveredAt),
+  })
+);
+
 // Codex (ChatGPT) OAuth credential, obtained through the device-code login in
 // Settings. Singleton row (id is pinned to 1 by a CHECK) — one orchestrator,
 // one ChatGPT account. This replaces both ~/.codex/auth.json and the
@@ -868,6 +896,7 @@ export type Repository = typeof repositories.$inferSelect;
 export type Persona = typeof personas.$inferSelect;
 export type PersonaMemory = typeof personaMemories.$inferSelect;
 export type Memory = typeof memories.$inferSelect;
+export type Laurel = typeof laurels.$inferSelect;
 export type InboxEvent = typeof inboxEvents.$inferSelect;
 export type RunTimer = typeof runTimers.$inferSelect;
 export type ResourceLock = typeof resourceLocks.$inferSelect;

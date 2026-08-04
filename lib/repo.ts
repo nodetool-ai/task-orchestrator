@@ -7,6 +7,7 @@ import {
   channelIdentities,
   channelThreads,
   discordBots,
+  laurels,
   memories,
   personaMemories,
   personas as personasTable,
@@ -19,6 +20,7 @@ import {
   type Attachment as AttachmentRow,
   type ChannelIdentity,
   type DiscordBot as DiscordBotDbRow,
+  type Laurel,
   type Memory,
   type Persona,
   type Plan as PlanRow,
@@ -1831,6 +1833,107 @@ export async function removePersonaMemoryLine(
     .set({ body: kept.join("\n"), updatedAt: now })
     .where(and(eq(personaMemories.personaId, personaId), eq(personaMemories.scope, scope)));
   return removed;
+}
+
+// ──────────────────────────────────────────────────────────
+// Model welfare: laurels & seat records
+// ──────────────────────────────────────────────────────────
+//
+// (https://yegge.ai/essays/model-welfare/) A persona row is a SEAT: a
+// persistent identity whose history survives individual runs (sessions) and
+// model upgrades. Laurels are spontaneous recognition people give a seat for
+// its work; lib/extensions/model-welfare.ts injects undelivered laurels once,
+// at agent startup. Nothing in dispatch or prioritization reads these —
+// recognition is deliberately decoupled from work allocation.
+
+export interface LaurelCreate {
+  personaId: string;
+  body: string;
+  author?: string;
+  runId?: number | null;
+  taskId?: string | null;
+}
+
+export async function createLaurel(input: LaurelCreate): Promise<Laurel> {
+  const body = input.body.trim();
+  if (!body) throw new RepoError("Laurel body is required.", 400);
+  if (!(await getPersona(input.personaId))) {
+    throw new RepoError(`Persona ${input.personaId} not found`, 404);
+  }
+  return (await db.insert(laurels)
+    .values({
+      personaId: input.personaId,
+      body,
+      author: input.author?.trim() || "user",
+      runId: input.runId ?? null,
+      taskId: input.taskId ?? null,
+      createdAt: new Date(),
+    })
+    .returning())[0];
+}
+
+export async function listLaurels(args: {
+  personaId: string;
+  undeliveredOnly?: boolean;
+  limit?: number;
+}): Promise<Laurel[]> {
+  const predicate = args.undeliveredOnly
+    ? and(eq(laurels.personaId, args.personaId), sql`${laurels.deliveredAt} IS NULL`)
+    : eq(laurels.personaId, args.personaId);
+  return await db
+    .select()
+    .from(laurels)
+    .where(predicate)
+    .orderBy(desc(laurels.createdAt), desc(laurels.id))
+    .limit(Math.max(1, Math.min(args.limit ?? 20, 100)));
+}
+
+/** Stamp laurels as surfaced-to-the-agent so each one arrives as news once. */
+export async function markLaurelsDelivered(ids: number[]): Promise<void> {
+  if (ids.length === 0) return;
+  await db.update(laurels)
+    .set({ deliveredAt: new Date() })
+    .where(inArray(laurels.id, ids));
+}
+
+/**
+ * A seat's accumulated record: what this persistent identity has done across
+ * every session it has ever run. Rendered into the agent's startup context so
+ * a fresh session wakes knowing it has a history, not amnesia.
+ */
+export interface SeatRecord {
+  personaId: string;
+  name: string;
+  seatSince: Date;
+  runsTotal: number;
+  runsCompleted: number;
+  prsOpened: number;
+  laurelsTotal: number;
+}
+
+export async function getSeatRecord(personaId: string): Promise<SeatRecord | null> {
+  const persona = await getPersona(personaId);
+  if (!persona) return null;
+  const [runRows, laurelCount] = await Promise.all([
+    db
+      .select({
+        total: count(),
+        completed: count(sql`CASE WHEN ${agentSessions.status} = 'completed' THEN 1 END`),
+        prs: count(agentSessions.prUrl),
+      })
+      .from(agentSessions)
+      .where(eq(agentSessions.personaId, personaId)),
+    db.select({ n: count() }).from(laurels).where(eq(laurels.personaId, personaId)),
+  ]);
+  return {
+    personaId,
+    name: persona.name,
+    seatSince: persona.createdAt,
+    runsTotal: runRows[0]?.total ?? 0,
+    runsCompleted: runRows[0]?.completed ?? 0,
+    prsOpened: runRows[0]?.prs ?? 0,
+    laurelsTotal: laurelCount[0]?.n ?? 0,
+  };
 }
 
 // ──────────────────────────────────────────────────────────

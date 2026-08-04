@@ -9,7 +9,8 @@
 //   • the always-on event tools (lib/extensions/events EVENT_TOOLS),
 //   • the planning gate tools (lib/extensions/planning PLANNING_TOOLS),
 //   • the child-spawn tools (lib/extensions/spawn SPAWN_TOOLS),
-//   • the persona-memory tools (lib/extensions/persona-memory MEMORY_TOOLS).
+//   • the persona-memory tools (lib/extensions/persona-memory MEMORY_TOOLS),
+//   • the model-welfare tools (lib/extensions/model-welfare WELFARE_TOOLS).
 //
 // The extension factories register thin wrappers that call
 // transport.callTool(runId, name, params, ctx); in the web-server process the
@@ -29,12 +30,13 @@ export type { OrchestratorTool };
 let registryPromise: Promise<Map<string, OrchestratorTool>> | null = null;
 
 async function buildRegistry(): Promise<Map<string, OrchestratorTool>> {
-  const [orch, events, planning, spawn, memory] = await Promise.all([
+  const [orch, events, planning, spawn, memory, welfare] = await Promise.all([
     import("../orchestrator-tools"),
     import("../extensions/events"),
     import("../extensions/planning"),
     import("../extensions/spawn"),
     import("../extensions/persona-memory"),
+    import("../extensions/model-welfare"),
   ]);
   const all: OrchestratorTool[] = [
     ...orch.ORCHESTRATOR_TOOLS,
@@ -42,6 +44,7 @@ async function buildRegistry(): Promise<Map<string, OrchestratorTool>> {
     ...planning.PLANNING_TOOLS,
     ...spawn.SPAWN_TOOLS,
     ...memory.MEMORY_TOOLS,
+    ...welfare.WELFARE_TOOLS,
   ];
   const map = new Map<string, OrchestratorTool>();
   for (const tool of all) {
