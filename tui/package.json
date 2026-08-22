@@ -3,10 +3,13 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "Ink mockup for the Task Orchestrator terminal cockpit (design exploration, fake data).",
+  "description": "Terminal cockpit (orch) for the Task Orchestrator.",
   "scripts": {
     "mock": "tsx src/mock.tsx",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "orch": "tsx src/orch.tsx",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "ink": "^7.1.1",
@@ -16,6 +19,7 @@
     "@types/node": "^26.2.0",
     "@types/react": "^19.2.0",
     "tsx": "^4.20.0",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "vitest": "^2.1.9"
   }
 }
