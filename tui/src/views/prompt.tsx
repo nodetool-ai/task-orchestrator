@@ -2,13 +2,17 @@ import React from "react";
 import { Box, Text } from "ink";
 import { C, Hair, Keys } from "../theme.js";
 
-// M1 is read-only, so the palette of commands is only the ones that actually
-// do something: navigation and the trace toggle. /new, /spawn, /cancel,
-// /model and /budget arrive with M2–M4 and are not advertised before then.
+// The commands the cockpit can actually honour today (PRD §6.4). M2 added the
+// three that write: /new, /spawn and /cancel. /model and /budget arrive with
+// M4 and are still not advertised, because a listed command that answers
+// "arrives later" is worse than one that is not listed at all.
 export const COMMANDS: { cmd: string; help: string }[] = [
   { cmd: "/floor", help: "all agents as a tree" },
   { cmd: "/inbox", help: "what needs you" },
+  { cmd: "/new", help: "start an agent  /new implementor <goal>" },
   { cmd: "/open", help: "look at a run  /open #45" },
+  { cmd: "/spawn", help: "ask this agent to delegate  /spawn reviewer T-42" },
+  { cmd: "/cancel", help: "stop this run and its live children" },
   { cmd: "/trace", help: "toggle the full tool trace" },
   { cmd: "/quit", help: "leave; agents keep running" },
 ];
@@ -28,14 +32,12 @@ export function Prompt({
   pendingCount,
   width,
   busy,
-  readOnly,
 }: {
   value: string;
   to: number | null;
   pendingCount: number;
   width: number;
   busy: boolean;
-  readOnly: boolean;
 }) {
   const cmds = matchCommands(value);
   return (
@@ -56,56 +58,42 @@ export function Prompt({
           <Text color={C.muted}>
             {pendingCount === 1 ? "an agent is waiting on you" : `${pendingCount} agents are waiting on you`}
           </Text>
-          {!readOnly && (
-            <Text color={C.muted}>
-              {" · "}
-              <Text color={C.fg}>tab</Text> to answer
-            </Text>
-          )}
+          <Text color={C.muted}>
+            {" · "}
+            <Text color={C.fg}>tab</Text> to answer
+          </Text>
         </Box>
       )}
       <Hair width={width} />
       <Box>
-        <Text color={readOnly ? C.muted : to !== null ? C.review : C.you}>{"❯ "}</Text>
+        <Text color={to !== null ? C.review : C.you}>{"❯ "}</Text>
         {to !== null && (
           <Text color={C.review} bold>
             @#{to}{" "}
           </Text>
         )}
-        <Text color={readOnly ? C.muted : C.fg}>{value}</Text>
+        <Text color={C.fg}>{value}</Text>
         <Text color={busy ? C.muted : C.fg}>{busy ? "…" : "▏"}</Text>
       </Box>
       <Box justifyContent="space-between">
         <Keys
           items={
-            readOnly
+            to !== null
               ? [
+                  ["↵", "answer"],
+                  ["esc", "cancel"],
+                ]
+              : [
+                  ["↵", "send"],
                   ["/", "commands"],
+                  ["tab", "answer agent"],
                   ["^k", "jump"],
                   ["^f", "floor"],
                   ["^n", "needs you"],
-                  ["^o", "trace"],
                   ["^b", "rail"],
                 ]
-              : to !== null
-                ? [
-                    ["↵", "answer"],
-                    ["esc", "cancel"],
-                  ]
-                : [
-                    ["↵", "send"],
-                    ["/", "commands"],
-                    ["tab", "answer agent"],
-                    ["^k", "jump"],
-                    ["^f", "floor"],
-                    ["^n", "needs you"],
-                    ["^b", "rail"],
-                  ]
           }
         />
-        {readOnly && (
-          <Text color={C.muted}>{width >= 100 ? "read-only — M2 adds sending" : "read-only"}</Text>
-        )}
       </Box>
     </Box>
   );
