@@ -363,7 +363,15 @@ describe("node_modules clone mode", () => {
   async function cloneWorksHere(): Promise<boolean> {
     const probeSrc = mkdtempSync(join(tmpdir(), "clone-probe-src-"));
     const probeDst = mkdtempSync(join(tmpdir(), "clone-probe-dst-"));
-    mkdirSync(join(probeSrc, "node_modules"), { recursive: true });
+    // The probe tree must hold a real FILE. `cp --reflink=always` (and `cp -c`)
+    // only refuses once it has a data block to share, so cloning an EMPTY
+    // directory exits 0 on ext4 and overlayfs alike — the probe would report
+    // "clone works here" on exactly the filesystems that cannot clone, and
+    // every guarded test below would then run against a symlink fallback and
+    // fail. GitHub's ubuntu runners are ext4, so an empty probe is red on
+    // every CI run.
+    mkdirSync(join(probeSrc, "node_modules", "probe-dep"), { recursive: true });
+    writeFileSync(join(probeSrc, "node_modules", "probe-dep", "index.js"), "module.exports = 0;");
     await linkNodeModulesTree(probeSrc, probeDst, "clone");
     const st = await lstat(join(probeDst, "node_modules"));
     resetCloneSupportProbe(); // the probe must not poison the test's own memo
