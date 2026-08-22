@@ -24,6 +24,13 @@ RUN npm run build
 ARG GIT_SHA
 RUN GIT_SHA=$GIT_SHA npm run build:worker:standalone
 
+# The terminal cockpit (`orch`). tui/ is its own package with its own lockfile
+# (it is deliberately NOT a root workspace — see tui/README.md), so install its
+# deps here before bundling. Both live only in this build stage: the runtime
+# stage copies dist/ and nothing else from tui/, so ink + react + tui/node_modules
+# never reach the shipped image. dist/orch.js is fully self-contained.
+RUN npm --prefix tui ci && npm run build:orch
+
 FROM node:24-bookworm-slim AS runtime
 WORKDIR /app
 # The server's GitHub I/O (gh_pr__* / gh_ci__* tools, the PR→task sync poller,
@@ -42,6 +49,9 @@ COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/next.config.mjs ./next.config.mjs
 COPY --from=build /app/db ./db
 COPY --from=build /app/dist ./dist
+# `orch` on PATH for `fly ssh console` / `docker exec` sessions: the bundle is
+# already chmod +x with its own shebang, so no wrapper script is needed.
+RUN ln -sf /app/dist/orch.js /usr/local/bin/orch
 # The `pipe` service runs `tsx scripts/pipe.ts` from THIS image, so the runtime
 # stage needs the TS source it imports (lib/*, scripts/*, auth) + tsconfig for
 # the `@/*` path alias. `next start` ignores these; they don't affect it.

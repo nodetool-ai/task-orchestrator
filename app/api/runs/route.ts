@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
-import { auth } from "@/auth";
+import { resolveApiActor, unauthorizedResponse } from "@/lib/api-auth";
 import * as runs from "@/lib/runs";
 import { errorResponse } from "@/lib/api";
 
@@ -36,17 +36,15 @@ const createRunSchema = z.object({
     .optional(),
 });
 
-async function userId(): Promise<number | null> {
-  const session = await auth();
-  const id = session?.user?.id;
-  return id ? Number(id) : null;
-}
-
 export async function POST(req: NextRequest) {
   try {
+    // Bearer (terminal cockpit) or session cookie (browser); a presented token
+    // that does not verify is a 401 (tui T-tui-11).
+    const actor = await resolveApiActor(req);
+    if (!actor.ok) return unauthorizedResponse();
     const raw = await req.json().catch(() => ({}));
     const input = createRunSchema.parse(raw);
-    const uid = await userId();
+    const uid = actor.actor?.userId ?? null;
     const run = await runs.create({
       goal: input.goal ?? "<implement>",
       toolsProfile: input.toolsProfile,

@@ -1,4 +1,5 @@
 import { type NextRequest } from "next/server";
+import { requireBearer } from "@/lib/api-auth";
 import * as runs from "@/lib/runs";
 import { listRunInboxEvents, listRunTimers, CONTROL_TYPES } from "@/lib/inbox";
 
@@ -12,9 +13,11 @@ export const dynamic = "force-dynamic";
 // the agent SAW; this endpoint also shows what it hasn't seen yet and why
 // something was withheld.
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const denied = await requireBearer(req);
+  if (denied) return denied;
   const { id } = await params;
   const runId = parseInt(id, 10);
   if (!Number.isFinite(runId)) {

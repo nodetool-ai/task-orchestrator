@@ -1,5 +1,5 @@
 import { type NextRequest } from "next/server";
-import { auth } from "@/auth";
+import { resolveApiActor, unauthorizedResponse } from "@/lib/api-auth";
 import * as runs from "@/lib/runs";
 import { buildMergePrompt } from "@/lib/run-templates";
 
@@ -21,8 +21,11 @@ export async function POST(
   const run = await runs.get(runId);
   if (!run) return new Response("Not found", { status: 404 });
 
-  const session = await auth();
-  const author = session?.user?.email ?? "chat";
+  // Bearer (terminal cockpit) or session cookie (browser); a presented token
+  // that does not verify is a 401 (tui T-tui-11).
+  const actor = await resolveApiActor(req);
+  if (!actor.ok) return unauthorizedResponse();
+  const author = actor.actor?.email ?? "chat";
 
   let body: { text?: string; resolveMergeBaseRef?: string | null };
   try {

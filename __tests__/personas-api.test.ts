@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeEach } from "vitest";
+import { NextRequest } from "next/server";
 import { GET } from "../app/api/personas/route";
 import { db } from "../db";
 import { personas as personasTable } from "../db/schema";
@@ -11,7 +12,7 @@ describe("GET /api/personas", () => {
   });
 
   it("returns all seeded personas with the expected shape", async () => {
-    const res = await GET();
+    const res = await GET(new NextRequest("http://localhost/api/personas"));
     const body = await res.json();
     expect(body.personas.length).toBe(7);
     const r = body.personas.find((p: any) => p.id === "implementor");

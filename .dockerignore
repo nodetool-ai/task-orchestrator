@@ -1,5 +1,6 @@
 .git
 node_modules
+tui/node_modules
 .next
 .next.prev
 .worktrees

@@ -1,4 +1,5 @@
 import { type NextRequest } from "next/server";
+import { requireBearer } from "@/lib/api-auth";
 import * as runs from "@/lib/runs";
 import { readStreamSince, ZERO_CURSOR, type StreamCursor } from "@/lib/run-stream";
 import { subscribeRunStream } from "@/lib/run-stream-listener";
@@ -31,6 +32,8 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const denied = await requireBearer(req);
+  if (denied) return denied;
   const { id } = await params;
   const runId = parseInt(id, 10);
   if (!Number.isFinite(runId)) return new Response("Bad id", { status: 400 });

@@ -1,14 +1,20 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { requireBearer } from "@/lib/api-auth";
 import * as runs from "@/lib/runs";
 import { errorResponse } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    // Bearer gate for the terminal cockpit (tui T-tui-11, lib/api-auth): a
+    // presented token that does not verify is a 401; no Authorization header
+    // means the middleware session gate already vouched for the request.
+    const denied = await requireBearer(req);
+    if (denied) return denied;
     const { id } = await params;
     const runId = parseInt(id, 10);
     if (!Number.isFinite(runId)) {
@@ -35,6 +41,9 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    // Bearer gate — see the note above.
+    const denied = await requireBearer(req);
+    if (denied) return denied;
     const { id } = await params;
     const runId = parseInt(id, 10);
     if (!Number.isFinite(runId)) {
