@@ -1,21 +1,46 @@
 // Shared vs. isolated worktree environments.
 //
-// By default every worktree symlinks `node_modules` and the Turbopack/Next.js
-// build cache (`.next`) back to the repo root, so concurrent worktrees share a
-// single install and a warm build cache. linkSharedWorktreeArtifacts is called
-// right after `git worktree add` (see lib/runs.ts).
+// Every worktree gets `node_modules` from the repo root and shares the
+// Turbopack/Next.js build cache (`.next`) with it, so a fresh worktree skips a
+// slow install and a cold build. linkSharedWorktreeArtifacts is called right
+// after `git worktree add` (see lib/runs.ts).
+//
+// node_modules is materialized one of two ways (TASK_ORCH_WORKTREE_NODE_MODULES):
+//
+//   • "clone" (default) — a copy-on-write CLONE of the root tree. APFS
+//     (`cp -c`) and btrfs/XFS (`cp --reflink=always`) share the underlying
+//     blocks, so the clone costs almost no disk until something writes. The
+//     worktree owns a REAL directory: an agent's `npm install` rewrites only
+//     its own blocks and can no longer corrupt the root store or the other
+//     live worktrees.
+//     Cost, measured on this repo (2.5 GB / ~200k files, APFS): ~35 s and
+//     63 MB of real disk per worktree. The bytes are shared; the time is
+//     per-file clonefile syscalls, which no flag avoids. Worth it for run
+//     isolation, but a dev box that spins up worktrees constantly can set
+//     TASK_ORCH_WORKTREE_NODE_MODULES=link to get the old millisecond path.
+//   • "link" — the historical symlink into the root store. One install, shared
+//     by everyone, and writes travel back to the root.
+//
+// Clone is best-effort. Windows has no portable reflink, and ext4/overlayfs
+// reject `--reflink=always`, so any failure falls back to the symlink and the
+// worktree still works. On Windows the fallback uses a junction, which needs no
+// administrator privilege or developer mode (a "dir" symlink does).
 //
 // A worktree that needs to change dependencies — or just wants a clean, private
 // build cache — opts out with unlinkSharedWorktreeArtifacts followed by a fresh
 // `npm install`. The `npm run isolate-env` script does exactly that from inside
-// a worktree (scripts/isolate-worktree-env.ts).
+// a worktree (scripts/isolate-worktree-env.ts). Under "clone" the node_modules
+// tree is already private, so isolate-env only has `.next` left to unlink.
 //
-// This module is deliberately dependency-free (only node:fs / node:path) so the
-// CLI script can use it without dragging in the agent runner and SDK.
+// This module stays light — node: builtins plus lib/config (itself only
+// node:crypto) — so the CLI script can use it without dragging in the agent
+// runner and SDK.
 
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readdir, readlink, rm, symlink } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { basename, dirname, join, resolve } from "node:path";
+import { config } from "./config";
 
 export interface SharedArtifact {
   /** Path component shared from the repo root into each worktree. */
@@ -74,18 +99,39 @@ export async function discoverNodeModulesDirs(baseDir: string): Promise<string[]
   return found.sort();
 }
 
+/** How a worktree gets its node_modules tree. See the module header. */
+export type NodeModulesMode = "clone" | "link";
+
 /**
- * Symlink every `node_modules` directory from `fromDir` into `toDir` at the same
- * relative path, idempotently and with the same repair/never-clobber semantics
- * as the shared-artifact linker. Used two ways:
+ * Resolve the materialization mode. "clone" is the default; only an explicit
+ * link/symlink opt-out turns it off (config.features.worktreeNodeModules).
+ */
+export function nodeModulesMode(): NodeModulesMode {
+  return config.features.worktreeNodeModules;
+}
+
+/**
+ * Materialize every `node_modules` directory from `fromDir` into `toDir` at the
+ * same relative path, idempotently and with the same repair/never-clobber
+ * semantics as the shared-artifact linker. Used two ways:
  *   • prewarm (image) → per-run checkout root: baked deps become present.
  *   • checkout root → worktree: worktrees inherit the whole install, not just the
  *     top-level node_modules (a monorepo needs web/, packages/* linked too).
- * A worktree that ran `isolate-env` (real private node_modules) is never
+ *
+ * `mode` defaults to "link" (the symlink behaviour every caller had before
+ * clones existed); worktree materialization passes nodeModulesMode(). A clone
+ * that the platform or filesystem refuses falls back to the symlink, so the
+ * result is always a usable tree.
+ *
+ * A target that ran `isolate-env` (real private node_modules) is never
  * clobbered. Best-effort per dir: a failure is logged, not thrown. Returns the
- * relative paths actually linked (or already correct).
+ * relative paths actually materialized (or already correct).
  */
-export async function linkNodeModulesTree(fromDir: string, toDir: string): Promise<string[]> {
+export async function linkNodeModulesTree(
+  fromDir: string,
+  toDir: string,
+  mode: NodeModulesMode = "link"
+): Promise<string[]> {
   if (resolve(fromDir) === resolve(toDir)) return [];
   const dirs = await discoverNodeModulesDirs(fromDir);
   const linked: string[] = [];
@@ -96,22 +142,95 @@ export async function linkNodeModulesTree(fromDir: string, toDir: string): Promi
       try {
         const existing = await lstat(linkPath).catch(() => null);
         if (existing) {
-          if (!existing.isSymbolicLink()) return; // real private dir — never clobber
-          if (await linkPointsAt(linkPath, target)) {
+          // A real dir is either a private install (isolate-env) or a clone we
+          // made on an earlier call. Either way it is the worktree's own —
+          // never clobber it.
+          if (!existing.isSymbolicLink()) {
+            if (mode === "clone") linked.push(rel);
+            return;
+          }
+          if (mode === "link" && (await linkPointsAt(linkPath, target))) {
             linked.push(rel);
             return;
           }
-          await rm(linkPath, { force: true }); // stale/wrong/dangling → replace
+          // stale/wrong/dangling — or a link left by a previous "link" run that
+          // this "clone" run should now replace with a real tree.
+          await rm(linkPath, { force: true });
         }
         await mkdir(dirname(linkPath), { recursive: true });
+        if (mode === "clone" && (await cloneDir(target, linkPath))) {
+          linked.push(rel);
+          return;
+        }
         await symlinkSharedTarget(target, linkPath);
         linked.push(rel);
       } catch (err) {
-        console.warn(`[worktree-env] failed to link node_modules ${rel} into ${toDir}: ${describe(err)}`);
+        console.warn(
+          `[worktree-env] failed to materialize node_modules ${rel} into ${toDir}: ${describe(err)}`
+        );
       }
     })
   );
   return linked.sort();
+}
+
+// ──────────────────────────────────────────────────────────
+// Copy-on-write clones
+// ──────────────────────────────────────────────────────────
+
+// Per-process memo of whether this host can reflink at all. The first refusal
+// (Windows, ext4, overlayfs, a `cp` without --reflink) turns every later clone
+// attempt into a straight symlink instead of re-paying a doomed spawn per
+// node_modules dir per worktree. Exported reset for tests.
+let cloneSupported: boolean | null = null;
+
+/** Test seam: forget what we learned about this host's reflink support. */
+export function resetCloneSupportProbe(): void {
+  cloneSupported = null;
+}
+
+/**
+ * Copy-on-write clone `src` → `dst`. Returns false when the platform or
+ * filesystem cannot do it; the caller then falls back to a symlink.
+ *
+ * `--reflink=always` (GNU) and `-c` (BSD/macOS) both FAIL rather than silently
+ * degrading to a full byte copy. That is deliberate: a full copy of a
+ * multi-GB node_modules would be far worse than sharing the root store.
+ * A partial tree left behind by a failed cp is removed before returning.
+ */
+async function cloneDir(src: string, dst: string): Promise<boolean> {
+  if (process.platform === "win32") return false; // no portable reflink
+  if (cloneSupported === false) return false;
+
+  const argv =
+    process.platform === "darwin"
+      ? ["cp", "-Rc", "--", src, dst]
+      : ["cp", "-a", "--reflink=always", "--", src, dst];
+
+  const ok = await runQuiet(argv);
+  if (!ok) {
+    if (cloneSupported === null) {
+      console.warn(
+        `[worktree-env] copy-on-write clone unavailable on this filesystem — ` +
+          `sharing node_modules by symlink instead (set ` +
+          `TASK_ORCH_WORKTREE_NODE_MODULES=link to silence this).`
+      );
+    }
+    cloneSupported = false;
+    await rm(dst, { recursive: true, force: true }); // drop any partial tree
+    return false;
+  }
+  cloneSupported = true;
+  return true;
+}
+
+/** Run argv, resolving true iff it exits 0. Never throws, never inherits stdio. */
+function runQuiet(argv: string[]): Promise<boolean> {
+  return new Promise((resolvePromise) => {
+    const child = spawn(argv[0], argv.slice(1), { stdio: "ignore" });
+    child.on("error", () => resolvePromise(false)); // cp missing / not executable
+    child.on("close", (code) => resolvePromise(code === 0));
+  });
 }
 
 /**
@@ -141,7 +260,7 @@ export async function linkSharedWorktreeArtifacts(
   await Promise.all([
     // The full node_modules tree (root + every nested workspace dir), so a
     // worktree of a monorepo can resolve deps at every level, not just the root.
-    linkNodeModulesTree(root, worktreePath).then(() => undefined),
+    linkNodeModulesTree(root, worktreePath, nodeModulesMode()).then(() => undefined),
     ...SHARED_WORKTREE_ARTIFACTS.map((artifact) =>
       linkOneSharedArtifact(artifact, worktreePath, root).catch((err) => {
         console.warn(
@@ -157,6 +276,10 @@ export async function linkSharedWorktreeArtifacts(
  * currently a symlink (into the root). Real, private dirs are left untouched, so
  * this is safe to call on an already-isolated worktree. Returns the names that
  * were actually unlinked (sorted, for determinism).
+ *
+ * Under the "clone" node_modules mode there is usually nothing to unlink there:
+ * the clone is already a real private tree. `.next` stays a symlink in both
+ * modes, so it is still the common result.
  *
  * After unlinking, callers must run a fresh `npm install` so `node_modules` is
  * repopulated privately — an unlinked worktree has no dependency tree until then.
@@ -215,10 +338,17 @@ async function linkPointsAt(linkPath: string, target: string): Promise<boolean> 
   return resolve(dirname(linkPath), current) === resolve(target);
 }
 
-/** Create the link, tolerating a concurrent creator that beat us to the punch. */
+/**
+ * Create the link, tolerating a concurrent creator that beat us to the punch.
+ *
+ * Windows uses a junction: a "dir" symlink there needs administrator rights or
+ * developer mode, while a junction needs neither. Junctions take an absolute
+ * target, which is what every caller passes.
+ */
 async function symlinkSharedTarget(target: string, linkPath: string): Promise<void> {
+  const kind = process.platform === "win32" ? "junction" : "dir";
   try {
-    await symlink(target, linkPath, "dir");
+    await symlink(resolve(target), linkPath, kind);
   } catch (err) {
     // Another worktree materialization may have created the same link between
     // our check and our create. Accept it iff it points where we intended;

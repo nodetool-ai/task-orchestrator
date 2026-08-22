@@ -9,13 +9,30 @@ import {
   discoverNodeModulesDirs,
   linkNodeModulesTree,
   linkSharedWorktreeArtifacts,
+  nodeModulesMode,
   preferredDevPort,
+  resetCloneSupportProbe,
   unlinkSharedWorktreeArtifacts,
 } from "../lib/worktree-env";
 
+// Most of this file pins the historical SYMLINK mode: the shared-store
+// semantics (repair, never-clobber, EEXIST races) are the same in both modes,
+// and asserting on links keeps them readable. The clone mode — the default —
+// gets its own describe at the bottom.
+function useLinkMode(): void {
+  beforeEach(() => {
+    process.env.TASK_ORCH_WORKTREE_NODE_MODULES = "link";
+    resetCloneSupportProbe();
+  });
+  afterEach(() => {
+    delete process.env.TASK_ORCH_WORKTREE_NODE_MODULES;
+  });
+}
+
 // Each worktree shares the repo root's node_modules and Turbopack/.next build
 // cache via symlink, so a fresh worktree skips the (slow) install + cold build.
-describe("linkSharedWorktreeArtifacts", () => {
+describe("linkSharedWorktreeArtifacts (link mode)", () => {
+  useLinkMode();
   let root: string;
   let worktree: string;
 
@@ -140,6 +157,7 @@ describe("linkSharedWorktreeArtifacts", () => {
 // `npm run isolate-env` uses this to break a worktree out of the shared store
 // before installing private dependencies.
 describe("unlinkSharedWorktreeArtifacts", () => {
+  useLinkMode();
   let root: string;
   let worktree: string;
 
@@ -238,6 +256,7 @@ describe("preferredDevPort", () => {
 // must reproduce the WHOLE tree, not just the top-level dir. These cover
 // discoverNodeModulesDirs + linkNodeModulesTree and the worktree integration.
 describe("node_modules tree linking (monorepo)", () => {
+  useLinkMode();
   let src: string;
   let dst: string;
 
@@ -314,5 +333,134 @@ describe("node_modules tree linking (monorepo)", () => {
     expect(removed).toContain("node_modules");
     expect(removed).toContain("web/node_modules");
     expect(existsSync(join(wt, "web/node_modules"))).toBe(false);
+  });
+});
+
+// The default mode: each worktree gets a copy-on-write CLONE of the root
+// node_modules tree, so an agent's `npm install` cannot write through into the
+// root store or into another live worktree. Where the filesystem refuses a
+// reflink (Windows, ext4, overlayfs) it falls back to the shared symlink, so
+// every assertion below either holds for both shapes or is guarded by a probe.
+describe("node_modules clone mode", () => {
+  let root: string;
+  let worktree: string;
+
+  beforeEach(() => {
+    delete process.env.TASK_ORCH_WORKTREE_NODE_MODULES; // clone is the default
+    resetCloneSupportProbe();
+    root = mkdtempSync(join(tmpdir(), "clone-root-"));
+    worktree = join(root, ".worktrees", "1");
+    mkdirSync(worktree, { recursive: true });
+    mkdirSync(join(root, "node_modules", "left-pad"), { recursive: true });
+    writeFileSync(join(root, "node_modules", "left-pad", "index.js"), "module.exports = 0;");
+  });
+
+  afterEach(() => {
+    resetCloneSupportProbe();
+  });
+
+  /** True when this host's filesystem actually performs reflink clones. */
+  async function cloneWorksHere(): Promise<boolean> {
+    const probeSrc = mkdtempSync(join(tmpdir(), "clone-probe-src-"));
+    const probeDst = mkdtempSync(join(tmpdir(), "clone-probe-dst-"));
+    mkdirSync(join(probeSrc, "node_modules"), { recursive: true });
+    await linkNodeModulesTree(probeSrc, probeDst, "clone");
+    const st = await lstat(join(probeDst, "node_modules"));
+    resetCloneSupportProbe(); // the probe must not poison the test's own memo
+    return !st.isSymbolicLink();
+  }
+
+  it("gives the worktree a resolvable node_modules in either shape", async () => {
+    await linkSharedWorktreeArtifacts(worktree, root);
+    // Whether it cloned or fell back, deps must resolve from the worktree.
+    expect(readFileSync(join(worktree, "node_modules/left-pad/index.js"), "utf8")).toContain(
+      "module.exports"
+    );
+  });
+
+  it("keeps .next shared by symlink even while node_modules is cloned", async () => {
+    await linkSharedWorktreeArtifacts(worktree, root);
+    // A shared build cache stays a feature; a corrupt one is cheap to delete.
+    expect((await lstat(join(worktree, ".next"))).isSymbolicLink()).toBe(true);
+    expect(await realpath(join(worktree, ".next"))).toBe(await realpath(join(root, ".next")));
+  });
+
+  it("materializes a private tree that writes cannot leak out of", async () => {
+    if (!(await cloneWorksHere())) return; // no reflink here — fallback covered above
+    await linkSharedWorktreeArtifacts(worktree, root);
+
+    const nm = join(worktree, "node_modules");
+    expect((await lstat(nm)).isSymbolicLink()).toBe(false); // a REAL dir
+    expect(readFileSync(join(nm, "left-pad/index.js"), "utf8")).toContain("module.exports");
+
+    // Simulate the agent's `npm install`: add a dep, change an existing one.
+    mkdirSync(join(nm, "brand-new-dep"), { recursive: true });
+    writeFileSync(join(nm, "left-pad", "index.js"), "module.exports = 'rewritten';");
+
+    // The root store is untouched — the whole point of the clone.
+    expect(existsSync(join(root, "node_modules/brand-new-dep"))).toBe(false);
+    expect(readFileSync(join(root, "node_modules/left-pad/index.js"), "utf8")).toBe(
+      "module.exports = 0;"
+    );
+  });
+
+  it("clones every level of a monorepo tree", async () => {
+    if (!(await cloneWorksHere())) return;
+    for (const rel of ["web/node_modules/react", "packages/agents/node_modules/zod"]) {
+      mkdirSync(join(root, rel), { recursive: true });
+      writeFileSync(join(root, rel, "index.js"), "module.exports = 1;");
+    }
+    await linkSharedWorktreeArtifacts(worktree, root);
+    for (const rel of ["node_modules", "web/node_modules", "packages/agents/node_modules"]) {
+      expect((await lstat(join(worktree, rel))).isSymbolicLink()).toBe(false);
+    }
+    expect(readFileSync(join(worktree, "web/node_modules/react/index.js"), "utf8")).toContain(
+      "module.exports"
+    );
+  });
+
+  it("upgrades a worktree left symlinked by the old mode", async () => {
+    if (!(await cloneWorksHere())) return;
+    // The worktree was materialized before clones existed.
+    symlinkSync(join(root, "node_modules"), join(worktree, "node_modules"));
+
+    await linkSharedWorktreeArtifacts(worktree, root);
+
+    expect((await lstat(join(worktree, "node_modules"))).isSymbolicLink()).toBe(false);
+    expect(existsSync(join(worktree, "node_modules/left-pad"))).toBe(true);
+  });
+
+  it("never clobbers a private install, and is idempotent", async () => {
+    // isolate-env's result: a real dir the worktree owns.
+    mkdirSync(join(worktree, "node_modules", "own-dep"), { recursive: true });
+
+    await linkSharedWorktreeArtifacts(worktree, root);
+    await linkSharedWorktreeArtifacts(worktree, root); // second call must not re-clone over it
+
+    expect(existsSync(join(worktree, "node_modules/own-dep"))).toBe(true);
+    expect(existsSync(join(worktree, "node_modules/left-pad"))).toBe(false);
+  });
+
+  it("leaves nothing for isolate-env to unlink once cloned", async () => {
+    if (!(await cloneWorksHere())) return;
+    await linkSharedWorktreeArtifacts(worktree, root);
+
+    // node_modules is already private; only the .next cache is still shared.
+    expect(await unlinkSharedWorktreeArtifacts(worktree)).toEqual([".next"]);
+    expect(existsSync(join(worktree, "node_modules/left-pad"))).toBe(true);
+  });
+
+  it("reads the mode from the environment, defaulting to clone", () => {
+    delete process.env.TASK_ORCH_WORKTREE_NODE_MODULES;
+    expect(nodeModulesMode()).toBe("clone");
+    process.env.TASK_ORCH_WORKTREE_NODE_MODULES = "link";
+    expect(nodeModulesMode()).toBe("link");
+    process.env.TASK_ORCH_WORKTREE_NODE_MODULES = "symlink";
+    expect(nodeModulesMode()).toBe("link");
+    process.env.TASK_ORCH_WORKTREE_NODE_MODULES = "clone";
+    expect(nodeModulesMode()).toBe("clone");
+    process.env.TASK_ORCH_WORKTREE_NODE_MODULES = "nonsense";
+    expect(nodeModulesMode()).toBe("clone");
+    delete process.env.TASK_ORCH_WORKTREE_NODE_MODULES;
   });
 });

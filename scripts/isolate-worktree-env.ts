@@ -1,10 +1,12 @@
 // Isolate the current worktree's environment.
 //
-// Worktrees share the repo root's `node_modules` and Turbopack/Next.js build
-// cache (`.next`) by default — fast to spin up, but a shared store. Run this
-// from inside a worktree to give it a PRIVATE node_modules and build cache, so
-// you can add/upgrade/remove dependencies (or get a clean build) without
-// affecting the other worktrees running concurrently:
+// A worktree takes `node_modules` and the Turbopack/Next.js build cache
+// (`.next`) from the repo root — fast to spin up. With
+// TASK_ORCH_WORKTREE_NODE_MODULES=link both are symlinks into a store every
+// worktree shares. Run this from inside a worktree to give it a PRIVATE
+// node_modules and build cache, so you can add/upgrade/remove dependencies (or
+// get a clean build) without affecting the other worktrees running
+// concurrently:
 //
 //   npm run isolate-env
 //

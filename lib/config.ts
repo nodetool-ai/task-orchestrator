@@ -419,6 +419,15 @@ export const config = Object.freeze({
     get worktreeGc(): boolean {
       return truthy(process.env.TASK_ORCH_WORKTREE_GC);
     },
+    /**
+     * How a worktree gets node_modules from the repo root: "clone" (default,
+     * copy-on-write — the worktree owns a private tree) or "link" (the shared
+     * symlink store). See lib/worktree-env.ts for the trade-off.
+     */
+    get worktreeNodeModules(): "clone" | "link" {
+      const raw = (process.env.TASK_ORCH_WORKTREE_NODE_MODULES ?? "").trim().toLowerCase();
+      return raw === "link" || raw === "symlink" ? "link" : "clone";
+    },
     /** Archive worker logs/artifacts to R2. */
     get archiveR2(): string | undefined {
       return strEnv("TASK_ORCH_ARCHIVE_R2");
