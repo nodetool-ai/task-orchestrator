@@ -1,32 +1,40 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { palette } from "../data.js";
+import type { PaletteItem } from "../model/palette.js";
 import { C, padEnd } from "../theme.js";
+import { fit } from "./layout.js";
 
-export function filterPalette(q: string) {
-  const needle = q.trim().toLowerCase();
-  if (!needle) return palette.slice(0, 9);
-  return palette.filter((p) => (p.id + " " + p.label).toLowerCase().includes(needle)).slice(0, 9);
-}
-
-// ⌘K-style jump. Drawn as an overlay box in the middle of the screen.
-export function Palette({ query, cursor, width }: { query: string; cursor: number; width: number }) {
-  const w = Math.min(72, width - 4);
-  const items = filterPalette(query);
+// ⌘K-style jump. Drawn as an overlay box in the middle of the screen. The
+// matching lives in model/palette.ts — this only draws what it was handed.
+export function Palette({
+  items,
+  query,
+  cursor,
+  width,
+}: {
+  items: PaletteItem[];
+  query: string;
+  cursor: number;
+  width: number;
+}) {
+  const w = Math.max(24, Math.min(72, width - 4));
+  // The round border and paddingX each take a column on both sides.
+  const inner = w - 4;
+  const labelW = Math.max(8, inner - 15);
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={C.hair} width={w} paddingX={1}>
       <Box>
         <Text color={C.muted}>jump to </Text>
-        <Text>{query}</Text>
+        <Text>{fit(query, Math.max(4, inner - 9))}</Text>
         <Text color={C.muted}>▏</Text>
       </Box>
       <Box flexDirection="column" marginTop={1}>
-        {items.length === 0 && <Text color={C.muted}>no match</Text>}
+        {items.length === 0 && <Text color={C.muted}>{query.trim() ? `no match for “${fit(query.trim(), 30)}”` : "nothing to jump to"}</Text>}
         {items.map((p, i) => (
-          <Text key={p.id} inverse={i === cursor}>
+          <Text key={`${p.kind}:${p.id}`} inverse={i === cursor}>
             <Text color={C.muted}>{padEnd(p.kind, 5)}</Text>
             <Text color={p.kind === "run" ? C.running : C.fg}>{padEnd(p.id, 10)}</Text>
-            <Text>{p.label.length > w - 20 ? p.label.slice(0, w - 21) + "…" : p.label}</Text>
+            <Text>{padEnd(fit(p.label, labelW), labelW)}</Text>
           </Text>
         ))}
       </Box>

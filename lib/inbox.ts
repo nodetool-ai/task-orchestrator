@@ -15,17 +15,19 @@
 // the runner (waking a parked run) goes through a lazy dynamic import so
 // runs.ts / run-dispatch.ts can import us without a cycle.
 
-import { and, asc, desc, eq, inArray, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lt, notInArray, sql } from "drizzle-orm";
 
 import { db } from "@/db";
 import {
   agentMessages,
   agentSessions,
   inboxEvents,
+  personas,
   runTimers,
   type InboxEvent,
   type RunTimer,
 } from "@/db/schema";
+import { TERMINAL_STATUSES } from "./run-state";
 import { isTerminalStatus, type SessionStatus } from "./types";
 
 // ────────────────────────────────────────
@@ -652,6 +654,233 @@ export async function parkedRunsWithPendingEvents(limit = 50): Promise<number[]>
     )
     .limit(limit);
   return rows.map((r) => r.id);
+}
+
+// ────────────────────────────────────────
+// Cross-run needs-you list (T-tui-04)
+// ────────────────────────────────────────
+
+/**
+ * One row of GET /api/inbox — the terminal cockpit's needs-you view and the
+ * `⚑ n` counts. Denormalised (persona, run title, PR) so the client renders a
+ * row without a lookup per row; mirrors tui/src/api/types.ts GlobalInboxRow.
+ */
+export interface GlobalInboxRow {
+  /** Stable key across polls: `e<eventId>` for an event, `q<runId>` for a question. */
+  id: string;
+  runId: number;
+  personaId: string | null;
+  personaName: string | null;
+  runTitle: string | null;
+  kind: GlobalInboxKind;
+  /** Raw dotted event type, or the synthetic 'run.question' for a question row. */
+  type: string;
+  text: string;
+  prUrl: string | null;
+  createdAt: string;
+}
+
+export type GlobalInboxKind = "question" | "review" | "stuck" | "budget";
+
+/** The synthetic type carried by a parked-on-a-question row: those rows come
+ *  from agent_runs.pending_question, not from an inbox_events row, but the
+ *  cockpit wants one uniform `type` field to render and filter on. */
+export const QUESTION_ROW_TYPE = "run.question";
+
+/**
+ * Event type → the four buckets the cockpit paints. Exported so the mapping is
+ * testable on its own: it is the one place the dotted taxonomy (§3) is
+ * projected onto the needs-you vocabulary, and the projection is lossy, so it
+ * must not be re-derived anywhere else.
+ *
+ * `stuck` is the default rather than a fifth "other" bucket: an unrecognised
+ * type reaching the human's queue is, by definition, something nobody has
+ * taught the cockpit to act on — showing it as needing attention fails safe,
+ * hiding it loses it.
+ */
+export function inboxKindForType(type: string): GlobalInboxKind {
+  if (type === QUESTION_ROW_TYPE || type.endsWith(".question")) return "question";
+  // gh.pr.* is a PR wanting a human's eyes; gh.ci.* rides the same PR and is
+  // only ever read next to it, so it lands in the same bucket.
+  if (type.startsWith("gh.")) return "review";
+  if (type.startsWith("budget.") || type.endsWith(".budget_exhausted")) return "budget";
+  return "stuck";
+}
+
+/** Payload fields that carry a human-readable line, most specific first. A
+ *  producer writes whichever fits its event (§3); the cockpit shows one line,
+ *  so we take the first that is actually there rather than shaping per type. */
+const SUMMARY_FIELDS = ["question", "message", "note", "summary", "body", "text", "reason"];
+
+const SUMMARY_MAX = 200;
+
+/** One-line human summary for a row: `<type>: <the payload's own words>`, or
+ *  the bare type when the payload says nothing renderable. */
+export function summarizeInboxEvent(type: string, payload: unknown): string {
+  const line = firstSummaryLine(payload);
+  return line ? `${type}: ${line}` : type;
+}
+
+function firstSummaryLine(payload: unknown): string | null {
+  if (typeof payload === "string") return oneLine(payload);
+  if (!payload || typeof payload !== "object") return null;
+  const p = payload as Record<string, unknown>;
+  for (const field of SUMMARY_FIELDS) {
+    const v = p[field];
+    if (typeof v === "string") {
+      const line = oneLine(v);
+      if (line) return line;
+    }
+  }
+  // A structured result (§4) nests its words one level down.
+  if (p.result && typeof p.result === "object") return firstSummaryLine(p.result);
+  return null;
+}
+
+function oneLine(s: string): string | null {
+  const first = s.split("\n").find((l) => l.trim().length > 0)?.trim();
+  if (!first) return null;
+  return first.length > SUMMARY_MAX ? `${first.slice(0, SUMMARY_MAX - 1)}…` : first;
+}
+
+/**
+ * The cross-run needs-you list, newest first.
+ *
+ * TWO sources, because "what needs me" is not one table:
+ *
+ *   1. pending inbox_events on LIVE runs. Live-only is a deliberate choice,
+ *      not an optimisation: a pending event on a terminal run can never be
+ *      injected (claimInboxEvents only ever runs inside a turn, and a terminal
+ *      run takes no more turns), so such a row is a tombstone. Showing it puts
+ *      an item in the human's queue that no action of theirs can clear.
+ *   2. runs parked on an OPEN question (park_reason='question'). These are the
+ *      single most important needs-you rows and they are not events at all —
+ *      ask_parent writes a column, and the parent's copy of the question may
+ *      already have been injected and cleared.
+ *
+ * Consequence worth stating: a run that FAILED is terminal, so its stale queued
+ * events drop out here. The `stuck` bucket is still reachable — via
+ * child.exception / child.died addressed to the live PARENT (§5.3), which is
+ * the run a human can actually do something with — so nothing is lost by
+ * refusing to surface the dead child's own queue.
+ */
+export async function listGlobalInbox(
+  audience: Audience = "owner",
+  limit = 100
+): Promise<GlobalInboxRow[]> {
+  const max = Math.max(1, Math.min(limit, 500));
+
+  // `status = 'pending'` is written as a literal equality so the planner can
+  // match inbox_target_pending_idx's partial predicate: verified to plan as an
+  // index-ONLY scan of that index (audience + id are its other columns), so the
+  // scan is proportional to the live backlog, never total event volume. The
+  // ordering is by id, not created_at — event ids are monotonic, so id order IS
+  // arrival order and the sort stays inside the index's own columns.
+  const eventRows = await db
+    .select({
+      eventId: inboxEvents.id,
+      type: inboxEvents.type,
+      payload: inboxEvents.payload,
+      createdAt: inboxEvents.createdAt,
+      runId: agentSessions.id,
+      personaId: agentSessions.personaId,
+      personaName: personas.name,
+      title: agentSessions.title,
+      goal: agentSessions.goal,
+      prUrl: agentSessions.prUrl,
+    })
+    .from(inboxEvents)
+    .innerJoin(agentSessions, eq(agentSessions.id, inboxEvents.targetRunId))
+    .leftJoin(personas, eq(personas.id, agentSessions.personaId))
+    .where(
+      and(
+        eq(inboxEvents.status, "pending"),
+        eq(inboxEvents.audience, audience),
+        notInArray(agentSessions.status, TERMINAL_STATUSES),
+        // Control events (§6.6) are platform enforcement made visible in the
+        // next digest — never a human's to act on, and excluded from the claim
+        // set too, so they must not appear in a human queue either.
+        sql`${inboxEvents.type} NOT IN (${sql.join(
+          [...CONTROL_TYPES].map((t) => sql`${t}`),
+          sql`, `
+        )})`
+      )
+    )
+    .orderBy(desc(inboxEvents.id))
+    .limit(max);
+
+  const rows: GlobalInboxRow[] = eventRows.map((r) => ({
+    id: `e${r.eventId}`,
+    runId: r.runId,
+    personaId: r.personaId,
+    personaName: r.personaName ?? null,
+    runTitle: r.title ?? r.goal ?? null,
+    kind: inboxKindForType(r.type),
+    type: r.type,
+    text: summarizeInboxEvent(r.type, r.payload),
+    prUrl: r.prUrl,
+    createdAt: r.createdAt.toISOString(),
+  }));
+
+  // Question rows are owner-only: 'supervisor' is the informational copy stream
+  // (§5.2), and a run parked waiting for a human is an operational fact, not a
+  // copy. Asking for the supervisor view must not silently duplicate them.
+  if (audience === "owner") rows.push(...(await parkedQuestionRows(max)));
+
+  rows.sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
+  return rows.slice(0, max);
+}
+
+/** Live runs parked on an unanswered ask_parent question (§8). */
+async function parkedQuestionRows(limit: number): Promise<GlobalInboxRow[]> {
+  const rows = await db
+    .select({
+      runId: agentSessions.id,
+      personaId: agentSessions.personaId,
+      personaName: personas.name,
+      title: agentSessions.title,
+      goal: agentSessions.goal,
+      prUrl: agentSessions.prUrl,
+      pendingQuestion: agentSessions.pendingQuestion,
+      startedAt: agentSessions.startedAt,
+    })
+    .from(agentSessions)
+    .leftJoin(personas, eq(personas.id, agentSessions.personaId))
+    .where(
+      and(
+        eq(agentSessions.parkReason, "question"),
+        notInArray(agentSessions.status, TERMINAL_STATUSES),
+        // answer_question settles a question in place — it writes
+        // state:'answered' and leaves park_reason alone (lib/extensions/events.ts)
+        // — so presence alone would keep answered questions in the queue
+        // forever. A row with no `state` at all is open by construction: state
+        // is only ever written by asking, and only ever moved off 'open' by an
+        // answer or an expiry.
+        sql`coalesce(${agentSessions.pendingQuestion}->>'state', 'open') = 'open'`
+      )
+    )
+    .orderBy(desc(agentSessions.id))
+    .limit(limit);
+
+  return rows.map((r) => {
+    const q = (r.pendingQuestion ?? null) as { question?: unknown; asked_at?: unknown } | null;
+    const text = typeof q?.question === "string" ? oneLine(q.question) : null;
+    const askedAt = typeof q?.asked_at === "string" ? Date.parse(q.asked_at) : NaN;
+    return {
+      id: `q${r.runId}`,
+      runId: r.runId,
+      personaId: r.personaId,
+      personaName: r.personaName ?? null,
+      runTitle: r.title ?? r.goal ?? null,
+      kind: "question" as const,
+      type: QUESTION_ROW_TYPE,
+      text: text ?? "asked a question",
+      prUrl: r.prUrl,
+      // Sorted with the events by when the human was actually asked; the run's
+      // start is the only earlier timestamp we have if the payload lacks one.
+      createdAt: new Date(Number.isNaN(askedAt) ? r.startedAt.getTime() : askedAt).toISOString(),
+    };
+  });
 }
 
 // ────────────────────────────────────────

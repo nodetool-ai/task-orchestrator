@@ -1,6 +1,10 @@
 import React from "react";
 import { Box, Text } from "ink";
-import type { Status } from "./data.js";
+import type { TuiStatus } from "./model/status.js";
+
+// One implementation of the formatting helpers, in the model layer, so a row
+// and a header can never disagree about what "12m" or "$1.20" means.
+export { age, ageMinutes, usd } from "./model/time.js";
 
 // Six-colour vocabulary, same discipline as the web app: colour means state.
 export const C = {
@@ -15,7 +19,7 @@ export const C = {
   you: "#6ea8fe",
 };
 
-export const glyph: Record<Status, { g: string; color: string }> = {
+export const glyph: Record<TuiStatus, { g: string; color: string }> = {
   running: { g: "●", color: C.running },
   preparing: { g: "◐", color: C.running },
   queued: { g: "○", color: C.queued },
@@ -25,9 +29,14 @@ export const glyph: Record<Status, { g: string; color: string }> = {
   failed: { g: "✕", color: C.blocked },
 };
 
-export function StatusGlyph({ s }: { s: Status }) {
+export function StatusGlyph({ s }: { s: TuiStatus }) {
   const { g, color } = glyph[s];
   return <Text color={color}>{g}</Text>;
+}
+
+/** The colour a status word is printed in — the glyph's colour, reused. */
+export function statusColor(s: TuiStatus): string {
+  return glyph[s].color;
 }
 
 export function Hair({ width }: { width: number }) {
@@ -51,17 +60,6 @@ export function Keys({ items }: { items: [string, string][] }) {
       ))}
     </Box>
   );
-}
-
-export function age(min: number): string {
-  if (min < 1) return "now";
-  if (min < 60) return `${min}m`;
-  if (min < 1440) return `${Math.round(min / 60)}h`;
-  return `${Math.round(min / 1440)}d`;
-}
-
-export function usd(n: number): string {
-  return `$${n.toFixed(2)}`;
 }
 
 export function padEnd(s: string, n: number): string {

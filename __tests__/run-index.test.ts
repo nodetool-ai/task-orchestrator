@@ -27,6 +27,8 @@ function row(overrides: Partial<RunIndexRow> & { id: number }): RunIndexRow {
     planTitle: null,
     repoId: null,
     repoName: null,
+    personaId: null,
+    personaName: null,
     parentRunId: null,
     prUrl: null,
     model: null,

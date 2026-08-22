@@ -66,6 +66,9 @@ export interface RunIndexRow {
   planTitle: string | null;
   repoId: string | null;
   repoName: string | null;
+  /** Persona the run speaks as — the cockpit floor row names it (T-tui-02). */
+  personaId: string | null;
+  personaName: string | null;
   parentRunId: number | null;
   prUrl: string | null;
   model: string | null;

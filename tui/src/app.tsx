@@ -1,277 +1,203 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { byId, inbox as seedInbox, runs, transcripts, type InboxItem, type Msg } from "./data.js";
+import type { OrchClient } from "./api/client.js";
+import { floorGroups } from "./model/forest.js";
+import { filterPalette } from "./model/palette.js";
+import { useOrch } from "./store.js";
 import { C, Hair } from "./theme.js";
 import { ChatHeader, Transcript } from "./views/chat.js";
-import { Floor, floorRows } from "./views/floor.js";
+import { Floor } from "./views/floor.js";
 import { Inbox } from "./views/inbox.js";
-import { Palette, filterPalette } from "./views/palette.js";
+import { Palette } from "./views/palette.js";
 import { Roster } from "./views/roster.js";
 import { Prompt, matchCommands } from "./views/prompt.js";
 
 type View = "chat" | "floor" | "inbox" | "palette";
 
-export function App() {
+// M1 is read-only (TASKS.md): navigation only, nothing that writes to the
+// server. Everything else answers with "arrives in M2" rather than pretending.
+const M2_COMMANDS = new Set(["/new", "/spawn", "/cancel", "/say", "/model", "/budget"]);
+
+export function App({ client }: { client: OrchClient }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const cols = stdout.columns ?? 100;
   const rows = stdout.rows ?? 30;
 
+  const s = useOrch(client);
+
   const [view, setView] = useState<View>("chat");
-  const [current, setCurrent] = useState(42);
-  const [msgs, setMsgs] = useState<Record<number, Msg[]>>(() => structuredClone(transcripts));
-  const [inbox, setInbox] = useState<InboxItem[]>(seedInbox);
   const [input, setInput] = useState("");
-  const [to, setTo] = useState<number | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [rail, setRail] = useState(cols >= 110);
-  const [cursor, setCursor] = useState(0);
   const [pq, setPq] = useState("");
-  const [tick, setTick] = useState(0);
+  const [cursor, setCursor] = useState(0);
+  const [trace, setTrace] = useState(false);
+  const [scrollBack, setScrollBack] = useState(0);
+  const [rail, setRail] = useState(cols >= 110);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  // Heartbeat so ages/costs in the mockup feel alive.
-  useEffect(() => {
-    const t = setInterval(() => {
-      for (const r of runs) if (r.status === "running") r.cost += 0.004;
-      setTick((n) => n + 1);
-    }, 3000);
-    return () => clearInterval(t);
-  }, []);
-
-  const run = byId(current);
-  const railW = rail && cols >= 90 ? 38 : 0;
+  const run = s.current === null ? null : (s.forest.byId(s.current) ?? null);
+  const railW = rail && cols >= 110 ? 38 : 0;
   const mainW = cols - railW - (railW ? 1 : 0);
 
-  const append = (id: number, m: Msg) =>
-    setMsgs((s) => ({ ...s, [id]: [...(s[id] ?? []), m] }));
+  const floorRows = useMemo(() => {
+    const { live, rest } = floorGroups(s.forest);
+    return [...live, ...rest];
+  }, [s.forest]);
+  const paletteItems = useMemo(() => filterPalette(s.palette, pq), [s.palette, pq]);
 
-  // Fake the agent side so the conversation has rhythm.
-  const fakeReply = (id: number, text: string) => {
-    setBusy(true);
-    const r = byId(id);
-    const t1 = setTimeout(() => append(id, { kind: "tool", run: id, text: "thinking", detail: ["reading context"] }), 500);
-    const t2 = setTimeout(() => {
-      append(id, {
-        kind: "agent",
-        run: id,
-        text:
-          r.persona === "concierge"
-            ? `On it. I will route "${text.slice(0, 40)}" — if it needs code I spawn an implementor and you will hear from me when a PR exists.`
-            : `Noted: "${text.slice(0, 40)}". Continuing.`,
-      });
-      setBusy(false);
-    }, 1400);
-    return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
-    };
+  const open = (id: number) => {
+    if (id === s.current) return setView("chat");
+    s.actions.select(id);
+    setScrollBack(0);
+    setView("chat");
   };
 
-  const answerQuestion = (runId: number, answer: string) => {
-    const r = byId(runId);
-    r.status = "running";
-    r.question = undefined;
-    setInbox((s) => s.filter((i) => !(i.kind === "question" && i.run === runId)));
-    setMsgs((s) => {
-      const next = { ...s };
-      for (const k of Object.keys(next)) {
-        next[+k] = next[+k].map((m) => (m.kind === "question" && m.run === runId && !m.answered ? { ...m, answered: answer } : m));
-      }
-      return next;
-    });
-    if (r.parentId !== null) {
-      const top = (() => {
-        let p = r;
-        while (p.parentId !== null) p = byId(p.parentId);
-        return p.id;
-      })();
-      append(top, { kind: "event", run: top, text: `you answered #${runId} · it resumed`, tone: "ok" });
+  const go = (next: View) => {
+    setCursor(0);
+    setNotice(null);
+    if (next === "palette") {
+      setPq("");
+      s.actions.ensurePalette();
     }
-    setTimeout(() => append(runId, { kind: "agent", run: runId, text: `Thanks — going with "${answer}".` }), 700);
+    setView(view === next ? "chat" : next);
+  };
+
+  // `↵` on a palette row. A task resolves to its run through the forest
+  // (run.taskId), not GET /api/tasks/:id/attached-run: the overview we already
+  // hold answers it without a round trip.
+  const openPaletteItem = (i: number) => {
+    const it = paletteItems[i];
+    setView("chat");
+    if (!it) return;
+    if (it.kind === "run" && it.runId !== undefined) return open(it.runId);
+    if (it.kind === "task") {
+      const id = s.actions.runForTask(it.id);
+      if (id !== null) return open(id);
+      setNotice(`${it.id} · no run attached yet`);
+      return;
+    }
+    setNotice(`${it.id} · ${it.label}`);
   };
 
   const submit = () => {
     const text = input.trim();
-    if (!text) return;
     setInput("");
-    // Slash commands.
-    if (text.startsWith("/")) {
-      const [cmd, ...rest] = text.split(/\s+/);
-      const arg = rest.join(" ");
-      switch (cmd) {
-        case "/floor":
-          setCursor(0);
-          setView("floor");
-          return;
-        case "/inbox":
-          setCursor(0);
-          setView("inbox");
-          return;
-        case "/open": {
-          const id = Number(arg.replace("#", ""));
-          if (runs.some((r) => r.id === id)) setCurrent(id);
-          return;
-        }
-        case "/new": {
-          const [persona, ...goal] = rest;
-          const id = Math.max(...runs.map((r) => r.id)) + 1;
-          runs.unshift({ id, parentId: null, persona: persona || "concierge", title: goal.join(" ") || "(no goal)", status: "preparing", startedMin: 0, cost: 0 });
-          setMsgs((s) => ({ ...s, [id]: [{ kind: "user", text: goal.join(" ") }] }));
-          setCurrent(id);
-          setTimeout(() => {
-            byId(id).status = "running";
-            fakeReply(id, goal.join(" "));
-          }, 900);
-          return;
-        }
-        case "/spawn": {
-          append(current, { kind: "user", text });
-          const id = Math.max(...runs.map((r) => r.id)) + 1;
-          runs.push({ id, parentId: current, persona: rest[0] || "implementor", title: rest.slice(1).join(" ") || "(no goal)", status: "preparing", startedMin: 0, cost: 0 });
-          setMsgs((s) => ({ ...s, [id]: [] }));
-          setTimeout(() => {
-            append(current, { kind: "spawn", run: current, children: [id] });
-            setTimeout(() => {
-              byId(id).status = "running";
-              setTick((n) => n + 1);
-            }, 1500);
-          }, 500);
-          return;
-        }
-        case "/cancel":
-          run.status = "failed";
-          append(current, { kind: "event", run: current, text: "cancelled by you", tone: "warn" });
-          return;
-        case "/quit":
-          exit();
-          return;
-        default:
-          append(current, { kind: "event", run: current, text: `${cmd}: mockup only`, tone: "warn" });
-          return;
-      }
-    }
-    if (to !== null) {
-      const target = to;
-      setTo(null);
-      append(current, { kind: "user", text, to: target });
-      answerQuestion(target, text);
+    if (!text) return;
+    if (!text.startsWith("/")) {
+      setNotice("read-only cockpit · sending arrives in M2");
       return;
     }
-    append(current, { kind: "user", text });
-    fakeReply(current, text);
+    const [cmd, ...rest] = text.split(/\s+/);
+    const arg = rest.join(" ");
+    switch (cmd) {
+      case "/floor":
+        return go(view === "floor" ? "chat" : "floor");
+      case "/inbox":
+        return go(view === "inbox" ? "chat" : "inbox");
+      case "/open": {
+        const id = Number(arg.replace("#", ""));
+        if (Number.isFinite(id) && s.forest.byId(id)) return open(id);
+        return setNotice(`no run #${arg.replace("#", "")}`);
+      }
+      case "/trace":
+        setTrace((t) => !t);
+        return setNotice(`tool trace ${trace ? "off" : "on"}`);
+      case "/quit":
+        return exit();
+      default:
+        return setNotice(M2_COMMANDS.has(cmd) ? `${cmd} arrives in M2` : `${cmd}: unknown command`);
+    }
   };
 
   useInput((ch, key) => {
-    // Global chords.
+    // Global chords (PRD §6.3).
     if (key.ctrl && ch === "c") return exit();
-    if (key.ctrl && ch === "k") {
-      setPq("");
-      setCursor(0);
-      setView(view === "palette" ? "chat" : "palette");
-      return;
-    }
-    if (key.ctrl && ch === "f") {
-      setCursor(0);
-      setView(view === "floor" ? "chat" : "floor");
-      return;
-    }
-    if (key.ctrl && ch === "n") {
-      setCursor(0);
-      setView(view === "inbox" ? "chat" : "inbox");
-      return;
-    }
+    if (key.ctrl && ch === "k") return go("palette");
+    if (key.ctrl && ch === "f") return go("floor");
+    if (key.ctrl && ch === "n") return go("inbox");
     if (key.ctrl && ch === "b") return setRail((r) => !r);
+    if (key.ctrl && ch === "o") return setTrace((t) => !t);
 
     if (view === "palette") {
-      const items = filterPalette(pq);
       if (key.escape) return setView("chat");
-      if (key.return) {
-        const it = items[cursor];
-        if (it?.kind === "run") setCurrent(Number(it.id.slice(1)));
-        setView("chat");
-        return;
-      }
+      if (key.return) return openPaletteItem(cursor);
       if (key.upArrow) return setCursor((c) => Math.max(0, c - 1));
-      if (key.downArrow) return setCursor((c) => Math.min(items.length - 1, c + 1));
-      if (key.backspace || key.delete) return setPq((q) => q.slice(0, -1));
-      if (ch && !key.ctrl && !key.meta) setPq((q) => q + ch);
+      if (key.downArrow) return setCursor((c) => Math.min(paletteItems.length - 1, c + 1));
+      if (key.backspace || key.delete) {
+        setCursor(0);
+        return setPq((q) => q.slice(0, -1));
+      }
+      if (ch && !key.ctrl && !key.meta) {
+        setCursor(0);
+        setPq((q) => q + ch);
+      }
       return;
     }
+
     if (view === "floor") {
-      const rowsF = floorRows();
       if (key.escape) return setView("chat");
       if (key.upArrow) return setCursor((c) => Math.max(0, c - 1));
-      if (key.downArrow) return setCursor((c) => Math.min(rowsF.length - 1, c + 1));
+      if (key.downArrow) return setCursor((c) => Math.min(floorRows.length - 1, c + 1));
       if (key.return) {
-        setCurrent(rowsF[cursor].run.id);
-        setView("chat");
+        const row = floorRows[cursor];
+        if (row) open(row.run.id);
         return;
       }
-      if (ch === "c") {
-        rowsF[cursor].run.status = "failed";
-        setTick((n) => n + 1);
-        return;
-      }
-      if (ch === "n") {
-        setView("chat");
-        setInput("/new concierge ");
-        return;
-      }
+      if (ch === "c" || ch === "n") return setNotice(`${ch} arrives in M2`);
       return;
     }
+
     if (view === "inbox") {
       if (key.escape) return setView("chat");
       if (key.upArrow) return setCursor((c) => Math.max(0, c - 1));
-      if (key.downArrow) return setCursor((c) => Math.min(inbox.length - 1, c + 1));
-      if (ch === "d") return setInbox((s) => s.filter((_, i) => i !== cursor));
+      if (key.downArrow) return setCursor((c) => Math.min(s.inbox.length - 1, c + 1));
       if (key.return) {
-        const it = inbox[cursor];
-        if (!it) return;
-        if (it.kind === "question") {
-          // Answer from wherever you are; the chat shows the question.
-          setTo(it.run);
-        } else {
-          setCurrent(it.run);
-        }
-        setView("chat");
+        const it = s.inbox[cursor];
+        if (it) open(it.runId);
         return;
       }
+      if (ch === "d") return setNotice("dismiss arrives in M2");
       return;
     }
 
-    // Chat view: the composer owns the keyboard.
+    // Chat: the composer owns the keyboard, apart from transcript scrolling.
+    if (key.pageUp) return setScrollBack((n) => n + 5);
+    if (key.pageDown) return setScrollBack((n) => Math.max(0, n - 5));
     if (key.escape) {
-      if (to !== null) return setTo(null);
-      if (input) return setInput("");
-      return;
-    }
-    if (key.tab) {
-      const qs = inbox.filter((i) => i.kind === "question");
-      if (qs.length === 0) return;
-      const idx = to === null ? 0 : (qs.findIndex((q) => q.run === to) + 1) % qs.length;
-      setTo(qs[idx].run);
-      return;
+      setNotice(null);
+      if (scrollBack) return setScrollBack(0);
+      return setInput("");
     }
     if (key.return) return submit();
-    if (key.backspace || key.delete) return setInput((s) => s.slice(0, -1));
+    if (key.backspace || key.delete) return setInput((v) => v.slice(0, -1));
     if (key.ctrl && ch === "u") return setInput("");
     if (ch && !key.ctrl && !key.meta && !key.upArrow && !key.downArrow && !key.leftArrow && !key.rightArrow) {
-      setInput((s) => s + ch);
+      setInput((v) => v + ch);
     }
   });
 
-  const header = useMemo(() => <ChatHeader run={run} width={mainW} />, [run, mainW, tick]);
-  const promptLines = 3 + matchCommands(input).length + (inbox.some((i) => i.kind === "question") && to === null ? 1 : 0);
-  const bodyH = rows - 2 - promptLines; // header + hairline
+  const promptLines = 3 + matchCommands(input).length;
+  const statusLine = notice ?? statusFor(s.status, s.error);
+  const bodyH = Math.max(3, rows - 3 - promptLines); // header + hair + status
 
   const main = (() => {
-    if (view === "floor") return <Floor width={mainW} height={bodyH} cursor={cursor} />;
-    if (view === "inbox") return <Inbox items={inbox} width={mainW} height={bodyH} cursor={cursor} />;
+    if (view === "floor")
+      return <Floor forest={s.forest} inboxCount={s.inbox.length} now={s.now} width={mainW} height={bodyH} cursor={cursor} />;
+    if (view === "inbox") return <Inbox items={s.inbox} now={s.now} width={mainW} height={bodyH} cursor={cursor} />;
     return (
       <Box flexDirection="column" width={mainW}>
-        {header}
+        <ChatHeader run={run} forest={s.forest} now={s.now} width={mainW} />
         <Hair width={mainW} />
-        <Transcript run={run} msgs={msgs[current] ?? []} width={mainW} height={bodyH} />
+        <Transcript
+          run={run}
+          frames={s.frames}
+          forest={s.forest}
+          now={s.now}
+          width={mainW}
+          height={bodyH}
+          trace={trace}
+          scrollBack={scrollBack}
+        />
       </Box>
     );
   })();
@@ -281,22 +207,66 @@ export function App() {
       <Box flexDirection="row" flexGrow={1}>
         <Box flexDirection="column" width={mainW}>
           {main}
-          {view !== "palette" && <Prompt value={input} to={to} pending={inbox} width={mainW} busy={busy} />}
+          {view !== "palette" && (
+            <Prompt
+              value={input}
+              to={null}
+              pendingCount={s.inbox.length}
+              width={mainW}
+              busy={s.loading}
+              readOnly
+            />
+          )}
           {view === "palette" && (
             <Box flexDirection="column" width={mainW} alignItems="center" marginBottom={2}>
-              <Palette query={pq} cursor={cursor} width={mainW} />
+              <Palette items={paletteItems} query={pq} cursor={cursor} width={mainW} />
             </Box>
           )}
+          <StatusLine text={statusLine} tone={notice ? "note" : s.status} width={mainW} />
         </Box>
         {railW > 0 && (
           <Box flexDirection="row">
             <Box flexDirection="column" height={rows}>
               <Text color={C.hair}>{"│\n".repeat(rows)}</Text>
             </Box>
-            <Roster width={railW - 1} height={rows} current={current} />
+            <Roster
+              forest={s.forest}
+              inboxCount={s.inbox.length}
+              now={s.now}
+              width={railW - 1}
+              height={rows}
+              current={s.current}
+            />
           </Box>
         )}
       </Box>
     </Box>
   );
+}
+
+/** One dim line, bottom left: a dropped stream must not look like a freeze. */
+function StatusLine({ text, tone, width }: { text: string; tone: string; width: number }) {
+  const color = tone === "unauthorized" || tone === "offline" ? C.blocked : tone === "reconnecting" ? C.running : C.muted;
+  return (
+    <Box width={width}>
+      <Text color={color} wrap="truncate">
+        {text}
+      </Text>
+    </Box>
+  );
+}
+
+function statusFor(status: string, error: string | null): string {
+  switch (status) {
+    case "connecting":
+      return "connecting…";
+    case "live":
+      return error ?? "live";
+    case "reconnecting":
+      return error ?? "reconnecting…";
+    case "unauthorized":
+      return `unauthorized · ${error ?? ""}`.trim();
+    default:
+      return `offline · ${error ?? "no connection"}`;
+  }
 }
