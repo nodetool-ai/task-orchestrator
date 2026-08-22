@@ -184,6 +184,21 @@ describe("auth", () => {
     expect(u.hint).toContain("ORCH_TOKEN");
   });
 
+  // The hint is the only thing a user sees when the token is wrong, so it has
+  // to name the real remediation: an API token from the server's settings page
+  // (the same tot_ tokens /api/mcp takes), not some other flow.
+  it("the 401 hint points at this server's token page and the login-link verb", async () => {
+    const fake = await fakeServer((_req, res) => json(res, 401, { error: "Unauthorized" }));
+    const err = await createClient({ url: `${fake.url}/`, token: "tot_bogus" })
+      .inbox()
+      .catch((e: unknown) => e);
+    const hint = (err as UnauthorizedError).hint;
+    expect(hint).toContain("ORCH_TOKEN");
+    expect(hint).toContain(`${fake.url}/settings?tab=tokens`);
+    expect(hint).toContain("npm run task -- user link");
+    expect(hint.split("\n")).toHaveLength(1);
+  });
+
   it("throws UnauthorizedError for an empty 401 body", async () => {
     const fake = await fakeServer((_req, res) => {
       res.writeHead(401);

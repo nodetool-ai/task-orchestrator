@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-import { auth } from "@/auth";
+import { resolveApiActor, unauthorizedResponse } from "@/lib/api-auth";
 import { errorResponse } from "@/lib/api";
 import { listGlobalInbox, type Audience, type GlobalInboxRow } from "@/lib/inbox";
 
@@ -14,7 +14,8 @@ const DEFAULT_LIMIT = 100;
 // pending inbox events across LIVE runs plus the runs parked on an open
 // question, newest first. Same auth posture as /api/runs/overview — an
 // unauthenticated poll gets an empty list, not an error, so the TUI works
-// against a dev server with auth disabled.
+// against a dev server with auth disabled. A presented Bearer token that does
+// not verify is a 401 (tui T-tui-11).
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
     const params = req.nextUrl.searchParams;
@@ -33,8 +34,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const limitParam = Number(params.get("limit"));
     const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : DEFAULT_LIMIT;
 
-    const session = await auth();
-    if (!session?.user?.email) {
+    const auth = await resolveApiActor(req);
+    if (!auth.ok) return unauthorizedResponse();
+    if (!auth.actor) {
       return NextResponse.json({ items: [] satisfies GlobalInboxRow[] });
     }
     return NextResponse.json({ items: await listGlobalInbox(audience, limit) });

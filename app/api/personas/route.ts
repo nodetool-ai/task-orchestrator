@@ -1,9 +1,12 @@
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
+import { requireBearer } from "@/lib/api-auth";
 import * as repo from "@/lib/repo";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const denied = await requireBearer(req);
+  if (denied) return denied;
   const personas = (await repo.listPersonas()).map(serialize);
   return NextResponse.json({ personas });
 }

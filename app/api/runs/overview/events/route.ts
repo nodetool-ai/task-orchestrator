@@ -1,5 +1,5 @@
 import { type NextRequest } from "next/server";
-import { auth } from "@/auth";
+import { resolveApiActor, unauthorizedResponse } from "@/lib/api-auth";
 import { getRunOverview } from "@/lib/run-overview";
 import { subscribeRunStreamAll } from "@/lib/run-stream-listener";
 import type { RunIndexRow } from "@/lib/run-index";
@@ -21,7 +21,8 @@ export const dynamic = "force-dynamic";
 //   - `{ type:"_eos" }` closes the stream (only for the unauthenticated case)
 //
 // Same auth posture as GET /api/runs/overview: an unauthenticated request is not
-// an error — it gets a single empty-rows frame and a graceful close.
+// an error — it gets a single empty-rows frame and a graceful close. An
+// `Authorization: Bearer tot_…` that fails to verify is a 401 instead.
 const PING_EVERY_MS = 15_000;
 // Belt-and-suspenders: re-fetch on this cadence even without a NOTIFY, in case
 // one is missed (e.g. the listen connection briefly dropped and reconnected).
@@ -31,8 +32,11 @@ const SAFETY_DRAIN_MS = 15_000;
 const DEBOUNCE_MS = 750;
 
 export async function GET(req: NextRequest) {
-  const session = await auth();
-  const authed = Boolean(session?.user?.email);
+  const auth = await resolveApiActor(req);
+  // A Bearer token that does not verify is a hard 401 rather than the empty
+  // stream the cookie-less browser case gets (tui T-tui-11).
+  if (!auth.ok) return unauthorizedResponse();
+  const authed = auth.actor !== null;
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {

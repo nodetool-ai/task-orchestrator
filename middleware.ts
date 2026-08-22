@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import NextAuth from "next-auth";
 import { authConfig } from "@/auth.config";
 import { isAuthDisabled } from "@/lib/auth-mode";
+import { isCockpitRoute } from "@/lib/cockpit-routes";
 
 // Auth.js gate. Every route requires a signed-in user except /login itself
 // and Auth.js's own /api/auth/* handlers. Browser visitors are redirected
@@ -34,6 +35,17 @@ export default auth((req) => {
   // /api/mcp has its own Bearer-token auth (lib/api-tokens). Bypass the
   // session gate so MCP clients without a browser session can reach it.
   if (path === "/api/mcp") {
+    return NextResponse.next();
+  }
+  // The terminal cockpit (`orch`, tui/) has no cookie jar, so it authenticates
+  // with `Authorization: Bearer tot_…` — the same API tokens /api/mcp accepts
+  // (lib/api-tokens). Middleware cannot verify one (Edge runtime: no DB, no
+  // bcrypt), so it only forwards the request; each route below calls
+  // lib/api-auth, which 401s a token that does not verify. The bypass is
+  // deliberately narrowed to the cockpit's routes AND to requests that
+  // actually carry an Authorization header, so no other API route can be
+  // reached without a session by attaching a junk header.
+  if (isCockpitRoute(path) && req.headers.has("authorization")) {
     return NextResponse.next();
   }
   // /api/github/webhook authenticates via the X-Hub-Signature-256 HMAC

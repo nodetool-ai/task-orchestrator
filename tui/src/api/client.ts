@@ -40,14 +40,27 @@ export class ApiError extends Error {
 /** Thrown on 401. Carries a one-line remedy in `.hint`. */
 export class UnauthorizedError extends ApiError {
   readonly hint: string;
-  constructor(body: unknown, message = "Unauthorized") {
+  constructor(body: unknown, message = "Unauthorized", hint: string = authHint()) {
     super(401, message, body);
     this.name = "UnauthorizedError";
-    this.hint = AUTH_HINT;
+    this.hint = hint;
   }
 }
 
-const AUTH_HINT = "npm run task -- user link …, or set ORCH_TOKEN from the token page";
+/**
+ * The real remediation path, in one line. The server accepts the same API
+ * tokens as its MCP endpoint: they are minted on the settings page, shown
+ * once, and sent as `Authorization: Bearer tot_…`. `user link` does not mint
+ * one — it prints a magic login link, which is how you reach that page when
+ * you have no browser session yet.
+ */
+export function authHint(base?: string): string {
+  const origin = (base ?? "").replace(/\/+$/, "");
+  return (
+    `set ORCH_TOKEN to an API token from ${origin}/settings?tab=tokens ` +
+    "(no session? npm run task -- user link <email> prints a login link)"
+  );
+}
 
 export interface Subscription {
   close(): void;
@@ -97,7 +110,7 @@ function defaultSleep(ms: number): Promise<void> {
 
 /** Server errors are JSON `{error}` on the REST routes but plain text on the
  * pre-stream path of /api/runs/:id/events, so sniff rather than assume. */
-async function errorFor(res: Response): Promise<ApiError> {
+async function errorFor(res: Response, base?: string): Promise<ApiError> {
   let text = "";
   try {
     text = await res.text();
@@ -117,7 +130,7 @@ async function errorFor(res: Response): Promise<ApiError> {
     }
   }
   if (!message) message = `HTTP ${res.status}`;
-  if (res.status === 401) return new UnauthorizedError(body, message);
+  if (res.status === 401) return new UnauthorizedError(body, message, authHint(base));
   return new ApiError(res.status, message, body);
 }
 
@@ -129,8 +142,10 @@ export function createClient(cfg: Partial<ClientConfig> = {}): OrchClient {
   const maxBackoffMs = cfg.maxBackoffMs ?? 30000;
   const sleep = cfg.sleep ?? defaultSleep;
 
-  // Bearer support on these routes lands with T-tui-11; today the server
-  // authenticates with a NextAuth session cookie and ignores the header.
+  // ORCH_TOKEN goes out as `Authorization: Bearer tot_…` — the server verifies
+  // it against its api_tokens table (lib/api-auth) on every route the cockpit
+  // uses. With no token the request is unauthenticated, which a dev server
+  // (NODE_ENV=development, login gate off) still serves.
   const authHeaders = (accept: string): Record<string, string> => {
     const h: Record<string, string> = { accept };
     if (token) h.authorization = `Bearer ${token}`;
@@ -139,7 +154,7 @@ export function createClient(cfg: Partial<ClientConfig> = {}): OrchClient {
 
   async function getJson<T>(path: string): Promise<T> {
     const res = await doFetch(`${base}${path}`, { headers: authHeaders("application/json") });
-    if (!res.ok) throw await errorFor(res);
+    if (!res.ok) throw await errorFor(res, base);
     return (await res.json()) as T;
   }
 
@@ -149,7 +164,7 @@ export function createClient(cfg: Partial<ClientConfig> = {}): OrchClient {
       headers: { ...authHeaders("application/json"), "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (!res.ok) throw await errorFor(res);
+    if (!res.ok) throw await errorFor(res, base);
     return (await res.json()) as T;
   }
 
@@ -181,7 +196,7 @@ export function createClient(cfg: Partial<ClientConfig> = {}): OrchClient {
             headers: authHeaders("text/event-stream"),
             signal: controller.signal,
           });
-          if (!res.ok) throw await errorFor(res);
+          if (!res.ok) throw await errorFor(res, base);
           if (!res.body) throw new ApiError(res.status, "Stream had no body", null);
           for await (const data of sseFrames(res.body as ReadableStream<Uint8Array>)) {
             if (closed) break;
@@ -290,7 +305,7 @@ export function createClient(cfg: Partial<ClientConfig> = {}): OrchClient {
         headers: { ...authHeaders("text/event-stream"), "content-type": "application/json" },
         body: JSON.stringify({ text }),
       });
-      if (!res.ok) throw await errorFor(res);
+      if (!res.ok) throw await errorFor(res, base);
       if (!res.body) return; // nothing to read; the turn was still accepted
       for await (const data of sseFrames(res.body as ReadableStream<Uint8Array>)) {
         let frame: unknown;
