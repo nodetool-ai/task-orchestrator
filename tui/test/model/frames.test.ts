@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MessageRow, SdkContentBlock } from "../../src/api/types.js";
-import { appendFrame, frameFromEvent, framesFromMessages, type Frame } from "../../src/model/frames.js";
+import { appendFrame, frameFromEvent, framesFromMessages, spawnedIds, type Frame } from "../../src/model/frames.js";
 
 const T0 = "2026-08-22T10:00:00.000Z";
 let seq = 0;
@@ -190,5 +190,25 @@ describe("appendFrame", () => {
     const a: Frame = { kind: "question", at: 1, run: 45, text: "pi or claude?" };
     const b: Frame = { kind: "question", at: 2, run: 45, text: "squash or merge?" };
     expect(appendFrame(appendFrame([], a), b)).toHaveLength(2);
+  });
+});
+
+describe("spawnedIds prose fallback", () => {
+  it("reads the real start_session result", () => {
+    expect(spawnedIds("Started session #43 on P-cli (model: default).")).toEqual([43]);
+  });
+
+  it("reads a hashless prose result", () => {
+    expect(spawnedIds("started run 43")).toEqual([43]);
+    expect(spawnedIds("Started session 77")).toEqual([77]);
+  });
+
+  it("ignores numbers that are not run ids", () => {
+    expect(spawnedIds("read 946 lines")).toEqual([]);
+    expect(spawnedIds("+88 −12")).toEqual([]);
+  });
+
+  it("still prefers structured ids", () => {
+    expect(spawnedIds(JSON.stringify({ run_id: 51 }))).toEqual([51]);
   });
 });

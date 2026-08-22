@@ -191,6 +191,12 @@ export function spawnedIds(content: unknown): number[] {
   if (out.size === 0) {
     for (const m of text.matchAll(/#(\d+)/g)) out.add(Number(m[1]));
   }
+  // Prose without a `#`: start_session says "Started session #43", but a tool
+  // that phrases it "started run 43" would otherwise render a childless spawn
+  // frame. Anchored on the noun so stray numbers ("946 lines") never match.
+  if (out.size === 0) {
+    for (const m of text.matchAll(/\b(?:run|session)\s+#?(\d+)/gi)) out.add(Number(m[1]));
+  }
   return [...out];
 }
 
