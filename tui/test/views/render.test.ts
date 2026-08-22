@@ -73,22 +73,49 @@ function lastFrame(out: FakeOut): string {
   return "";
 }
 
-async function screenshot(cols: number, rows: number, keys: string[], ascii = false): Promise<string[]> {
+/** Poll rather than sleep: the frame we want is the one that has arrived,
+ *  and how long that takes is the runner's business, not the test's. */
+async function until(ready: () => boolean, ms = 5000): Promise<void> {
+  for (let waited = 0; waited < ms; waited += 20) {
+    if (ready()) return;
+    await tick(20);
+  }
+}
+
+async function screenshot(
+  cols: number,
+  rows: number,
+  keys: string[],
+  marker: string,
+  ascii = false,
+): Promise<string[]> {
   const stdout = fakeStdout(cols, rows);
   const stdin = fakeStdin();
   const app = render(
     React.createElement(App, { client: createFakeClient(), initial: 42, baseUrl: "http://localhost:3000", ascii }),
     // patchConsole off so a stray console.log cannot land in the frame we
-    // are about to measure.
-    { stdout: stdout as never, stdin: stdin as never, exitOnCtrlC: false, patchConsole: false },
+    // are about to measure. `interactive` is forced rather than detected:
+    // Ink asks is-in-ci, and under a CI runner it writes nothing until
+    // unmount, so the whole harness would measure an empty string and every
+    // assertion here would be vacuous — which is exactly what it did.
+    {
+      stdout: stdout as never,
+      stdin: stdin as never,
+      exitOnCtrlC: false,
+      patchConsole: false,
+      interactive: true,
+    },
   );
   // The store fills from the fake client on mount; the frames before that are
-  // an empty cockpit and would prove nothing.
-  await tick(150);
+  // an empty cockpit and would prove nothing. Waiting on the content rather
+  // than on a fixed delay keeps a loaded CI runner from failing a screen that
+  // was merely slow to arrive.
+  await until(() => lastFrame(stdout).trim() !== "");
   for (const k of keys) {
     stdin.write(k);
     await tick();
   }
+  await until(() => lastFrame(stdout).includes(marker));
   const frame = lastFrame(stdout);
   app.unmount();
   await tick(10);
@@ -109,7 +136,7 @@ describe("the rendered cockpit", () => {
   for (const [cols, rows] of SIZES) {
     for (const [view, keys, marker] of VIEWS) {
       it(`fits ${cols}x${rows} in ${view}`, async () => {
-        const lines = await screenshot(cols, rows, keys);
+        const lines = await screenshot(cols, rows, keys, marker);
         // Without this the test would happily measure a cockpit that never
         // got the keystroke and stayed on the transcript.
         expect(lines.join("\n"), `${view} ${cols}x${rows}`).toContain(marker);
@@ -127,7 +154,7 @@ describe("the rendered cockpit", () => {
   // the same — but only if every fallback really is one column.
   for (const [view, keys, marker] of VIEWS) {
     it(`fits 80x24 in ${view} under --ascii`, async () => {
-      const lines = await screenshot(80, 24, keys, true);
+      const lines = await screenshot(80, 24, keys, marker, true);
       expect(lines.join("\n")).toContain(marker);
       // Box drawing and block elements are what a font without them turns
       // into mojibake; the interpunct the prose separates with is not part of
