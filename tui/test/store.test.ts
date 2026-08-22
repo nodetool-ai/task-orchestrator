@@ -3,7 +3,18 @@
 
 import { describe, expect, it } from "vitest";
 import { UnauthorizedError, type OrchClient, type OverviewHandlers, type RunEventHandlers, type Subscription } from "../src/api/client.js";
-import type { GlobalInboxRow, MessageRow, PlanSummary, RunDetail, RunIndexRow, StreamCursor, TaskSummary } from "../src/api/types.js";
+import type {
+  CreateRunInput,
+  GlobalInboxRow,
+  MessageRow,
+  PersonaSummary,
+  PlanSummary,
+  RunDetail,
+  RunIndexRow,
+  RunRow,
+  StreamCursor,
+  TaskSummary,
+} from "../src/api/types.js";
 import { createStore, type Clock } from "../src/store.js";
 
 class TestClock implements Clock {
@@ -79,6 +90,55 @@ function message(id: number, runId: number, text: string): MessageRow {
   return { id, runId, role: "agent", content: [{ type: "text", text }], createdAt: new Date(id * 1000).toISOString() };
 }
 
+function runRow(id: number, goal: string, status: RunRow["status"] = "running"): RunRow {
+  return {
+    id,
+    goal,
+    status,
+    title: null,
+    personaId: "concierge",
+    parentRunId: null,
+    model: null,
+    taskId: null,
+    planId: null,
+    prUrl: null,
+    totalCostUsd: 0,
+    startedAt: new Date(0).toISOString(),
+    completedAt: null,
+  };
+}
+
+function persona(id: string, over: Partial<PersonaSummary> = {}): PersonaSummary {
+  return {
+    id,
+    name: id,
+    description: null,
+    modelProvider: null,
+    modelId: null,
+    thinkingLevel: null,
+    toolsProfile: null,
+    backend: null,
+    budgetMaxTurns: null,
+    budgetMaxSeconds: null,
+    ...over,
+  };
+}
+
+function inboxRow(id: string, runId: number, kind: GlobalInboxRow["kind"], at: number): GlobalInboxRow {
+  return {
+    id,
+    runId,
+    kind,
+    text: `${kind} on ${runId}`,
+    createdAt: new Date(at).toISOString(),
+    personaId: "concierge",
+    personaName: "concierge",
+    runTitle: null,
+    type: kind,
+    prUrl: null,
+  };
+}
+
 interface RunSub extends Subscription {
   id: number;
   cursor: StreamCursor;
@@ -96,6 +156,19 @@ class StubClient implements OrchClient {
   tasksCalls = 0;
   plansCalls = 0;
   inboxCalls = 0;
+  personaRows: PersonaSummary[] = [];
+  personasCalls = 0;
+  sent: Array<{ id: number; text: string }> = [];
+  created: CreateRunInput[] = [];
+  cancelled: number[] = [];
+  sendError: unknown = null;
+  createError: unknown = null;
+  cancelError: unknown = null;
+  /** While true, sendMessage hangs until releaseSend() — so a test can look at
+   *  the transcript while the POST is still in flight. */
+  sendBlocked = false;
+  private release: (() => void) | null = null;
+  nextRunId = 100;
   overviewError: unknown = null;
   overviewHandlers: OverviewHandlers | null = null;
   overviewClosed = false;
@@ -126,6 +199,32 @@ class StubClient implements OrchClient {
   async plans(): Promise<PlanSummary[]> {
     this.plansCalls++;
     return this.planRows;
+  }
+  async personas(): Promise<PersonaSummary[]> {
+    this.personasCalls++;
+    return this.personaRows;
+  }
+  releaseSend(): void {
+    this.sendBlocked = false;
+    this.release?.();
+    this.release = null;
+  }
+  async sendMessage(id: number, text: string): Promise<void> {
+    if (this.sendBlocked) await new Promise<void>((r) => (this.release = r));
+    if (this.sendError) throw this.sendError;
+    this.sent.push({ id, text });
+  }
+  async createRun(input: CreateRunInput): Promise<RunRow> {
+    this.created.push(input);
+    if (this.createError) throw this.createError;
+    const id = this.nextRunId++;
+    this.rows = [...this.rows, row(id, { personaId: input.personaId ?? null })];
+    return runRow(id, input.goal);
+  }
+  async cancelRun(id: number): Promise<RunRow> {
+    this.cancelled.push(id);
+    if (this.cancelError) throw this.cancelError;
+    return runRow(id, `goal ${id}`, "cancelled");
   }
   overviewEvents(h: OverviewHandlers): Subscription {
     this.overviewHandlers = h;
@@ -327,5 +426,193 @@ describe("store", () => {
     expect(client.inboxCalls).toBe(before.inbox);
     expect(client.tasksCalls).toBe(before.tasks);
     store.stop(); // idempotent
+  });
+  // ── writes (T-tui-06/07) ────────────────────────────────────────────────
+
+  it("shows the typed line before the POST settles, and folds the stream's echo into it", async () => {
+    const client = new StubClient();
+    client.sendBlocked = true;
+    const { store } = boot(client);
+    await flush();
+    store.actions.select(1);
+    await flush();
+
+    const sending = store.actions.send("ship it");
+    await flush();
+    // The operator sees their own line immediately; the request is still open.
+    expect(store.getState().frames).toEqual([{ kind: "user", at: 0, text: "ship it" }]);
+    expect(client.sent).toEqual([]);
+
+    client.releaseSend();
+    await sending;
+    expect(client.sent).toEqual([{ id: 1, text: "ship it" }]);
+
+    // The server replays the same message on the stream: still one frame.
+    client.runSubs[0].handlers.onMessage({
+      id: 5,
+      runId: 1,
+      role: "user",
+      content: [{ type: "text", text: "ship it" }],
+      createdAt: new Date(5000).toISOString(),
+    });
+    expect(store.getState().frames).toHaveLength(1);
+    store.stop();
+  });
+
+  it("leaves one actionable line when a send fails, and keeps taking messages", async () => {
+    const client = new StubClient();
+    client.sendError = new Error("connect ECONNREFUSED");
+    const { store } = boot(client);
+    await flush();
+    store.actions.select(1);
+    await flush();
+
+    await store.actions.send("first"); // resolves; never throws
+    expect(store.getState().error).toBe("send to #1 failed: connect ECONNREFUSED");
+    expect(store.getState().status).not.toBe("unauthorized");
+
+    client.sendError = null;
+    await store.actions.send("second");
+    expect(client.sent).toEqual([{ id: 1, text: "second" }]);
+    store.stop();
+  });
+
+  it("flips to unauthorized when a write is rejected with 401", async () => {
+    const client = new StubClient();
+    client.sendError = new UnauthorizedError(null);
+    const { store } = boot(client);
+    await flush();
+    store.actions.select(1);
+    await flush();
+
+    await store.actions.send("hi");
+    expect(store.getState().status).toBe("unauthorized");
+    expect(store.getState().error).toMatch(/ORCH_TOKEN/);
+    store.stop();
+  });
+
+  it("settles the open question and refreshes the inbox when a send is aimed at a run", async () => {
+    const client = new StubClient();
+    const { store } = boot(client, { inboxGapMs: 0 });
+    await flush();
+    store.actions.select(1);
+    await flush();
+    expect(client.inboxCalls).toBe(1);
+
+    client.runSubs[0].handlers.onEvent({ type: "child.question", question: "pi or claude?", run_id: 5 });
+    expect(store.getState().frames).toEqual([{ kind: "question", at: 0, run: 5, text: "pi or claude?" }]);
+
+    await store.actions.send("pi", 5);
+    await flush();
+
+    expect(client.sent).toEqual([{ id: 5, text: "pi" }]);
+    // The question settles in place — no second copy of it — and the answer is
+    // in the transcript as the operator's own line.
+    expect(store.getState().frames).toEqual([
+      { kind: "question", at: 0, run: 5, text: "pi or claude?", answered: "pi" },
+      { kind: "user", at: 0, text: "pi", to: 5 },
+    ]);
+    expect(client.inboxCalls).toBe(2); // the ⚑ count has to drop now, not in 30 s
+    store.stop();
+  });
+
+  it("creates a run with the persona's budget defaults and opens it", async () => {
+    const client = new StubClient();
+    client.personaRows = [persona("qa", { budgetMaxTurns: 40, budgetMaxSeconds: 900 }), persona("planner")];
+    const { store } = boot(client);
+    await flush();
+    store.actions.ensurePersonas();
+    await flush();
+
+    const id = await store.actions.newRun("qa", "verify the cockpit");
+    await flush();
+
+    expect(client.created).toEqual([
+      {
+        goal: "verify the cockpit",
+        personaId: "qa",
+        // Deliberate: a worktree run with no taskId is rejected server-side.
+        cwdStrategy: "none",
+        budget: { maxTurns: 40, maxSeconds: 900 },
+      },
+    ]);
+    expect(id).toBe(100);
+    expect(store.getState().current).toBe(100);
+
+    // A persona with no budget columns sends no budget key at all.
+    await store.actions.newRun("planner", "plan it");
+    await flush();
+    expect(client.created[1]).toEqual({ goal: "plan it", personaId: "planner", cwdStrategy: "none" });
+    store.stop();
+  });
+
+  it("reports a failed create instead of throwing, and stays on the current run", async () => {
+    const client = new StubClient();
+    client.createError = new Error("unknown persona");
+    const { store } = boot(client);
+    await flush();
+    store.actions.select(1);
+    await flush();
+
+    expect(await store.actions.newRun("nope", "goal")).toBe(null);
+    expect(store.getState().error).toBe("new nope run failed: unknown persona");
+    expect(store.getState().current).toBe(1);
+    store.stop();
+  });
+
+  it("cancels a run and refreshes the needs-you list", async () => {
+    const client = new StubClient();
+    const { store } = boot(client, { inboxGapMs: 0 });
+    await flush();
+
+    await store.actions.cancelRun(1);
+    await flush();
+    expect(client.cancelled).toEqual([1]);
+    expect(client.inboxCalls).toBe(2);
+
+    client.cancelError = new Error("Not found");
+    await store.actions.cancelRun(99);
+    expect(store.getState().error).toBe("cancel #99 failed: Not found");
+    store.stop();
+  });
+
+  it("orders the tab cycle newest-question-first, with parked runs as the backstop", async () => {
+    const client = new StubClient();
+    client.rows = [
+      row(1),
+      row(7, { status: "parked", parkReason: "question" }),
+      row(9, { status: "parked", parkReason: "question" }),
+      row(11, { status: "parked", parkReason: "sleeping" }), // waiting on time, not on us
+    ];
+    client.inboxRows = [
+      inboxRow("q5", 5, "question", 3000),
+      inboxRow("r6", 6, "review", 2500), // not a question: not in the cycle
+      inboxRow("q7", 7, "question", 2000),
+      inboxRow("q5b", 5, "question", 1000), // same run twice: visited once
+    ];
+    const { store } = boot(client);
+    await flush();
+
+    expect(store.actions.waiting()).toEqual([5, 7, 9]);
+    store.stop();
+  });
+
+  it("fetches the persona list once and caches it", async () => {
+    const client = new StubClient();
+    client.personaRows = [persona("qa")];
+    const { store } = boot(client);
+    await flush();
+    expect(client.personasCalls).toBe(0); // nothing fetches it until /new needs it
+
+    store.actions.ensurePersonas();
+    store.actions.ensurePersonas();
+    await flush();
+    expect(client.personasCalls).toBe(1);
+    expect(store.getState().personas.map((p) => p.id)).toEqual(["qa"]);
+
+    store.actions.ensurePersonas();
+    await flush();
+    expect(client.personasCalls).toBe(1);
+    store.stop();
   });
 });

@@ -186,6 +186,31 @@ describe("appendFrame", () => {
     expect(appendFrame(answered, { ...q, answered: "pi" })).toBe(answered);
   });
 
+  it("drops the stream's echo of a message the cockpit already showed", () => {
+    // The cockpit pushes the typed line optimistically; the server then
+    // replays its own copy. The FIRST frame survives, because it is the one
+    // carrying the `to` chip the operator aimed the message at.
+    const typed: Frame = { kind: "user", at: 1, text: "answer: pi", to: 45 };
+    const echo: Frame = { kind: "user", at: 2, text: "answer: pi" };
+    const once = appendFrame([], typed);
+    expect(appendFrame(once, echo)).toBe(once);
+  });
+
+  it("keeps a genuinely repeated message once the window has passed", () => {
+    const typed: Frame = { kind: "user", at: 1, text: "again" };
+    let frames = appendFrame([], typed);
+    expect(appendFrame(frames, { ...typed, at: 2 })).toBe(frames); // still an echo
+    for (let i = 0; i < 12; i++) frames = appendFrame(frames, { kind: "agent", at: 3, run: 44, text: `a${i}` });
+    frames = appendFrame(frames, { ...typed, at: 9 });
+    expect(frames.filter((f) => f.kind === "user")).toHaveLength(2);
+  });
+
+  it("keeps two different messages apart", () => {
+    const a: Frame = { kind: "user", at: 1, text: "one" };
+    const b: Frame = { kind: "user", at: 2, text: "two" };
+    expect(appendFrame(appendFrame([], a), b)).toHaveLength(2);
+  });
+
   it("keeps two different questions apart", () => {
     const a: Frame = { kind: "question", at: 1, run: 45, text: "pi or claude?" };
     const b: Frame = { kind: "question", at: 2, run: 45, text: "squash or merge?" };
