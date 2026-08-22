@@ -13,6 +13,13 @@ export interface Run {
   taskId: string | null;
   planId: string | null;
   pr: { number: number; ci: "pending" | "pass" | "fail" | "unknown" } | null;
+  /** The raw PR link, kept alongside the parsed number because `o` opens a
+   *  url the cockpit cannot always parse a number out of. */
+  prUrl: string | null;
+  /** What `/model` and `/budget` set; null means the run inherits. */
+  model: string | null;
+  budgetUsd: number | null;
+  budgetTurns: number | null;
   startedAt: number;
   completedAt: number | null;
   cost: number;
@@ -33,6 +40,10 @@ export function toRun(row: RunIndexRow): Run {
     // The overview payload carries no check-run state, so CI is unknown until
     // the row is opened. Fill this in when /api/runs/overview grows a ci field.
     pr: pr === null ? null : { number: pr, ci: "unknown" },
+    prUrl: row.prUrl,
+    model: row.model,
+    budgetUsd: row.budgetMaxUsd,
+    budgetTurns: row.budgetMaxTurns,
     startedAt: epoch(row.startedAt),
     completedAt: row.completedAt === null ? null : epoch(row.completedAt),
     cost: row.totalCostUsd ?? 0,

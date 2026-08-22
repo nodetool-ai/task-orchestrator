@@ -8,6 +8,7 @@ import type {
   MessageRow,
   PersonaSummary,
   PlanSummary,
+  RunConfigInput,
   RunDetail,
   RunIndexRow,
   RunInbox,
@@ -98,6 +99,8 @@ export interface OrchClient {
   sendMessage(id: number, text: string): Promise<void>;
   createRun(input: CreateRunInput): Promise<RunRow>;
   cancelRun(id: number): Promise<RunRow>;
+  /** Retune a live run's model and budget caps (`/model`, `/budget`). */
+  configureRun(id: number, patch: RunConfigInput): Promise<RunRow>;
   overviewEvents(h: OverviewHandlers): Subscription;
   runEvents(id: number, cursor: StreamCursor, h: RunEventHandlers): Subscription;
 }
@@ -329,6 +332,11 @@ export function createClient(cfg: Partial<ClientConfig> = {}): OrchClient {
 
     // Cancel cascades to descendants server-side, so one PATCH is enough.
     cancelRun: (id: number) => patchJson<RunRow>(`/api/runs/${id}`, { action: "cancel" }),
+
+    // The action rides in the same object as the fields: the route reads a flat
+    // body, and a nested `patch` would be a second shape to keep in sync.
+    configureRun: (id: number, patch: RunConfigInput) =>
+      patchJson<RunRow>(`/api/runs/${id}`, { action: "configure", ...patch }),
 
     overviewEvents(h: OverviewHandlers): Subscription {
       // The overview stream is cursorless: every connect replays a full `rows`

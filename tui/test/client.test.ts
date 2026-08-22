@@ -89,6 +89,8 @@ const row = (id: number): RunIndexRow =>
     parentRunId: null,
     prUrl: null,
     model: null,
+    budgetMaxUsd: null,
+    budgetMaxTurns: null,
     totalCostUsd: null,
     error: null,
     startedAt: "2026-01-01T00:00:00.000Z",
@@ -575,6 +577,42 @@ describe("writes", () => {
     expect(JSON.parse(seen.body ?? "{}")).toEqual({ action: "cancel" });
     expect(fake.auth[0]).toBe("Bearer tok");
     expect(run.status).toBe("cancelled");
+  });
+
+  // The action rides in the same flat object as the fields, because that is
+  // the body the route reads.
+  it("configures a run with one flat PATCH body", async () => {
+    let seen: { method?: string; body?: string } = {};
+    const fake = await fakeServer((req, res) => {
+      void bodyOf(req).then((body) => {
+        seen = { method: req.method, body };
+        json(res, 200, { id: 44, goal: "g", status: "running", model: "sonnet", budgetMaxUsd: 5 });
+      });
+    });
+    const run = await createClient({ url: fake.url, token: "tok" }).configureRun(44, {
+      model: "sonnet",
+      budgetMaxUsd: 5,
+    });
+    expect(fake.paths).toEqual(["/api/runs/44"]);
+    expect(seen.method).toBe("PATCH");
+    expect(JSON.parse(seen.body ?? "{}")).toEqual({
+      action: "configure",
+      model: "sonnet",
+      budgetMaxUsd: 5,
+    });
+    expect(fake.auth[0]).toBe("Bearer tok");
+    expect(run.model).toBe("sonnet");
+  });
+
+  // A cap the server refuses has to reach the operator as a line, not a throw
+  // the cockpit swallows — the store turns this into the notice.
+  it("throws the server's reason when a cap is refused", async () => {
+    const fake = await fakeServer((req, res) => {
+      void bodyOf(req).then(() => json(res, 400, { error: "Bad configure: budgetMaxTurns too small" }));
+    });
+    await expect(
+      createClient({ url: fake.url }).configureRun(44, { budgetMaxTurns: 0 }),
+    ).rejects.toMatchObject({ status: 400, message: "Bad configure: budgetMaxTurns too small" });
   });
 
   it("surfaces a JSON error from a write", async () => {

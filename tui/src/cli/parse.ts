@@ -6,6 +6,8 @@
 // a known verb is a verb, anything else is a goal.
 
 /** The interactive forms, as app.tsx has always described them. */
+import { orchColors, type ColorMode } from "../model/colors.js";
+
 export type Cli =
   | { kind: "open"; id: number | null }
   | { kind: "new"; goal: string; persona: string | null }
@@ -54,8 +56,59 @@ export const USAGE = `orch — terminal cockpit for the task orchestrator
   orch cancel <id>                cancel a run and its subtree
   orch task …                     the cli.ts verbs, unchanged
 
+  --ascii                         plain-ASCII glyphs and box drawing, anywhere
+                                  before the verb (or ORCH_ASCII=1)
+  --16color                       the six hues as ANSI colour names, for a
+                                  terminal that cannot paint 24-bit
+                                  (or ORCH_COLORS=16; the default is detected)
+
 Exit codes: 0 ok, 1 user error, 2 server error. Data on stdout, notes on stderr.
-Env: ORCH_URL (default http://localhost:3000), ORCH_TOKEN.`;
+Env: ORCH_URL (default http://localhost:3000), ORCH_TOKEN, ORCH_ASCII, ORCH_COLORS.`;
+
+/**
+ * `--ascii` and `--16color` are global, not per-verb: they say what the
+ * terminal can draw, which is a property of the session and not of the
+ * command. Stripping them here keeps every parser below unchanged — they still
+ * refuse any dash-word they do not know, which is what makes a typo an error
+ * rather than a goal.
+ *
+ * The scan stops at `--` (a message may legitimately contain `--ascii`) and at
+ * `task`, whose argv belongs to cli.ts and is none of our business.
+ *
+ * `colors` is null when nothing was asked for, which is not the same as asking
+ * for truecolor: the palette is detected from the environment then, and only
+ * an explicit flag overrides that.
+ */
+export function takeGlobalFlags(
+  argv: readonly string[],
+  env: { ORCH_ASCII?: string | undefined; ORCH_COLORS?: string | undefined } = {},
+): { ascii: boolean; colors: ColorMode | null; argv: string[] } {
+  let ascii = asciiEnv(env.ORCH_ASCII);
+  let colors = orchColors(env.ORCH_COLORS);
+  const rest: string[] = [];
+  let mine = true;
+  for (const a of argv) {
+    if (mine && a === "--ascii") {
+      ascii = true;
+      continue;
+    }
+    if (mine && (a === "--16color" || a === "--16colour")) {
+      colors = "ansi16";
+      continue;
+    }
+    if (a === "--" || a === "task") mine = false;
+    rest.push(a);
+  }
+  return { ascii, colors, argv: rest };
+}
+
+/** ORCH_ASCII is a switch, so anything but an explicit off means on: a user
+ *  who exported it at all wants the plain glyphs. */
+export function asciiEnv(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  const v = value.trim().toLowerCase();
+  return v !== "" && v !== "0" && v !== "false" && v !== "no";
+}
 
 const VERBS = new Set(["floor", "inbox", "tail", "say", "new", "spawn", "cancel", "open", "task", "help"]);
 

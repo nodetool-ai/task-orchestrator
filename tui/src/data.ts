@@ -114,6 +114,8 @@ export const runIndexRows: RunIndexRow[] = SEEDS.map((s) => ({
   parentRunId: s.parent,
   prUrl: s.pr ? `https://github.com/acme/task-orchestrator/pull/${s.pr}` : null,
   model: "claude-opus-5",
+  budgetMaxUsd: null,
+  budgetMaxTurns: null,
   totalCostUsd: s.cost,
   error: s.error ?? null,
   startedAt: ago(s.startedMin),
@@ -294,6 +296,8 @@ export function createFakeClient(): OrchClient {
     personaId: row.personaId,
     parentRunId: row.parentRunId,
     model: row.model,
+    budgetMaxUsd: row.budgetMaxUsd,
+    budgetMaxTurns: row.budgetMaxTurns,
     taskId: row.taskId,
     planId: row.planId,
     prUrl: row.prUrl,
@@ -321,8 +325,8 @@ export function createFakeClient(): OrchClient {
       startedAt: row.startedAt,
       completedAt: row.completedAt,
       parkReason: row.parkReason,
-      budgetMaxUsd: 5,
-      budgetMaxTurns: null,
+      budgetMaxUsd: row.budgetMaxUsd,
+      budgetMaxTurns: row.budgetMaxTurns,
       messages: messageRows.filter((m) => m.runId === id),
       live: row.status === "running" || row.status === "preparing",
     };
@@ -378,6 +382,15 @@ export function createFakeClient(): OrchClient {
         personaName: input.personaId ? (PERSONA_NAMES[input.personaId] ?? input.personaId) : null,
       };
       rows.unshift(row);
+      return toRunRow(row);
+    },
+
+    configureRun: async (id, patch) => {
+      const row = rows.find((r) => r.id === id);
+      if (!row) throw new Error(`no run ${id}`);
+      if (patch.model !== undefined) row.model = patch.model;
+      if (patch.budgetMaxUsd !== undefined) row.budgetMaxUsd = patch.budgetMaxUsd;
+      if (patch.budgetMaxTurns !== undefined) row.budgetMaxTurns = patch.budgetMaxTurns;
       return toRunRow(row);
     },
 

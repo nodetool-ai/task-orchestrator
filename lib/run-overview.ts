@@ -46,6 +46,8 @@ export async function getRunOverview(): Promise<RunIndexRow[]> {
     parentRunId: r.parentRunId,
     prUrl: r.prUrl,
     model: r.model,
+    budgetMaxUsd: r.budgetMaxUsd,
+    budgetMaxTurns: r.budgetMaxTurns,
     totalCostUsd: r.totalCostUsd,
     error: r.error,
     startedAt: r.startedAt.toISOString(),

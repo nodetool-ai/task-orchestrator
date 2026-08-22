@@ -2,7 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import type { Forest, TreeRow } from "../model/forest.js";
 import { statusWord } from "../model/status.js";
-import { C, StatusGlyph, age, statusColor, usd } from "../theme.js";
+import { C, StatusGlyph, age, statusColor, useGlyphs, usd } from "../theme.js";
 import { layoutRow } from "./layout.js";
 
 // One run, one line. The column arithmetic lives in layout.ts so the
@@ -25,6 +25,7 @@ export function RunRow({
   compact?: boolean;
 }) {
   const { run, prefix } = row;
+  const g = useGlyphs();
   const cost = forest ? forest.subtreeCost(run.id) : run.cost;
   const cells = layoutRow({
     prefix,
@@ -37,6 +38,7 @@ export function RunRow({
     cost: usd(cost),
     width,
     compact,
+    glyphs: g,
   });
   return (
     <Box>

@@ -1768,6 +1768,37 @@ export async function interrupt(id: number): Promise<boolean> {
   return true;
 }
 
+/** What `/model` and `/budget` in the terminal cockpit set on a live run
+ *  (tui T-tui-12). An omitted field is left alone; an explicit null clears the
+ *  cap so the run falls back to its persona / deployment default. */
+export interface RunConfigPatch {
+  model?: string | null;
+  budgetMaxUsd?: number | null;
+  budgetMaxTurns?: number | null;
+}
+
+/**
+ * Retune a run in place. Deliberately a plain UPDATE and not applyStatusTx:
+ * nothing here is a state transition, so there is no paired status event to
+ * write and no terminal guard to respect — a parked or finished run may still
+ * be retuned, and the next turn (a resume) picks the new values up when it
+ * reads the row. checkBudget() reads budget_max_* per turn, so a tightened cap
+ * bites at the end of the turn that is already in flight.
+ */
+export async function configure(id: number, patch: RunConfigPatch): Promise<RunRow> {
+  const run = await get(id);
+  if (!run) throw new repo.RepoError(`Run ${id} not found`, 404);
+  const set: Partial<typeof agentSessions.$inferInsert> = {};
+  if (patch.model !== undefined) set.model = patch.model;
+  if (patch.budgetMaxUsd !== undefined) set.budgetMaxUsd = patch.budgetMaxUsd;
+  if (patch.budgetMaxTurns !== undefined) set.budgetMaxTurns = patch.budgetMaxTurns;
+  // An empty patch is a no-op rather than an error: the caller already got
+  // what it asked for, and an UPDATE with no columns is a SQL error.
+  if (Object.keys(set).length === 0) return run;
+  await db.update(agentSessions).set(set).where(eq(agentSessions.id, id));
+  return (await get(id)) ?? run;
+}
+
 export async function close(id: number): Promise<RunRow> {
   const run = await get(id);
   if (!run) throw new repo.RepoError(`Run ${id} not found`, 404);

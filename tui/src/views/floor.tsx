@@ -1,8 +1,8 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { floorGroups, type Forest, type TreeRow } from "../model/forest.js";
-import { C, Hair, Keys, usd } from "../theme.js";
-import { cursorWindow } from "./layout.js";
+import { C, Hair, Keys, useGlyphs, usd } from "../theme.js";
+import { cursorWindow, layoutFloorHead } from "./layout.js";
 import { RunRow } from "./tree.js";
 
 type Entry = { kind: "row"; row: TreeRow; cursor: number } | { kind: "earlier" };
@@ -24,7 +24,8 @@ export function Floor({
   height: number;
   cursor: number;
 }) {
-  const { live, rest } = floorGroups(forest);
+  const g = useGlyphs();
+  const { live, rest } = floorGroups(forest, g);
   const today = forest.runs.reduce((s, r) => s + r.cost, 0);
 
   // One flat list so the viewport can scroll past the "earlier" divider
@@ -39,24 +40,34 @@ export function Floor({
   const at = entries.findIndex((e) => e.kind === "row" && e.cursor === cursor);
   const { start, end } = cursorWindow(entries.length, budget, at < 0 ? 0 : at);
 
+  // The headline and the hints share one line: at 80 columns the two only
+  // just fit, and a wrapped header would push a transcript row off the
+  // bottom, so both halves are measured and the hints give way first.
+  const head = layoutFloorHead({
+    live: forest.liveCount(),
+    needsYou: inboxCount,
+    today: usd(today),
+    width,
+    glyphs: g,
+    keys: [
+      [g.enter, "talk"],
+      ["o", "open"],
+      ["c", "cancel"],
+      ["n", "new"],
+      ["esc", "back"],
+    ],
+  });
+
   return (
     <Box flexDirection="column" width={width} height={height}>
       <Box justifyContent="space-between">
         <Text>
-          <Text bold>FLOOR</Text>
-          <Text color={C.muted}>
-            {" "}
-            {forest.liveCount()} live · <Text color={C.review}>{inboxCount} need you</Text> · {usd(today)} today
-          </Text>
+          <Text bold>{head.parts[0]}</Text>
+          <Text color={C.muted}>{head.parts[1]}</Text>
+          <Text color={C.review}>{head.parts[2]}</Text>
+          <Text color={C.muted}>{head.parts[3]}</Text>
         </Text>
-        <Keys
-          items={[
-            ["↵", "talk"],
-            ["c", "cancel"],
-            ["n", "new"],
-            ["esc", "back"],
-          ]}
-        />
+        <Keys items={head.keys} />
       </Box>
       <Hair width={width} />
       <Box flexDirection="column" marginTop={1}>
