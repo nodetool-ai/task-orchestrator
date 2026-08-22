@@ -4,17 +4,22 @@
 // Shared by the server-rendered first paint (app/runs/page.tsx) and the
 // polling endpoint (GET /api/runs/overview) so both produce identical rows.
 
+import { db } from "@/db";
+import { personas } from "@/db/schema";
 import * as repo from "./repo";
 import { pendingOwnerCounts } from "./inbox";
 import { listRuns } from "./runs";
 import type { RunIndexRow } from "./run-index";
 
 export async function getRunOverview(): Promise<RunIndexRow[]> {
-  const [runs, repos, tasks, plans, pendingEvents] = await Promise.all([
+  const [runs, repos, tasks, plans, personaRows, pendingEvents] = await Promise.all([
     listRuns(),
     repo.listRepositories(),
     repo.listTasks(),
     repo.listPlans(),
+    // One query for the whole (small) persona table, joined in memory like the
+    // repo/task/plan names above — never one lookup per run.
+    db.select({ id: personas.id, name: personas.name }).from(personas),
     // Agent-event visibility (docs/agent-events.md §11): "N queued" badges.
     // Never let an inbox hiccup take down the whole index.
     pendingOwnerCounts().catch(() => new Map<number, number>()),
@@ -22,6 +27,7 @@ export async function getRunOverview(): Promise<RunIndexRow[]> {
   const repoNames = new Map(repos.map((r) => [r.id, r.name]));
   const taskTitles = new Map(tasks.map((t) => [t.id, t.title]));
   const planTitles = new Map(plans.map((p) => [p.id, p.title]));
+  const personaNames = new Map(personaRows.map((p) => [p.id, p.name]));
 
   return runs.map((r) => ({
     id: r.id,
@@ -35,6 +41,8 @@ export async function getRunOverview(): Promise<RunIndexRow[]> {
     planTitle: r.planId ? planTitles.get(r.planId) ?? null : null,
     repoId: r.repoId,
     repoName: r.repoId ? repoNames.get(r.repoId) ?? null : null,
+    personaId: r.personaId,
+    personaName: r.personaId ? personaNames.get(r.personaId) ?? null : null,
     parentRunId: r.parentRunId,
     prUrl: r.prUrl,
     model: r.model,
