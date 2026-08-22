@@ -86,6 +86,7 @@ The bundle ships in the server image, with `/usr/local/bin/orch` on `PATH`, so
 | `ORCH_URL` | `http://localhost:3000` | Base URL of the orchestrator. Point it at the deployment to drive production. |
 | `ORCH_TOKEN` | *(unset)* | API token, sent as `Authorization: Bearer …`. Optional against a dev server with no login gate; required against a deployed one. |
 | `ORCH_BUNDLE` | *(unset)* | `1` makes the `bin` shim run `dist/orch.js` instead of the TypeScript source. |
+| `ORCH_ASCII` | *(unset)* | Same as passing `--ascii`: plain-ASCII marks and box drawing. Anything but `0`, `false`, `no` or empty counts as on. |
 
 ```bash
 export ORCH_URL=https://tasks.nodetool.ai
@@ -126,7 +127,7 @@ Full rationale in [PRD §6.3](../tui/PRD.md).
 | `c` | — | cancel the subtree (confirm) | — | — |
 | `n` | — | new agent (hands back `/new `) | — | — |
 | `d` | — | — | dismiss (not wired yet — it says so) | — |
-| `o` | — | open the PR, else the run URL | open the PR, else the run URL | — |
+| `o` | — | open the PR, else the run page | open the PR, else the run page | — |
 | `^f` | toggle the floor (global) | | | |
 | `^n` | toggle needs you (global) | | | |
 | `^k` | toggle the jump palette (global) | | | |
@@ -166,8 +167,12 @@ without horizontal overflow.
 
 Colour carries the same information: amber working, purple needs a human, red
 broken, green shipped, grey waiting. It degrades to 16-colour terminals.
-`--ascii` swaps the glyphs and the box drawing for ASCII when the terminal
-font has no coverage for them.
+`--ascii` swaps the marks and the box drawing for ASCII when the terminal
+font has no coverage for them: the status glyphs above, the rules and the
+rail divider, the tree branches, the list and transcript marks, and the
+truncation character. Prose separators (the `·` in a status line) stay as
+they are. `ORCH_ASCII` is the env form — anything but `0`, `false`, `no` or
+empty turns it on.
 
 ## Slash commands
 
@@ -182,8 +187,8 @@ above the prompt.
 | `/open #id` | Open that run's conversation. |
 | `/spawn <persona> <goal\|T-id>` | Ask the run you are in to delegate to a child agent. Never creates a run itself — it messages the agent that owns the `spawn` tool. |
 | `/cancel` | Cancel the current run and its live children (same confirmation as `c`). |
-| `/model <id>` | Change the model the current run uses; the header reflects it. |
-| `/budget <usd\|turns>` | Change the current run's budget. |
+| `/model <id>` | Change the model the current run uses; the header shows it. |
+| `/budget <usd\|turns>` | Change the current run's cap. `$5`, `5usd` set a dollar cap; `20 turns`, `20t` or a bare `20` set a turn cap. |
 | `/trace` | Toggle the full tool trace — same as `^o`. |
 | `/quit` | Leave. Agents keep running. |
 
@@ -210,7 +215,11 @@ if a message starts with a dash. Exit codes: **0** ok, **1** user error
 | `orch task …` | The existing `cli.ts` verbs, delegated verbatim — `npm run task -- …` keeps working, and so does its exit code. |
 | `orch help` | The usage block. Also `--help`, `-h`. |
 
-`--ascii` is global: it applies to the TUI and to the verbs that draw a tree.
+`--ascii` is global rather than per-verb — it says what the terminal can
+draw, not what a verb should do — so it is accepted anywhere before the verb
+and applies to the TUI and to `orch tail`'s frame marks. The scan stops at
+`--` and at `task`, so a message containing `--ascii` reaches the run intact
+and `orch task` keeps parsing its own argv.
 
 `orch task` needs a checkout — it walks up from the binary to the nearest
 `cli.ts` and runs it. In the server image that is `/app/cli.ts`, so it works
