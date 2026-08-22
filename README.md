@@ -39,6 +39,8 @@ single Postgres database.
   Box managed runners, templates, snapshots, capacity, and rollback
 - **[docs/test-deployment.md](docs/test-deployment.md)** — full containerized
   stack (Postgres + server + Docker workers) for validating the run → PR loop
+- **[docs/tui.md](docs/tui.md)** — `orch`, the terminal cockpit: when to use
+  it over the web app, the keyboard contract, and the CLI verbs
 - **[docs/model-welfare.md](docs/model-welfare.md)** — seats, laurels
   (recognition delivered at agent startup), and the graceful handoff protocol
 - **[Persona bots on Discord](#persona-bots-on-discord)** — one Discord bot per

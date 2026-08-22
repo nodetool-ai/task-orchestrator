@@ -3,8 +3,12 @@
 A conversation with your top-level agents, plus the run forest, a needs-you
 list and a jump palette — in the terminal. Ink + React, ESM, Node 22+.
 
-Spec: [PRD.md](PRD.md) · concept: [DESIGN.md](DESIGN.md) · work breakdown:
-[TASKS.md](TASKS.md).
+Operator guide: [docs/tui.md](../docs/tui.md) (what it is, when to use it over
+the web app, keys and verbs) · spec: [PRD.md](PRD.md) · work breakdown:
+[TASKS.md](TASKS.md) · concept, historical: [DESIGN.md](DESIGN.md).
+
+This file is the *packaging* half: install, the `bin` shim, the bundle, and
+how it ships in the Fly image.
 
 `orch` is a *client*. It talks to a running orchestrator over REST + SSE and
 never imports `lib/` or touches the database, so the same binary drives a local

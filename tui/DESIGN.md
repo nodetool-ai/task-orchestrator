@@ -1,5 +1,12 @@
 # Task Orchestrator CLI / TUI — design exploration
 
+> **Historical.** This is the design record from before the cockpit was
+> built — the concept, the view sketches and the open questions it left. It is
+> kept for the reasoning, not as a description of what shipped, and it is not
+> updated. The current documents are [PRD.md](PRD.md) (the spec, including the
+> decisions that closed the open questions below) and
+> [docs/tui.md](../docs/tui.md) (the operator's guide: install, keys, verbs).
+
 Status: mockup with fake data. Run it: `cd tui && npm install && npm run mock`.
 Quit with `ctrl+c` or `/quit`. Resize the terminal; the right rail hides
 below ~110 columns (`ctrl+b` toggles it).
