@@ -156,9 +156,28 @@ function rpcThrow(code: number, message: string, data?: unknown): RpcThrow {
 export async function POST(req: NextRequest) {
   const session = await authenticate(req);
   if (!session) {
+    // A 401 here is nearly always an onboarding problem: no header at all,
+    // a proxy that stripped it, or a revoked token. Say which, and point at
+    // the page that issues a new one — MCP clients surface this body.
+    const auth = req.headers.get("authorization");
+    const reason = !auth
+      ? "missing_authorization_header"
+      : /^Bearer\s+\S+$/i.test(auth)
+        ? "invalid_or_revoked_token"
+        : "malformed_authorization_header";
     return jsonResponse(
-      { error: "Unauthorized" },
-      { status: 401, headers: { "WWW-Authenticate": "Bearer" } }
+      {
+        error: "Unauthorized",
+        reason,
+        hint: "Send `Authorization: Bearer tot_…`. Issue and revoke tokens in Settings → API tokens.",
+        tokens_url: `${new URL(req.url).origin}/settings?tab=tokens`,
+      },
+      {
+        status: 401,
+        headers: {
+          "WWW-Authenticate": `Bearer realm="task-orchestrator", error="invalid_token"`,
+        },
+      }
     );
   }
 
@@ -218,10 +237,19 @@ export async function POST(req: NextRequest) {
 }
 
 // GET is sometimes used by clients to probe / open an SSE stream. We don't
-// stream; respond with 405 so clients fall back to POST.
-export function GET() {
-  return new Response("Method Not Allowed (use POST)", {
-    status: 405,
-    headers: { Allow: "POST" },
-  });
+// stream; respond with 405 so clients fall back to POST. The body carries
+// the same setup facts a human needs when they paste the URL into a browser
+// and get a bare "Method Not Allowed".
+export function GET(req: NextRequest) {
+  const origin = new URL(req.url).origin;
+  return jsonResponse(
+    {
+      error: "Method Not Allowed",
+      hint: "This MCP endpoint speaks JSON-RPC 2.0 over POST; it does not stream (no SSE).",
+      server: { name: "task-orchestrator", protocolVersion: MCP_PROTOCOL_VERSION },
+      authorization: "Bearer tot_… (Settings → API tokens)",
+      tokens_url: `${origin}/settings?tab=tokens`,
+    },
+    { status: 405, headers: { Allow: "POST" } }
+  );
 }
