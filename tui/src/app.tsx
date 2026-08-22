@@ -1,10 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import type { OrchClient } from "./api/client.js";
-import type { CreateRunInput } from "./api/types.js";
+import { confirmLine, liveKids, nextInCycle, resolvePersona, spawnMessage } from "./cli/commands.js";
 import { floorGroups } from "./model/forest.js";
 import { filterPalette } from "./model/palette.js";
-import { isLive, type TuiStatus } from "./model/status.js";
 import { useOrch } from "./store.js";
 import { C, Hair } from "./theme.js";
 import { ChatHeader, Transcript } from "./views/chat.js";
@@ -22,122 +21,21 @@ const LATER_COMMANDS = new Set(["/say", "/model", "/budget"]);
 
 // ── Pure helpers ───────────────────────────────────────────────────────────
 // There is no component test harness here, so every decision that is not
-// about painting lives in a function that can be called from a test.
+// about painting lives in a function that can be called from a test. They now
+// live one directory down (src/cli/), where the non-interactive verbs can
+// reach them without importing Ink, and are re-exported here because this is
+// the module the cockpit and its tests have always imported them from.
 
-/** A persona reference as `/new` needs it: an id and a human name. */
-export interface PersonaRef {
-  id: string;
-  name: string;
-}
-
-/** Resolve what the operator typed to a persona id. The list is empty until
- *  `ensurePersonas()` lands, and refusing to start a run because of that
- *  would be worse than letting the server decide — so an empty list passes
- *  the name through untouched. */
-export function resolvePersona(
-  personas: readonly PersonaRef[],
-  name: string,
-): { id: string; notice: null } | { id: null; notice: string } {
-  const want = name.trim().toLowerCase();
-  if (!want) return { id: null, notice: "/new <persona> <goal>" };
-  if (personas.length === 0) return { id: want, notice: null };
-  const hit = personas.find((p) => p.id.toLowerCase() === want) ?? personas.find((p) => p.name.toLowerCase() === want);
-  if (hit) return { id: hit.id, notice: null };
-  return { id: null, notice: `no persona "${name}" · try ${personas.map((p) => p.id).join(", ")}` };
-}
-
-/** The body of POST /api/runs for a chat run. Mirrors store.newRun so the CLI
- *  path (`orch "<goal>" -p persona`) starts runs the same way the TUI does.
- *  `budgetFrom` is the persona row when we have it — the server does not apply
- *  persona budgets itself. */
-export function newRunInput(
-  goal: string,
-  personaId: string | null,
-  budgetFrom?: { budgetMaxTurns: number | null; budgetMaxSeconds: number | null } | null,
-): CreateRunInput {
-  const input: CreateRunInput = {
-    goal,
-    // Deliberate: the server rejects a non-deferred `worktree` run with no
-    // taskId (lib/runs.ts:744), and the cockpit has no task picker before the
-    // first message.
-    cwdStrategy: "none",
-  };
-  if (personaId) input.personaId = personaId;
-  const budget: { maxTurns?: number; maxSeconds?: number } = {};
-  if (budgetFrom?.budgetMaxTurns != null) budget.maxTurns = budgetFrom.budgetMaxTurns;
-  if (budgetFrom?.budgetMaxSeconds != null) budget.maxSeconds = budgetFrom.budgetMaxSeconds;
-  if (Object.keys(budget).length > 0) input.budget = budget;
-  return input;
-}
-
-/** The `tab` cycle: the id after `current` in `list`, wrapping. Anything not
- *  in the list (including null) starts at the head. */
-export function nextInCycle(list: readonly number[], current: number | null): number | null {
-  if (list.length === 0) return null;
-  const at = current === null ? -1 : list.indexOf(current);
-  return list[(at + 1) % list.length] ?? null;
-}
-
-const TASK_ID = /^T-[\w-]+$/i;
-
-/** `/spawn` never creates a run: it asks the agent that owns the `spawn` tool
- *  to delegate. Both templates are the wording the orchestrator prompt
- *  recognises, so they are fixed text, not a format string to improvise on. */
-export function spawnMessage(persona: string, arg: string): string {
-  const a = arg.trim();
-  if (TASK_ID.test(a)) return `Spawn a ${persona} sub-agent for task ${a} using the spawn tool.`;
-  return `Spawn a ${persona} sub-agent using the spawn tool with this goal: ${a}`;
-}
-
-/** Live descendants of `id` inside its own subtree rows (the row for `id`
- *  itself is in there and does not count as a child). */
-export function liveKids(subtree: readonly { id: number; status: TuiStatus }[], id: number): number {
-  return subtree.filter((r) => r.id !== id && isLive(r.status)).length;
-}
-
-/** One line, because cancelling a subtree kills work that is still running
- *  and the operator should see how much before the second keystroke. */
-export function confirmLine(id: number, kids: number, key: string): string {
-  const what = kids === 1 ? "1 live child" : `${kids} live children`;
-  return `cancel #${id} and ${what}? ${key} again to confirm · esc to abort`;
-}
-
-/** `orch` argv (PRD §6.5, the three TUI forms). M3 adds the list verbs. */
-export type Cli =
-  | { kind: "open"; id: number | null }
-  | { kind: "new"; goal: string; persona: string | null }
-  | { kind: "error"; message: string };
-
-export function parseArgv(argv: readonly string[]): Cli {
-  const args = [...argv];
-  if (args.length === 0) return { kind: "open", id: null };
-
-  if (args[0] === "open") {
-    if (args.length !== 2) return { kind: "error", message: "usage: orch open <id>" };
-    const id = Number((args[1] ?? "").replace(/^#/, ""));
-    if (!Number.isInteger(id) || id <= 0) return { kind: "error", message: `not a run id: ${args[1]}` };
-    return { kind: "open", id };
-  }
-
-  const words: string[] = [];
-  let persona: string | null = null;
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i] as string;
-    if (a === "-p" || a === "--persona") {
-      const v = args[++i];
-      if (v === undefined) return { kind: "error", message: `${a} needs a persona` };
-      persona = v;
-      continue;
-    }
-    if (a.startsWith("-") && a !== "-") return { kind: "error", message: `unknown option ${a}` };
-    words.push(a);
-  }
-  // An unquoted goal arrives as several words; joining them is friendlier
-  // than refusing, and quoting still round-trips exactly.
-  const goal = words.join(" ").trim();
-  if (!goal) return { kind: "error", message: 'usage: orch "<goal>" [-p persona]' };
-  return { kind: "new", goal, persona };
-}
+export {
+  confirmLine,
+  liveKids,
+  newRunInput,
+  nextInCycle,
+  resolvePersona,
+  spawnMessage,
+  type PersonaRef,
+} from "./cli/commands.js";
+export { parseArgv, type Cli } from "./cli/parse.js";
 
 // ── The cockpit ────────────────────────────────────────────────────────────
 
