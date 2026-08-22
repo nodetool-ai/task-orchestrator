@@ -2,6 +2,7 @@
 // can re-render on every SSE tick without re-scanning the row list per row.
 
 import type { RunIndexRow } from "../api/types.js";
+import { UNICODE, type Glyphs } from "./glyphs.js";
 import { toRun, type Run } from "./run.js";
 import { isLive } from "./status.js";
 
@@ -118,21 +119,22 @@ export interface TreeRow {
 
 /** Flatten the whole forest. The filter selects ROOTS (a matching root brings
  *  its whole subtree), which is what keeps subtrees intact in floorGroups. */
-export function flatten(f: Forest, filter: (r: Run) => boolean = () => true): TreeRow[] {
-  return flattenFrom(f, f.roots().filter(filter));
+export function flatten(f: Forest, filter: (r: Run) => boolean = () => true, g: Glyphs = UNICODE): TreeRow[] {
+  return flattenFrom(f, f.roots().filter(filter), g);
 }
 
-/** Same walk from an explicit set of tops — used for the inline spawn tree. */
-export function flattenFrom(f: Forest, tops: Run[]): TreeRow[] {
+/** Same walk from an explicit set of tops — used for the inline spawn tree.
+ *  The branch marks come from the glyph table so `--ascii` reaches the tree. */
+export function flattenFrom(f: Forest, tops: Run[], g: Glyphs = UNICODE): TreeRow[] {
   const out: TreeRow[] = [];
   const seen = new Set<number>();
   const walk = (r: Run, prefix: string, last: boolean, depth: number) => {
     if (seen.has(r.id)) return;
     seen.add(r.id);
     const kids = f.childrenOf(r.id);
-    const branch = depth === 0 ? "" : prefix + (last ? "└ " : "├ ");
+    const branch = depth === 0 ? "" : prefix + (last ? `${g.branchLast} ` : `${g.branchTee} `);
     out.push({ run: r, prefix: branch, depth });
-    const next = depth === 0 ? "" : prefix + (last ? "  " : "│ ");
+    const next = depth === 0 ? "" : prefix + (last ? "  " : `${g.rail} `);
     kids.forEach((k, i) => walk(k, next, i === kids.length - 1, depth + 1));
   };
   tops.forEach((r, i) => walk(r, "", i === tops.length - 1, 0));
@@ -142,7 +144,7 @@ export function flattenFrom(f: Forest, tops: Run[]): TreeRow[] {
 /** Live subtrees first, then "earlier". A root counts as live if ANYTHING in
  *  its subtree is live, so a finished orchestrator with a working child stays
  *  on the top floor with its child under it. */
-export function floorGroups(f: Forest): { live: TreeRow[]; rest: TreeRow[] } {
+export function floorGroups(f: Forest, g: Glyphs = UNICODE): { live: TreeRow[]; rest: TreeRow[] } {
   const hot = new Set<number>();
   for (const r of f.runs) {
     if (!isLive(r.status)) continue;
@@ -150,7 +152,7 @@ export function floorGroups(f: Forest): { live: TreeRow[]; rest: TreeRow[] } {
     for (const a of f.ancestors(r.id)) hot.add(a.id);
   }
   return {
-    live: flatten(f, (r) => hot.has(r.id)),
-    rest: flatten(f, (r) => !hot.has(r.id)),
+    live: flatten(f, (r) => hot.has(r.id), g),
+    rest: flatten(f, (r) => !hot.has(r.id), g),
   };
 }

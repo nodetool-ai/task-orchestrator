@@ -32,6 +32,8 @@ function row(overrides: Partial<RunIndexRow> & { id: number }): RunIndexRow {
     parentRunId: null,
     prUrl: null,
     model: null,
+    budgetMaxUsd: null,
+    budgetMaxTurns: null,
     totalCostUsd: null,
     error: null,
     startedAt: "2026-07-01T10:00:00.000Z",

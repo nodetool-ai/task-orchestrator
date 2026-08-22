@@ -2,6 +2,8 @@
 // views, because the 80-column guarantee (T-tui-02) is arithmetic and the
 // suite only picks up test/**/*.test.ts.
 
+import { UNICODE, type Glyphs } from "../model/glyphs.js";
+
 /** Glyph plus its trailing space: always drawn, never negotiable. */
 const GLYPH_W = 2;
 const ID_W = 4;
@@ -24,6 +26,9 @@ export interface RowInput {
   cost: string;
   width: number;
   compact?: boolean;
+  /** `--ascii` swaps the CI mark and the clip character. Defaults to unicode,
+   *  so a caller that never heard of the flag still renders. */
+  glyphs?: Glyphs;
 }
 
 /** Every cell is already padded to its final width; concatenating them plus
@@ -45,20 +50,21 @@ export interface RowCells {
 /** CI is `unknown` for every row in M1 — the overview payload carries no
  *  check state — so the neutral marker has to read as "no answer yet", not as
  *  a pass or a fail. */
-export function ciMark(ci: Ci): string {
+export function ciMark(ci: Ci, g: Glyphs = UNICODE): string {
   switch (ci) {
     case "pass":
-      return "✓";
+      return g.pass;
     case "fail":
-      return "✕";
+      return g.fail;
     case "pending":
-      return "⋯";
+      return g.pending;
     case "unknown":
-      return "·";
+      return g.bullet;
   }
 }
 
 export function layoutRow(o: RowInput): RowCells {
+  const g = o.glyphs ?? UNICODE;
   const compact = o.compact === true;
   const width = Math.max(0, Math.floor(o.width));
   const personaW = compact ? 11 : 12;
@@ -67,12 +73,12 @@ export function layoutRow(o: RowInput): RowCells {
   // Deep nesting must not push the row off the right edge, so the branch
   // prefix is the first thing that gets clipped.
   let avail = Math.max(0, width - GLYPH_W);
-  const prefix = fit(o.prefix, Math.max(0, avail - 10));
+  const prefix = fit(o.prefix, Math.max(0, avail - 10), g.ellipsis);
   avail -= prefix.length;
 
-  const id = fit(`${padEnd(`#${o.id}`, ID_W)} `, avail);
+  const id = fit(`${padEnd(`#${o.id}`, ID_W)} `, avail, g.ellipsis);
   avail -= id.length;
-  const persona = fit(`${padEnd(o.persona, personaW)} `, avail);
+  const persona = fit(`${padEnd(o.persona, personaW)} `, avail, g.ellipsis);
   avail -= persona.length;
 
   // Tail columns in the order they are given up: cost first, then the status
@@ -80,7 +86,7 @@ export function layoutRow(o: RowInput): RowCells {
   let cost = compact ? "" : ` ${o.cost.padStart(6)}`;
   let status = compact ? "" : ` ${padEnd(o.status, 9)}`;
   let age = compact ? "" : ` ${o.age.padStart(4)}`;
-  let pr = o.pr === null ? "" : compact ? ` PR${o.pr.number}` : ` PR#${o.pr.number} ${ciMark(o.pr.ci)}`;
+  let pr = o.pr === null ? "" : compact ? ` PR${o.pr.number}` : ` PR#${o.pr.number} ${ciMark(o.pr.ci, g)}`;
 
   const slack = () => avail - (cost.length + status.length + age.length + pr.length);
   if (slack() < minTitle) cost = "";
@@ -91,7 +97,7 @@ export function layoutRow(o: RowInput): RowCells {
   // The title absorbs all of it: padded when there is room to spare, clipped
   // when there is not, so the composed row is exactly `width` columns.
   const titleW = Math.max(0, slack());
-  const title = o.title.length > titleW ? fit(o.title, titleW) : padEnd(o.title, titleW);
+  const title = o.title.length > titleW ? fit(o.title, titleW, g.ellipsis) : padEnd(o.title, titleW);
 
   const total =
     GLYPH_W + prefix.length + id.length + persona.length + title.length + pr.length + status.length + age.length + cost.length;
@@ -146,10 +152,12 @@ export function cursorWindow(total: number, size: number, cursor: number): { sta
   return { start, end: Math.min(total, start + h) };
 }
 
-export function fit(s: string, n: number): string {
+/** Clip to `n` columns, marking the cut. `ell` is one column in every glyph
+ *  mode, which is why the arithmetic above can budget for it blindly. */
+export function fit(s: string, n: number, ell = "…"): string {
   if (n <= 0) return "";
   if (s.length <= n) return s;
-  return n === 1 ? "…" : `${s.slice(0, n - 1)}…`;
+  return n === 1 ? ell : `${s.slice(0, n - 1)}${ell}`;
 }
 
 function padEnd(s: string, n: number): string {

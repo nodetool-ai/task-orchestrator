@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { floorGroups, type Forest, type TreeRow } from "../model/forest.js";
-import { C, Hair, Keys, usd } from "../theme.js";
+import { C, Hair, Keys, useGlyphs, usd } from "../theme.js";
 import { cursorWindow } from "./layout.js";
 import { RunRow } from "./tree.js";
 
@@ -24,7 +24,8 @@ export function Floor({
   height: number;
   cursor: number;
 }) {
-  const { live, rest } = floorGroups(forest);
+  const g = useGlyphs();
+  const { live, rest } = floorGroups(forest, g);
   const today = forest.runs.reduce((s, r) => s + r.cost, 0);
 
   // One flat list so the viewport can scroll past the "earlier" divider
@@ -51,7 +52,8 @@ export function Floor({
         </Text>
         <Keys
           items={[
-            ["↵", "talk"],
+            [g.enter, "talk"],
+            ["o", "open"],
             ["c", "cancel"],
             ["n", "new"],
             ["esc", "back"],

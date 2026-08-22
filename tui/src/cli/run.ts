@@ -15,6 +15,7 @@ import { buildForest } from "../model/forest.js";
 import { appendFrame, frameFromEvent, framesFromMessages, type Frame } from "../model/frames.js";
 import { toInboxItems } from "../model/inbox.js";
 import { newRunInput, resolvePersona, spawnMessage } from "./commands.js";
+import { glyphs } from "../model/glyphs.js";
 import { floorJson, floorRows, floorText, frameJson, frameLine, inboxJson, inboxText, type Speaker } from "./format.js";
 import { USAGE, type CliCommand } from "./parse.js";
 
@@ -29,6 +30,9 @@ export interface CliIo {
   now?(): number;
   /** `orch tail` follows until this aborts (^c) or the stream ends. */
   signal?: AbortSignal;
+  /** `--ascii`: the tail's frame marks come out of the plain table. The list
+   *  verbs already avoid box drawing, so this only reaches `orch tail`. */
+  ascii?: boolean;
 }
 
 /** Map a thrown error to an exit code. A 401 is the operator's to fix (wrong
@@ -116,7 +120,7 @@ async function tail(id: number, json: boolean, io: CliIo): Promise<ExitCode> {
     frames = next;
     if (!grew) return; // an in-place fold adds detail a one-line view never shows
     const last = next[next.length - 1] as Frame;
-    io.out(json ? JSON.stringify(frameJson(last, who)) : frameLine(last, who));
+    io.out(json ? JSON.stringify(frameJson(last, who)) : frameLine(last, who, glyphs(io.ascii === true)));
   };
 
   for (const f of framesFromMessages(detail.messages ?? [])) write(f);

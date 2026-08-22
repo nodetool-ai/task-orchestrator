@@ -1,11 +1,10 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { C, Hair, Keys } from "../theme.js";
+import { C, Hair, Keys, useGlyphs } from "../theme.js";
 
 // The commands the cockpit can actually honour today (PRD §6.4). M2 added the
-// three that write: /new, /spawn and /cancel. /model and /budget arrive with
-// M4 and are still not advertised, because a listed command that answers
-// "arrives later" is worse than one that is not listed at all.
+// three that write: /new, /spawn and /cancel; M4 added /model and /budget,
+// which patch the open run and are listed now that they do something.
 export const COMMANDS: { cmd: string; help: string }[] = [
   { cmd: "/floor", help: "all agents as a tree" },
   { cmd: "/inbox", help: "what needs you" },
@@ -13,6 +12,8 @@ export const COMMANDS: { cmd: string; help: string }[] = [
   { cmd: "/open", help: "look at a run  /open #45" },
   { cmd: "/spawn", help: "ask this agent to delegate  /spawn reviewer T-42" },
   { cmd: "/cancel", help: "stop this run and its live children" },
+  { cmd: "/model", help: "retune this run  /model claude-sonnet-4-5" },
+  { cmd: "/budget", help: "cap this run  /budget $5  ·  /budget 20 turns" },
   { cmd: "/trace", help: "toggle the full tool trace" },
   { cmd: "/quit", help: "leave; agents keep running" },
 ];
@@ -39,6 +40,7 @@ export function Prompt({
   width: number;
   busy: boolean;
 }) {
+  const g = useGlyphs();
   const cmds = matchCommands(value);
   return (
     <Box flexDirection="column" width={width}>
@@ -54,7 +56,7 @@ export function Prompt({
       )}
       {pendingCount > 0 && to === null && (
         <Box>
-          <Text color={C.review}>⚑ </Text>
+          <Text color={C.review}>{g.flag} </Text>
           <Text color={C.muted}>
             {pendingCount === 1 ? "an agent is waiting on you" : `${pendingCount} agents are waiting on you`}
           </Text>
@@ -66,25 +68,25 @@ export function Prompt({
       )}
       <Hair width={width} />
       <Box>
-        <Text color={to !== null ? C.review : C.you}>{"❯ "}</Text>
+        <Text color={to !== null ? C.review : C.you}>{`${g.caret} `}</Text>
         {to !== null && (
           <Text color={C.review} bold>
             @#{to}{" "}
           </Text>
         )}
         <Text color={C.fg}>{value}</Text>
-        <Text color={busy ? C.muted : C.fg}>{busy ? "…" : "▏"}</Text>
+        <Text color={busy ? C.muted : C.fg}>{busy ? g.ellipsis : g.bar}</Text>
       </Box>
       <Box justifyContent="space-between">
         <Keys
           items={
             to !== null
               ? [
-                  ["↵", "answer"],
+                  [g.enter, "answer"],
                   ["esc", "cancel"],
                 ]
               : [
-                  ["↵", "send"],
+                  [g.enter, "send"],
                   ["/", "commands"],
                   ["tab", "answer agent"],
                   ["^k", "jump"],

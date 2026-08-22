@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { cursorWindow, layoutRow, tailWindow, wrapText, type RowInput } from "../../src/views/layout.js";
+import { ciMark, cursorWindow, layoutRow, tailWindow, wrapText, type RowInput } from "../../src/views/layout.js";
+import { glyphs } from "../../src/model/glyphs.js";
 
 const base: RowInput = {
   prefix: "",
@@ -115,5 +116,27 @@ describe("cursorWindow", () => {
 
   it("shows everything when it fits", () => {
     expect(cursorWindow(3, 10, 2)).toEqual({ start: 0, end: 3 });
+  });
+});
+
+// `--ascii` reaches the row through the glyph table, and the width guarantee
+// has to survive it: every fallback is one column, so nothing shifts.
+describe("layoutRow under --ascii", () => {
+  it("swaps the CI mark and the clip character without changing the width", () => {
+    const c = layoutRow({ ...base, pr: { number: 1234, ci: "fail" }, glyphs: glyphs(true) });
+    expect(c.total).toBe(80);
+    expect(c.pr).toContain("x");
+    // `render` prepends the status glyph the component paints; the cells
+    // themselves must be pure ASCII.
+    expect(render(c).slice(2)).not.toMatch(/[^\x00-\x7f]/);
+    const narrow = layoutRow({ ...base, width: 60, glyphs: glyphs(true) });
+    expect(narrow.total).toBe(60);
+    expect(narrow.title).toContain("~");
+  });
+
+  it("keeps the unicode marks by default", () => {
+    expect(layoutRow({ ...base, pr: { number: 1, ci: "fail" } }).pr).toContain("✕");
+    expect(ciMark("pass")).toBe("✓");
+    expect(ciMark("pass", glyphs(true))).toBe("v");
   });
 });

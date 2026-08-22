@@ -7,6 +7,7 @@
 //   orch open <id>              open that run                   (TUI)
 //   orch floor|inbox|tail|say|new|spawn|cancel                  (stdout)
 //   orch task …                 the repo-root cli.ts, unchanged (child)
+//   --ascii                     plain glyphs everywhere (also ORCH_ASCII=1)
 //
 // Everything the verbs decide lives in src/cli/ as pure functions over an
 // injected client and injected writers, so the suite covers them without a
@@ -20,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 import { App, newRunInput, resolvePersona } from "./app.js";
 import { createClient, UnauthorizedError } from "./api/client.js";
-import { isCliCommand, parseCli } from "./cli/parse.js";
+import { isCliCommand, parseCli, takeGlobalFlags } from "./cli/parse.js";
 import { runCommand } from "./cli/run.js";
 import { findRepoRoot, taskSpawn } from "./cli/task.js";
 
@@ -33,7 +34,9 @@ function die(message: string, code: 1 | 2): never {
   process.exit(code);
 }
 
-const argv = process.argv.slice(2);
+// `--ascii` (and ORCH_ASCII) is global, so it comes off argv before any verb
+// parser sees it — see takeGlobalFlags for why the scan stops where it does.
+const { ascii, argv } = takeGlobalFlags(process.argv.slice(2), process.env);
 const cmd = parseCli(argv);
 
 // ── orch task … ────────────────────────────────────────────────────────────
@@ -62,6 +65,7 @@ else if (isCliCommand(cmd)) {
     out: (line) => process.stdout.write(`${line}\n`),
     err: (line) => process.stderr.write(`${line}\n`),
     signal: stop.signal,
+    ascii,
   });
   // exitCode rather than exit(): a piped stdout may still be draining, and a
   // hard exit truncates the last row.
@@ -105,7 +109,9 @@ else {
   const ALT_ON = "\x1b[?1049h\x1b[H";
   const ALT_OFF = "\x1b[?1049l";
   process.stdout.write(ALT_ON);
-  const app = render(<App client={client} initial={initial} />, { exitOnCtrlC: true });
+  const app = render(<App client={client} initial={initial} baseUrl={url} ascii={ascii} />, {
+    exitOnCtrlC: true,
+  });
   app.waitUntilExit().finally(() => process.stdout.write(ALT_OFF));
 }
 

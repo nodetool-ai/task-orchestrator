@@ -3,7 +3,7 @@
 // here rather than discovered against a live server.
 
 import { describe, expect, it } from "vitest";
-import { isCliCommand, parseCli, type Command } from "../../src/cli/parse.js";
+import { isCliCommand, parseCli, takeGlobalFlags, type Command } from "../../src/cli/parse.js";
 
 const cmd = (...argv: string[]): Command => parseCli(argv);
 
@@ -112,5 +112,46 @@ describe("isCliCommand", () => {
     expect(isCliCommand(cmd())).toBe(false);
     expect(isCliCommand(cmd("a goal"))).toBe(false);
     expect(isCliCommand(cmd("task", "list"))).toBe(false);
+  });
+});
+
+// `--ascii` says what the terminal can draw, so it is global rather than a
+// per-verb flag — and stripping it must not disturb argv the parsers below
+// still have to refuse or keep verbatim.
+describe("takeGlobalFlags", () => {
+  it("takes --ascii from anywhere before the verb's arguments", () => {
+    expect(takeGlobalFlags(["--ascii", "floor"])).toEqual({ ascii: true, argv: ["floor"] });
+    expect(takeGlobalFlags(["floor", "--ascii", "--json"])).toEqual({
+      ascii: true,
+      argv: ["floor", "--json"],
+    });
+    expect(takeGlobalFlags(["floor"])).toEqual({ ascii: false, argv: ["floor"] });
+  });
+
+  it("leaves it alone after `--` and after `task`", () => {
+    expect(takeGlobalFlags(["say", "1", "--", "--ascii"])).toEqual({
+      ascii: false,
+      argv: ["say", "1", "--", "--ascii"],
+    });
+    expect(takeGlobalFlags(["task", "list", "--ascii"])).toEqual({
+      ascii: false,
+      argv: ["task", "list", "--ascii"],
+    });
+  });
+
+  it("honours ORCH_ASCII, and lets an explicit off mean off", () => {
+    expect(takeGlobalFlags(["floor"], { ORCH_ASCII: "1" }).ascii).toBe(true);
+    expect(takeGlobalFlags(["floor"], { ORCH_ASCII: "yes" }).ascii).toBe(true);
+    expect(takeGlobalFlags(["floor"], { ORCH_ASCII: "0" }).ascii).toBe(false);
+    expect(takeGlobalFlags(["floor"], { ORCH_ASCII: "" }).ascii).toBe(false);
+    expect(takeGlobalFlags(["floor"], {}).ascii).toBe(false);
+  });
+
+  // The stripped argv is what every parser below sees, so the shapes they
+  // already know must survive the pass untouched.
+  it("hands the verb parsers an argv they still understand", () => {
+    const { ascii, argv } = takeGlobalFlags(["--ascii", "tail", "44", "--json"]);
+    expect(ascii).toBe(true);
+    expect(parseCli(argv)).toEqual({ kind: "tail", id: 44, json: true });
   });
 });

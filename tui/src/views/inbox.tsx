@@ -1,15 +1,19 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { InboxItem } from "../model/inbox.js";
-import { C, Hair, Keys, age, padEnd } from "../theme.js";
+import { C, Hair, Keys, age, padEnd, useGlyphs } from "../theme.js";
+import type { Glyphs } from "../model/glyphs.js";
 import { cursorWindow, fit } from "./layout.js";
 
-const kindGlyph: Record<InboxItem["kind"], { g: string; color: string; label: string }> = {
-  question: { g: "⚑", color: C.review, label: "asks" },
-  review: { g: "◎", color: C.review, label: "review" },
-  stuck: { g: "✕", color: C.blocked, label: "stuck" },
-  budget: { g: "$", color: C.running, label: "budget" },
-};
+function kindGlyphs(g: Glyphs): Record<InboxItem["kind"], { g: string; color: string; label: string }> {
+  return {
+    question: { g: g.flag, color: C.review, label: "asks" },
+    review: { g: g.review, color: C.review, label: "review" },
+    stuck: { g: g.fail, color: C.blocked, label: "stuck" },
+    // `$` is already ASCII, so it is the same mark in both modes.
+    budget: { g: "$", color: C.running, label: "budget" },
+  };
+}
 
 // Everything that is waiting on a human, newest first. Enter on a question
 // drops you into the chat with the asking agent addressed.
@@ -26,6 +30,8 @@ export function Inbox({
   height: number;
   cursor: number;
 }) {
+  const g = useGlyphs();
+  const kindGlyph = kindGlyphs(g);
   // glyph+space, id, persona, kind, and the right-aligned age.
   const fixed = 2 + 5 + 13 + 7 + 5;
   const textW = Math.max(8, width - fixed);
@@ -39,8 +45,9 @@ export function Inbox({
         </Text>
         <Keys
           items={[
-            ["↑↓", "move"],
-            ["↵", "answer / open"],
+            [g.move, "move"],
+            [g.enter, "answer / open"],
+            ["o", "open"],
             ["d", "dismiss"],
             ["esc", "back"],
           ]}
@@ -51,7 +58,7 @@ export function Inbox({
         {items.length === 0 && <Text color={C.muted}>Nothing waits on you.</Text>}
         {items.slice(start, end).map((it, i) => {
           const k = kindGlyph[it.kind];
-          const text = fit(it.text, textW);
+          const text = fit(it.text, textW, g.ellipsis);
           return (
             <Box key={it.id}>
               <Text inverse={start + i === cursor}>

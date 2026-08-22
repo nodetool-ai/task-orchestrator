@@ -10,6 +10,7 @@
 import { flatten, floorGroups, type Forest, type TreeRow } from "../model/forest.js";
 import type { Frame } from "../model/frames.js";
 import type { InboxItem } from "../model/inbox.js";
+import { UNICODE, type Glyphs } from "../model/glyphs.js";
 import type { Run } from "../model/run.js";
 import { statusWord } from "../model/status.js";
 import { age, usd } from "../model/time.js";
@@ -100,22 +101,22 @@ export interface Speaker {
  * the wrapping taken out: `>` for your turns, `⎿` for a tool call, `·` for an
  * event, `⚑` for a question.
  */
-export function frameLine(f: Frame, who: Speaker): string {
+export function frameLine(f: Frame, who: Speaker, g: Glyphs = UNICODE): string {
   switch (f.kind) {
     case "user":
       return `> ${oneLine(f.text)}`;
     case "agent":
       return `${speaker(f.run, who)}: ${oneLine(f.text)}`;
     case "tool":
-      return `  ⎿ ${f.text}`;
+      return `  ${g.tool} ${f.text}`;
     case "spawn":
-      return `  ⎿ spawned ${f.children.length === 0 ? "an agent" : f.children.map((c) => `#${c}`).join(" ")}`;
+      return `  ${g.tool} spawned ${f.children.length === 0 ? "an agent" : f.children.map((c) => `#${c}`).join(" ")}`;
     case "event":
-      return `  · ${oneLine(f.text)}`;
+      return `  ${g.bullet} ${oneLine(f.text)}`;
     case "question":
       return f.answered === undefined
-        ? `⚑ ${speaker(f.run, who)} asks: ${oneLine(f.text)}`
-        : `⚑ ${speaker(f.run, who)} asks: ${oneLine(f.text)} ↳ you: ${oneLine(f.answered)}`;
+        ? `${g.flag} ${speaker(f.run, who)} asks: ${oneLine(f.text)}`
+        : `${g.flag} ${speaker(f.run, who)} asks: ${oneLine(f.text)} ${g.answer} you: ${oneLine(f.answered)}`;
   }
 }
 

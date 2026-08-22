@@ -54,8 +54,46 @@ export const USAGE = `orch — terminal cockpit for the task orchestrator
   orch cancel <id>                cancel a run and its subtree
   orch task …                     the cli.ts verbs, unchanged
 
+  --ascii                         plain-ASCII glyphs and box drawing, anywhere
+                                  before the verb (or ORCH_ASCII=1)
+
 Exit codes: 0 ok, 1 user error, 2 server error. Data on stdout, notes on stderr.
-Env: ORCH_URL (default http://localhost:3000), ORCH_TOKEN.`;
+Env: ORCH_URL (default http://localhost:3000), ORCH_TOKEN, ORCH_ASCII.`;
+
+/**
+ * `--ascii` is global, not per-verb: it says what the terminal can draw, which
+ * is a property of the session and not of the command. Stripping it here keeps
+ * every parser below unchanged — they still refuse any dash-word they do not
+ * know, which is what makes a typo an error rather than a goal.
+ *
+ * The scan stops at `--` (a message may legitimately contain `--ascii`) and at
+ * `task`, whose argv belongs to cli.ts and is none of our business.
+ */
+export function takeGlobalFlags(
+  argv: readonly string[],
+  env: { ORCH_ASCII?: string | undefined } = {},
+): { ascii: boolean; argv: string[] } {
+  let ascii = asciiEnv(env.ORCH_ASCII);
+  const rest: string[] = [];
+  let mine = true;
+  for (const a of argv) {
+    if (mine && a === "--ascii") {
+      ascii = true;
+      continue;
+    }
+    if (a === "--" || a === "task") mine = false;
+    rest.push(a);
+  }
+  return { ascii, argv: rest };
+}
+
+/** ORCH_ASCII is a switch, so anything but an explicit off means on: a user
+ *  who exported it at all wants the plain glyphs. */
+export function asciiEnv(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  const v = value.trim().toLowerCase();
+  return v !== "" && v !== "0" && v !== "false" && v !== "no";
+}
 
 const VERBS = new Set(["floor", "inbox", "tail", "say", "new", "spawn", "cancel", "open", "task", "help"]);
 

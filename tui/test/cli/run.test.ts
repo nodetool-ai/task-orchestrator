@@ -50,6 +50,7 @@ function fakeClient(over: Partial<OrchClient> = {}): Fake {
     sendMessage: async (id: number, text: string) => void note(`sendMessage ${id} ${text}`, null),
     createRun: unused("createRun") as unknown as (input: CreateRunInput) => Promise<RunRow>,
     cancelRun: unused("cancelRun") as unknown as (id: number) => Promise<RunRow>,
+    configureRun: unused("configureRun") as unknown as OrchClient["configureRun"],
     overviewEvents: unused("overviewEvents") as unknown as OrchClient["overviewEvents"],
     runEvents: (id, _cursor, h): Subscription => {
       fake.calls.push(`runEvents ${id}`);
@@ -92,6 +93,8 @@ const runRow = (over: Partial<RunRow> & { id: number }): RunRow => ({
   personaId: "planner",
   parentRunId: null,
   model: null,
+  budgetMaxUsd: null,
+  budgetMaxTurns: null,
   taskId: null,
   planId: null,
   prUrl: null,
@@ -116,6 +119,8 @@ const overviewRow = (id: number): RunIndexRow => ({
   parentRunId: null,
   prUrl: null,
   model: null,
+  budgetMaxUsd: null,
+  budgetMaxTurns: null,
   totalCostUsd: 0,
   error: null,
   startedAt: new Date(NOW - 60_000).toISOString(),

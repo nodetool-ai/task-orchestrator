@@ -35,6 +35,10 @@ export interface RunIndexRow {
   parentRunId: number | null;
   prUrl: string | null;
   model: string | null;
+  /** Per-run caps, as `/model` and `/budget` set them (T-tui-12). Null means
+   *  the run inherits its persona / deployment default. */
+  budgetMaxUsd: number | null;
+  budgetMaxTurns: number | null;
   totalCostUsd: number | null;
   error: string | null;
   /** ISO-8601 */
@@ -205,12 +209,22 @@ export interface RunRow {
   personaId: string | null;
   parentRunId: number | null;
   model: string | null;
+  budgetMaxUsd: number | null;
+  budgetMaxTurns: number | null;
   taskId: string | null;
   planId: string | null;
   prUrl: string | null;
   totalCostUsd: number | null;
   startedAt: string | null;
   completedAt: string | null;
+}
+
+/** Body for PATCH /api/runs/:id `{ action: "configure" }`. An omitted field is
+ *  left alone; an explicit null clears the cap. */
+export interface RunConfigInput {
+  model?: string | null;
+  budgetMaxUsd?: number | null;
+  budgetMaxTurns?: number | null;
 }
 
 /** GET /api/personas → { personas }. The route also sends `systemPrompt`,

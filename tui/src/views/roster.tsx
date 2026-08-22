@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { floorGroups, type Forest } from "../model/forest.js";
-import { C, usd } from "../theme.js";
+import { C, useGlyphs, usd } from "../theme.js";
 import { RunRow } from "./tree.js";
 
 // Right-hand rail: the live part of the forest, compact. Shown when the
@@ -21,9 +21,10 @@ export function Roster({
   height: number;
   current: number | null;
 }) {
+  const g = useGlyphs();
   // Same grouping as the floor, so the rail and the floor agree on what is
   // still on the clock — including a finished parent with a working child.
-  const rows = floorGroups(forest).live;
+  const rows = floorGroups(forest, g).live;
   const today = forest.runs.reduce((s, r) => s + r.cost, 0);
   // header + its blank line + the cost footer; one more line goes to the
   // "+n more" tally when the rail cannot show everything.
@@ -36,7 +37,7 @@ export function Roster({
         <Text color={C.muted}> {forest.liveCount()}</Text>
         {inboxCount > 0 && (
           <Text color={C.review}>
-            {"  "}⚑ {inboxCount}
+            {"  "}{g.flag} {inboxCount}
           </Text>
         )}
       </Text>
@@ -44,7 +45,7 @@ export function Roster({
         {visible.length === 0 && <Text color={C.muted}>nothing running</Text>}
         {visible.map((row) => (
           <Box key={row.run.id}>
-            <Text color={row.run.id === current ? C.fg : C.hair}>{row.run.id === current ? "▸" : " "}</Text>
+            <Text color={row.run.id === current ? C.fg : C.hair}>{row.run.id === current ? g.cursor : " "}</Text>
             <RunRow row={row} forest={forest} width={width - 3} now={now} compact />
           </Box>
         ))}

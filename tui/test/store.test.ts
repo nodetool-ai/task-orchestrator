@@ -9,6 +9,7 @@ import type {
   MessageRow,
   PersonaSummary,
   PlanSummary,
+  RunConfigInput,
   RunDetail,
   RunIndexRow,
   RunRow,
@@ -73,6 +74,8 @@ function row(id: number, over: Partial<RunIndexRow> = {}): RunIndexRow {
     parentRunId: null,
     prUrl: null,
     model: null,
+    budgetMaxUsd: null,
+    budgetMaxTurns: null,
     totalCostUsd: 0,
     error: null,
     startedAt: new Date(0).toISOString(),
@@ -99,6 +102,8 @@ function runRow(id: number, goal: string, status: RunRow["status"] = "running"):
     personaId: "concierge",
     parentRunId: null,
     model: null,
+    budgetMaxUsd: null,
+    budgetMaxTurns: null,
     taskId: null,
     planId: null,
     prUrl: null,
@@ -161,6 +166,8 @@ class StubClient implements OrchClient {
   sent: Array<{ id: number; text: string }> = [];
   created: CreateRunInput[] = [];
   cancelled: number[] = [];
+  configured: Array<{ id: number; patch: RunConfigInput }> = [];
+  configureError: unknown = null;
   sendError: unknown = null;
   createError: unknown = null;
   cancelError: unknown = null;
@@ -225,6 +232,16 @@ class StubClient implements OrchClient {
     this.cancelled.push(id);
     if (this.cancelError) throw this.cancelError;
     return runRow(id, `goal ${id}`, "cancelled");
+  }
+  async configureRun(id: number, patch: RunConfigInput): Promise<RunRow> {
+    this.configured.push({ id, patch });
+    if (this.configureError) throw this.configureError;
+    return {
+      ...runRow(id, `goal ${id}`),
+      model: patch.model === undefined ? null : patch.model,
+      budgetMaxUsd: patch.budgetMaxUsd === undefined ? null : patch.budgetMaxUsd,
+      budgetMaxTurns: patch.budgetMaxTurns === undefined ? null : patch.budgetMaxTurns,
+    };
   }
   overviewEvents(h: OverviewHandlers): Subscription {
     this.overviewHandlers = h;
@@ -573,6 +590,45 @@ describe("store", () => {
     client.cancelError = new Error("Not found");
     await store.actions.cancelRun(99);
     expect(store.getState().error).toBe("cancel #99 failed: Not found");
+    store.stop();
+  });
+
+  // The overview stream wakes on agent_events/agent_messages inserts, and a
+  // bare column update writes neither — so the confirmed values have to be
+  // folded in here or the header would lag by up to the stream's safety
+  // refetch, which is exactly what `/model` and `/budget` are judged on.
+  it("shows a configured model and budget before the next snapshot arrives", async () => {
+    const client = new StubClient();
+    const { store } = boot(client);
+    await flush();
+
+    expect(await store.actions.configureRun(1, { model: "sonnet", budgetMaxUsd: 5 })).toBe(true);
+    await flush();
+    expect(client.configured).toEqual([{ id: 1, patch: { model: "sonnet", budgetMaxUsd: 5 } }]);
+    const run = store.getState().forest.byId(1);
+    expect(run?.model).toBe("sonnet");
+    expect(run?.budgetUsd).toBe(5);
+
+    // A stale snapshot must not undo it; the row that finally carries the new
+    // values retires the override.
+    client.overviewHandlers?.onRows([row(1)]);
+    expect(store.getState().forest.byId(1)?.model).toBe("sonnet");
+    client.overviewHandlers?.onRows([row(1, { model: "sonnet", budgetMaxUsd: 5 })]);
+    expect(store.getState().forest.byId(1)?.model).toBe("sonnet");
+    client.overviewHandlers?.onRows([row(1, { model: "opus" })]);
+    expect(store.getState().forest.byId(1)?.model).toBe("opus");
+    store.stop();
+  });
+
+  it("reports a refused configure as one line and never throws", async () => {
+    const client = new StubClient();
+    client.configureError = new Error("Bad configure: model expected string");
+    const { store } = boot(client);
+    await flush();
+
+    expect(await store.actions.configureRun(1, { model: "" })).toBe(false);
+    expect(store.getState().error).toBe("configure #1 failed: Bad configure: model expected string");
+    expect(store.getState().forest.byId(1)?.model).toBe(null);
     store.stop();
   });
 

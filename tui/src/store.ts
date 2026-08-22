@@ -13,6 +13,7 @@ import {
   type CreateRunInput,
   type PersonaSummary,
   type PlanSummary,
+  type RunConfigInput,
   type RunIndexRow,
   type StreamCursor,
   type TaskSummary,
@@ -58,6 +59,9 @@ export interface StoreActions {
   newRun(persona: string, goal: string): Promise<number | null>;
   /** PATCH cancel. Never throws. */
   cancelRun(id: number): Promise<void>;
+  /** PATCH configure: `/model` and `/budget`. Never throws. Resolves to true
+   *  when the server accepted the patch, so the caller can word its notice. */
+  configureRun(id: number, patch: RunConfigInput): Promise<boolean>;
   /** Ids of runs waiting on a human, newest first — the `tab` cycle order. */
   waiting(): number[];
   /** Fetch /api/personas once and cache it in state.personas. */
@@ -179,8 +183,39 @@ export function createStore(client: OrchClient, opts: StoreOptions = {}): Store 
   // it, so the first overview must not queue a second one.
   let rowsSig: string | null = null;
 
-  function applyRows(rows: RunIndexRow[]): void {
+  // What the server confirmed for a run's model/budget, held until a snapshot
+  // arrives already carrying it. The overview stream only wakes on
+  // agent_events/agent_messages inserts, and a bare column update writes
+  // neither — without this the header would keep showing the old cap for up to
+  // the stream's 15 s safety refetch.
+  const configured = new Map<number, Pick<RunIndexRow, "model" | "budgetMaxUsd" | "budgetMaxTurns">>();
+
+  function reconcile(rows: RunIndexRow[]): RunIndexRow[] {
+    if (configured.size === 0) return rows;
+    return rows.map((r) => {
+      const mine = configured.get(r.id);
+      if (!mine) return r;
+      const landed =
+        mine.model === r.model &&
+        mine.budgetMaxUsd === r.budgetMaxUsd &&
+        mine.budgetMaxTurns === r.budgetMaxTurns;
+      if (landed) {
+        configured.delete(r.id);
+        return r;
+      }
+      return { ...r, ...mine };
+    });
+  }
+
+  // The newest snapshot as the server sent it, unpatched — `configureRun` needs
+  // something to re-apply its override onto, and reconcile() has to compare
+  // against server truth rather than against its own last patch.
+  let lastRows: RunIndexRow[] = [];
+
+  function applyRows(raw: RunIndexRow[]): void {
     if (stopped) return;
+    lastRows = raw;
+    const rows = reconcile(raw);
     const forest = buildForest(rows);
     const patch: Partial<OrchState> = { forest, palette: paletteFrom(forest) };
     // A 401 stays on screen: rows arriving from a cached poll do not clear it.
@@ -483,6 +518,29 @@ export function createStore(client: OrchClient, opts: StoreOptions = {}): Store 
     refreshInbox();
   }
 
+  /** `/model` and `/budget`. The confirmed row is folded into the forest at
+   *  once rather than waited for: the header is the whole point of the command,
+   *  and the overview stream does not wake on a column update. */
+  async function configureRun(id: number, patch: RunConfigInput): Promise<boolean> {
+    if (stopped) return false;
+    let updated;
+    try {
+      updated = await client.configureRun(id, patch);
+    } catch (err) {
+      if (stopped) return false;
+      writeFailed(`configure #${id}`, err);
+      return false;
+    }
+    if (stopped) return false;
+    configured.set(id, {
+      model: updated.model,
+      budgetMaxUsd: updated.budgetMaxUsd,
+      budgetMaxTurns: updated.budgetMaxTurns,
+    });
+    applyRows(lastRows);
+    return true;
+  }
+
   function waiting(): number[] {
     const out: number[] = [];
     const seen = new Set<number>();
@@ -539,6 +597,7 @@ export function createStore(client: OrchClient, opts: StoreOptions = {}): Store 
     send,
     newRun,
     cancelRun,
+    configureRun,
     waiting,
     ensurePersonas,
     runForTask(taskId) {

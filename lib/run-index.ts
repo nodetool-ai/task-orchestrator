@@ -72,6 +72,10 @@ export interface RunIndexRow {
   parentRunId: number | null;
   prUrl: string | null;
   model: string | null;
+  /** Per-run caps, as the cockpit's `/model` and `/budget` set them (T-tui-12).
+   *  Null means the run inherits its persona / deployment default. */
+  budgetMaxUsd: number | null;
+  budgetMaxTurns: number | null;
   totalCostUsd: number | null;
   error: string | null;
   startedAt: string;

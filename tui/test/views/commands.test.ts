@@ -8,11 +8,16 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  budgetLabel,
   confirmLine,
+  glyphs,
   liveKids,
   newRunInput,
   nextInCycle,
+  openCommand,
+  openUrlFor,
   parseArgv,
+  parseBudget,
   resolvePersona,
   spawnMessage,
 } from "../../src/app.js";
@@ -170,5 +175,104 @@ describe("parseArgv", () => {
     expect(parseArgv(["goal", "-x"]).kind).toBe("error");
     expect(parseArgv(["-p", "implementor"]).kind).toBe("error");
     expect(parseArgv(["   "]).kind).toBe("error");
+  });
+});
+
+// ── /budget ────────────────────────────────────────────────────────────────
+// The one command where a misread argument costs money: "5" meaning five
+// dollars instead of five turns caps a run two orders of magnitude tighter
+// than the operator asked for, so every shape they can type is nailed down.
+
+describe("parseBudget", () => {
+  it("reads a dollar cap from the shapes a `$` marks", () => {
+    expect(parseBudget("$5")).toEqual({ budget: { usd: 5 }, notice: null });
+    expect(parseBudget("5usd")).toEqual({ budget: { usd: 5 }, notice: null });
+    expect(parseBudget("5 USD")).toEqual({ budget: { usd: 5 }, notice: null });
+    expect(parseBudget(" $2.50 ")).toEqual({ budget: { usd: 2.5 }, notice: null });
+  });
+
+  it("reads a turn cap, a bare number included", () => {
+    expect(parseBudget("20 turns")).toEqual({ budget: { turns: 20 }, notice: null });
+    expect(parseBudget("20turn")).toEqual({ budget: { turns: 20 }, notice: null });
+    expect(parseBudget("20t")).toEqual({ budget: { turns: 20 }, notice: null });
+    expect(parseBudget("20")).toEqual({ budget: { turns: 20 }, notice: null });
+  });
+
+  it("refuses nothing, zero, a fraction of a turn, and anything unparseable", () => {
+    for (const arg of ["", "   ", "0", "$0", "-5", "2.5", "2.5 turns", "lots", "$", "5 dollars"]) {
+      const r = parseBudget(arg);
+      expect(r.budget).toBeNull();
+      expect(r.notice?.split("\n")).toHaveLength(1);
+    }
+  });
+});
+
+describe("budgetLabel", () => {
+  it("says nothing when the run inherits both caps", () => {
+    expect(budgetLabel({ budgetUsd: null, budgetTurns: null })).toBe("");
+  });
+
+  it("names whichever caps are set", () => {
+    expect(budgetLabel({ budgetUsd: 5, budgetTurns: null })).toBe("$5 cap");
+    expect(budgetLabel({ budgetUsd: null, budgetTurns: 20 })).toBe("20t cap");
+    expect(budgetLabel({ budgetUsd: 2.5, budgetTurns: 20 })).toBe("$2.5/20t cap");
+  });
+});
+
+// ── the `o` key ────────────────────────────────────────────────────────────
+
+describe("openUrlFor", () => {
+  it("prefers the run's PR", () => {
+    const url = "https://github.com/acme/orch/pull/12";
+    expect(openUrlFor({ id: 45, prUrl: url }, "http://localhost:3000")).toBe(url);
+  });
+
+  it("falls back to the run's own page, trailing slashes and all", () => {
+    expect(openUrlFor({ id: 45, prUrl: null }, "http://localhost:3000")).toBe(
+      "http://localhost:3000/runs/45",
+    );
+    expect(openUrlFor({ id: 45, prUrl: "  " }, "https://orch.example.com//")).toBe(
+      "https://orch.example.com/runs/45",
+    );
+  });
+});
+
+describe("openCommand", () => {
+  it("uses the launcher each platform actually ships", () => {
+    expect(openCommand("darwin", "u")).toEqual({ command: "open", args: ["u"] });
+    expect(openCommand("linux", "u")).toEqual({ command: "xdg-open", args: ["u"] });
+    expect(openCommand("freebsd", "u")).toEqual({ command: "xdg-open", args: ["u"] });
+  });
+
+  // The empty argument is `start`'s window title. Without it the url becomes
+  // the title and no browser opens.
+  it("keeps the empty title argument on Windows", () => {
+    expect(openCommand("win32", "u")).toEqual({ command: "cmd", args: ["/c", "start", "", "u"] });
+  });
+});
+
+// ── --ascii ────────────────────────────────────────────────────────────────
+
+describe("glyphs", () => {
+  it("swaps every mark for a single-column ASCII one", () => {
+    const a = glyphs(true);
+    const u = glyphs(false);
+    const marks = Object.entries(a).filter(([k]) => k !== "status" && k !== "move");
+    for (const [key, mark] of marks) {
+      expect(typeof mark).toBe("string");
+      expect(mark, key).toMatch(/^[\x20-\x7e]$/);
+      expect(mark).not.toBe((u as unknown as Record<string, string>)[key]);
+    }
+    for (const [state, mark] of Object.entries(a.status)) {
+      expect(mark, state).toMatch(/^[\x20-\x7e]$/);
+    }
+  });
+
+  it("falls the box drawing back to | and -", () => {
+    expect(glyphs(true).rule).toBe("-");
+    expect(glyphs(true).rail).toBe("|");
+    expect(glyphs(true).bar).toBe("|");
+    expect(glyphs(false).rule).toBe("─");
+    expect(glyphs(false).rail).toBe("│");
   });
 });

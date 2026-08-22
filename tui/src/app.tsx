@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import type { OrchClient } from "./api/client.js";
-import { confirmLine, liveKids, nextInCycle, resolvePersona, spawnMessage } from "./cli/commands.js";
+import { confirmLine, liveKids, nextInCycle, openUrlFor, parseBudget, resolvePersona, spawnMessage } from "./cli/commands.js";
+import { openInBrowser } from "./cli/open.js";
 import { floorGroups } from "./model/forest.js";
 import { filterPalette } from "./model/palette.js";
 import { useOrch } from "./store.js";
-import { C, Hair } from "./theme.js";
+import { C, GlyphProvider, Hair, useGlyphs } from "./theme.js";
 import { ChatHeader, Transcript } from "./views/chat.js";
 import { Floor } from "./views/floor.js";
 import { Inbox } from "./views/inbox.js";
@@ -15,9 +16,11 @@ import { Prompt, matchCommands } from "./views/prompt.js";
 
 type View = "chat" | "floor" | "inbox" | "palette";
 
-// Not wired yet: /model and /budget patch the run in M4, /say is an M3 CLI
-// verb. They answer honestly rather than pretending to work.
-const LATER_COMMANDS = new Set(["/say", "/model", "/budget"]);
+// Not wired yet: /say is an M3 CLI verb with no cockpit form. It answers
+// honestly rather than pretending to work.
+const LATER_COMMANDS = new Set(["/say"]);
+
+const DEFAULT_URL = "http://localhost:3000";
 
 // ── Pure helpers ───────────────────────────────────────────────────────────
 // There is no component test harness here, so every decision that is not
@@ -27,20 +30,49 @@ const LATER_COMMANDS = new Set(["/say", "/model", "/budget"]);
 // the module the cockpit and its tests have always imported them from.
 
 export {
+  budgetLabel,
   confirmLine,
   liveKids,
   newRunInput,
   nextInCycle,
+  openCommand,
+  openUrlFor,
+  parseBudget,
   resolvePersona,
   spawnMessage,
+  type Budget,
   type PersonaRef,
 } from "./cli/commands.js";
-export { parseArgv, type Cli } from "./cli/parse.js";
+export { parseArgv, takeGlobalFlags, type Cli } from "./cli/parse.js";
+export { glyphs, type Glyphs } from "./theme.js";
 
 // ── The cockpit ────────────────────────────────────────────────────────────
 
-export function App({ client, initial }: { client: OrchClient; initial?: number | null }) {
+export interface AppProps {
+  client: OrchClient;
+  initial?: number | null;
+  /** Where the server lives, so `o` can build a run url. */
+  baseUrl?: string;
+  /** Injected so the suite never spawns a browser. */
+  openUrl?: (url: string) => Promise<void> | void;
+  ascii?: boolean;
+}
+
+export function App({ client, initial, baseUrl, openUrl, ascii }: AppProps) {
+  return (
+    <GlyphProvider ascii={ascii === true}>
+      <Cockpit client={client} initial={initial} baseUrl={baseUrl} openUrl={openUrl} />
+    </GlyphProvider>
+  );
+}
+
+// Split from App so every view below — and the cockpit's own key handling —
+// reads the glyph table out of the context rather than off a prop.
+function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii">) {
   const { exit } = useApp();
+  const g = useGlyphs();
+  const base = baseUrl ?? process.env.ORCH_URL ?? DEFAULT_URL;
+  const launch = openUrl ?? openInBrowser;
   const { stdout } = useStdout();
   const cols = stdout.columns ?? 100;
   const rows = stdout.rows ?? 30;
@@ -65,9 +97,9 @@ export function App({ client, initial }: { client: OrchClient; initial?: number 
   const mainW = cols - railW - (railW ? 1 : 0);
 
   const floorRows = useMemo(() => {
-    const { live, rest } = floorGroups(s.forest);
+    const { live, rest } = floorGroups(s.forest, g);
     return [...live, ...rest];
-  }, [s.forest]);
+  }, [s.forest, g]);
   const paletteItems = useMemo(() => filterPalette(s.palette, pq), [s.palette, pq]);
 
   // Warm, so `/new implementor …` can be validated the moment it is typed.
@@ -118,6 +150,14 @@ export function App({ client, initial }: { client: OrchClient; initial?: number 
     setConfirm(null);
     setNotice(`cancelling #${id}…`);
     void s.actions.cancelRun(id);
+  };
+
+  // `o` from the floor and from needs-you. The PR is what an operator wants
+  // when there is one; the run page is the honest fallback, not an error.
+  const browse = (target: { id: number; prUrl: string | null }) => {
+    const url = openUrlFor(target, base);
+    setNotice(`opening ${url}`);
+    void (async () => launch(url))().catch(() => setNotice(`could not open a browser · ${url}`));
   };
 
   const say = (text: string, target: number | null) => {
@@ -177,6 +217,33 @@ export function App({ client, initial }: { client: OrchClient; initial?: number 
         if (!who || !what) return setNotice("/spawn <persona> <goal|T-id>");
         if (s.current === null) return setNotice("no run open · /spawn asks the run you are in");
         return say(spawnMessage(who, what), null);
+      }
+      case "/model": {
+        const id = arg.trim();
+        if (s.current === null) return setNotice("no run open · /model retunes the run you are in");
+        if (!id) return setNotice("/model <id> — e.g. /model claude-sonnet-4-5");
+        setNotice(`model → ${id}…`);
+        void s.actions
+          .configureRun(s.current, { model: id })
+          .then((ok) => setNotice(ok ? `model → ${id}` : `could not set the model to ${id}`));
+        return;
+      }
+      case "/budget": {
+        if (s.current === null) return setNotice("no run open · /budget caps the run you are in");
+        const b = parseBudget(arg);
+        if (b.budget === null) return setNotice(b.notice);
+        // One command, two columns: a dollar cap and a turn cap are separate
+        // limits on the run, so setting one leaves the other alone.
+        const patch =
+          b.budget.usd === undefined
+            ? { budgetMaxTurns: b.budget.turns }
+            : { budgetMaxUsd: b.budget.usd };
+        const said = b.budget.usd === undefined ? `${b.budget.turns} turns` : `$${b.budget.usd}`;
+        setNotice(`budget → ${said}…`);
+        void s.actions
+          .configureRun(s.current, patch)
+          .then((ok) => setNotice(ok ? `budget → ${said}` : `could not cap #${s.current} at ${said}`));
+        return;
       }
       case "/cancel": {
         if (s.current === null) return setNotice("no run open");
@@ -239,6 +306,11 @@ export function App({ client, initial }: { client: OrchClient; initial?: number 
         if (!row) return;
         return cancel(row.run.id, "c");
       }
+      if (ch === "o") {
+        const row = floorRows[cursor];
+        if (!row) return;
+        return browse(row.run);
+      }
       // New agent: the composer already knows how to start one, so `n` hands
       // the keyboard back with the command half typed.
       if (ch === "n") {
@@ -257,6 +329,11 @@ export function App({ client, initial }: { client: OrchClient; initial?: number 
         const it = s.inbox[cursor];
         if (it) open(it.runId);
         return;
+      }
+      if (ch === "o") {
+        const it = s.inbox[cursor];
+        if (!it) return;
+        return browse({ id: it.runId, prUrl: it.prUrl });
       }
       if (ch === "d") return setNotice("dismiss is not wired yet");
       return;
@@ -345,7 +422,7 @@ export function App({ client, initial }: { client: OrchClient; initial?: number 
         {railW > 0 && (
           <Box flexDirection="row">
             <Box flexDirection="column" height={rows}>
-              <Text color={C.hair}>{"│\n".repeat(rows)}</Text>
+              <Text color={C.hair}>{`${g.rail}\n`.repeat(rows)}</Text>
             </Box>
             <Roster
               forest={s.forest}

@@ -38,6 +38,8 @@ function row(over: Partial<RunIndexRow> & { id: number }): RunIndexRow {
     parentRunId: null,
     prUrl: null,
     model: null,
+    budgetMaxUsd: null,
+    budgetMaxTurns: null,
     totalCostUsd: 0,
     error: null,
     startedAt: ago(10),
