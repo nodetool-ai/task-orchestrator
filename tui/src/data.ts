@@ -6,12 +6,15 @@
 
 import type { OrchClient, OverviewHandlers, RunEventHandlers, Subscription } from "./api/client.js";
 import type {
+  CreateRunInput,
   GlobalInboxRow,
   MessageRow,
+  PersonaSummary,
   PlanSummary,
   RunDetail,
   RunIndexRow,
   RunInbox,
+  RunRow,
   SdkContentBlock,
   TaskSummary,
 } from "./api/types.js";
@@ -258,6 +261,20 @@ export const taskSummaries: TaskSummary[] = [
 
 export const personas = ["concierge", "planner", "executor", "implementor", "designer", "qa"];
 
+/** GET /api/personas, with the budgets `/new` reads off the persona. */
+export const personaSummaries: PersonaSummary[] = personas.map((id) => ({
+  id,
+  name: PERSONA_NAMES[id] ?? id,
+  description: `the ${id} persona`,
+  modelProvider: "anthropic",
+  modelId: "claude-opus-5",
+  thinkingLevel: id === "planner" ? "high" : "medium",
+  toolsProfile: "default",
+  backend: "claude",
+  budgetMaxTurns: 40,
+  budgetMaxSeconds: 1800,
+}));
+
 // ── the fake client ────────────────────────────────────────────────────────
 
 /**
@@ -267,6 +284,23 @@ export const personas = ["concierge", "planner", "executor", "implementor", "des
  */
 export function createFakeClient(): OrchClient {
   const rows = runIndexRows;
+  let nextRunId = Math.max(...rows.map((r) => r.id)) + 1;
+
+  const toRunRow = (row: RunIndexRow): RunRow => ({
+    id: row.id,
+    goal: row.goal,
+    status: row.status,
+    title: row.title,
+    personaId: row.personaId,
+    parentRunId: row.parentRunId,
+    model: row.model,
+    taskId: row.taskId,
+    planId: row.planId,
+    prUrl: row.prUrl,
+    totalCostUsd: row.totalCostUsd,
+    startedAt: row.startedAt,
+    completedAt: row.completedAt,
+  });
 
   const detail = (id: number): RunDetail => {
     const row = rows.find((r) => r.id === id);
@@ -309,6 +343,55 @@ export function createFakeClient(): OrchClient {
     inbox: async () => globalInboxRows,
     tasks: async () => taskSummaries,
     plans: async () => planSummaries,
+
+    personas: async () => personaSummaries,
+
+    // The mock has no agent behind it, so a sent message just lands in the
+    // transcript the way the server's own `user_message` frame would.
+    sendMessage: async (id, text) => {
+      messageRows.push(msg(id, "user", 0, [{ type: "text", text }]));
+    },
+
+    createRun: async (input: CreateRunInput): Promise<RunRow> => {
+      const id = nextRunId++;
+      const row: RunIndexRow = {
+        ...runIndexRows[0]!,
+        id,
+        goal: input.goal,
+        status: "running",
+        origin: input.taskId ? "task" : "chat",
+        title: input.title ?? input.goal,
+        taskId: input.taskId ?? null,
+        taskTitle: null,
+        planId: null,
+        planTitle: null,
+        parentRunId: null,
+        prUrl: null,
+        totalCostUsd: 0,
+        error: null,
+        startedAt: new Date().toISOString(),
+        completedAt: null,
+        parkReason: null,
+        pendingReason: null,
+        pendingEvents: 0,
+        personaId: input.personaId ?? null,
+        personaName: input.personaId ? (PERSONA_NAMES[input.personaId] ?? input.personaId) : null,
+      };
+      rows.unshift(row);
+      return toRunRow(row);
+    },
+
+    cancelRun: async (id) => {
+      const row = rows.find((r) => r.id === id);
+      if (!row) throw new Error(`no run ${id}`);
+      row.status = "cancelled";
+      row.completedAt = new Date().toISOString();
+      // Cancel cascades on the server; mirror that so the floor looks right.
+      for (const r of rows) {
+        if (r.parentRunId === id && r.status !== "completed") r.status = "cancelled";
+      }
+      return toRunRow(row);
+    },
 
     overviewEvents(h: OverviewHandlers): Subscription {
       let closed = false;

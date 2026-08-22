@@ -192,3 +192,52 @@ export interface PlanSummary {
   title: string;
   state: string;
 }
+
+/**
+ * POST /api/runs (201) and PATCH /api/runs/:id → the serialized run row.
+ * A narrower view of the same row `RunDetail` widens with messages.
+ */
+export interface RunRow {
+  id: number;
+  goal: string;
+  status: SessionStatus;
+  title: string | null;
+  personaId: string | null;
+  parentRunId: number | null;
+  model: string | null;
+  taskId: string | null;
+  planId: string | null;
+  prUrl: string | null;
+  totalCostUsd: number | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+/** GET /api/personas → { personas }. The route also sends `systemPrompt`,
+ * which the cockpit never shows. */
+export interface PersonaSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  modelProvider: string | null;
+  modelId: string | null;
+  thinkingLevel: string | null;
+  toolsProfile: string | null;
+  backend: string | null;
+  budgetMaxTurns: number | null;
+  budgetMaxSeconds: number | null;
+}
+
+/** Body for POST /api/runs. Mirrors createRunSchema in app/api/runs/route.ts. */
+export interface CreateRunInput {
+  goal: string;
+  personaId?: string;
+  model?: string | null;
+  thinkingLevel?: "low" | "medium" | "high" | "xhigh" | null;
+  backend?: "pi" | "claude" | null;
+  title?: string | null;
+  taskId?: string | null;
+  cwdStrategy?: "worktree" | "worktree_at_pr" | "repo" | "none";
+  defer?: boolean;
+  budget?: { maxTurns?: number; maxUsd?: number; maxSeconds?: number } | null;
+}

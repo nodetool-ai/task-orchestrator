@@ -3,12 +3,15 @@
 
 import { sseFrames } from "./sse.js";
 import type {
+  CreateRunInput,
   GlobalInboxRow,
   MessageRow,
+  PersonaSummary,
   PlanSummary,
   RunDetail,
   RunIndexRow,
   RunInbox,
+  RunRow,
   StreamCursor,
   TaskSummary,
 } from "./types.js";
@@ -77,6 +80,11 @@ export interface OrchClient {
   inbox(): Promise<GlobalInboxRow[]>;
   tasks(): Promise<TaskSummary[]>;
   plans(): Promise<PlanSummary[]>;
+  personas(): Promise<PersonaSummary[]>;
+  /** Post a human turn to a run and wait for the server to finish the turn. */
+  sendMessage(id: number, text: string): Promise<void>;
+  createRun(input: CreateRunInput): Promise<RunRow>;
+  cancelRun(id: number): Promise<RunRow>;
   overviewEvents(h: OverviewHandlers): Subscription;
   runEvents(id: number, cursor: StreamCursor, h: RunEventHandlers): Subscription;
 }
@@ -134,6 +142,20 @@ export function createClient(cfg: Partial<ClientConfig> = {}): OrchClient {
     if (!res.ok) throw await errorFor(res);
     return (await res.json()) as T;
   }
+
+  async function writeJson<T>(method: "POST" | "PATCH", path: string, body: unknown): Promise<T> {
+    const res = await doFetch(`${base}${path}`, {
+      method,
+      headers: { ...authHeaders("application/json"), "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw await errorFor(res);
+    return (await res.json()) as T;
+  }
+
+  const postJson = <T>(path: string, body: unknown): Promise<T> => writeJson<T>("POST", path, body);
+  const patchJson = <T>(path: string, body: unknown): Promise<T> =>
+    writeJson<T>("PATCH", path, body);
 
   /**
    * One reconnecting SSE subscription. `urlFor` is re-evaluated per attempt so
@@ -246,6 +268,52 @@ export function createClient(cfg: Partial<ClientConfig> = {}): OrchClient {
       const rows = await getJson<Array<PlanSummary & Record<string, unknown>>>("/api/plans");
       return rows.map((p) => ({ id: p.id, title: p.title, state: p.state }));
     },
+
+    personas: () =>
+      getJson<{ personas: PersonaSummary[] }>("/api/personas").then((r) => r.personas ?? []),
+
+    /**
+     * POST /api/runs/:id/messages answers with an SSE stream rather than JSON:
+     * the server holds the connection open for the whole agent turn and emits
+     * `user_message`, `sdk`, then `done` (or `error`). We only need to know the
+     * turn was accepted and how it ended — the transcript itself arrives on the
+     * run's own event stream, which the store is already subscribed to.
+     *
+     * This gets its own read loop instead of `subscribe()` because it is a
+     * one-shot: a reconnect would re-post the message, and there is no cursor
+     * to resume from. For the same reason the request is never aborted — the
+     * server treats a dropped POST as a cancelled turn.
+     */
+    async sendMessage(id: number, text: string): Promise<void> {
+      const res = await doFetch(`${base}/api/runs/${id}/messages`, {
+        method: "POST",
+        headers: { ...authHeaders("text/event-stream"), "content-type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) throw await errorFor(res);
+      if (!res.body) return; // nothing to read; the turn was still accepted
+      for await (const data of sseFrames(res.body as ReadableStream<Uint8Array>)) {
+        let frame: unknown;
+        try {
+          frame = JSON.parse(data);
+        } catch {
+          continue; // a malformed frame must not fail an accepted turn
+        }
+        if (!frame || typeof frame !== "object") continue;
+        const typed = frame as { type?: unknown; error?: unknown };
+        if (typed.type === "error") {
+          const message = typeof typed.error === "string" ? typed.error : "Message failed";
+          throw new ApiError(res.status, message, frame);
+        }
+        if (typed.type === "done") return;
+      }
+      // Clean end-of-stream without a `done` frame still means the turn ran.
+    },
+
+    createRun: (input: CreateRunInput) => postJson<RunRow>("/api/runs", input),
+
+    // Cancel cascades to descendants server-side, so one PATCH is enough.
+    cancelRun: (id: number) => patchJson<RunRow>(`/api/runs/${id}`, { action: "cancel" }),
 
     overviewEvents(h: OverviewHandlers): Subscription {
       // The overview stream is cursorless: every connect replays a full `rows`
