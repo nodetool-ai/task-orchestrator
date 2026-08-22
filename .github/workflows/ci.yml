@@ -91,6 +91,29 @@ jobs:
       - name: Test
         run: npm test
 
+      # Packaging (T-tui-10): the `orch` bundle is built from tui/node_modules
+      # alone (esbuild is a tui devDependency), so it belongs in this job and
+      # not in `quality`. The smoke test is deliberately not asserting on verb
+      # semantics — it guards the one thing bundling can break: a runtime
+      # module-resolution failure in a directory with no node_modules.
+      - name: Build orch bundle
+        run: npm run build:orch
+
+      - name: Bundle smoke test (standalone, no node_modules)
+        run: |
+          d=$(mktemp -d)
+          cp ../dist/orch.js "$d/orch.js"
+          cd "$d"
+          rc=0
+          out=$(./orch.js --help 2>&1) || rc=$?
+          echo "exit=$rc"
+          echo "$out"
+          case "$out" in
+            *ERR_MODULE_NOT_FOUND*|*"Cannot find package"*|*"Dynamic require of"*)
+              echo "bundle is not self-contained"; exit 1 ;;
+          esac
+          [ "$rc" -le 2 ] || { echo "bundle crashed (exit $rc)"; exit 1; }
+
   # Deploy gating: docs-only pushes skip the Fly deploys (the old fly-deploy
   # workflow's paths-ignore, reproduced as a diff so deploys can live behind
   # `needs: quality`).
