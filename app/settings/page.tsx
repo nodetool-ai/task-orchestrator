@@ -7,7 +7,6 @@ import { ApiTokensManager } from "@/components/api-tokens-manager";
 import { CodexLoginPanel } from "@/components/settings/codex-login";
 import { DiscordSettings } from "@/components/settings/discord-settings";
 import type { DiscordPersonaOption } from "@/components/settings/discord-setup-wizard";
-import { CodeBlock } from "@/components/ui/code-block";
 import { EmptyState } from "@/components/ui/empty-state";
 import { formatDate, relativeDate } from "@/lib/utils";
 import { SettingsTabs } from "@/components/settings/settings-tabs";
@@ -181,43 +180,10 @@ export default async function SettingsPage({
               <p className="text-sm text-muted-foreground">
                 Tokens authenticate the MCP server at <code>POST /api/mcp</code>. Pass{" "}
                 <code>Authorization: Bearer tot_…</code>. Each token inherits its owner&apos;s
-                permissions; revoke any time.
+                permissions and can be revoked at any time. Generate one below, then copy the
+                config for your client — deployment and operations notes live in{" "}
+                <code>docs/mcp-server.md</code>.
               </p>
-
-              <div className="grid gap-3 md:grid-cols-3">
-                <div className="rounded-md border border-border/60 bg-card/40 p-3 text-xs space-y-1.5">
-                  <div className="font-medium">Claude Code (CLI):</div>
-                  <CodeBlock tone="muted" className="border-0 bg-transparent p-0">{`claude mcp add --transport http \\
-  task-orchestrator \\
-  https://tasks.nodetool.ai/api/mcp \\
-  --header "Authorization: Bearer tot_…"`}</CodeBlock>
-                </div>
-
-                <div className="rounded-md border border-border/60 bg-card/40 p-3 text-xs space-y-1.5">
-                  <div className="font-medium">Claude Desktop:</div>
-                  <CodeBlock tone="muted" className="border-0 bg-transparent p-0">{`{
-  "mcpServers": {
-    "task-orchestrator": {
-      "type": "http",
-      "url": "https://tasks.nodetool.ai/api/mcp",
-      "headers": { "Authorization": "Bearer tot_…" }
-    }
-  }
-}`}</CodeBlock>
-                </div>
-
-                <div className="rounded-md border border-border/60 bg-card/40 p-3 text-xs space-y-1.5">
-                  <div className="font-medium">Cursor (~/.cursor/mcp.json):</div>
-                  <CodeBlock tone="muted" className="border-0 bg-transparent p-0">{`{
-  "mcpServers": {
-    "task-orchestrator": {
-      "url": "https://tasks.nodetool.ai/api/mcp",
-      "headers": { "Authorization": "Bearer tot_…" }
-    }
-  }
-}`}</CodeBlock>
-                </div>
-              </div>
             </header>
             <ApiTokensManager />
           </div>

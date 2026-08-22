@@ -30,6 +30,9 @@ single Postgres database.
 - **[docs/runners/](docs/runners/README.md)** — how runs actually execute:
   workers, the control-plane split, and the Local / Fly / Box integrations
   (start here for architecture)
+- **[docs/mcp-server.md](docs/mcp-server.md)** — the hosted MCP server
+  (`POST /api/mcp`): production setup, the bearer-token auth model, and
+  client onboarding from Settings → API tokens
 - **[docs/fly-deployment.md](docs/fly-deployment.md)** — one-command deploy of the
   whole app (server + agent runners + database) to Fly.io
 - **[docs/box-deployment.md](docs/box-deployment.md)** — configure and operate
@@ -323,6 +326,28 @@ GET    /api/sessions/:id           # → session + full event log
 GET    /api/sessions/:id/events    # SSE, ?since=<eventId> to resume
 POST   /api/sessions/:id/cancel
 ```
+
+## MCP server (remote clients)
+
+The whole tool registry is also served as a remote MCP server, so Claude
+Code, Claude Desktop, Cursor, or VS Code can drive plans, tasks, and agent
+runs against a deployment:
+
+```
+POST /api/mcp        # JSON-RPC 2.0 over Streamable HTTP
+Authorization: Bearer tot_…
+```
+
+Onboarding lives in the app: **Settings → API tokens** issues a token
+(shown once), fills the client snippets in with this deployment's origin
+and that token, offers a one-click install for Cursor and VS Code plus a
+`.mcp.json` download, and has a **Test connection** button that runs a real
+`tools/list` and reports how many tools answered.
+
+Tokens are `tot_`-prefixed, stored bcrypt-hashed, act as their owning user,
+carry no expiry, and are revocable at any time — full production setup,
+proxy requirements, and the 401 troubleshooting table are in
+**[docs/mcp-server.md](docs/mcp-server.md)**.
 
 ## Agent sessions
 

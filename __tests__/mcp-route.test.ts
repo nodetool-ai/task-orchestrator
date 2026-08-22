@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { POST } from "../app/api/mcp/route";
+import { GET, POST } from "../app/api/mcp/route";
 import { db } from "../db";
 import { apiTokens, users } from "../db/schema";
 import { createToken } from "../lib/api-tokens";
@@ -33,6 +33,44 @@ describe("POST /api/mcp", () => {
       makeReq({ jsonrpc: "2.0", id: 1, method: "tools/list" }) as never
     );
     expect(res.status).toBe(401);
+  });
+
+  it("names the failure mode and links to the token page on 401", async () => {
+    const res = await POST(
+      makeReq({ jsonrpc: "2.0", id: 1, method: "tools/list" }) as never
+    );
+    expect(res.status).toBe(401);
+    expect(res.headers.get("WWW-Authenticate")).toContain("Bearer");
+    const body = await res.json();
+    expect(body.reason).toBe("missing_authorization_header");
+    expect(body.tokens_url).toBe("http://localhost/settings?tab=tokens");
+  });
+
+  it("distinguishes a malformed header from a dead token", async () => {
+    const malformed = await POST(
+      makeReq(
+        { jsonrpc: "2.0", id: 1, method: "tools/list" },
+        { Authorization: "tot_no_bearer_prefix" }
+      ) as never
+    );
+    expect((await malformed.json()).reason).toBe("malformed_authorization_header");
+
+    const dead = await POST(
+      makeReq(
+        { jsonrpc: "2.0", id: 1, method: "tools/list" },
+        { Authorization: "Bearer tot_revoked" }
+      ) as never
+    );
+    expect((await dead.json()).reason).toBe("invalid_or_revoked_token");
+  });
+
+  it("answers GET with 405 plus setup hints", async () => {
+    const res = GET(new Request("http://localhost/api/mcp") as never);
+    expect(res.status).toBe(405);
+    expect(res.headers.get("Allow")).toBe("POST");
+    const body = await res.json();
+    expect(body.server.protocolVersion).toBe("2024-11-05");
+    expect(body.tokens_url).toBe("http://localhost/settings?tab=tokens");
   });
 
   it("rejects invalid token with 401", async () => {
