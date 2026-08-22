@@ -127,6 +127,8 @@ runner image is already pressed against Fly's 8 GB unpacked-image limit.
 | `ORCH_URL` | `http://localhost:3000` | Base URL of the orchestrator. Point it at the Fly deployment to drive production. |
 | `ORCH_TOKEN` | *(unset)* | API token, sent as `Authorization: Bearer …`. Optional against a dev server with no login gate; required against a deployed one. Mint one at `<ORCH_URL>/tokens`, or `npm run task -- user link …`. |
 | `ORCH_BUNDLE` | *(unset)* | `1` makes the `bin` shim run `dist/orch.js` instead of the TypeScript source. |
+| `ORCH_ASCII` | *(unset)* | Anything but `0`/`false`/`no` swaps every glyph and the box drawing for ASCII. Same as `--ascii`. |
+| `ORCH_COLORS` | *(detected)* | `16` forces the named ANSI palette, `truecolor` forces the 24-bit one. See [Terminal size and colour](#terminal-size-and-colour). |
 
 A 401 prints one line on stderr naming the fix and exits 1 — it never opens an
 empty cockpit.
@@ -185,6 +187,111 @@ to stderr. Exit codes: **0** ok, **1** user error, **2** server error.
 Run states (PRD §6.2): `●` running · `◐` preparing · `○` queued · `⚑` parked on
 a question · `◌` idle · `✓` completed · `✕` failed / cancelled / budget
 exhausted.
+
+## Terminal size and colour
+
+T-tui-13. Two claims: nothing overflows at 80×24, 100×30 or 160×50, and the
+six hues degrade deliberately on a 16-colour terminal.
+
+### Size
+
+Every region's geometry is a pure function in `src/views/layout.ts` (rows,
+needs-you rows, the chat header, the floor and needs-you headings, the palette,
+the composer's help, nudge and key hints, the rail's window) or in
+`src/views/transcript.ts` (the frame lines). `test/views/screen.test.ts` runs
+all of them at the three sizes, under both glyph tables, over the mock
+fixtures *and* an adversarial forest — ten levels of nesting, four-digit run
+ids, a 35-character persona, a 99-character title, `PR#31245` with a CI mark
+and `$1234.56` — and asserts that nothing produces more columns than it was
+given, plus that `bodyH` + the composer + header/hair/status never exceeds the
+rows there are. `test/views/render.test.ts` then renders the whole cockpit
+through Ink onto a fake 80×24 / 100×30 / 160×50 stream (chat, floor, needs
+you, jump, the composer's help list, and 80×24 again under `--ascii`) and
+measures the frame Ink actually writes.
+
+What that pass changed, beyond the tests:
+
+- a four-digit run id used to be clipped to `#123` in floor and needs-you
+  rows — a wrong id, not a narrow one. The id cell grows and the title pays;
+- the chat header's right-hand tally (age, agents, model, budget, spend) is
+  capped at half the width, so a long model id can no longer push the run's
+  own name out of its own header;
+- the floor's key hints drop from the right instead of wrapping the header
+  onto a second line (at 80 columns `esc back` is the one that goes);
+- the command help under the composer yields before the transcript does on a
+  short terminal;
+- the jump palette's rows come out of the transcript's budget instead of
+  pushing the status line off a 24-row screen, and its border follows
+  `--ascii` (Ink's `classic` style) like every other rule.
+
+**Still needs a human at a real terminal**: how it *feels* — whether the
+80-column floor row is readable rather than merely inside its budget, and
+whether an emulator with a different font metric (a double-width glyph, a
+non-monospace fallback for `⚑` or `⎿`) still lines up. The suite counts
+characters, not cells.
+
+### Colour
+
+The palette lives in `src/model/colors.ts` and reaches the views through one
+accessor (`C`, and `statusColor` for run state). Nothing else names a colour.
+
+| Hue | Means | 24-bit | on black | on white | 16-colour | chalk would have picked |
+|---|---|---|---|---|---|---|
+| `running` | running, preparing | `#c68108` | 6.5 | 3.2 | `yellow` | `yellow` |
+| `review` | parked on a question, the `@#id` chip | `#a662ea` | 5.6 | 3.8 | `magentaBright` | `magentaBright` |
+| `blocked` | failed, cancelled, CI red | `#e25050` | 5.5 | 3.8 | `redBright` | `red` |
+| `done` | completed | `#29a46a` | 6.6 | 3.2 | `green` | `green` |
+| `queued` | queued, idle | `#8f8f97` | 6.5 | 3.2 | `gray` | `white` |
+| `you` | your turns, the prompt caret | `#6092dd` | 6.7 | 3.2 | `blueBright` | `cyan` |
+| `muted` | secondary text | `#808080` | 5.3 | 3.9 | `gray` | `white` |
+| `hair` | rules | `#3a3a3f` | 1.9 | 11.3 | `gray` | `black` |
+| `fg` | primary text | *the terminal's own* | — | — | *the terminal's own* | — |
+
+Contrast is WCAG 2.1 against a pure black and a pure white background, and
+`test/model/colors.test.ts` computes it rather than trusting the table: every
+hue must clear 4.5:1 on black and 3:1 on white. The 16-colour column is scored
+against the xterm defaults, which is the worst case — a terminal theme remaps
+those names, which is exactly why the fallback names colours instead of
+stating hexes.
+
+Four hues were **darkened 4–19 %** in this pass. `#f59f0a`, `#2eb877`,
+`#6ea8fe` and `#95959d` scored 2.1–3.0:1 on a white background: amber and
+mid-blue on white is the classic unreadable case, and a status glyph you
+cannot see is a status you do not have. They still clear 6.5:1 on black.
+`fg` was `"white"`, which on a light theme is ANSI 37 — 1.8:1 against the
+background, i.e. invisible. It is now unset, so the terminal's own foreground
+is used and both themes work.
+
+The last column is the point of having a fallback at all: chalk *does*
+quantise a hex on its own, by rounding each channel, and on four of the eight
+it lands somewhere the vocabulary did not intend — `blocked` on plain red
+(1.9:1 on a black terminal: a failed run you cannot see), `queued` and `muted`
+both on white (1.8:1 on a light one), and `you` on cyan, which is a different
+hue rather than a dimmer blue. The named palette is picked instead whenever
+the terminal is at 16 colours or fewer; at 256 chalk's own downsample keeps
+the hue, so the 24-bit table stays. `you` is the one compromise in the
+fallback: every blue in the ANSI sixteen is dark (`blue` is 1.3:1 on black at
+the xterm defaults), so bright blue is the least bad — 8.6:1 on white, a dim
+2.4:1 on a stock black terminal, and brighter than that under any theme that
+remaps it.
+
+The mode is detected the way chalk detects its level, as a pure function over
+the environment: `ORCH_COLORS`, then `NO_COLOR`, `FORCE_COLOR`, `COLORTERM`,
+`TERM`. chalk's own `chalk.level` is not read — chalk is not a dependency of
+this package, it only arrives under `ink`, and the detection has to be
+testable against a fake environment anyway. Override it with:
+
+```bash
+orch --16color                  # anywhere before the verb
+ORCH_COLORS=16 orch             # or truecolor, to force the other way
+npm run mock -- --16color       # look at it without a 16-colour terminal
+```
+
+**Still needs a human at a real terminal**: a light theme that is not pure
+white (Solarized Light's `#fdf6e3`) and a dark theme that is not pure black
+(`#1e1e1e`), plus how the named fallbacks land in *that* terminal's palette —
+the ratios above are computed against the extremes and the xterm defaults, and
+the extremes are where a colour is hardest.
 
 ## Development
 

@@ -120,21 +120,35 @@ describe("isCliCommand", () => {
 // still have to refuse or keep verbatim.
 describe("takeGlobalFlags", () => {
   it("takes --ascii from anywhere before the verb's arguments", () => {
-    expect(takeGlobalFlags(["--ascii", "floor"])).toEqual({ ascii: true, argv: ["floor"] });
+    expect(takeGlobalFlags(["--ascii", "floor"])).toEqual({ ascii: true, colors: null, argv: ["floor"] });
     expect(takeGlobalFlags(["floor", "--ascii", "--json"])).toEqual({
       ascii: true,
+      colors: null,
       argv: ["floor", "--json"],
     });
-    expect(takeGlobalFlags(["floor"])).toEqual({ ascii: false, argv: ["floor"] });
+    expect(takeGlobalFlags(["floor"])).toEqual({ ascii: false, colors: null, argv: ["floor"] });
+  });
+
+  it("takes --16color the same way, and leaves the palette undecided without it", () => {
+    expect(takeGlobalFlags(["--16color", "floor"])).toEqual({ ascii: false, colors: "ansi16", argv: ["floor"] });
+    expect(takeGlobalFlags(["--16colour", "--ascii"])).toEqual({ ascii: true, colors: "ansi16", argv: [] });
+    // null, not "truecolor": nothing was asked for, so the environment decides.
+    expect(takeGlobalFlags(["floor"]).colors).toBe(null);
+    expect(takeGlobalFlags(["floor"], { ORCH_COLORS: "16" }).colors).toBe("ansi16");
+    expect(takeGlobalFlags(["floor"], { ORCH_COLORS: "truecolor" }).colors).toBe("truecolor");
+    expect(takeGlobalFlags(["floor"], { ORCH_COLORS: "nonsense" }).colors).toBe(null);
+    expect(takeGlobalFlags(["say", "1", "--", "--16color"]).colors).toBe(null);
   });
 
   it("leaves it alone after `--` and after `task`", () => {
     expect(takeGlobalFlags(["say", "1", "--", "--ascii"])).toEqual({
       ascii: false,
+      colors: null,
       argv: ["say", "1", "--", "--ascii"],
     });
     expect(takeGlobalFlags(["task", "list", "--ascii"])).toEqual({
       ascii: false,
+      colors: null,
       argv: ["task", "list", "--ascii"],
     });
   });

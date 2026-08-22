@@ -1,6 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { C, Hair, Keys, useGlyphs } from "../theme.js";
+import { fitKeys, layoutHelp, layoutPending, type KeyHint } from "./layout.js";
 
 // The commands the cockpit can actually honour today (PRD §6.4). M2 added the
 // three that write: /new, /spawn and /cancel; M4 added /model and /budget,
@@ -33,22 +34,42 @@ export function Prompt({
   pendingCount,
   width,
   busy,
+  maxHelp,
 }: {
   value: string;
   to: number | null;
   pendingCount: number;
   width: number;
   busy: boolean;
+  /** How many help lines the screen has room for; the rest are dropped rather
+   *  than pushing the transcript off the top. */
+  maxHelp?: number;
 }) {
   const g = useGlyphs();
-  const cmds = matchCommands(value);
+  const cmds = layoutHelp(matchCommands(value).slice(0, maxHelp ?? Infinity), width, g);
+  const pending = layoutPending(pendingCount, width, g);
+  const keys: KeyHint[] =
+    to !== null
+      ? [
+          [g.enter, "answer"],
+          ["esc", "cancel"],
+        ]
+      : [
+          [g.enter, "send"],
+          ["/", "commands"],
+          ["tab", "answer agent"],
+          ["^k", "jump"],
+          ["^f", "floor"],
+          ["^n", "needs you"],
+          ["^b", "rail"],
+        ];
   return (
     <Box flexDirection="column" width={width}>
       {cmds.length > 0 && (
         <Box flexDirection="column" paddingLeft={2}>
           {cmds.map((c) => (
             <Text key={c.cmd}>
-              <Text color={C.fg}>{c.cmd.padEnd(9)}</Text>
+              <Text color={C.fg}>{c.cmd}</Text>
               <Text color={C.muted}>{c.help}</Text>
             </Text>
           ))}
@@ -56,14 +77,11 @@ export function Prompt({
       )}
       {pendingCount > 0 && to === null && (
         <Box>
-          <Text color={C.review}>{g.flag} </Text>
-          <Text color={C.muted}>
-            {pendingCount === 1 ? "an agent is waiting on you" : `${pendingCount} agents are waiting on you`}
-          </Text>
-          <Text color={C.muted}>
-            {" · "}
-            <Text color={C.fg}>tab</Text> to answer
-          </Text>
+          <Text color={C.review}>{pending[0]}</Text>
+          <Text color={C.muted}>{pending[1]}</Text>
+          <Text color={C.muted}>{pending[2]}</Text>
+          <Text color={C.fg}>{pending[3]}</Text>
+          <Text color={C.muted}>{pending[4]}</Text>
         </Box>
       )}
       <Hair width={width} />
@@ -78,24 +96,7 @@ export function Prompt({
         <Text color={busy ? C.muted : C.fg}>{busy ? g.ellipsis : g.bar}</Text>
       </Box>
       <Box justifyContent="space-between">
-        <Keys
-          items={
-            to !== null
-              ? [
-                  [g.enter, "answer"],
-                  ["esc", "cancel"],
-                ]
-              : [
-                  [g.enter, "send"],
-                  ["/", "commands"],
-                  ["tab", "answer agent"],
-                  ["^k", "jump"],
-                  ["^f", "floor"],
-                  ["^n", "needs you"],
-                  ["^b", "rail"],
-                ]
-          }
-        />
+        <Keys items={fitKeys(keys, width)} />
       </Box>
     </Box>
   );

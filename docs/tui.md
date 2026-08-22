@@ -87,6 +87,7 @@ The bundle ships in the server image, with `/usr/local/bin/orch` on `PATH`, so
 | `ORCH_TOKEN` | *(unset)* | API token, sent as `Authorization: Bearer …`. Optional against a dev server with no login gate; required against a deployed one. |
 | `ORCH_BUNDLE` | *(unset)* | `1` makes the `bin` shim run `dist/orch.js` instead of the TypeScript source. |
 | `ORCH_ASCII` | *(unset)* | Same as passing `--ascii`: plain-ASCII marks and box drawing. Anything but `0`, `false`, `no` or empty counts as on. |
+| `ORCH_COLORS` | *(detected)* | `16` forces the ANSI-name palette, same as `--16color`. By default the colour depth is detected from `COLORTERM`/`TERM`/`FORCE_COLOR`/`NO_COLOR`. |
 
 ```bash
 export ORCH_URL=https://tasks.nodetool.ai
@@ -166,7 +167,13 @@ without horizontal overflow.
 | `✕` | failed | `failed`, `cancelled`, `budget_exhausted` |
 
 Colour carries the same information: amber working, purple needs a human, red
-broken, green shipped, grey waiting. It degrades to 16-colour terminals.
+broken, green shipped, grey waiting. On a terminal that cannot do 24-bit
+colour the six hues become ANSI names rather than being quantised by the
+renderer, which does not preserve them; `--16color` forces that fallback and
+`NO_COLOR` drops colour altogether. Every hue is chosen to stay legible on a
+dark *and* a light background, and the foreground is the terminal's own — the
+palette table and what was actually measured are in
+[`tui/README.md`](../tui/README.md).
 `--ascii` swaps the marks and the box drawing for ASCII when the terminal
 font has no coverage for them: the status glyphs above, the rules and the
 rail divider, the tree branches, the list and transcript marks, and the
@@ -215,9 +222,10 @@ if a message starts with a dash. Exit codes: **0** ok, **1** user error
 | `orch task …` | The existing `cli.ts` verbs, delegated verbatim — `npm run task -- …` keeps working, and so does its exit code. |
 | `orch help` | The usage block. Also `--help`, `-h`. |
 
-`--ascii` is global rather than per-verb — it says what the terminal can
-draw, not what a verb should do — so it is accepted anywhere before the verb
-and applies to the TUI and to `orch tail`'s frame marks. The scan stops at
+`--ascii` and `--16color` are global rather than per-verb — they say what the
+terminal can draw, not what a verb should do — so they are accepted anywhere
+before the verb, and `--ascii` applies to the TUI and to `orch tail`'s frame
+marks. The scan stops at
 `--` and at `task`, so a message containing `--ascii` reaches the run intact
 and `orch task` keeps parsing its own argv.
 

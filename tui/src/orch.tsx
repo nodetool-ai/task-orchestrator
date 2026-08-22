@@ -8,6 +8,7 @@
 //   orch floor|inbox|tail|say|new|spawn|cancel                  (stdout)
 //   orch task …                 the repo-root cli.ts, unchanged (child)
 //   --ascii                     plain glyphs everywhere (also ORCH_ASCII=1)
+//   --16color                   named ANSI hues (also ORCH_COLORS=16)
 //
 // Everything the verbs decide lives in src/cli/ as pure functions over an
 // injected client and injected writers, so the suite covers them without a
@@ -22,6 +23,7 @@ import { dirname } from "node:path";
 import { App, newRunInput, resolvePersona } from "./app.js";
 import { createClient, UnauthorizedError } from "./api/client.js";
 import { isCliCommand, parseCli, takeGlobalFlags } from "./cli/parse.js";
+import { applyColorMode } from "./theme.js";
 import { runCommand } from "./cli/run.js";
 import { findRepoRoot, taskSpawn } from "./cli/task.js";
 
@@ -36,7 +38,10 @@ function die(message: string, code: 1 | 2): never {
 
 // `--ascii` (and ORCH_ASCII) is global, so it comes off argv before any verb
 // parser sees it — see takeGlobalFlags for why the scan stops where it does.
-const { ascii, argv } = takeGlobalFlags(process.argv.slice(2), process.env);
+const { ascii, colors, argv } = takeGlobalFlags(process.argv.slice(2), process.env);
+// Before anything renders: the palette is read per frame, but nothing is
+// written to expect it to change mid-session.
+if (colors !== null) applyColorMode(colors);
 const cmd = parseCli(argv);
 
 // ── orch task … ────────────────────────────────────────────────────────────

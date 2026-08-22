@@ -257,7 +257,9 @@ describe("glyphs", () => {
   it("swaps every mark for a single-column ASCII one", () => {
     const a = glyphs(true);
     const u = glyphs(false);
-    const marks = Object.entries(a).filter(([k]) => k !== "status" && k !== "move");
+    // `border` is the odd one out: Ink draws the palette's frame itself, so
+    // the fallback is the name of a border style rather than a character.
+    const marks = Object.entries(a).filter(([k]) => k !== "status" && k !== "move" && k !== "border");
     for (const [key, mark] of marks) {
       expect(typeof mark).toBe("string");
       expect(mark, key).toMatch(/^[\x20-\x7e]$/);
@@ -269,6 +271,8 @@ describe("glyphs", () => {
   });
 
   it("falls the box drawing back to | and -", () => {
+    expect(glyphs(true).border).toBe("classic");
+    expect(glyphs(false).border).toBe("round");
     expect(glyphs(true).rule).toBe("-");
     expect(glyphs(true).rail).toBe("|");
     expect(glyphs(true).bar).toBe("|");

@@ -1,6 +1,7 @@
 import React, { createContext, useContext } from "react";
 import { Box, Text } from "ink";
 import { glyphs, UNICODE, type Glyphs } from "./model/glyphs.js";
+import { C, hueFor } from "./model/colors.js";
 import type { TuiStatus } from "./model/status.js";
 
 // One implementation of the formatting helpers, in the model layer, so a row
@@ -9,29 +10,9 @@ export { age, ageMinutes, usd } from "./model/time.js";
 export { glyphs, type Glyphs } from "./model/glyphs.js";
 
 // Six-colour vocabulary, same discipline as the web app: colour means state.
-export const C = {
-  fg: "white",
-  muted: "gray",
-  hair: "#3a3a3f",
-  running: "#f59f0a",
-  review: "#a662ea",
-  blocked: "#e25050",
-  done: "#2eb877",
-  queued: "#95959d",
-  you: "#6ea8fe",
-};
-
-/** Colour per run state. The mark itself lives in model/glyphs.ts, because
- *  `--ascii` swaps the marks and never the colours. */
-export const statusHue: Record<TuiStatus, string> = {
-  running: C.running,
-  preparing: C.running,
-  queued: C.queued,
-  parked: C.review,
-  idle: C.queued,
-  done: C.done,
-  failed: C.blocked,
-};
+// The table itself (and its 16-colour fallback) lives in model/colors.ts, so
+// the pure modules can read it without importing Ink.
+export { C, applyColorMode, colorMode, orchColors, type ColorMode, type Palette } from "./model/colors.js";
 
 // A context rather than a prop threaded through every view: the glyph table is
 // process-wide and never changes after argv is parsed, so passing it by hand
@@ -50,12 +31,13 @@ export function useGlyphs(): Glyphs {
 
 export function StatusGlyph({ s }: { s: TuiStatus }) {
   const g = useGlyphs();
-  return <Text color={statusHue[s]}>{g.status[s]}</Text>;
+  return <Text color={statusColor(s)}>{g.status[s]}</Text>;
 }
 
-/** The colour a status word is printed in — the glyph's colour, reused. */
+/** The colour a status word — and its glyph — is printed in. One accessor, so
+ *  the views never see which palette is live. */
 export function statusColor(s: TuiStatus): string {
-  return statusHue[s];
+  return hueFor(s, C);
 }
 
 export function Hair({ width }: { width: number }) {

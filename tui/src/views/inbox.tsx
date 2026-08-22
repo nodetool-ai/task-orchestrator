@@ -1,9 +1,9 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { InboxItem } from "../model/inbox.js";
-import { C, Hair, Keys, age, padEnd, useGlyphs } from "../theme.js";
+import { C, Hair, Keys, age, useGlyphs } from "../theme.js";
 import type { Glyphs } from "../model/glyphs.js";
-import { cursorWindow, fit } from "./layout.js";
+import { cursorWindow, layoutInboxHead, layoutInboxRow } from "./layout.js";
 
 function kindGlyphs(g: Glyphs): Record<InboxItem["kind"], { g: string; color: string; label: string }> {
   return {
@@ -32,41 +32,51 @@ export function Inbox({
 }) {
   const g = useGlyphs();
   const kindGlyph = kindGlyphs(g);
-  // glyph+space, id, persona, kind, and the right-aligned age.
-  const fixed = 2 + 5 + 13 + 7 + 5;
-  const textW = Math.max(8, width - fixed);
   const { start, end } = cursorWindow(items.length, Math.max(1, height - 3), cursor);
+  const head = layoutInboxHead({
+    count: items.length,
+    width,
+    glyphs: g,
+    keys: [
+      [g.move, "move"],
+      [g.enter, "answer / open"],
+      ["o", "open"],
+      ["d", "dismiss"],
+      ["esc", "back"],
+    ],
+  });
   return (
     <Box flexDirection="column" width={width} height={height}>
       <Box justifyContent="space-between">
         <Text>
-          <Text bold>NEEDS YOU</Text>
-          <Text color={C.muted}> {items.length}</Text>
+          <Text bold>{head.parts[0]}</Text>
+          <Text color={C.muted}>{head.parts[1]}</Text>
         </Text>
-        <Keys
-          items={[
-            [g.move, "move"],
-            [g.enter, "answer / open"],
-            ["o", "open"],
-            ["d", "dismiss"],
-            ["esc", "back"],
-          ]}
-        />
+        <Keys items={head.keys} />
       </Box>
       <Hair width={width} />
       <Box flexDirection="column" marginTop={1}>
         {items.length === 0 && <Text color={C.muted}>Nothing waits on you.</Text>}
         {items.slice(start, end).map((it, i) => {
           const k = kindGlyph[it.kind];
-          const text = fit(it.text, textW, g.ellipsis);
+          const c = layoutInboxRow({
+            mark: k.g,
+            runId: it.runId,
+            persona: it.persona,
+            label: k.label,
+            text: it.text,
+            age: age(it.at, now),
+            width,
+            glyphs: g,
+          });
           return (
             <Box key={it.id}>
               <Text inverse={start + i === cursor}>
-                <Text color={k.color}>{k.g}</Text> <Text color={C.muted}>{padEnd(`#${it.runId}`, 4)}</Text>{" "}
-                <Text bold>{padEnd(it.persona, 12)}</Text>
-                <Text color={k.color}>{padEnd(k.label, 7)}</Text>
-                <Text>{padEnd(text, textW)}</Text>
-                <Text color={C.muted}>{age(it.at, now).padStart(4)}</Text>
+                <Text color={k.color}>{c.mark}</Text> <Text color={C.muted}>{c.id}</Text>
+                <Text bold color={C.fg}>{c.persona}</Text>
+                <Text color={k.color}>{c.label}</Text>
+                <Text color={C.fg}>{c.text}</Text>
+                <Text color={C.muted}>{c.age}</Text>
               </Text>
             </Box>
           );

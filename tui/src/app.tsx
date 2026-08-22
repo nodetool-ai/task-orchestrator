@@ -13,6 +13,7 @@ import { Inbox } from "./views/inbox.js";
 import { Palette } from "./views/palette.js";
 import { Roster } from "./views/roster.js";
 import { Prompt, matchCommands } from "./views/prompt.js";
+import { RAIL_MIN_COLS, cursorWindow, paletteHeight, paletteRows, screenLayout } from "./views/layout.js";
 
 type View = "chat" | "floor" | "inbox" | "palette";
 
@@ -85,7 +86,7 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii">)
   const [cursor, setCursor] = useState(0);
   const [trace, setTrace] = useState(false);
   const [scrollBack, setScrollBack] = useState(0);
-  const [rail, setRail] = useState(cols >= 110);
+  const [rail, setRail] = useState(cols >= RAIL_MIN_COLS);
   const [notice, setNotice] = useState<string | null>(null);
   // The run a message is addressed to (`tab`), and a pending cancel awaiting
   // its second keystroke. Both are cleared by `esc`, in that order.
@@ -93,8 +94,14 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii">)
   const [confirm, setConfirm] = useState<{ id: number; kids: number } | null>(null);
 
   const run = s.current === null ? null : (s.forest.byId(s.current) ?? null);
-  const railW = rail && cols >= 110 ? 38 : 0;
-  const mainW = cols - railW - (railW ? 1 : 0);
+
+  // Every width and height in one arithmetic (views/layout.ts), because the
+  // transcript is sized from what the prompt leaves over and an under-count
+  // here over-draws the screen. `help` and `pending` are what <Prompt> is
+  // about to paint above the composer.
+  const pending = s.inbox.length > 0 && to === null;
+  const screen = screenLayout(cols, rows, { rail, help: matchCommands(input).length, pending });
+  const { railW, mainW, bodyH } = screen;
 
   const floorRows = useMemo(() => {
     const { live, rest } = floorGroups(s.forest, g);
@@ -368,13 +375,14 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii">)
     }
   });
 
-  // Exactly what <Prompt> paints: hair + input + key hints, plus the command
-  // help and the needs-you line when they are on screen. The transcript is
-  // sized from what is left, so an under-count here over-draws the screen.
-  const pendingLine = s.inbox.length > 0 && to === null ? 1 : 0;
-  const promptLines = 3 + matchCommands(input).length + pendingLine;
   const statusLine = notice ?? statusFor(s.status, s.error);
-  const bodyH = Math.max(3, rows - 3 - promptLines); // header + hair + status
+
+  // The palette floats over the chat rather than replacing it, so its rows
+  // come out of the transcript's budget — otherwise the overlay pushes the
+  // status line off a 24-row screen.
+  const paletteShown = paletteRows(rows, paletteItems.length);
+  const paletteWin = cursorWindow(paletteItems.length, paletteShown, cursor);
+  const mainH = view === "palette" ? Math.max(1, rows - 3 - paletteHeight(paletteWin.end - paletteWin.start)) : bodyH;
 
   const main = (() => {
     if (view === "floor")
@@ -390,7 +398,7 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii">)
           forest={s.forest}
           now={s.now}
           width={mainW}
-          height={bodyH}
+          height={mainH}
           trace={trace}
           scrollBack={scrollBack}
         />
@@ -410,11 +418,17 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii">)
               pendingCount={s.inbox.length}
               width={mainW}
               busy={s.loading}
+              maxHelp={screen.helpShown}
             />
           )}
           {view === "palette" && (
             <Box flexDirection="column" width={mainW} alignItems="center" marginBottom={2}>
-              <Palette items={paletteItems} query={pq} cursor={cursor} width={mainW} />
+              <Palette
+                items={paletteItems.slice(paletteWin.start, paletteWin.end)}
+                query={pq}
+                cursor={cursor - paletteWin.start}
+                width={mainW}
+              />
             </Box>
           )}
           <StatusLine text={statusLine} tone={notice ? "note" : s.status} width={mainW} />
@@ -422,7 +436,7 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii">)
         {railW > 0 && (
           <Box flexDirection="row">
             <Box flexDirection="column" height={rows}>
-              <Text color={C.hair}>{`${g.rail}\n`.repeat(rows)}</Text>
+              <Text color={C.hair}>{Array.from({ length: rows }, () => g.rail).join("\n")}</Text>
             </Box>
             <Roster
               forest={s.forest}

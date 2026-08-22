@@ -18,6 +18,9 @@ export interface Glyphs {
   rule: string;
   rail: string;
   bar: string;
+  /** Ink draws the palette's frame itself, so the fallback is the name of one
+   *  of its border styles rather than a character: "classic" is `+-|`. */
+  border: "round" | "classic";
   /** The forest's branch marks; the continuation column is `rail`. */
   branchTee: string;
   branchLast: string;
@@ -55,6 +58,7 @@ export const UNICODE: Glyphs = {
   rule: "─",
   rail: "│",
   bar: "▏",
+  border: "round",
   branchTee: "├",
   branchLast: "└",
   tool: "⎿",
@@ -90,6 +94,7 @@ export const ASCII: Glyphs = {
   rule: "-",
   rail: "|",
   bar: "|",
+  border: "classic",
   branchTee: "+",
   branchLast: "\\",
   tool: "\\",
