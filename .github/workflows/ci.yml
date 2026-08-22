@@ -63,6 +63,34 @@ jobs:
       - name: Test
         run: npm test
 
+  # The terminal cockpit (tui/) is its own package with its own deps, so it is
+  # excluded from the root tsconfig the way mobile/ is, and its vitest suite is
+  # not in the root `include`. Without this job it would have no CI at all.
+  # Hermetic: no Postgres, no server — the client tests use loopback servers.
+  tui:
+    name: tui
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tui/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
   # Deploy gating: docs-only pushes skip the Fly deploys (the old fly-deploy
   # workflow's paths-ignore, reproduced as a diff so deploys can live behind
   # `needs: quality`).
