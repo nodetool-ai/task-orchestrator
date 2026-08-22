@@ -8,7 +8,15 @@
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 
 import { UnauthorizedError, type OrchClient, type Subscription } from "./api/client.js";
-import { ZERO_CURSOR, type PlanSummary, type RunIndexRow, type StreamCursor, type TaskSummary } from "./api/types.js";
+import {
+  ZERO_CURSOR,
+  type CreateRunInput,
+  type PersonaSummary,
+  type PlanSummary,
+  type RunIndexRow,
+  type StreamCursor,
+  type TaskSummary,
+} from "./api/types.js";
 import { buildForest, type Forest } from "./model/forest.js";
 import { appendFrame, frameFromEvent, framesFromMessages, type Frame } from "./model/frames.js";
 import { toInboxItems, type InboxItem } from "./model/inbox.js";
@@ -29,6 +37,8 @@ export interface OrchState {
   now: number;
   /** The current run's batch load is in flight (first paint of a switch). */
   loading: boolean;
+  /** Empty until ensurePersonas() resolves; only /new needs it. */
+  personas: PersonaSummary[];
 }
 
 export interface StoreActions {
@@ -39,6 +49,19 @@ export interface StoreActions {
   refreshInbox(): void;
   /** The run attached to a task id, if the overview already knows one. */
   runForTask(taskId: string): number | null;
+  /** Post `text` to run `to` (default: the current run). Pushes an optimistic
+   *  user frame first, and settles a matching unanswered question frame when
+   *  `to` is given. Resolves after the POST settles; never throws. */
+  send(text: string, to?: number | null): Promise<void>;
+  /** POST /api/runs with the persona's defaults; selects the new run.
+   *  Resolves to the new run id, or null when the create failed. */
+  newRun(persona: string, goal: string): Promise<number | null>;
+  /** PATCH cancel. Never throws. */
+  cancelRun(id: number): Promise<void>;
+  /** Ids of runs waiting on a human, newest first — the `tab` cycle order. */
+  waiting(): number[];
+  /** Fetch /api/personas once and cache it in state.personas. */
+  ensurePersonas(): void;
 }
 
 export interface Store {
@@ -103,6 +126,7 @@ export function createStore(client: OrchClient, opts: StoreOptions = {}): Store 
     error: null,
     now: clock.now(),
     loading: false,
+    personas: [],
   };
 
   const listeners = new Set<() => void>();
@@ -363,6 +387,145 @@ export function createStore(client: OrchClient, opts: StoreOptions = {}): Store 
     if (frames !== state.frames) set({ frames });
   }
 
+  // ── writes ───────────────────────────────────────────────────────────────
+  // Every write is optimistic in the transcript and pessimistic in `error`:
+  // the frame appears before the request settles so typing feels local, and a
+  // failure leaves one actionable line rather than throwing into a keypress
+  // handler that has nowhere to catch it.
+
+  /** One line an operator can act on — never a stack, never a bare "Error". */
+  function writeFailed(what: string, err: unknown): void {
+    if (err instanceof UnauthorizedError) {
+      fail(err); // terminal: status flips to `unauthorized` with the remedy
+      return;
+    }
+    set({ error: `${what} failed: ${message(err)}` });
+  }
+
+  /** The still-open question frame for `run`, if the transcript holds one. */
+  function openQuestion(run: number): Extract<Frame, { kind: "question" }> | null {
+    for (let i = state.frames.length - 1; i >= 0; i--) {
+      const f = state.frames[i];
+      if (f.kind === "question" && f.run === run && f.answered === undefined) return f;
+    }
+    return null;
+  }
+
+  async function send(text: string, to?: number | null): Promise<void> {
+    const target = to ?? state.current;
+    if (stopped || target === null) return;
+    const mine = gen;
+
+    // Optimistic first: the operator sees their own line immediately, and the
+    // stream's copy of it folds into this frame instead of duplicating it.
+    push({ kind: "user", at: clock.now(), text, to: to ?? undefined });
+    // Captured before the await: this is the question the answer was aimed at,
+    // whatever arrives on the stream meanwhile.
+    const question = to != null ? openQuestion(to) : null;
+
+    try {
+      await client.sendMessage(target, text);
+    } catch (err) {
+      if (stopped || gen !== mine) return;
+      writeFailed(`send to #${target}`, err);
+      return;
+    }
+    if (stopped || gen !== mine) return;
+    // Answering settles the question in place (appendFrame's question fold)
+    // and drops the ⚑ the run was carrying.
+    if (question) push({ ...question, answered: text });
+    if (to != null) refreshInbox();
+  }
+
+  async function newRun(persona: string, goal: string): Promise<number | null> {
+    if (stopped) return null;
+    const p = state.personas.find((x) => x.id === persona) ?? state.personas.find((x) => x.name === persona);
+    const input: CreateRunInput = {
+      goal,
+      personaId: p?.id ?? persona,
+      // Deliberate: the server rejects a non-deferred `worktree` run that has
+      // no taskId (lib/runs.ts:744), and the cockpit has no task picker before
+      // the first message — so a chat run starts without a working copy.
+      cwdStrategy: "none",
+    };
+    const budget: { maxTurns?: number; maxSeconds?: number } = {};
+    if (p?.budgetMaxTurns != null) budget.maxTurns = p.budgetMaxTurns;
+    if (p?.budgetMaxSeconds != null) budget.maxSeconds = p.budgetMaxSeconds;
+    if (Object.keys(budget).length > 0) input.budget = budget;
+
+    let created;
+    try {
+      created = await client.createRun(input);
+    } catch (err) {
+      if (stopped) return null;
+      writeFailed(`new ${persona} run`, err);
+      return null;
+    }
+    // No `gen` guard here on purpose: creating a run IS a selection change, so
+    // there is no earlier selection left to protect.
+    if (stopped) return null;
+    select(created.id);
+    return created.id;
+  }
+
+  async function cancelRun(id: number): Promise<void> {
+    if (stopped) return;
+    try {
+      await client.cancelRun(id);
+    } catch (err) {
+      if (stopped) return;
+      writeFailed(`cancel #${id}`, err);
+      return;
+    }
+    if (stopped) return;
+    // The row's own status arrives with the next overview frame; the ⚑ counts
+    // are ours to refresh.
+    refreshInbox();
+  }
+
+  function waiting(): number[] {
+    const out: number[] = [];
+    const seen = new Set<number>();
+    // The inbox is already newest-first (model/inbox.ts), and one run can hold
+    // several questions — the cycle visits each run once.
+    for (const item of state.inbox) {
+      if (item.kind !== "question" || seen.has(item.runId)) continue;
+      seen.add(item.runId);
+      out.push(item.runId);
+    }
+    // A run can be parked on a question before its inbox row lands (or after
+    // a failed inbox poll), so the forest is the backstop. `parked` in the
+    // cockpit vocabulary already means parked ON A QUESTION (model/status.ts).
+    for (const r of state.forest.runs) {
+      if (r.status !== "parked" || seen.has(r.id)) continue;
+      seen.add(r.id);
+      out.push(r.id);
+    }
+    return out;
+  }
+
+  // ── personas ─────────────────────────────────────────────────────────────
+  let personasLoaded = false;
+  let personasInFlight = false;
+
+  /** Fetched at most once per store: the persona list is static config, and
+   *  only `/new` reads it. A failed fetch stays retryable. */
+  function ensurePersonas(): void {
+    if (stopped || personasLoaded || personasInFlight) return;
+    personasInFlight = true;
+    client
+      .personas()
+      .then((rows) => {
+        if (stopped) return;
+        personasLoaded = true;
+        set({ personas: rows });
+      })
+      .catch((err) => fail(err, state.status === "connecting" ? "offline" : state.status))
+      .finally(() => {
+        personasInFlight = false;
+      });
+  }
+
   // ── clock ────────────────────────────────────────────────────────────────
   function tick(): void {
     set({ now: clock.now() });
@@ -373,6 +536,11 @@ export function createStore(client: OrchClient, opts: StoreOptions = {}): Store 
     select,
     ensurePalette,
     refreshInbox,
+    send,
+    newRun,
+    cancelRun,
+    waiting,
+    ensurePersonas,
     runForTask(taskId) {
       // Resolved from the forest rather than GET /api/tasks/:id/attached-run:
       // the overview already carries taskId on every run, so this is one map

@@ -435,3 +435,152 @@ describe("overview stream", () => {
     expect(fake.paths).toHaveLength(1);
   });
 });
+
+// The M2 write path. These four methods are the only place the cockpit talks
+// back to the server, and `sendMessage` is the odd one out: it POSTs and then
+// reads an SSE stream for the whole agent turn, so it needs the same framing
+// coverage the read streams get — plus proof it never reconnects.
+describe("writes", () => {
+  function bodyOf(req: http.IncomingMessage): Promise<string> {
+    return new Promise((resolve) => {
+      let buf = "";
+      req.on("data", (c) => (buf += String(c)));
+      req.on("end", () => resolve(buf));
+    });
+  }
+
+  it("posts a message and resolves on the done frame", async () => {
+    let seen: { method?: string; body?: string } = {};
+    const fake = await fakeServer((req, res) => {
+      void bodyOf(req).then((body) => {
+        seen = { method: req.method, body };
+        sseHead(res);
+        res.write('data: {"type":"user_message","message":{"id":5}}\n\n');
+        res.write('data: {"type":"sdk","sdk":{"type":"assistant"}}\n\n');
+        res.write('data: {"type":"done"}\n\n');
+      });
+    });
+    await createClient({ url: fake.url, token: "tok" }).sendMessage(7, "hi there");
+    expect(fake.paths).toEqual(["/api/runs/7/messages"]);
+    expect(seen.method).toBe("POST");
+    expect(JSON.parse(seen.body ?? "{}")).toEqual({ text: "hi there" });
+    expect(fake.auth[0]).toBe("Bearer tok");
+  });
+
+  it("resolves on a clean end-of-stream with no done frame", async () => {
+    const fake = await fakeServer((req, res) => {
+      void bodyOf(req).then(() => {
+        sseHead(res);
+        res.write('data: {"type":"sdk","sdk":{}}\n\n');
+        res.end();
+      });
+    });
+    await expect(createClient({ url: fake.url }).sendMessage(1, "x")).resolves.toBeUndefined();
+  });
+
+  it("rejects with the message carried by an error frame", async () => {
+    const fake = await fakeServer((req, res) => {
+      void bodyOf(req).then(() => {
+        sseHead(res);
+        res.write('data: {"type":"error","error":"run is not accepting messages"}\n\n');
+        res.end();
+      });
+    });
+    await expect(createClient({ url: fake.url }).sendMessage(4, "x")).rejects.toMatchObject({
+      name: "ApiError",
+      message: "run is not accepting messages",
+    });
+  });
+
+  it("surfaces a plain-text pre-stream failure as an ApiError", async () => {
+    const fake = await fakeServer((req, res) => {
+      void bodyOf(req).then(() => {
+        res.writeHead(404, { "content-type": "text/plain" });
+        res.end("Not found");
+      });
+    });
+    const err = await createClient({ url: fake.url })
+      .sendMessage(99, "x")
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toMatchObject({ status: 404, message: "Not found" });
+  });
+
+  it("never retries a message POST — one connection even when the turn fails", async () => {
+    const fake = await fakeServer((req, res) => {
+      void bodyOf(req).then(() => {
+        sseHead(res);
+        res.write('data: {"type":"error","error":"boom"}\n\n');
+        res.end();
+      });
+    });
+    await createClient({ url: fake.url, minBackoffMs: 1, maxBackoffMs: 1, sleep: async () => {} })
+      .sendMessage(2, "x")
+      .catch(() => {});
+    await tick(60);
+    expect(fake.paths).toHaveLength(1);
+  });
+
+  it("creates a run from the posted body and returns the row", async () => {
+    let seen: { method?: string; body?: string; contentType?: string } = {};
+    const fake = await fakeServer((req, res) => {
+      void bodyOf(req).then((body) => {
+        seen = { method: req.method, body, contentType: req.headers["content-type"] };
+        json(res, 201, { id: 51, goal: "ship it", status: "running", personaId: "executor" });
+      });
+    });
+    const run = await createClient({ url: fake.url, token: "tok" }).createRun({
+      goal: "ship it",
+      personaId: "executor",
+      cwdStrategy: "none",
+    });
+    expect(fake.paths).toEqual(["/api/runs"]);
+    expect(seen.method).toBe("POST");
+    expect(seen.contentType).toBe("application/json");
+    expect(JSON.parse(seen.body ?? "{}")).toEqual({
+      goal: "ship it",
+      personaId: "executor",
+      cwdStrategy: "none",
+    });
+    expect(fake.auth[0]).toBe("Bearer tok");
+    expect(run.id).toBe(51);
+  });
+
+  it("cancels with a PATCH action and returns the updated row", async () => {
+    let seen: { method?: string; body?: string } = {};
+    const fake = await fakeServer((req, res) => {
+      void bodyOf(req).then((body) => {
+        seen = { method: req.method, body };
+        json(res, 200, { id: 44, goal: "g", status: "cancelled" });
+      });
+    });
+    const run = await createClient({ url: fake.url, token: "tok" }).cancelRun(44);
+    expect(fake.paths).toEqual(["/api/runs/44"]);
+    expect(seen.method).toBe("PATCH");
+    expect(JSON.parse(seen.body ?? "{}")).toEqual({ action: "cancel" });
+    expect(fake.auth[0]).toBe("Bearer tok");
+    expect(run.status).toBe("cancelled");
+  });
+
+  it("surfaces a JSON error from a write", async () => {
+    const fake = await fakeServer((req, res) => {
+      void bodyOf(req).then(() => json(res, 400, { error: "goal is required" }));
+    });
+    await expect(createClient({ url: fake.url }).createRun({ goal: "" })).rejects.toMatchObject({
+      status: 400,
+      message: "goal is required",
+    });
+  });
+
+  it("unwraps { personas } and tolerates an empty payload", async () => {
+    const fake = await fakeServer((req, res) => {
+      if ((req.url ?? "") === "/api/personas" && fake.paths.length === 1)
+        return json(res, 200, { personas: [{ id: "qa", name: "qa", budgetMaxTurns: 40 }] });
+      return json(res, 200, {});
+    });
+    const c = createClient({ url: fake.url });
+    const list = await c.personas();
+    expect(list.map((p) => p.id)).toEqual(["qa"]);
+    expect(await c.personas()).toEqual([]);
+  });
+});

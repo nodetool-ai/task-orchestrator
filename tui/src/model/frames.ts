@@ -439,10 +439,24 @@ const FOLD_WINDOW = 12;
 /**
  * Append one frame to the transcript, folding it into an existing frame where
  * that is what the server meant: a repeated tool_result adds nothing (the same
- * array comes back), and an answer settles the open question in place instead
- * of duplicating it.
+ * array comes back), an answer settles the open question in place instead of
+ * duplicating it, and the stream's copy of a message the cockpit already
+ * echoed optimistically is dropped.
  */
 export function appendFrame(frames: Frame[], next: Frame): Frame[] {
+  if (next.kind === "user") {
+    // The cockpit echoes a typed message optimistically, then the stream
+    // replays the server's own copy of it. Same text inside the window means
+    // the same message, so the second one is dropped — and the FIRST is kept,
+    // because that is the one carrying the `to` chip the operator aimed at.
+    const from = Math.max(0, frames.length - FOLD_WINDOW);
+    for (let i = frames.length - 1; i >= from; i--) {
+      const f = frames[i];
+      if (f.kind === "user" && f.text === next.text) return frames;
+    }
+    return [...frames, next];
+  }
+
   if (next.kind === "question") {
     for (let i = frames.length - 1; i >= 0; i--) {
       const f = frames[i];
