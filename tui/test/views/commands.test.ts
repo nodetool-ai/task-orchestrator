@@ -259,7 +259,10 @@ describe("glyphs", () => {
     const u = glyphs(false);
     // `border` is the odd one out: Ink draws the palette's frame itself, so
     // the fallback is the name of a border style rather than a character.
-    const marks = Object.entries(a).filter(([k]) => k !== "status" && k !== "move" && k !== "border");
+    // `spinner` is a list of frames, checked on its own below.
+    const marks = Object.entries(a).filter(
+      ([k]) => k !== "status" && k !== "move" && k !== "border" && k !== "spinner",
+    );
     for (const [key, mark] of marks) {
       expect(typeof mark).toBe("string");
       expect(mark, key).toMatch(/^[\x20-\x7e]$/);
@@ -268,6 +271,11 @@ describe("glyphs", () => {
     for (const [state, mark] of Object.entries(a.status)) {
       expect(mark, state).toMatch(/^[\x20-\x7e]$/);
     }
+    // The spinner animates in place, so a two-column frame would make the
+    // line it sits on jitter by a column every 120 ms.
+    expect(a.spinner.length).toBeGreaterThan(1);
+    for (const frame of a.spinner) expect(frame).toMatch(/^[\x20-\x7e]$/);
+    for (const frame of u.spinner) expect(frame).toHaveLength(1);
   });
 
   it("falls the box drawing back to | and -", () => {

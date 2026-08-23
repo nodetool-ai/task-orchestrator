@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SessionStatus } from "../../src/api/types.js";
-import { isLive, statusWord, toTuiStatus, type TuiStatus } from "../../src/model/status.js";
+import { isLive, statusWord, threadStatusWord, toTuiStatus, type TuiStatus } from "../../src/model/status.js";
 
 // The whole projection, in one table: ten server statuses (and every park
 // reason) onto the seven glyphs of PRD §6.2.
@@ -57,6 +57,22 @@ describe("statusWord", () => {
       "preparing",
       "queued",
       "idle",
+      "done",
+      "failed",
+    ]);
+  });
+});
+
+describe("threadStatusWord", () => {
+  it("drops the two states the glyph already says", () => {
+    expect(threadStatusWord("running")).toBe("");
+    expect(threadStatusWord("idle")).toBe("");
+  });
+  it("keeps every state that asks something of you", () => {
+    expect(["preparing", "queued", "parked", "done", "failed"].map((s) => threadStatusWord(s as TuiStatus))).toEqual([
+      "preparing",
+      "queued",
+      "asks you",
       "done",
       "failed",
     ]);

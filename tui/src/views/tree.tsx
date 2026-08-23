@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { Forest, TreeRow } from "../model/forest.js";
-import { statusWord } from "../model/status.js";
+import { statusWord, threadStatusWord } from "../model/status.js";
 import { C, StatusGlyph, age, statusColor, useGlyphs, usd } from "../theme.js";
 import { layoutRow } from "./layout.js";
 
@@ -14,6 +14,7 @@ export function RunRow({
   forest,
   selected,
   compact,
+  quiet,
 }: {
   row: TreeRow;
   width: number;
@@ -23,6 +24,9 @@ export function RunRow({
   forest?: Forest;
   selected?: boolean;
   compact?: boolean;
+  /** Drawn inside a conversation rather than on the floor: the routine states
+   *  drop their word, because the glyph in front of the row already says it. */
+  quiet?: boolean;
 }) {
   const { run, prefix } = row;
   const g = useGlyphs();
@@ -33,7 +37,7 @@ export function RunRow({
     persona: run.persona,
     title: run.title,
     pr: run.pr,
-    status: statusWord(run.status),
+    status: quiet === true ? threadStatusWord(run.status) : statusWord(run.status),
     age: age(run.startedAt, now),
     cost: usd(cost),
     width,

@@ -4,6 +4,7 @@ import type { OrchClient } from "./api/client.js";
 import { confirmLine, liveKids, nextInCycle, openUrlFor, parseBudget, resolvePersona, spawnMessage } from "./cli/commands.js";
 import { openInBrowser } from "./cli/open.js";
 import { floorGroups } from "./model/forest.js";
+import { isLive } from "./model/status.js";
 import { filterPalette } from "./model/palette.js";
 import { useOrch } from "./store.js";
 import { C, GlyphProvider, Hair, useGlyphs } from "./theme.js";
@@ -13,6 +14,8 @@ import { Inbox } from "./views/inbox.js";
 import { Palette } from "./views/palette.js";
 import { Roster } from "./views/roster.js";
 import { Prompt, matchCommands } from "./views/prompt.js";
+import { MotionProvider, motionEnabled } from "./views/motion.js";
+import { LiveLine } from "./views/spinner.js";
 import { RAIL_MIN_COLS, cursorWindow, paletteHeight, paletteRows, screenLayout } from "./views/layout.js";
 
 type View = "chat" | "floor" | "inbox" | "palette";
@@ -57,19 +60,25 @@ export interface AppProps {
   /** Injected so the suite never spawns a browser. */
   openUrl?: (url: string) => Promise<void> | void;
   ascii?: boolean;
+  /** Overrides the environment's answer. The mock turns it on so the live
+   *  line can be looked at without a server. */
+  motion?: boolean;
 }
 
-export function App({ client, initial, baseUrl, openUrl, ascii }: AppProps) {
+export function App({ client, initial, baseUrl, openUrl, ascii, motion }: AppProps) {
+  const moves = motion ?? motionEnabled(process.env, ascii === true, process.stdout.isTTY === true);
   return (
     <GlyphProvider ascii={ascii === true}>
-      <Cockpit client={client} initial={initial} baseUrl={baseUrl} openUrl={openUrl} />
+      <MotionProvider enabled={moves}>
+        <Cockpit client={client} initial={initial} baseUrl={baseUrl} openUrl={openUrl} />
+      </MotionProvider>
     </GlyphProvider>
   );
 }
 
 // Split from App so every view below — and the cockpit's own key handling —
 // reads the glyph table out of the context rather than off a prop.
-function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii">) {
+function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" | "motion">) {
   const { exit } = useApp();
   const g = useGlyphs();
   const base = baseUrl ?? process.env.ORCH_URL ?? DEFAULT_URL;
@@ -100,7 +109,10 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii">)
   // here over-draws the screen. `help` and `pending` are what <Prompt> is
   // about to paint above the composer.
   const pending = s.inbox.length > 0 && to === null;
-  const screen = screenLayout(cols, rows, { rail, help: matchCommands(input).length, pending });
+  // The live line only exists while the open run is working, so it is part of
+  // the same arithmetic as the command help: a row the transcript gives up.
+  const live = view === "chat" && run !== null && isLive(run.status);
+  const screen = screenLayout(cols, rows, { rail, help: matchCommands(input).length, pending, spinner: live });
   const { railW, mainW, bodyH } = screen;
 
   const floorRows = useMemo(() => {
@@ -411,6 +423,7 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii">)
       <Box flexDirection="row" flexGrow={1}>
         <Box flexDirection="column" width={mainW}>
           {main}
+          {live && run !== null && <LiveLine run={run} forest={s.forest} width={mainW} now={s.now} />}
           {view !== "palette" && (
             <Prompt
               value={input}

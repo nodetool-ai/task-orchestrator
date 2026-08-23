@@ -26,6 +26,9 @@ export interface Palette {
   done: string;
   queued: string;
   you: string;
+  /** The highlight the spinner's glimmer drags across its verb. Not a state
+   *  colour: it is `running` lifted, and it never appears on its own. */
+  shimmer: string;
 }
 
 // Contrast against pure black / pure white, WCAG 2.1 ratios (see README):
@@ -43,6 +46,7 @@ export const TRUECOLOR: Palette = {
   done: "#29a46a",
   queued: "#8f8f97",
   you: "#6092dd",
+  shimmer: "#f3ce8a",
 };
 
 // Nearest ANSI name per hue, picked in CIE L*a*b* within the hue's own family
@@ -62,6 +66,7 @@ export const ANSI16: Palette = {
   done: "green",
   queued: "gray",
   you: "blueBright",
+  shimmer: "yellowBright",
 };
 
 export function palette(mode: ColorMode): Palette {

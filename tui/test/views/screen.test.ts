@@ -14,6 +14,7 @@ import { toInboxItems } from "../../src/model/inbox.js";
 import { buildPalette } from "../../src/model/palette.js";
 import { statusWord } from "../../src/model/status.js";
 import { age, usd } from "../../src/model/time.js";
+import { SPINNER_VERBS } from "../../src/model/verbs.js";
 import { glyphs, type Glyphs } from "../../src/model/glyphs.js";
 import type { RunIndexRow } from "../../src/api/types.js";
 import { globalInboxRows, messageRows, planSummaries, runIndexRows, taskSummaries } from "../../src/data.js";
@@ -31,6 +32,7 @@ import {
   layoutPaletteRow,
   layoutPending,
   layoutRow,
+  layoutSpinner,
   rosterRowWidth,
   rosterWindow,
   screenLayout,
@@ -120,13 +122,15 @@ describe("screenLayout", () => {
       for (const rail of [false, true]) {
         for (const help of [0, 1, COMMANDS.length]) {
           for (const pending of [false, true]) {
-            const s = screenLayout(cols, rows, { rail, help, pending });
+            for (const spinner of [false, true]) {
+            const s = screenLayout(cols, rows, { rail, help, pending, spinner });
             // header + hair + status line are the three the main column always
-            // paints; the rest is the transcript and the composer.
+            // paints; the rest is the transcript, the live line and the composer.
             expect(3 + s.promptH + s.bodyH, `${cols}x${rows}`).toBeLessThanOrEqual(rows);
             expect(s.bodyH).toBeGreaterThanOrEqual(3);
             expect(s.helpShown).toBeLessThanOrEqual(help);
             expect(s.railW + (s.railW ? 1 : 0) + s.mainW).toBe(cols);
+            }
           }
         }
       }
@@ -321,6 +325,28 @@ describe("no region overflows its width", () => {
             );
             for (const p of items) {
               expect(layoutPaletteRow(p, box, g).total).toBeLessThanOrEqual(box.inner);
+            }
+          }
+        });
+
+        it("the live line, whose byline gives up parts rather than wrapping", () => {
+          for (const s of screens) {
+            for (const verb of SPINNER_VERBS) {
+              const cells = layoutSpinner({
+                verb,
+                parts: ["12m 34s", "9 agents", usd(1234.56), "/cancel to stop"],
+                width: s.mainW,
+                glyphs: g,
+              });
+              expect(cells.total, `${verb} at ${s.mainW}`).toBeLessThanOrEqual(s.mainW);
+              // The verb is the one part that never goes: a spinner with no
+              // word is a mark that says nothing.
+              expect(cells.verb.length).toBeGreaterThan(0);
+            }
+            // A pane too narrow for even the verb still answers a line that
+            // fits — the cockpit draws something short, not something wide.
+            for (const w of [0, 1, 4, 12]) {
+              expect(layoutSpinner({ verb: "Cogitating", parts: ["12s"], width: w, glyphs: g }).total).toBeLessThanOrEqual(w);
             }
           }
         });

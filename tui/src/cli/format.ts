@@ -98,8 +98,8 @@ export interface Speaker {
 
 /**
  * One frame, one line. The shapes mirror views/chat.tsx with the colour and
- * the wrapping taken out: `>` for your turns, `⎿` for a tool call, `·` for an
- * event, `⚑` for a question.
+ * the wrapping taken out: `>` for your turns, `∴` for a thinking block, `⎿`
+ * for a tool call, `·` for an event, `⚑` for a question.
  */
 export function frameLine(f: Frame, who: Speaker, g: Glyphs = UNICODE): string {
   switch (f.kind) {
@@ -107,6 +107,8 @@ export function frameLine(f: Frame, who: Speaker, g: Glyphs = UNICODE): string {
       return `> ${oneLine(f.text)}`;
     case "agent":
       return `${speaker(f.run, who)}: ${oneLine(f.text)}`;
+    case "thinking":
+      return `  ${g.think} ${oneLine(f.text)}`;
     case "tool":
       return `  ${g.tool} ${f.text}`;
     case "spawn":

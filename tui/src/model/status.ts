@@ -62,6 +62,16 @@ export function statusWord(s: TuiStatus): string {
   }
 }
 
+/**
+ * The status word a run carries inside a conversation. Running and idle are
+ * what the glyph in front of the row already says, and repeating them costs a
+ * column the title wants — so only the states that ask something of you keep
+ * a word: asks you, queued, done, failed.
+ */
+export function threadStatusWord(s: TuiStatus): string {
+  return s === "running" || s === "idle" ? "" : statusWord(s);
+}
+
 /** Live = still on the floor: not finished, not broken, not an idle chat. */
 export function isLive(s: TuiStatus): boolean {
   return s !== "done" && s !== "failed" && s !== "idle";
