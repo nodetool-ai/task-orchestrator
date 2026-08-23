@@ -63,6 +63,10 @@ export interface SdkContentBlock {
   input?: unknown;
   content?: unknown;
   tool_use_id?: string;
+  /** Extended-thinking blocks: `thinking` carries the prose, `is_error` marks
+   *  a tool_result the harness rejected. Both are drawn, so both are typed. */
+  thinking?: string;
+  is_error?: boolean;
   data?: string;
   mimeType?: string;
 }

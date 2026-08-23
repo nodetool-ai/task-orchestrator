@@ -9,18 +9,23 @@ import { C, StatusGlyph, age, useGlyphs, usd } from "../theme.js";
 import { chatHeaderEmpty, layoutChatHeader, tailWindow } from "./layout.js";
 import { moreLine, transcriptLines, type TRowLine, type TSpanLine } from "./transcript.js";
 import { RunRow } from "./tree.js";
+import { useBlink } from "./anim.js";
+import { useMotion } from "./motion.js";
 
 // The transcript is built as a flat list of single-line elements rather than
 // nested boxes: paging back (T-tui-03) has to count lines, and a line the
 // view cannot count is a line the scroll arithmetic gets wrong. The lines
 // themselves are built — and measured — in views/transcript.ts; this file
 // only turns spans into <Text>.
-function paint(l: TSpanLine): React.ReactNode {
+function paint(l: TSpanLine, lit: boolean): React.ReactNode {
   return (
     <Text>
       {l.spans.map((s, i) => (
-        <Text key={i} color={s.color} bold={s.bold}>
-          {s.text}
+        <Text key={i} color={s.color} bold={s.bold} italic={s.italic}>
+          {/* A blinking span keeps its width on the dark half of the cycle, so
+              the line under it never moves — the mark is what blinks, not the
+              layout. Same trick as Claude Code's ToolUseLoader. */}
+          {s.blink === true && !lit ? " ".repeat(s.text.length) : s.text}
         </Text>
       ))}
     </Text>
@@ -47,7 +52,7 @@ export function ChatHeader({ run, forest, now, width }: { run: Run | null; fores
     title: run.title,
     crumb: parent ? `${parent.persona} #${parent.id} ${g.crumb} ` : "",
     right: `${isLive(run.status) ? `${age(run.startedAt, now)} · ` : ""}${
-      kids.length > 0 ? `${kids.length} agents · ` : ""
+      kids.length > 0 ? `${kids.length} agent${kids.length === 1 ? "" : "s"} · ` : ""
     }${tuning === "" ? "" : `${tuning} · `}${usd(forest.subtreeCost(run.id))}`,
     width,
     glyphs: g,
@@ -88,6 +93,9 @@ export function Transcript({
   const g = useGlyphs();
   const lines = transcriptLines(frames, { forest, width, trace, selfId: run?.id ?? null, g });
   const h = Math.max(1, height);
+  // One blink for the whole transcript: every unfinished call pulses together,
+  // which reads as one machine working rather than several.
+  const lit = useBlink(useMotion());
 
   // Pinned to the tail by default; scrollBack is clamped inside tailWindow so
   // paging past either end is a no-op instead of an empty screen.
@@ -100,7 +108,7 @@ export function Transcript({
     <Box flexDirection="column" width={width} height={h} overflow="hidden" justifyContent="flex-end">
       {lines.length === 0 && <Text color={C.muted}>{run ? "nothing yet." : ""}</Text>}
       {visible.map((l) => (
-        <Box key={l.key}>{l.row === undefined ? paint(l) : <RunRowLine line={l} forest={forest} now={now} />}</Box>
+        <Box key={l.key}>{l.row === undefined ? paint(l, lit) : <RunRowLine line={l} forest={forest} now={now} />}</Box>
       ))}
       {!full.pinned && <Text color={C.muted}>{moreLine(behind, width, g)}</Text>}
     </Box>
@@ -112,7 +120,7 @@ export function Transcript({
 function RunRowLine({ line, forest, now }: { line: TRowLine; forest: Forest; now: number }) {
   return (
     <Box paddingLeft={line.indent}>
-      <RunRow row={line.row} forest={forest} width={line.width} now={now} />
+      <RunRow row={line.row} forest={forest} width={line.width} now={now} quiet />
     </Box>
   );
 }

@@ -4,16 +4,34 @@
 // interaction, tool_result folds into the interaction it names via
 // tool_use_id, falling back to the most recent interaction without a result.
 //
-// The terminal difference: a tool call is ONE dim line by default (T-tui-03),
-// so everything the web puts behind a disclosure triangle goes into `detail`,
-// which the view only shows when `^o` is on.
+// The terminal difference: a tool call is ONE line by default (T-tui-03), in
+// Claude Code's own grammar — `⏺ Read(cli.ts)` with the result folded under a
+// single `⎿`. Everything the web puts behind a disclosure triangle goes into
+// `detail` and the tail of `result`, which the view only shows when `^o` is on.
 
 import type { MessageRow, SdkContentBlock } from "../api/types.js";
 
 export type Frame =
   | { kind: "user"; at: number; text: string; to?: number }
   | { kind: "agent"; at: number; run: number; text: string }
-  | { kind: "tool"; at: number; run: number; text: string; detail: string[] }
+  | { kind: "thinking"; at: number; run: number; text: string }
+  | {
+      kind: "tool";
+      at: number;
+      run: number;
+      /** The one-line label the CLI prints: `read cli.ts`. */
+      text: string;
+      /** The same call split the way the transcript draws it — `Read(cli.ts)`. */
+      name: string;
+      arg: string;
+      /** Arguments the call line had no room for; `^o` shows them. */
+      detail: string[];
+      /** What came back. The first line is always drawn, the rest under `^o`. */
+      result: string[];
+      /** A call with its result folded in. An unfinished call blinks. */
+      done?: boolean;
+      error?: boolean;
+    }
   | { kind: "spawn"; at: number; run: number; children: number[] }
   | { kind: "event"; at: number; run: number; text: string; tone: "info" | "warn" | "ok" }
   | { kind: "question"; at: number; run: number; text: string; answered?: string };
@@ -87,6 +105,7 @@ const SPAWN_TOOLS = new Set(["spawn__spawn_agent", "start_session"]);
 const MAX_TEXT = 72;
 const MAX_DETAIL = 120;
 const DETAIL_LINES = 4;
+const RESULT_LINES = 8;
 
 function canonical(raw: string): string | null {
   return CANONICAL[raw.toLowerCase()] ?? null;
@@ -101,6 +120,28 @@ export function toolLabel(raw: string | undefined | null): string {
   if (c) return c;
   const mcp = /^mcp__.+?__(.+)$/.exec(raw);
   return (mcp ? mcp[1] : raw).replace(/^task_orch__/, "");
+}
+
+/** The tool's name as the transcript writes it: `Read`, `Bash`, `Task`. A
+ *  built-in is title-cased from its canonical word; anything else — an
+ *  orchestrator verb, an MCP tool — keeps the name it was given, because
+ *  `Transition_task` is a worse name than `transition_task`. */
+export function toolName(raw: string | undefined | null): string {
+  const label = toolLabel(raw);
+  return canonical(raw ?? "") === null ? label : label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+/** The argument inside the parentheses: the same one `toolText` puts after the
+ *  label, and empty when the call has nothing worth naming. */
+export function toolArg(raw: string | undefined | null, input: unknown): string {
+  const args = new Map(argEntries(input));
+  const keys = [...(ARG_KEYS[canonical(raw ?? "") ?? ""] ?? []), ...GENERIC_ARG_KEYS];
+  for (const k of keys) {
+    const v = args.get(k);
+    if (v) return clip(v, MAX_TEXT);
+  }
+  if (args.size === 1) return clip([...args.values()][0] as string, MAX_TEXT);
+  return "";
 }
 
 function argEntries(input: unknown): Array<[string, string]> {
@@ -147,7 +188,7 @@ export function resultLines(content: unknown): string[] {
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.length > 0)
-    .slice(0, DETAIL_LINES)
+    .slice(0, RESULT_LINES)
     .map((l) => clip(l, MAX_DETAIL));
 }
 
@@ -248,7 +289,16 @@ export function framesFromMessages(messages: MessageRow[]): Frame[] {
           frames.push({ kind: "spawn", at, run: m.runId, children: [] });
         } else {
           const text = toolText(b.name, b.input);
-          frames.push({ kind: "tool", at, run: m.runId, text, detail: toolDetail(b.name, b.input, text) });
+          frames.push({
+            kind: "tool",
+            at,
+            run: m.runId,
+            text,
+            name: toolName(b.name),
+            arg: toolArg(b.name, b.input),
+            detail: toolDetail(b.name, b.input, text),
+            result: [],
+          });
         }
         attach(b.id, idx);
         continue;
@@ -260,9 +310,19 @@ export function framesFromMessages(messages: MessageRow[]): Frame[] {
         if (f.kind === "spawn") {
           frames[i] = { ...f, children: dedupe([...f.children, ...spawnedIds(b.content)]) };
         } else if (f.kind === "tool") {
-          frames[i] = { ...f, detail: dedupe([...f.detail, ...resultLines(b.content)]) };
+          frames[i] = {
+            ...f,
+            result: dedupe([...f.result, ...resultLines(b.content)]),
+            done: true,
+            ...(b.is_error === true ? { error: true } : {}),
+          };
         }
         close(i);
+        continue;
+      }
+      if (b.type === "thinking" || (b.type === "redacted_thinking" && m.role === "agent")) {
+        const think = (b.thinking ?? "").trim();
+        if (think) frames.push({ kind: "thinking", at, run: m.runId, text: think });
         continue;
       }
       if (b.type === "text" || (b.type === undefined && typeof b.text === "string")) {
@@ -457,6 +517,17 @@ export function appendFrame(frames: Frame[], next: Frame): Frame[] {
     return [...frames, next];
   }
 
+  if (next.kind === "thinking") {
+    // A reconnect replays the turn, and a thinking block is long: the same
+    // prose twice reads as the agent having said it twice.
+    const from = Math.max(0, frames.length - FOLD_WINDOW);
+    for (let i = frames.length - 1; i >= from; i--) {
+      const f = frames[i];
+      if (f.kind === "thinking" && f.run === next.run && f.text === next.text) return frames;
+    }
+    return [...frames, next];
+  }
+
   if (next.kind === "question") {
     for (let i = frames.length - 1; i >= 0; i--) {
       const f = frames[i];
@@ -477,9 +548,19 @@ export function appendFrame(frames: Frame[], next: Frame): Frame[] {
       if (f.kind === "tool" && next.kind === "tool") {
         if (f.text !== next.text) continue;
         const detail = dedupe([...f.detail, ...next.detail]);
-        if (detail.length === f.detail.length) return frames;
+        const result = dedupe([...f.result, ...next.result]);
+        // The one thing a repeat can still say is that the call finished:
+        // the stream sends the call, then the same call with its result.
+        const settles = (next.done === true && f.done !== true) || (next.error === true && f.error !== true);
+        if (detail.length === f.detail.length && result.length === f.result.length && !settles) return frames;
         const out = frames.slice();
-        out[i] = { ...f, detail };
+        out[i] = {
+          ...f,
+          detail,
+          result,
+          ...(next.done === true ? { done: true } : {}),
+          ...(next.error === true ? { error: true } : {}),
+        };
         return out;
       }
       if (f.kind === "spawn" && next.kind === "spawn") {

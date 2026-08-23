@@ -130,6 +130,7 @@ export const runIndexRows: RunIndexRow[] = SEEDS.map((s) => ({
 // ── transcripts ────────────────────────────────────────────────────────────
 
 const text = (s: string): SdkContentBlock => ({ type: "text", text: s });
+const thinking = (s: string): SdkContentBlock => ({ type: "thinking", thinking: s });
 const tool = (id: string, name: string, input: unknown): SdkContentBlock => ({ type: "tool_use", id, name, input });
 const result = (id: string, content: string): SdkContentBlock => ({ type: "tool_result", tool_use_id: id, content });
 
@@ -142,6 +143,11 @@ export const messageRows: MessageRow[] = [
   // #42 concierge — the top-level conversation the cockpit opens on.
   msg(42, "user", 12, [text("ship the CLI plan")]),
   msg(42, "agent", 12, [
+    thinking(
+      "The plan has five tasks and three are open. Handing the whole plan to one executor keeps the ordering constraints in one place, rather than racing three implementors against each other on the same repo layer.",
+    ),
+  ]),
+  msg(42, "agent", 12, [
     text(
       "Reading P-cli. Five tasks, three still open. I will hand the plan to an executor and report back when a PR is ready for you.",
     ),
@@ -153,6 +159,10 @@ export const messageRows: MessageRow[] = [
   msg(42, "system", 4, [
     { type: "inbox_event", ...({ event_type: "gh.pr.opened", payload: { run_id: 44, number: 312 } } as Record<string, unknown>) } as SdkContentBlock,
   ]),
+
+  // A call with no result yet: the design surface has to show the dot that
+  // is still blinking, not only the ones that came back.
+  msg(42, "agent", 1, [tool("t9", "grep", { pattern: "TODO\\(cli\\)" })]),
 
   // #40 planner — the second root, so the floor has two trees.
   msg(40, "user", 31, [text("write the spec for discord persona bots")]),
@@ -185,7 +195,9 @@ export const messageRows: MessageRow[] = [
   msg(44, "agent", 3, [tool("t6", "edit", { file_path: "cli.ts" })]),
   msg(44, "tool", 3, [result("t6", "+88 −12")]),
   msg(44, "agent", 2, [tool("t7", "bash", { command: "npm test -- cli" })]),
-  msg(44, "tool", 2, [result("t7", "42 passed")]),
+  msg(44, "tool", 2, [
+    { type: "tool_result", tool_use_id: "t7", content: "42 passed\n3 skipped\n1 flaky: cli tails a closed run\nsuite green in 8.2s" },
+  ]),
   msg(44, "agent", 1, [text("PR #312 is open. Waiting for CI.")]),
 
   // #45 — the parked question.

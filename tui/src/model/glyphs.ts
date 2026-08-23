@@ -27,6 +27,16 @@ export interface Glyphs {
   /** Transcript and row marks. */
   tool: string;
   bullet: string;
+  /** Claude Code's message grammar: the filled dot that opens an assistant
+   *  turn or a tool call, the caret that opens yours, and the therefore-sign
+   *  that opens a thinking block. */
+  dot: string;
+  pointer: string;
+  think: string;
+  /** The spinner's frames, smallest mark first. The animation plays the list
+   *  forwards and then backwards, so it breathes rather than loops, and the
+   *  last frame doubles as the still mark when motion is off. */
+  spinner: string[];
   flag: string;
   review: string;
   pass: string;
@@ -63,6 +73,12 @@ export const UNICODE: Glyphs = {
   branchLast: "└",
   tool: "⎿",
   bullet: "·",
+  // ⏺ is better vertically aligned but is not usually in a Linux console
+  // font, which is the same cut Claude Code makes.
+  dot: process.platform === "darwin" ? "⏺" : "●",
+  pointer: "❯",
+  think: "∴",
+  spinner: ["·", "✢", "✳", "✶", "✻", "✽"],
   flag: "⚑",
   review: "◎",
   pass: "✓",
@@ -99,6 +115,10 @@ export const ASCII: Glyphs = {
   branchLast: "\\",
   tool: "\\",
   bullet: ".",
+  dot: "*",
+  pointer: ">",
+  think: ":",
+  spinner: ["-", "\\", "|", "/", "*"],
   flag: "!",
   review: "o",
   pass: "v",

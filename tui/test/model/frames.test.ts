@@ -32,9 +32,14 @@ describe("framesFromMessages", () => {
     const tool = frames[2] as Extract<Frame, { kind: "tool" }>;
     // The default line stands alone without any detail.
     expect(tool.text).toBe("read cli.ts");
-    expect(tool.detail).toEqual(["946 lines", "ok"]);
+    // The transcript draws the same call as `Read(cli.ts)`; the result is the
+    // `⎿` block under it, and is kept apart from the arguments.
+    expect([tool.name, tool.arg]).toEqual(["Read", "cli.ts"]);
+    expect(tool.result).toEqual(["946 lines", "ok"]);
+    expect(tool.done).toBe(true);
     expect((frames[3] as Extract<Frame, { kind: "tool" }>).text).toBe("npm test -- cli");
-    expect((frames[3] as Extract<Frame, { kind: "tool" }>).detail).toEqual(["42 passed"]);
+    expect((frames[3] as Extract<Frame, { kind: "tool" }>).name).toBe("Bash");
+    expect((frames[3] as Extract<Frame, { kind: "tool" }>).result).toEqual(["42 passed"]);
     expect(frames[4]).toMatchObject({ kind: "spawn", run: 44, children: [46] });
     expect(frames[0]).toMatchObject({ kind: "user", text: "ship the CLI plan", at: Date.parse(T0) });
   });
@@ -60,7 +65,7 @@ describe("framesFromMessages", () => {
       msg("agent", [{ type: "tool_use", id: "t1", name: "grep", input: { pattern: "TODO" } }]),
       msg("tool", [{ type: "tool_result", content: "3 matches" }]),
     ]);
-    expect(frames[0]).toMatchObject({ kind: "tool", text: "grep TODO", detail: ["3 matches"] });
+    expect(frames[0]).toMatchObject({ kind: "tool", text: "grep TODO", result: ["3 matches"], done: true });
   });
 
   it("renders a mirrored inbox event as an event frame", () => {
@@ -87,6 +92,9 @@ describe("framesFromMessages", () => {
       msg("agent", [{ type: "tool_use", id: "b", name: "mcp__gmail__search_threads", input: { query: "from:ci" } }]),
     ]);
     expect((frames[0] as Extract<Frame, { kind: "tool" }>).text).toBe("transition_task T-0005");
+    // An orchestrator verb keeps the name it was given: `Transition_task` is
+    // a worse name than the one the server uses.
+    expect((frames[0] as Extract<Frame, { kind: "tool" }>).name).toBe("transition_task");
     expect((frames[0] as Extract<Frame, { kind: "tool" }>).detail).toEqual(["state=review"]);
     expect((frames[1] as Extract<Frame, { kind: "tool" }>).text).toBe("search_threads from:ci");
   });
@@ -148,19 +156,24 @@ describe("frameFromEvent", () => {
 });
 
 describe("appendFrame", () => {
-  const tool: Frame = { kind: "tool", at: 1, run: 44, text: "read cli.ts", detail: [] };
+  const tool: Frame = { kind: "tool", at: 1, run: 44, text: "read cli.ts", name: "Read", arg: "cli.ts", detail: [], result: [] };
 
   it("appends a new frame", () => {
     expect(appendFrame([], tool)).toEqual([tool]);
   });
 
   it("is idempotent when the same tool_result is folded twice", () => {
-    const withDetail: Frame = { ...tool, detail: ["946 lines"] };
-    const once = appendFrame([tool], withDetail);
-    expect(once).toEqual([withDetail]);
-    const twice = appendFrame(once, withDetail);
+    const settled: Frame = { ...tool, result: ["946 lines"], done: true };
+    const once = appendFrame([tool], settled);
+    expect(once).toEqual([settled]);
+    const twice = appendFrame(once, settled);
     expect(twice).toBe(once); // same array: nothing changed
-    expect(appendFrame(twice, { ...tool, detail: [] })).toBe(twice);
+    expect(appendFrame(twice, tool)).toBe(twice);
+  });
+
+  it("marks a call finished even when its result says nothing", () => {
+    const [settled] = appendFrame([tool], { ...tool, done: true }) as [Extract<Frame, { kind: "tool" }>];
+    expect(settled.done).toBe(true);
   });
 
   it("treats an identical call far later as a new call", () => {

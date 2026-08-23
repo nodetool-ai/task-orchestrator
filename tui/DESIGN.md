@@ -18,8 +18,11 @@ The web app is a dashboard with a chat bolted on. The terminal version is a
 talks to a few top-level agents (concierge, planner, executor). Those agents
 spawn and manage workers. The UI therefore has exactly three jobs:
 
-1. Talk to the current top-level agent (Claude Code rhythm: `>` you, prose
-   agent, dim `⎿` tool lines, inline live tree for spawned children).
+1. Talk to the current top-level agent, in Claude Code's own rhythm: `❯` your
+   turns, `⏺` an agent turn and a tool call, `∴ Thinking` collapsed behind
+   `^o`, one `⎿` under a call for whatever it came back with, and an inline
+   live tree for spawned children. While a run is working, a breathing `✻`
+   line sits above the composer with its verb, its timer and its spend.
 2. Show what waits on a human (questions, PRs to review, stuck runs) and make
    answering a one-keystroke reach: `tab` addresses the asking agent, type,
    enter. You never leave the conversation.

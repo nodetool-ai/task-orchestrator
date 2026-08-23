@@ -159,14 +159,8 @@ describe("frameLine", () => {
   });
 
   it("answers --json with the frame plus who said it", () => {
-    expect(frameJson({ kind: "tool", at: NOW, run: 44, text: "npm test", detail: ["exit 0"] }, who)).toEqual({
-      kind: "tool",
-      at: NOW,
-      run: 44,
-      text: "npm test",
-      detail: ["exit 0"],
-      persona: "implementor",
-    });
+    const call: Frame = { kind: "tool", at: NOW, run: 44, text: "npm test", name: "Bash", arg: "npm test", detail: [], result: ["exit 0"] };
+    expect(frameJson(call, who)).toEqual({ ...call, persona: "implementor" });
     // A user frame carries no run of its own; it belongs to the tailed run.
     expect(frameJson({ kind: "user", at: NOW, text: "use pi" }, who)).toMatchObject({ run: 44, persona: "implementor" });
   });

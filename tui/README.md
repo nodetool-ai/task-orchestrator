@@ -128,6 +128,7 @@ runner image is already pressed against Fly's 8 GB unpacked-image limit.
 | `ORCH_TOKEN` | *(unset)* | API token, sent as `Authorization: Bearer …`. Optional against a dev server with no login gate; required against a deployed one. Mint one at `<ORCH_URL>/tokens`, or `npm run task -- user link …`. |
 | `ORCH_BUNDLE` | *(unset)* | `1` makes the `bin` shim run `dist/orch.js` instead of the TypeScript source. |
 | `ORCH_ASCII` | *(unset)* | Anything but `0`/`false`/`no` swaps every glyph and the box drawing for ASCII. Same as `--ascii`. |
+| `ORCH_NO_ANIM` | *(unset)* | Any value stops the live line breathing and the unfinished tool dot blinking. Motion is off anyway under `--ascii` and when stdout is not a terminal. |
 | `ORCH_COLORS` | *(detected)* | `16` forces the named ANSI palette, `truecolor` forces the 24-bit one. See [Terminal size and colour](#terminal-size-and-colour). |
 
 A 401 prints one line on stderr naming the fix and exits 1 — it never opens an
@@ -138,6 +139,44 @@ export ORCH_URL=https://tasks.nodetool.ai
 export ORCH_TOKEN=…
 orch floor
 ```
+
+## The transcript
+
+The chat reads like Claude Code, because the operator is already reading Claude
+Code all day:
+
+```
+❯ ship the CLI plan
+
+∴ Thinking (^o to expand)
+
+⏺ Reading P-cli. Five tasks, three still open.
+⏺ get_plan(P-cli)
+  ⎿  state accepted · 5 tasks · 2 merged, 3 todo
+⏺ Task(executor #43)
+    ● #43  executor     P-cli · execute plan                    9m  $0.84
+    └ ⚑ #45  implementor  T-0006 chat + runs           asks you  2m  $0.11
+
+✻ Cogitating (1m 12s · 3 agents · $2.04 · /cancel to stop)
+```
+
+- `❯` is you, `⏺` is an agent turn and a tool call, `∴` is a thinking block.
+  A built-in tool is title-cased the way Claude Code writes it (`Read`,
+  `Bash`, `Task`); an orchestrator or MCP tool keeps the name it was given.
+- A call's dot blinks while the call is out, then turns green — or red when
+  the tool reported an error. A call the run never answered settles when the
+  run stops: red if the run broke, dim if it simply ended. Nothing pulses
+  forever.
+- A child row inside a transcript drops the words `running` and `idle`: the
+  glyph in front of it already says them, and the title wants the column. The
+  floor keeps them, because there the word is the only state it has.
+- One `⎿` line carries the first line of the result; `^o` opens the rest,
+  the arguments the call line had no room for, and the reasoning.
+- Two things have no Claude Code counterpart and keep the cockpit's own
+  shapes: a spawned child is a live row inside its parent's transcript, and a
+  question is loud, with `⚑` and the key that answers it.
+- The live line under the transcript belongs to the open run: its verb is a
+  pure function of the run id, so it never resamples itself mid-turn.
 
 ## Keyboard contract
 
@@ -152,7 +191,7 @@ PRD §6.3. `^x` is Ctrl-X.
 | `^n` | toggle needs you (global) | | | |
 | `^k` | toggle jump palette (global) | | | |
 | `^b` | toggle the rail (global; auto on at ≥110 columns) | | | |
-| `^o` | toggle the full tool trace | — | — | — |
+| `^o` | expand thinking, tool arguments and the whole result | — | — | — |
 | `^c` | quit — agents keep running | | | |
 | `c` | — | cancel subtree (confirm) | — | — |
 | `n` | — | new agent | — | — |

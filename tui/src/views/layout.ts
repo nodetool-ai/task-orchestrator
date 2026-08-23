@@ -209,18 +209,67 @@ export interface Screen {
 export function screenLayout(
   cols: number,
   rows: number,
-  o: { rail: boolean; help?: number; pending?: boolean },
+  o: { rail: boolean; help?: number; pending?: boolean; spinner?: boolean },
 ): Screen {
   const c = Math.max(0, Math.floor(cols));
   const r = Math.max(0, Math.floor(rows));
   const railW = o.rail && c >= RAIL_MIN_COLS ? RAIL_W : 0;
   const mainW = Math.max(0, c - railW - (railW ? 1 : 0));
   const pending = o.pending === true ? 1 : 0;
-  const room = r - CHROME_H - MIN_BODY_H - PROMPT_H - pending;
+  // The live line sits between the transcript and the composer, so it is part
+  // of the composer's budget: the transcript has to give up a row for it or
+  // the status line drops off a 24-row screen.
+  const spinner = o.spinner === true ? 1 : 0;
+  const room = r - CHROME_H - MIN_BODY_H - PROMPT_H - pending - spinner;
   const helpShown = Math.max(0, Math.min(Math.max(0, Math.floor(o.help ?? 0)), room));
-  const promptH = PROMPT_H + helpShown + pending;
+  const promptH = PROMPT_H + helpShown + pending + spinner;
   const bodyH = Math.max(MIN_BODY_H, r - CHROME_H - promptH);
   return { cols: c, rows: r, railW, mainW, bodyH, promptH, helpShown };
+}
+
+// ── The live line ──────────────────────────────────────────────────────────
+
+export interface SpinnerInput {
+  /** `Cogitating` — one word, chosen once per run (model/verbs.ts). */
+  verb: string;
+  /** The byline inside the parentheses, most useful first. */
+  parts: string[];
+  width: number;
+  glyphs?: Glyphs;
+}
+
+export interface SpinnerCells {
+  /** The glyph's column plus its space; the glyph itself animates. */
+  head: string;
+  verb: string;
+  /** `(12s · 3 agents · $0.42)`, or empty when nothing fits. */
+  tail: string;
+  total: number;
+}
+
+/**
+ * Claude Code's spinner line, measured. The byline is progressive: a part is
+ * dropped from the right rather than wrapped, because the line is one row of
+ * the composer's budget and a second row would push the status line off.
+ */
+export function layoutSpinner(o: SpinnerInput): SpinnerCells {
+  const g = o.glyphs ?? UNICODE;
+  const width = Math.max(0, Math.floor(o.width));
+  // The glyph's own column plus its space. A pane too narrow for even that
+  // gets what is left of it, so the line still fits rather than overflowing.
+  const head = " ".repeat(Math.min(2, width));
+  const verb = fit(o.verb, Math.max(0, width - head.length), g.ellipsis);
+  const kept = o.parts.filter((p) => p !== "");
+  let tail = "";
+  while (kept.length > 0) {
+    const candidate = ` (${kept.join(" · ")})`;
+    if (head.length + verb.length + candidate.length <= width) {
+      tail = candidate;
+      break;
+    }
+    kept.pop();
+  }
+  return { head, verb, tail, total: head.length + verb.length + tail.length };
 }
 
 // ── Shared clipping ────────────────────────────────────────────────────────
