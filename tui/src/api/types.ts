@@ -231,8 +231,27 @@ export interface RunConfigInput {
   budgetMaxTurns?: number | null;
 }
 
+/** GET /api/providers → one catalog per agent backend, in the shape the
+ *  persona editor and the run composers read. */
+export interface ProviderCatalog {
+  id: string;
+  models: ProviderModel[];
+}
+
+export interface ProviderModel {
+  id: string;
+  name: string;
+}
+
+export interface ProvidersResponse {
+  /** The deployment-default backend's catalog (legacy consumers). */
+  providers: ProviderCatalog[];
+  backends: { id: string; providers: ProviderCatalog[] }[];
+  defaultBackend: string;
+}
+
 /** GET /api/personas → { personas }. The route also sends `systemPrompt`,
- * which the cockpit never shows. */
+ *  which the cockpit never shows. */
 export interface PersonaSummary {
   id: string;
   name: string;

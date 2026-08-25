@@ -5,6 +5,9 @@ import { confirmLine, liveKids, nextInCycle, openUrlFor, parseBudget, resolvePer
 import { openInBrowser } from "./cli/open.js";
 import { floorGroups } from "./model/forest.js";
 import { isLive } from "./model/status.js";
+import * as ed from "./model/composer.js";
+import type { Composer } from "./model/composer.js";
+import { applyModelCompletion, matchModels } from "./model/models.js";
 import { filterPalette } from "./model/palette.js";
 import { useOrch } from "./store.js";
 import { C, GlyphProvider, Hair, useGlyphs } from "./theme.js";
@@ -90,7 +93,9 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
   const s = useOrch(client, initial == null ? {} : { current: initial });
 
   const [view, setView] = useState<View>("chat");
-  const [input, setInput] = useState("");
+  // The whole composer — line, cursor and recall history — is one value with
+  // one setter (model/composer.ts), so a keystroke updates all three or none.
+  const [comp, setComp] = useState<Composer>(ed.emptyComposer);
   const [pq, setPq] = useState("");
   const [cursor, setCursor] = useState(0);
   const [trace, setTrace] = useState(false);
@@ -101,6 +106,9 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
   // its second keystroke. Both are cleared by `esc`, in that order.
   const [to, setTo] = useState<number | null>(null);
   const [confirm, setConfirm] = useState<{ id: number; kids: number } | null>(null);
+  // The highlighted `/model` suggestion. Reset by every input change, so it
+  // can never point past a list that just shrank.
+  const [compIx, setCompIx] = useState(0);
 
   const run = s.current === null ? null : (s.forest.byId(s.current) ?? null);
 
@@ -112,8 +120,17 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
   // The live line only exists while the open run is working, so it is part of
   // the same arithmetic as the command help: a row the transcript gives up.
   const live = view === "chat" && run !== null && isLive(run.status);
-  const screen = screenLayout(cols, rows, { rail, help: matchCommands(input).length, pending, spinner: live });
+  const comps = useMemo(() => matchModels(comp.line.text, s.models), [comp.line.text, s.models]);
+  const screen = screenLayout(cols, rows, {
+    rail,
+    help: comps.length > 0 ? comps.length : matchCommands(comp.line.text).length,
+    pending,
+    spinner: live,
+  });
   const { railW, mainW, bodyH } = screen;
+  // What actually fits above the composer. Completion stays WYSIWYG: on a
+  // short terminal `tab` can only accept a row the operator was shown.
+  const shownComps = comps.slice(0, screen.helpShown);
 
   const floorRows = useMemo(() => {
     const { live, rest } = floorGroups(s.forest, g);
@@ -121,14 +138,25 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
   }, [s.forest, g]);
   const paletteItems = useMemo(() => filterPalette(s.palette, pq), [s.palette, pq]);
 
-  // Warm, so `/new implementor …` can be validated the moment it is typed.
-  useEffect(() => s.actions.ensurePersonas(), [s.actions]);
+  // Warm, so `/new implementor …` can be validated the moment it is typed and
+  // `/model ` completes on the first space.
+  useEffect(() => {
+    s.actions.ensurePersonas();
+    s.actions.ensureModels();
+  }, [s.actions]);
 
   const open = (id: number) => {
     if (id === s.current) return setView("chat");
     s.actions.select(id);
     setScrollBack(0);
     setView("chat");
+  };
+
+  // One door into the composer, so a highlight never survives the keystroke
+  // that changed what it points at.
+  const edit = (e: ed.Edit) => {
+    setCompIx(0);
+    setComp((c) => e(c));
   };
 
   const go = (next: View) => {
@@ -187,8 +215,9 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
   };
 
   const submit = () => {
-    const text = input.trim();
-    setInput("");
+    const text = comp.line.text.trim();
+    setCompIx(0);
+    setComp((c) => ed.commit(c, text));
     // A bare `↵` under a cancel confirm is the confirmation.
     if (!text) {
       if (confirm) return cancel(confirm.id, "↵");
@@ -240,7 +269,7 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
       case "/model": {
         const id = arg.trim();
         if (s.current === null) return setNotice("no run open · /model retunes the run you are in");
-        if (!id) return setNotice("/model <id> — e.g. /model claude-sonnet-4-5");
+        if (!id) return setNotice("/model <id> — e.g. /model claude-sonnet-4-6");
         setNotice(`model → ${id}…`);
         void s.actions
           .configureRun(s.current, { model: id })
@@ -334,7 +363,7 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
       // the keyboard back with the command half typed.
       if (ch === "n") {
         setView("chat");
-        setInput("/new ");
+        edit(ed.insertText("/new "));
         return setNotice("/new <persona> <goal>");
       }
       return;
@@ -361,7 +390,18 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
     // Chat: the composer owns the keyboard, apart from transcript scrolling.
     if (key.pageUp) return setScrollBack((n) => n + 5);
     if (key.pageDown) return setScrollBack((n) => Math.max(0, n - 5));
+    // While `/model` suggests, the arrows walk the suggestions; they had no
+    // job in the composer before (scrolling is pgup/pgdn). Otherwise ↓/↑ walk
+    // the recall history, newest first.
+    if (shownComps.length > 0 && key.upArrow) return setCompIx((i) => Math.max(0, i - 1));
+    if (shownComps.length > 0 && key.downArrow) return setCompIx((i) => Math.min(shownComps.length - 1, i + 1));
     if (key.tab) {
+      // Mid-command the suggestions own `tab`: a leading slash routes to the
+      // command switch, never to an agent, so there is no addressing to lose.
+      if (comp.line.text.startsWith("/") && shownComps.length > 0) {
+        const pick = shownComps[Math.min(compIx, shownComps.length - 1)];
+        return edit(ed.replaced(applyModelCompletion(comp.line.text, pick.value)));
+      }
       const w = s.actions.waiting();
       if (w.length === 0) return setNotice("nobody is waiting on you");
       setNotice(null);
@@ -377,13 +417,24 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
       if (notice) return setNotice(null);
       if (to !== null) return setTo(null);
       if (scrollBack) return setScrollBack(0);
-      return setInput("");
+      return edit(ed.clear);
     }
     if (key.return) return submit();
-    if (key.backspace || key.delete) return setInput((v) => v.slice(0, -1));
-    if (key.ctrl && ch === "u") return setInput("");
+    // Line editing, readline-shaped (model/composer.ts): a cursor you can
+    // move, word motions under ⌥, positional erase. The composer used to be
+    // append-only, so a typo at the top of a long goal cost the whole line.
+    if (key.home || (key.ctrl && ch === "a")) return edit(ed.cursorHome);
+    if (key.end || (key.ctrl && ch === "e")) return edit(ed.cursorEnd);
+    if (key.leftArrow) return edit(key.meta ? ed.cursorWordBack : ed.cursorLeft);
+    if (key.rightArrow) return edit(key.meta ? ed.cursorWordForward : ed.cursorRight);
+    if (key.upArrow) return edit((c) => ed.recallPrev(c));
+    if (key.downArrow) return edit((c) => ed.recallNext(c));
+    if (key.backspace) return edit(key.meta || (key.ctrl && ch === "w") ? ed.killWord : ed.erase);
+    // Forward delete is its own key now that there is a cursor to delete at.
+    if (key.delete) return edit(ed.eraseForward);
+    if (key.ctrl && ch === "u") return edit(ed.clear);
     if (ch && !key.ctrl && !key.meta && !key.upArrow && !key.downArrow && !key.leftArrow && !key.rightArrow) {
-      setInput((v) => v + ch);
+      edit(ed.insertText(ch));
     }
   });
 
@@ -426,12 +477,15 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
           {live && run !== null && <LiveLine run={run} forest={s.forest} width={mainW} now={s.now} />}
           {view !== "palette" && (
             <Prompt
-              value={input}
+              value={comp.line.text}
+              cur={comp.line.cur}
               to={to}
               pendingCount={s.inbox.length}
               width={mainW}
               busy={s.loading}
               maxHelp={screen.helpShown}
+              completions={shownComps}
+              completionIndex={Math.min(compIx, Math.max(0, comps.length - 1))}
             />
           )}
           {view === "palette" && (

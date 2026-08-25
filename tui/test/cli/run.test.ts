@@ -47,6 +47,7 @@ function fakeClient(over: Partial<OrchClient> = {}): Fake {
     tasks: unused("tasks"),
     plans: unused("plans"),
     personas: async () => note("personas", [] as PersonaSummary[]),
+    providers: unused("providers") as unknown as OrchClient["providers"],
     sendMessage: async (id: number, text: string) => void note(`sendMessage ${id} ${text}`, null),
     createRun: unused("createRun") as unknown as (input: CreateRunInput) => Promise<RunRow>,
     cancelRun: unused("cancelRun") as unknown as (id: number) => Promise<RunRow>,

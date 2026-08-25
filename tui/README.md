@@ -186,7 +186,10 @@ PRD §6.3. `^x` is Ctrl-X.
 |---|---|---|---|---|
 | `↵` | send | talk to row | answer / open | open |
 | `esc` | clear the `@#id` chip, then clear the input | back | back | close |
-| `tab` | address the next waiting agent | — | — | — |
+| `tab` | address the next waiting agent; completes a `/model` suggestion while one is up | — | — | — |
+| `↑` `↓` | recall history (walk `/model` suggestions while one is up) | move | move | move |
+| `←` `→` | move the cursor · `⌥←` `⌥→` by word · `home`/`end`, `^a`/`^e` to the ends | — | — | — |
+| `backspace` / `del` | erase behind / at the cursor · `⌥⌫` or `^w` kills a word | — | — | — |
 | `^f` | toggle floor (global) | | | |
 | `^n` | toggle needs you (global) | | | |
 | `^k` | toggle jump palette (global) | | | |

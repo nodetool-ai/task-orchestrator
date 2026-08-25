@@ -21,6 +21,7 @@ import {
 import { buildForest, type Forest } from "./model/forest.js";
 import { appendFrame, frameFromEvent, framesFromMessages, type Frame } from "./model/frames.js";
 import { toInboxItems, type InboxItem } from "./model/inbox.js";
+import { modelOptions, type ModelOption } from "./model/models.js";
 import { buildPalette, type PaletteItem } from "./model/palette.js";
 
 export type ConnStatus = "connecting" | "live" | "reconnecting" | "offline" | "unauthorized";
@@ -40,6 +41,8 @@ export interface OrchState {
   loading: boolean;
   /** Empty until ensurePersonas() resolves; only /new needs it. */
   personas: PersonaSummary[];
+  /** Empty until ensureModels() resolves; only /model completion reads it. */
+  models: ModelOption[];
 }
 
 export interface StoreActions {
@@ -66,6 +69,8 @@ export interface StoreActions {
   waiting(): number[];
   /** Fetch /api/personas once and cache it in state.personas. */
   ensurePersonas(): void;
+  /** Fetch /api/providers once and flatten it into state.models. */
+  ensureModels(): void;
 }
 
 export interface Store {
@@ -131,6 +136,7 @@ export function createStore(client: OrchClient, opts: StoreOptions = {}): Store 
     now: clock.now(),
     loading: false,
     personas: [],
+    models: [],
   };
 
   const listeners = new Set<() => void>();
@@ -584,6 +590,30 @@ export function createStore(client: OrchClient, opts: StoreOptions = {}): Store 
       });
   }
 
+  // ── model catalog ────────────────────────────────────────────────────────
+  let modelsLoaded = false;
+  let modelsInFlight = false;
+
+  /** Fetched at most once per store: the catalog is static config, and only
+   *  `/model` completion reads it. Failures stay silent on purpose — a server
+   *  without the route must not turn into an offline badge over a nicety —
+   *  and leave the fetch retryable for the next call. */
+  function ensureModels(): void {
+    if (stopped || modelsLoaded || modelsInFlight) return;
+    modelsInFlight = true;
+    client
+      .providers()
+      .then((res) => {
+        if (stopped) return;
+        modelsLoaded = true;
+        set({ models: modelOptions(res) });
+      })
+      .catch(() => {})
+      .finally(() => {
+        modelsInFlight = false;
+      });
+  }
+
   // ── clock ────────────────────────────────────────────────────────────────
   function tick(): void {
     set({ now: clock.now() });
@@ -600,6 +630,7 @@ export function createStore(client: OrchClient, opts: StoreOptions = {}): Store 
     configureRun,
     waiting,
     ensurePersonas,
+    ensureModels,
     runForTask(taskId) {
       // Resolved from the forest rather than GET /api/tasks/:id/attached-run:
       // the overview already carries taskId on every run, so this is one map

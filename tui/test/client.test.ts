@@ -138,6 +138,14 @@ describe("REST surface", () => {
         ]);
       if (path === "/api/plans")
         return json(res, 200, [{ id: "P-1", title: "p", state: "active", body: "big" }]);
+      if (path === "/api/providers")
+        return json(res, 200, {
+          providers: [{ id: "anthropic", models: [{ id: "claude-haiku-4-5", name: "Claude Haiku 4.5" }] }],
+          backends: [
+            { id: "claude", providers: [{ id: "anthropic", models: [{ id: "claude-haiku-4-5", name: "Claude Haiku 4.5" }] }] },
+          ],
+          defaultBackend: "claude",
+        });
       return json(res, 404, { error: "Not found" });
     });
     const c = createClient({ url: fake.url });
@@ -152,6 +160,8 @@ describe("REST surface", () => {
       { id: "T-1", title: "t", state: "open", planId: "P-1", prUrl: null },
     ]);
     expect(await c.plans()).toEqual([{ id: "P-1", title: "p", state: "active" }]);
+    expect((await c.providers()).backends[0]!.providers[0]!.models[0]!.id).toBe("claude-haiku-4-5");
+    expect(fake.paths).toContain("/api/providers");
   });
 
   it("surfaces JSON errors as ApiError", async () => {

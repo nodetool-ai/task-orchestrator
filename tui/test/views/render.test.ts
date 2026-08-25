@@ -150,20 +150,48 @@ describe("the rendered cockpit", () => {
     }
   }
 
-  // --ascii swaps every mark for a one-column fallback, so the arithmetic is
-  // the same — but only if every fallback really is one column.
-  for (const [view, keys, marker] of VIEWS) {
-    it(`fits 80x24 in ${view} under --ascii`, async () => {
-      const lines = await screenshot(80, 24, keys, marker, true);
-      expect(lines.join("\n")).toContain(marker);
-      // Box drawing and block elements are what a font without them turns
-      // into mojibake; the interpunct the prose separates with is not part of
-      // the swap (T-tui-12) and is left alone here too.
-      expect(lines.join("")).not.toMatch(/[\u2500-\u259f]/);
-      for (const [i, line] of lines.entries()) {
-        expect([...line].length, `${view} ascii line ${i}: ${JSON.stringify(line)}`).toBeLessThanOrEqual(80);
-      }
-      expect(lines.length).toBeLessThanOrEqual(24);
-    });
-  }
+// --ascii swaps every mark for a one-column fallback, so the arithmetic is
+// the same — but only if every fallback really is one column.
+for (const [view, keys, marker] of VIEWS) {
+  it(`fits 80x24 in ${view} under --ascii`, async () => {
+    const lines = await screenshot(80, 24, keys, marker, true);
+    expect(lines.join("\n")).toContain(marker);
+    // Box drawing and block elements are what a font without them turns
+    // into mojibake; the interpunct the prose separates with is not part of
+    // the swap (T-tui-12) and is left alone here too.
+    expect(lines.join("")).not.toMatch(/[\u2500-\u259f]/);
+    for (const [i, line] of lines.entries()) {
+      expect([...line].length, `${view} ascii line ${i}: ${JSON.stringify(line)}`).toBeLessThanOrEqual(80);
+    }
+    expect(lines.length).toBeLessThanOrEqual(24);
+  });
+}
+
+// The composer's cursor, driven through the same bytes a terminal sends.
+// These assert what the operator sees — the rendered line, inverse video
+// stripped — so they catch wiring bugs the pure model tests cannot: a key the
+// handler never receives, or a Prompt that ignores the cursor it was given.
+describe("the composer under keystrokes", () => {
+  const promptLine = (lines: string[]): string => lines.find((l) => l.startsWith("❯ ")) ?? "";
+
+  it("edits mid-line", async () => {
+    const lines = await screenshot(80, 24, ["h", "i", "\x1b[D", "!"], "h!i");
+    expect(promptLine(lines)).toContain("h!i");
+  });
+
+  it("erases at the cursor, not just off the end", async () => {
+    const lines = await screenshot(80, 24, ["a", "b", "c", "\x1b[D", "\x1b[D", "\x7f"], "❯ bc");
+    expect(promptLine(lines)).toMatch(/^❯ bc\b/);
+  });
+
+  it("jumps home and types there", async () => {
+    const lines = await screenshot(80, 24, ["s", "h", "i", "p", "\x1b[H", "X"], "Xship");
+    expect(promptLine(lines)).toContain("Xship");
+  });
+
+  it("recalls a sent line with the arrow that typed it back", async () => {
+    const lines = await screenshot(80, 24, ["o", "n", "e", "\r", "t", "w", "\x1b[A"], "❯ one");
+    expect(promptLine(lines)).toMatch(/^❯ one\b/);
+  });
+});
 });

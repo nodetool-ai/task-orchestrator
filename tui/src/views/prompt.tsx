@@ -1,7 +1,8 @@
 import React from "react";
 import { Box, Text } from "ink";
+import type { ModelOption } from "../model/models.js";
 import { C, Hair, Keys, useGlyphs } from "../theme.js";
-import { fitKeys, layoutHelp, layoutPending, type KeyHint } from "./layout.js";
+import { fitKeys, layoutCompletions, layoutHelp, layoutPending, type KeyHint } from "./layout.js";
 
 // The commands the cockpit can actually honour today (PRD §6.4). M2 added the
 // three that write: /new, /spawn and /cancel; M4 added /model and /budget,
@@ -13,7 +14,7 @@ export const COMMANDS: { cmd: string; help: string }[] = [
   { cmd: "/open", help: "look at a run  /open #45" },
   { cmd: "/spawn", help: "ask this agent to delegate  /spawn reviewer T-42" },
   { cmd: "/cancel", help: "stop this run and its live children" },
-  { cmd: "/model", help: "retune this run  /model claude-sonnet-4-5" },
+  { cmd: "/model", help: "retune this run  /model claude-sonnet-4-6" },
   { cmd: "/budget", help: "cap this run  /budget $5  ·  /budget 20 turns" },
   { cmd: "/trace", help: "toggle the full tool trace" },
   { cmd: "/quit", help: "leave; agents keep running" },
@@ -30,13 +31,19 @@ export function matchCommands(input: string) {
 // @#id chip, and the message would go to that run instead of the current one.
 export function Prompt({
   value,
+  cur,
   to,
   pendingCount,
   width,
   busy,
   maxHelp,
+  completions,
+  completionIndex,
 }: {
   value: string;
+  /** Where the next keystroke lands in `value`; end-of-line when omitted.
+   *  Mid-line it is painted as an inverse block, readline-style. */
+  cur?: number;
   to: number | null;
   pendingCount: number;
   width: number;
@@ -44,12 +51,24 @@ export function Prompt({
   /** How many help lines the screen has room for; the rest are dropped rather
    *  than pushing the transcript off the top. */
   maxHelp?: number;
+  /** `/model` suggestions. While non-empty they replace the command help and
+   *  `tab` completes the highlighted row instead of addressing an agent. */
+  completions?: ModelOption[];
+  completionIndex?: number;
 }) {
   const g = useGlyphs();
+  const at = cur ?? value.length;
   const cmds = layoutHelp(matchCommands(value).slice(0, maxHelp ?? Infinity), width, g);
+  const comps = layoutCompletions((completions ?? []).slice(0, maxHelp ?? Infinity), width, g);
   const pending = layoutPending(pendingCount, width, g);
-  const keys: KeyHint[] =
-    to !== null
+  const completing = comps.length > 0;
+  const keys: KeyHint[] = completing
+    ? [
+        [g.enter, "send"],
+        ["tab", "complete"],
+        [g.move, "pick"],
+      ]
+    : to !== null
       ? [
           [g.enter, "answer"],
           ["esc", "cancel"],
@@ -65,7 +84,17 @@ export function Prompt({
         ];
   return (
     <Box flexDirection="column" width={width}>
-      {cmds.length > 0 && (
+      {completing && (
+        <Box flexDirection="column" paddingLeft={2}>
+          {comps.map((c, i) => (
+            <Text key={c.value} inverse={i === completionIndex}>
+              <Text color={C.fg}>{c.value}</Text>
+              <Text color={C.muted}>{c.label}</Text>
+            </Text>
+          ))}
+        </Box>
+      )}
+      {!completing && cmds.length > 0 && (
         <Box flexDirection="column" paddingLeft={2}>
           {cmds.map((c) => (
             <Text key={c.cmd}>
@@ -92,8 +121,21 @@ export function Prompt({
             @#{to}{" "}
           </Text>
         )}
-        <Text color={C.fg}>{value}</Text>
-        <Text color={busy ? C.muted : C.fg}>{busy ? g.ellipsis : g.bar}</Text>
+        {at < value.length ? (
+          <>
+            <Text color={C.fg}>{value.slice(0, at)}</Text>
+            {/* The block cursor sits on the character it would replace. */}
+            <Text color={C.fg} inverse>
+              {value.slice(at, at + 1)}
+            </Text>
+            <Text color={C.fg}>{value.slice(at + 1)}</Text>
+          </>
+        ) : (
+          <>
+            <Text color={C.fg}>{value}</Text>
+            <Text color={busy ? C.muted : C.fg}>{busy ? g.ellipsis : g.bar}</Text>
+          </>
+        )}
       </Box>
       <Box justifyContent="space-between">
         <Keys items={fitKeys(keys, width)} />

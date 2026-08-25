@@ -567,6 +567,28 @@ export function layoutHelp(
   });
 }
 
+/** `/model` suggestion rows: qualified model id first, display name after.
+ *  The id column is shared (the widest on offer, capped) so the names line up
+ *  the way `layoutHelp` lines its help texts up; the name gives way first. */
+export function layoutCompletions(
+  items: readonly { value: string; label: string }[],
+  width: number,
+  g: Glyphs = UNICODE,
+): { value: string; label: string; total: number }[] {
+  // The two columns of indent the composer paints before the list.
+  const avail = Math.max(0, Math.floor(width) - 2);
+  const longest = items.reduce((m, c) => Math.max(m, c.value.length), 0);
+  const valueW = Math.min(MODEL_ID_W, avail, longest);
+  return items.map((c) => {
+    const value = padEnd(fit(c.value, valueW, g.ellipsis), valueW);
+    const label = fit(c.label, Math.max(0, avail - valueW), g.ellipsis);
+    return { value, label, total: value.length + label.length };
+  });
+}
+
+/** Widest model id before the display name starts paying (`anthropic/claude-sonnet-4-6` fits). */
+const MODEL_ID_W = 34;
+
 /** The needs-you nudge above the prompt, as clipped segments. */
 export function layoutPending(count: number, width: number, g: Glyphs = UNICODE): string[] {
   const said = count === 1 ? "an agent is waiting on you" : `${count} agents are waiting on you`;

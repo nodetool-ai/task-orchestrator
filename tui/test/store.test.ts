@@ -9,6 +9,7 @@ import type {
   MessageRow,
   PersonaSummary,
   PlanSummary,
+  ProvidersResponse,
   RunConfigInput,
   RunDetail,
   RunIndexRow,
@@ -163,6 +164,8 @@ class StubClient implements OrchClient {
   inboxCalls = 0;
   personaRows: PersonaSummary[] = [];
   personasCalls = 0;
+  providerRows: ProvidersResponse | null = null;
+  providersCalls = 0;
   sent: Array<{ id: number; text: string }> = [];
   created: CreateRunInput[] = [];
   cancelled: number[] = [];
@@ -210,6 +213,11 @@ class StubClient implements OrchClient {
   async personas(): Promise<PersonaSummary[]> {
     this.personasCalls++;
     return this.personaRows;
+  }
+  async providers(): Promise<ProvidersResponse> {
+    this.providersCalls++;
+    if (this.providerRows === null) throw new Error("no catalog");
+    return this.providerRows;
   }
   releaseSend(): void {
     this.sendBlocked = false;
@@ -669,6 +677,73 @@ describe("store", () => {
     store.actions.ensurePersonas();
     await flush();
     expect(client.personasCalls).toBe(1);
+    store.stop();
+  });
+
+  it("flattens the provider catalog once and caches it", async () => {
+    const client = new StubClient();
+    client.providerRows = {
+      providers: [{ id: "anthropic", models: [] }],
+      backends: [
+        { id: "pi", providers: [{ id: "openai", models: [{ id: "gpt-6", name: "GPT-6" }] }] },
+        {
+          id: "claude",
+          providers: [
+            {
+              id: "anthropic",
+              models: [
+                { id: "claude-haiku-4-5", name: "Claude Haiku 4.5" },
+                { id: "claude-sonnet-5", name: "Claude Sonnet 5" },
+              ],
+            },
+          ],
+        },
+      ],
+      defaultBackend: "claude",
+    };
+    const { store } = boot(client);
+    await flush();
+    expect(client.providersCalls).toBe(0); // nothing fetches it until /model needs it
+
+    store.actions.ensureModels();
+    store.actions.ensureModels();
+    await flush();
+    expect(client.providersCalls).toBe(1);
+    // Every backend's models, qualified and sorted; the two catalogs do not overlap.
+    expect(store.getState().models.map((m) => m.value)).toEqual([
+      "anthropic/claude-haiku-4-5",
+      "anthropic/claude-sonnet-5",
+      "openai/gpt-6",
+    ]);
+
+    store.actions.ensureModels();
+    await flush();
+    expect(client.providersCalls).toBe(1);
+    store.stop();
+  });
+
+  it("keeps completion silent when the catalog never arrives", async () => {
+    const client = new StubClient();
+    const { store } = boot(client);
+    await flush();
+    const before = store.getState();
+
+    store.actions.ensureModels();
+    await flush();
+    expect(store.getState().models).toEqual([]);
+    // A missing catalog is a nicety, not an outage: status and error untouched.
+    expect(store.getState().status).toBe(before.status);
+    expect(store.getState().error).toBe(before.error);
+
+    // A failed fetch stays retryable.
+    client.providerRows = {
+      providers: [],
+      backends: [{ id: "claude", providers: [{ id: "anthropic", models: [{ id: "m", name: "M" }] }] }],
+      defaultBackend: "claude",
+    };
+    store.actions.ensureModels();
+    await flush();
+    expect(store.getState().models.map((m) => m.value)).toEqual(["anthropic/m"]);
     store.stop();
   });
 });

@@ -120,10 +120,14 @@ Full rationale in [PRD §6.3](../tui/PRD.md).
 |---|---|---|---|---|
 | `↵` | send (or confirm a pending cancel) | talk to the row | open the run | open |
 | `esc` | clear notice → chip → scrollback → input | back to chat | back to chat | close |
-| `tab` | address the next waiting agent | — | — | — |
-| `↑` `↓` | — | move the cursor | move the cursor | move the cursor |
+| `tab` | address the next waiting agent (`tab` completes a `/model` suggestion while one is up) | — | — | — |
+| `↑` `↓` | walk what you sent before (the `/model` suggestions while one is up) | move the cursor | move the cursor | move the cursor |
+| `←` `→` | move the cursor; with `⌥`, by word | — | — | — |
+| `home` `end` · `^a` `^e` | jump to the start or end of the line | — | — | — |
 | letters | type into the composer | — | — | fuzzy-filter the palette |
 | `pgup` `pgdn` | scroll the transcript | — | — | — |
+| `backspace` | erase behind the cursor; with `⌥` or as `^w`, the whole word | — | — | — |
+| `del` | erase at the cursor | — | — | — |
 | `^u` | clear the input | — | — | — |
 | `c` | — | cancel the subtree (confirm) | — | — |
 | `n` | — | new agent (hands back `/new `) | — | — |

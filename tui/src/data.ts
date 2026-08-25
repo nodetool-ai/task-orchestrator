@@ -11,6 +11,7 @@ import type {
   MessageRow,
   PersonaSummary,
   PlanSummary,
+  ProvidersResponse,
   RunDetail,
   RunIndexRow,
   RunInbox,
@@ -289,6 +290,22 @@ export const personaSummaries: PersonaSummary[] = personas.map((id) => ({
   budgetMaxSeconds: 1800,
 }));
 
+/** GET /api/providers, mirrored from lib/agent-backend/claude-backend.ts so
+ *  `/model` completes on the design surface exactly as it does live. */
+const ANTHROPIC_MODELS = [
+  { id: "claude-fable-5", name: "Claude Fable 5" },
+  { id: "claude-opus-4-8", name: "Claude Opus 4.8" },
+  { id: "claude-sonnet-5", name: "Claude Sonnet 5" },
+  { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+  { id: "claude-haiku-4-5", name: "Claude Haiku 4.5" },
+];
+
+export const providersResponse: ProvidersResponse = {
+  providers: [{ id: "anthropic", models: ANTHROPIC_MODELS }],
+  backends: [{ id: "claude", providers: [{ id: "anthropic", models: ANTHROPIC_MODELS }] }],
+  defaultBackend: "claude",
+};
+
 // ── the fake client ────────────────────────────────────────────────────────
 
 /**
@@ -361,6 +378,8 @@ export function createFakeClient(): OrchClient {
     plans: async () => planSummaries,
 
     personas: async () => personaSummaries,
+
+    providers: async () => providersResponse,
 
     // The mock has no agent behind it, so a sent message just lands in the
     // transcript the way the server's own `user_message` frame would.

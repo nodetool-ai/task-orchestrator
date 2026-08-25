@@ -8,6 +8,7 @@ import type {
   MessageRow,
   PersonaSummary,
   PlanSummary,
+  ProvidersResponse,
   RunConfigInput,
   RunDetail,
   RunIndexRow,
@@ -95,6 +96,8 @@ export interface OrchClient {
   tasks(): Promise<TaskSummary[]>;
   plans(): Promise<PlanSummary[]>;
   personas(): Promise<PersonaSummary[]>;
+  /** Model catalog per agent backend (`/model` completion). */
+  providers(): Promise<ProvidersResponse>;
   /** Post a human turn to a run and wait for the server to finish the turn. */
   sendMessage(id: number, text: string): Promise<void>;
   createRun(input: CreateRunInput): Promise<RunRow>;
@@ -289,6 +292,8 @@ export function createClient(cfg: Partial<ClientConfig> = {}): OrchClient {
 
     personas: () =>
       getJson<{ personas: PersonaSummary[] }>("/api/personas").then((r) => r.personas ?? []),
+
+    providers: () => getJson<ProvidersResponse>("/api/providers"),
 
     /**
      * POST /api/runs/:id/messages answers with an SSE stream rather than JSON:
