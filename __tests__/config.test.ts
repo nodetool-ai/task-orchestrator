@@ -13,7 +13,6 @@ import {
   runnerProviderKind,
   snapshot,
   truthy,
-  validateBoxConfig,
 } from "../lib/config";
 
 // Every var these tests touch, restored after each case.
@@ -38,16 +37,6 @@ const KEYS = [
   "TASK_ORCH_FLY_MEMORY_MB",
   "TASK_ORCH_FLY_POLL_MS",
   "TASK_ORCH_RUNNER_VOLUME_GB",
-  "BOX_API_KEY",
-  "TASK_ORCH_BOX_BASE_URL",
-  "TASK_ORCH_BOX_TEMPLATE_ID",
-  "TASK_ORCH_BOX_TEMPLATE_VERSION",
-  "TASK_ORCH_BOX_REPO_PATH",
-  "TASK_ORCH_BOX_IDLE_STOP_MS",
-  "TASK_ORCH_BOX_POLL_MS",
-  "TASK_ORCH_BOX_READY_TIMEOUT_MS",
-  "TASK_ORCH_BOX_RETENTION_MS",
-  "TASK_ORCH_BOX_MAX_ACTIVE",
   "AUTH_SECRET",
 ] as const;
 const saved: Record<string, string | undefined> = {};
@@ -109,9 +98,7 @@ describe("runnerProviderKind() — exact provider equality, not truthiness", () 
   it("only supported provider literals select remote providers", () => {
     set("TASK_ORCH_RUNNER", "fly");
     expect(runnerProviderKind()).toBe("fly");
-    set("TASK_ORCH_RUNNER", "box");
-    expect(runnerProviderKind()).toBe("box");
-    for (const v of [undefined, "", "local", "docker", "FLY", "BOX", "1", "true"]) {
+    for (const v of [undefined, "", "local", "docker", "box", "FLY", "1", "true"]) {
       set("TASK_ORCH_RUNNER", v);
       expect(runnerProviderKind()).toBe("local");
     }
@@ -121,14 +108,6 @@ describe("runnerProviderKind() — exact provider equality, not truthiness", () 
 describe("detachedRunsEnabled() — fly FORCES detached", () => {
   it("fly is detached even with the flag unset or explicitly off", () => {
     set("TASK_ORCH_RUNNER", "fly");
-    for (const v of [undefined, "0", "false"]) {
-      set("TASK_ORCH_DETACHED_RUNS", v);
-      expect(detachedRunsEnabled()).toBe(true);
-    }
-  });
-
-  it("box is detached even with the flag unset or explicitly off", () => {
-    set("TASK_ORCH_RUNNER", "box");
     for (const v of [undefined, "0", "false"]) {
       set("TASK_ORCH_DETACHED_RUNS", v);
       expect(detachedRunsEnabled()).toBe(true);
@@ -147,11 +126,9 @@ describe("detachedRunsEnabled() — fly FORCES detached", () => {
 });
 
 describe("nestedDispatchMode() — isolate default on managed remote providers", () => {
-  it("defaults to isolate on fly or box, inline locally", () => {
+  it("defaults to isolate on fly, inline locally", () => {
     set("TASK_ORCH_NESTED_DISPATCH", undefined);
     set("TASK_ORCH_RUNNER", "fly");
-    expect(nestedDispatchMode()).toBe("isolate");
-    set("TASK_ORCH_RUNNER", "box");
     expect(nestedDispatchMode()).toBe("isolate");
     set("TASK_ORCH_RUNNER", "local");
     expect(nestedDispatchMode()).toBe("inline");
@@ -251,70 +228,3 @@ describe("snapshot() — frozen plain-value dump", () => {
   });
 });
 
-describe("Box configuration", () => {
-  it("is inert when Box is not selected", () => {
-    set("TASK_ORCH_RUNNER", "local");
-    expect(() => validateBoxConfig()).not.toThrow();
-  });
-
-  it("accepts Box when the account credential and template are configured", () => {
-    // Box worker-channel ingress is the ascii.dev `host` proxy (discovered per
-    // run); validateBoxConfig only checks the account credential and the fork
-    // template up front.
-    set("TASK_ORCH_RUNNER", "box");
-    set("BOX_API_KEY", "box-api-key-secret");
-    set("TASK_ORCH_BOX_TEMPLATE_ID", "bx_template_123");
-    expect(() => validateBoxConfig()).not.toThrow();
-  });
-
-  it("rejects Box without an API key", () => {
-    set("TASK_ORCH_RUNNER", "box");
-    set("TASK_ORCH_BOX_TEMPLATE_ID", "bx_template_123");
-    expect(() => validateBoxConfig()).toThrow(/BOX_API_KEY is required/);
-  });
-
-  it("accepts Box with only an API key (app-managed templates are the default)", () => {
-    set("TASK_ORCH_RUNNER", "box");
-    set("BOX_API_KEY", "box-api-key-secret");
-    expect(() => validateBoxConfig()).not.toThrow();
-  });
-
-  it("reads Box settings lazily with the documented defaults", () => {
-    expect(config.box.baseUrl).toBe("https://ascii.dev/api/box/v1");
-    expect(config.box.idleStopMs).toBe(30_000);
-    expect(config.box.pollMs).toBe(5_000);
-    expect(config.box.readyTimeoutMs).toBe(120_000);
-    expect(config.box.retentionMs).toBe(30 * 24 * 60 * 60_000);
-    expect(config.box.maxActive).toBe(0);
-
-    set("TASK_ORCH_BOX_REPO_PATH", "/home/user/repository");
-    expect(config.box.repoPath).toBe("/home/user/repository");
-    set("TASK_ORCH_BOX_REPO_PATH", "/home/user/other-repository");
-    expect(config.box.repoPath).toBe("/home/user/other-repository");
-  });
-
-  it("redacts the Box API key from snapshots", () => {
-    set("BOX_API_KEY", "box-api-key-secret");
-    expect(snapshot().box.apiKey).toBe("[redacted]");
-    expect(JSON.stringify(snapshot())).not.toContain("box-api-key-secret");
-  });
-});
-
-describe("box app-managed template config", () => {
-  it("exposes defaults for the template build settings", () => {
-    expect(config.box.workerRepoUrl).toBe("https://github.com/nodetool-ai/task-orchestrator.git");
-    expect(config.box.workerRepoRef).toBe("main");
-    expect(config.box.agentRepoUrl).toBe("https://github.com/nodetool-ai/nodetool.git");
-    expect(config.box.agentRepo).toBe("nodetool-ai/nodetool");
-    expect(config.box.buildStepTimeoutSeconds).toBe(900);
-  });
-
-  it("validateBoxConfig requires only BOX_API_KEY (app-managed is the default)", () => {
-    process.env.TASK_ORCH_RUNNER = "box";
-    delete process.env.TASK_ORCH_BOX_TEMPLATE_ID;
-    delete process.env.BOX_API_KEY;
-    expect(() => validateBoxConfig()).toThrow(/BOX_API_KEY/);
-    process.env.BOX_API_KEY = "test-key";
-    expect(() => validateBoxConfig()).not.toThrow(); // no template id or base id needed
-  });
-});

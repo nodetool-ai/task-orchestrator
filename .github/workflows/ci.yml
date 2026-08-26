@@ -5,9 +5,6 @@ name: CI
 #
 #   quality (typecheck + full vitest)          ← the gate everything waits on
 #     └─► server / runner deploys              ← push to main + code changed
-#           └─► warm-box-template              ← pre-build the box template for
-#                                                the freshly deployed SHA so no
-#                                                first dispatch waits ~15 min
 #
 # quality is also the check the GitHub-driven task lifecycle keys off
 # (testing -> passing/failing) and the gate `gh pr merge --auto` waits on.
@@ -176,8 +173,7 @@ jobs:
   # ── Standalone worker bundle artifact ─────────────────────────────────────
   # Builds the single-file worker (dist/run-worker.standalone.js) and publishes
   # it as a per-SHA workflow artifact: bundle + sha256 + a small manifest naming
-  # the worker SHA it was built from. Today the Box template build compiles the
-  # same bundle on the Box itself; this artifact exists so the future
+  # the worker SHA it was built from. This artifact exists so a future
   # fetch-at-launch step (spec §6, 2026-07-18-standalone-worker-bundle-design)
   # has a published, checksummed artifact to consume. Not on the deploy path —
   # a failure here blocks nothing.
@@ -222,38 +218,3 @@ jobs:
             dist/run-worker.standalone.js.sha256
             dist/worker-bundle.json
 
-  # Pre-build the box template ("environment") for the SHA that just went green
-  # and deployed, so the first dispatch never waits out the ~15-minute cold
-  # build. Requires a TASK_ORCH_API_TOKEN repo secret (create one at /tokens on
-  # the control plane); skips politely when the secret is absent or the
-  # deployment has no Box configured (503).
-  warm-box-template:
-    name: Warm box template
-    runs-on: ubuntu-latest
-    needs: [server]
-    steps:
-      - name: Kick app-managed box template build
-        env:
-          URL: ${{ vars.TASK_ORCH_URL || 'https://tasks.nodetool.ai' }}
-          TOKEN: ${{ secrets.TASK_ORCH_API_TOKEN }}
-        run: |
-          if [ -z "$TOKEN" ]; then
-            echo "TASK_ORCH_API_TOKEN secret not set; skipping template warm."
-            exit 0
-          fi
-          # The server restarts right after deploy; retry while it comes up.
-          for i in $(seq 1 20); do
-            code=$(curl -sS -o /tmp/resp.json -w "%{http_code}" -X POST "$URL/api/environments/build" \
-              -H "Authorization: Bearer $TOKEN" -H "content-type: application/json" \
-              -d '{"provider":"box"}') || code=000
-            echo "attempt $i -> HTTP $code: $(head -c 300 /tmp/resp.json 2>/dev/null)"
-            case "$code" in
-              202) echo "template build kicked for the deployed SHA"; exit 0 ;;
-              409) echo "already building/ready for this SHA — nothing to do"; exit 0 ;;
-              503) echo "Box not configured on this deployment — skipping"; exit 0 ;;
-              400|401) echo "warm request rejected"; exit 1 ;;
-              *) sleep 15 ;;
-            esac
-          done
-          echo "server did not accept the warm request in time"
-          exit 1

@@ -3,8 +3,6 @@ import { auth } from "@/auth";
 import * as runs from "@/lib/runs";
 import * as repo from "@/lib/repo";
 import { RunView } from "@/components/runs/run-view";
-import { loadTemplateBuildState } from "@/lib/runner/box-template-state";
-import { loadBoxBootState } from "@/lib/runner/box-boot-state";
 
 export const dynamic = "force-dynamic";
 
@@ -25,12 +23,6 @@ export default async function RunPage({
   // Seed the read-only SSE tail so it streams only rows written after this
   // server render — the conversation above is already the snapshot.
   const initialCursor = await runs.streamCursor(runId);
-  // Seed the box-template build stepper from persisted events so it renders on
-  // load for a run opened mid-build (the SSE tail only forwards later rows).
-  const initialTemplateBuild = await loadTemplateBuildState(runId);
-  // Seed the box boot / worker-startup stepper the same way, so a run opened
-  // mid-boot shows accurate progress instead of the coarse status guess.
-  const initialBoxBoot = await loadBoxBootState(runId);
   const repositories = (await repo.listRepositories()).map((r) => ({
     id: r.id,
     name: r.name,
@@ -85,8 +77,6 @@ export default async function RunPage({
         run={run}
         initialMessages={messages}
         initialCursor={initialCursor}
-        initialTemplateBuild={initialTemplateBuild}
-        initialBoxBoot={initialBoxBoot}
         live={runs.isLive(runId)}
         userEmail={session?.user?.email ?? null}
         repositories={repositories}

@@ -1,15 +1,15 @@
 "use client";
 
-// The environments list, grouped by provider (box / docker / fly). Box and
-// docker get an in-app build button (POST /api/environments/build); fly is
-// info-only with the copyable build/push command from docs/fly-deployment.md.
+// The environments list, grouped by provider (docker / fly). Docker gets an
+// in-app build button (POST /api/environments/build); fly is info-only with
+// the copyable build/push command from docs/fly-deployment.md.
 // While any row is `building` the list polls via router.refresh() every 5s so
 // step `detail` and the eventual ready/failed transition appear without a
 // manual reload.
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Box, Container, Cloud } from "lucide-react";
+import { Container, Cloud } from "lucide-react";
 
 import { cn, relativeDate } from "@/lib/utils";
 import { Spinner } from "@/components/ui/spinner";
@@ -27,18 +27,13 @@ export interface EnvironmentRowView {
   readyAt: string | null;
 }
 
-const PROVIDER_ORDER = ["box", "docker", "fly"] as const;
+const PROVIDER_ORDER = ["docker", "fly"] as const;
 type Provider = (typeof PROVIDER_ORDER)[number];
 
 const PROVIDER_META: Record<
   Provider,
-  { label: string; blurb: string; icon: typeof Box }
+  { label: string; blurb: string; icon: typeof Container }
 > = {
-  box: {
-    label: "Box",
-    blurb: "Archived template box snapshots — run boxes fork from the ready one.",
-    icon: Box,
-  },
   docker: {
     label: "Docker",
     blurb: "The worker image built from Dockerfile.worker on this host.",
@@ -193,13 +188,13 @@ function BuildButton({
   building,
   onRefresh,
 }: {
-  provider: "box" | "docker";
+  provider: "docker";
   building: boolean;
   onRefresh: () => void;
 }) {
   const [pending, setPending] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const label = provider === "box" ? "Build template" : "Build image";
+  const label = "Build image";
 
   async function build() {
     setPending(true);

@@ -28,15 +28,13 @@ single Postgres database.
 - **[SCHEMA.md](SCHEMA.md)** — DB schema, state machines, REST surface
 - **[AGENTS.md](AGENTS.md)** — workflow contract for humans and agents
 - **[docs/runners/](docs/runners/README.md)** — how runs actually execute:
-  workers, the control-plane split, and the Local / Fly / Box integrations
+  workers, the control-plane split, and the Local / Fly integrations
   (start here for architecture)
 - **[docs/mcp-server.md](docs/mcp-server.md)** — the hosted MCP server
   (`POST /api/mcp`): production setup, the bearer-token auth model, and
   client onboarding from Settings → API tokens
 - **[docs/fly-deployment.md](docs/fly-deployment.md)** — one-command deploy of the
   whole app (server + agent runners + database) to Fly.io
-- **[docs/box-deployment.md](docs/box-deployment.md)** — configure and operate
-  Box managed runners, templates, snapshots, capacity, and rollback
 - **[docs/test-deployment.md](docs/test-deployment.md)** — full containerized
   stack (Postgres + server + Docker workers) for validating the run → PR loop
 - **[docs/tui.md](docs/tui.md)** — `orch`, the terminal cockpit: when to use

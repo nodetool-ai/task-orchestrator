@@ -9,7 +9,6 @@ pages go deeper:
 
 - [Local / Docker](docker-local.md) — runs on your machine or one host
 - [Fly.io](fly.md) — one micro-VM per run, in the cloud
-- [Box](box.md) — one managed remote box per run, with an app-built template
 
 ---
 
@@ -74,9 +73,8 @@ variable:
 | --- | --- | --- |
 | unset / `local` / anything else | **local** | a process or Docker container on the same host |
 | `fly` | **Fly** | an ephemeral Fly Machine (micro-VM) + volume |
-| `box` | **Box** | a managed remote box forked from a template snapshot |
 
-The value is matched by exact equality, so anything that isn't `fly` or `box`
+The value is matched by exact equality, so anything that isn't `fly`
 (including the empty string) resolves to `local` — local is the default and the
 catch-all (`lib/config.ts`, `runnerProviderKind()`).
 
@@ -86,7 +84,7 @@ Every provider implements the same small interface
 | Method | Purpose |
 | --- | --- |
 | `admit(input)` | *May we start a run right now?* A capacity decision made **before** anything is provisioned. Returns `admit`, `defer`, `never-fits`, or `reject`. |
-| `create(input)` | Provision and start the worker for an already-claimed run. Returns a handle (container name / Machine id / box id) or `null` on failure. |
+| `create(input)` | Provision and start the worker for an already-claimed run. Returns a handle (container name / Machine id) or `null` on failure. |
 | `stop(handle)` | Best-effort hard stop — the fallback when a run is cancelled. |
 | `sweep()` | Reconcile the database's picture of runs against the *real* state of the runners (catch deaths the live watcher missed). |
 | `startMonitor()` | Start the process-wide watcher that reacts to runner lifecycle events. |
@@ -98,7 +96,7 @@ is written once and works for all three providers. The differences live behind
 
 Each running worker gets one row in the **`runner_instances`** table (keyed by
 `run_id` — one row per run). That row records the provider, the provider-scoped
-handle (container name, Machine id, box id), the runner state, the channel
+handle (container name, Machine id), the runner state, the channel
 endpoint the control plane dials, and provider-specific bookkeeping. It's how a
 *restarted* control plane rediscovers and reconnects to workers that are still
 alive.
@@ -188,7 +186,6 @@ that differs between them:
 | local (host process) | a Unix domain socket | `ws+unix://` to that socket path |
 | local (Docker) | TCP `:8787` in the container | by container name (compose network) or private bridge IP |
 | Fly | TCP `:8787` on the Machine | the Machine's private 6PN IPv6 address |
-| Box | TCP `:8787` inside the box | a token-gated public tunnel URL (the ascii.dev `host` proxy) |
 
 The resolved endpoint is stored on `runner_instances.channel_endpoint` so the
 control plane can reconnect after a restart. Full protocol design:
@@ -215,11 +212,10 @@ single in-process promise chain (`withAdmissionLock`). Inside it:
 - The provider's admission gate runs. Each provider measures capacity
   differently — this is the other big provider difference:
   - **local** measures free host RAM (does one more worker fit in memory?);
-  - **Fly** counts active Machines against `TASK_ORCH_MAX_MACHINES`;
-  - **Box** probes the remote account's capacity.
+  - **Fly** counts active Machines against `TASK_ORCH_MAX_MACHINES`.
 - If the answer is `defer`, the run is parked back in `pending` with a
-  human-readable `pending_reason` (e.g. *"Building box template…"*,
-  *"Box active-runner capacity exhausted"*), and the pump will retry it later.
+  human-readable `pending_reason` (e.g. *"Waiting for runner capacity."*),
+  and the pump will retry it later.
 - If the answer is `admit`, the run is **atomically claimed**: a guarded
   database UPDATE flips it to `preparing` and stamps a unique ownership token
   (`worker_scope`). Only one dispatch can win this UPDATE; the loser sees
@@ -253,14 +249,14 @@ never clobbered.
 
 ## 6. Choosing an integration
 
-| | Local (host / Docker) | Fly | Box |
-| --- | --- | --- | --- |
-| **A worker is** | a process or container on one host | an ephemeral micro-VM + volume | a managed remote box + snapshot |
-| **Isolation** | shared host / container cgroup | full VM per run | full remote box per run |
-| **Capacity gate** | free host RAM | Machine count | remote account limit |
-| **State between turns** | host filesystem / repo cache | Fly volume (survives suspend) | box snapshot (checkpoint/resume) |
-| **Setup** | Docker (or nothing) | Fly app + token + images | one API key; template built by the app |
-| **Best for** | local dev, single-box deploys | horizontal cloud scale | managed remote runs, zero infra |
+| | Local (host / Docker) | Fly |
+| --- | --- | --- |
+| **A worker is** | a process or container on one host | an ephemeral micro-VM + volume |
+| **Isolation** | shared host / container cgroup | full VM per run |
+| **Capacity gate** | free host RAM | Machine count |
+| **State between turns** | host filesystem / repo cache | Fly volume (survives suspend) |
+| **Setup** | Docker (or nothing) | Fly app + token + images |
+| **Best for** | local dev, single-box deploys | horizontal cloud scale |
 
 Rough guidance:
 
@@ -270,18 +266,15 @@ Rough guidance:
 - **Fly** — you want each run in its own VM and to scale horizontally across a
   cloud without managing a host. See [fly-deployment.md](../fly-deployment.md)
   for the full operator guide.
-- **Box** — you want managed remote runs with the least infrastructure: a single
-  `BOX_API_KEY`, and the app builds and maintains the run template for you.
 
 ## 7. Environments
 
 Whatever the integration, a run launches from an **execution artifact** — a
-Docker worker image, a Fly runner image, or a Box template snapshot — built for
-a specific worker build SHA. These are first-class **environments**: the
-`/environments` page lists them grouped by provider and versioned by SHA, and
-box/docker builds can be triggered in-app (fly images are built out-of-app; the
-page shows the push command). The shared `environments` registry table backs all
-three and replaced the box-only `box_templates` table in migration 0021.
+Docker worker image or a Fly runner image — built for a specific worker build
+SHA. These are first-class **environments**: the `/environments` page lists
+them grouped by provider and versioned by SHA, and docker builds can be
+triggered in-app (fly images are built out-of-app; the page shows the push
+command). The shared `environments` registry table backs both.
 
 ---
 
@@ -289,8 +282,7 @@ three and replaced the box-only `box_templates` table in migration 0021.
 
 - [Local / Docker integration](docker-local.md)
 - [Fly.io integration](fly.md)
-- [Box integration](box.md)
 - [Worker WebSocket protocol](../worker-websocket-protocol.md) — the normative channel design
-- [Fly deployment guide](../fly-deployment.md) · [Box operations guide](../box-deployment.md) · [Local Docker stack](../test-deployment.md)
+- [Fly deployment guide](../fly-deployment.md) · [Local Docker stack](../test-deployment.md)
 - [Agent event system](../agent-events.md) — how parked runs are woken by events
 - [Nested machine dispatch](../nested-machine-dispatch.md) — worker-spawned child runs

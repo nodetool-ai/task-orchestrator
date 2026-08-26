@@ -17,17 +17,6 @@ describe("getRunnerProvider", () => {
     expect(getRunnerProvider().kind).toBe("fly");
   });
 
-  it("selects the inert Box provider without performing lifecycle work", () => {
-    vi.stubEnv("TASK_ORCH_RUNNER", "box");
-    expect(getRunnerProvider().kind).toBe("box");
-  });
-});
-
-describe("RunnerRef", () => {
-  it("accepts a Box handle", () => {
-    const ref: RunnerRef = { runId: 1, handle: "box_123", provider: "box" };
-    expect(ref.provider).toBe("box");
-  });
 });
 
 describe("LocalRunnerProvider", () => {

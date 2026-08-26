@@ -1,6 +1,6 @@
-// The worker build SHA that identifies which worker code a Box template must
-// contain. A template is built by cloning the worker repo REMOTE and checking
-// out this SHA, so the SHA must exist on the remote — the control plane's local
+// The worker build SHA that identifies which worker code an execution
+// artifact must contain. Artifacts are keyed by the tip of the pushed worker
+// repo ref, so the SHA must exist on the remote — the control plane's local
 // HEAD (which may be an unpushed dev commit) is NOT usable. Resolution order:
 //   1. TASK_ORCH_WORKER_SHA override (deployed control planes can be git-less).
 //   2. `git ls-remote <workerRepoUrl> <workerRepoRef>` — the tip of the pushed
@@ -32,8 +32,8 @@ export async function workerBuildSha(opts: { exec?: Exec } = {}): Promise<string
   }
   if (cached) return cached;
 
-  const url = config.box.workerRepoUrl;
-  const ref = config.box.workerRepoRef;
+  const url = config.worker.repoUrl;
+  const ref = config.worker.repoRef;
   try {
     // ls-remote prints "<sha>\t<ref>" for each matching ref; the tip of the
     // requested ref is the first line's SHA.
@@ -48,14 +48,14 @@ export async function workerBuildSha(opts: { exec?: Exec } = {}): Promise<string
     throw new Error(
       `Cannot resolve the worker build SHA from ${url} ${ref} ` +
         `(${error instanceof Error ? error.message : String(error)}). ` +
-        "Push the worker ref, set TASK_ORCH_BOX_WORKER_REPO_REF, or pin TASK_ORCH_WORKER_SHA."
+        "Push the worker ref, set TASK_ORCH_WORKER_REPO_REF, or pin TASK_ORCH_WORKER_SHA."
     );
   }
 }
 
 /**
  * SHA that identifies exactly what a host Docker build ships. Unlike
- * {@link workerBuildSha} (the tip of the pushed REMOTE box ref), the docker
+ * {@link workerBuildSha} (the tip of the pushed REMOTE worker ref), the docker
  * builder tars `process.cwd()`, so its artifact's identity is the LOCAL commit
  * the context is checked out at — not the remote ref, which can differ. Using
  * the remote ref would let the registry claim an image contains SHA X while it

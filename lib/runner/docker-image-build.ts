@@ -1,8 +1,8 @@
 // lib/runner/docker-image-build.ts
 //
 // Build the worker Docker image (Dockerfile.worker) on the host via dockerode,
-// recording progress and outcome on an environments row. Fire-and-forget like
-// the box template builder: never throws.
+// recording progress and outcome on an environments row. Fire-and-forget:
+// never throws.
 import { config } from "../config";
 import { markEnvironmentFailed, markEnvironmentReady, setEnvironmentDetail } from "./environments";
 

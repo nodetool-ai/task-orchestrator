@@ -17,8 +17,7 @@ COPY . .
 # enough to compile — no database is contacted during the build.
 ENV DATABASE_URL=postgres://build:build@localhost:5432/build
 RUN npm run build
-# The standalone worker bundle served by GET /api/worker-bundle to
-# blank-provisioned Box runners. Version-locked to this image by construction.
+# The standalone worker bundle, version-locked to this image by construction.
 # There is no .git in this build context, so the build script's git-HEAD
 # resolution can't fire here — GIT_SHA is what bakes the sha sidecar file.
 ARG GIT_SHA

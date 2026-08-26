@@ -120,7 +120,7 @@ or feature flag. What production does need:
    `dynamic = "force-dynamic"` — bcrypt and the DB driver rule out the Edge
    runtime, and responses must never be cached.
 
-Deployment guides: [Fly](fly-deployment.md) · [Box](box-deployment.md) ·
+Deployment guides: [Fly](fly-deployment.md) ·
 [runners](runners/README.md).
 
 ### Operating notes

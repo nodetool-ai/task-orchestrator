@@ -155,7 +155,7 @@ export { schema };
 
 /**
  * Close an already-open database client without constructing one just to shut
- * it down. CLI-only Box operations do not touch Postgres; calling the `sql`
+ * it down. Some CLI-only operations do not touch Postgres; calling the `sql`
  * proxy's `end()` in that case would instead start a background connection and
  * can produce a misleading connection error while the real command is still
  * polling a remote provider.

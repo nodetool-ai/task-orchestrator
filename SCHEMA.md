@@ -103,7 +103,7 @@ For chat, `agent_messages` is the UI/streaming projection of the conversation.
 
 Nearly every run — chats, plan executors (goal=`<execute>`), implement, and
 review — executes in an out-of-process **worker** (a detached local process,
-Docker container, or Fly/Box Machine). The worker drives its model turns over the
+Docker container, or Fly Machine). The worker drives its model turns over the
 WebSocket channel and resumes conversation context from its backend's SDK
 session, so no run holds the control-plane event loop or its heap.
 

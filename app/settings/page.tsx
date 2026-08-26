@@ -154,8 +154,8 @@ export default async function SettingsPage({
               <h2 className="text-base font-semibold tracking-tight">Environments</h2>
               <p className="text-sm text-muted-foreground">
                 The execution artifact each runner provider launches from — a
-                Docker image, a Fly runner image, or a Box template snapshot —
-                versioned by worker build SHA.
+                Docker image or a Fly runner image — versioned by worker build
+                SHA.
               </p>
             </header>
             <EnvironmentsView
@@ -164,7 +164,7 @@ export default async function SettingsPage({
                 provider: r.provider,
                 workerSha: r.workerSha,
                 state: r.state,
-                artifact: r.boxId ?? r.image ?? null,
+                artifact: r.image ?? null,
                 detail: r.detail,
                 error: r.error,
                 createdAt: r.createdAt.toISOString(),

@@ -156,8 +156,8 @@ refreshes (~20s). Two reapers catch a dead container:
 ## 4. The host-memory admission gate
 
 Local is the only provider that admits by measuring **physical host RAM** — it's
-asking "does one more worker fit on this box?". (Fly counts Machines; Box asks
-its remote account.)
+asking "does one more worker fit on this box?". (Fly counts Machines
+instead.)
 
 `readHostMemory()` reads `/proc/meminfo` for `MemAvailable`/`MemTotal`. Because
 Docker doesn't namespace memory, those figures are host-wide even from inside
@@ -185,7 +185,7 @@ host-process-only or lightweight-only deployment skips it.
 
 | Variable | Effect |
 | --- | --- |
-| `TASK_ORCH_DETACHED_RUNS` | `1` runs turns out-of-process (real workers). Forced on for fly/box. |
+| `TASK_ORCH_DETACHED_RUNS` | `1` runs turns out-of-process (real workers). Forced on for fly. |
 | `TASK_ORCH_WORKER_IMAGE` | **The Docker switch.** Set → container workers; unset → host-process workers. Also arms the Docker monitor, sweep, and memory gate. |
 | `TASK_ORCH_CLAUDE_HOME_HOST` | Host `~/.claude` mounted into each worker so Claude session/resume survives ephemeral containers. |
 | `TASK_ORCH_REPO_CACHE_HOST_VOLUME` | Named Docker volume of bare repo mirrors, mounted at `/repo-cache`, so workers clone from a local mirror instead of hitting GitHub each run. |

@@ -1,19 +1,14 @@
-// Kick a manual environment build from the /environments page — or from CI,
-// which warms the box template for a freshly-green main (bearer API token).
-// Single-flight per (provider, worker SHA) via the environments live index; a
-// manual build deliberately bypasses the failed-build cooldown (an explicit
-// human/CI retry).
+// Kick a manual environment build from the /environments page — or from CI
+// (bearer API token). Single-flight per (provider, worker SHA) via the
+// environments live index.
 import { NextResponse } from "next/server";
 import { and, eq, inArray } from "drizzle-orm";
 import { auth } from "@/auth";
 import { db } from "@/db";
 import { environments } from "@/db/schema";
-import { config } from "@/lib/config";
 import { verifyToken } from "@/lib/api-tokens";
-import { dockerContextSha, workerBuildSha } from "@/lib/runner/worker-sha";
-import { runBoxTemplateBuild } from "@/lib/runner/box-template-builder";
+import { dockerContextSha } from "@/lib/runner/worker-sha";
 import { runDockerImageBuild } from "@/lib/runner/docker-image-build";
-import { makeBoxClient } from "@/lib/runner/box-client";
 
 async function authorized(req: Request): Promise<boolean> {
   const bearer = req.headers.get("authorization");
@@ -30,21 +25,15 @@ export async function POST(req: Request): Promise<NextResponse> {
 
   const body = (await req.json().catch(() => ({}))) as { provider?: string };
   const provider = body.provider;
-  if (provider !== "box" && provider !== "docker") {
-    return NextResponse.json({ error: "provider must be 'box' or 'docker' (fly builds are not in-app)" }, { status: 400 });
-  }
-  if (provider === "box" && !config.box.apiKey) {
-    // A CI warm hitting a control plane without Box configured must fail
-    // clearly instead of littering failed environment rows.
-    return NextResponse.json({ error: "BOX_API_KEY is not configured on this deployment." }, { status: 503 });
+  if (provider !== "docker") {
+    return NextResponse.json({ error: "provider must be 'docker' (fly builds are not in-app)" }, { status: 400 });
   }
 
-  // Box builds clone the pushed remote ref; the docker host build tars the
-  // local checkout. Each artifact's identity is the SHA of what it actually
-  // ships, so the row is keyed by the provider-appropriate resolver.
+  // The docker host build tars the local checkout, so the artifact's identity
+  // is the SHA of what it actually ships.
   let sha: string;
   try {
-    sha = provider === "docker" ? await dockerContextSha() : await workerBuildSha();
+    sha = await dockerContextSha();
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 503 });
   }
@@ -67,15 +56,9 @@ export async function POST(req: Request): Promise<NextResponse> {
 
   try {
     const [row] = await db.insert(environments).values({ provider, workerSha: sha }).returning();
-    if (provider === "box") {
-      void runBoxTemplateBuild(makeBoxClient(), { registryId: row.id, runId: null, workerSha: sha }).catch((err) => {
-        console.error(`manual box environment build ${row.id} crashed:`, err);
-      });
-    } else {
-      void runDockerImageBuild({ environmentId: row.id }).catch((err) => {
-        console.error(`manual docker environment build ${row.id} crashed:`, err);
-      });
-    }
+    void runDockerImageBuild({ environmentId: row.id }).catch((err) => {
+      console.error(`manual docker environment build ${row.id} crashed:`, err);
+    });
     return NextResponse.json({ id: row.id, state: "building" }, { status: 202 });
   } catch {
     return NextResponse.json({ error: "A build is already in progress." }, { status: 409 }); // insert race

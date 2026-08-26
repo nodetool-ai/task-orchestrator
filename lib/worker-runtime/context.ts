@@ -356,8 +356,8 @@ async function runModelTurn(
   // process.cwd() — a local worker's cwd is the ORCHESTRATOR checkout, and an
   // agent turned loose there is exploring the wrong codebase.
   //
-  // GUARD (box runs 26/27): both snapshot paths are CONTROL-PLANE paths. On a
-  // remote worker (box/fly/docker) they may not exist here; spawning from a
+  // GUARD: both snapshot paths are CONTROL-PLANE paths. On a remote worker
+  // (fly/docker) they may not exist here; spawning from a
   // missing cwd surfaces as the SDK's misleading "native binary failed to
   // launch / libc mismatch" error. Validate before any backend spawns so the
   // run fails with the real cause instead.

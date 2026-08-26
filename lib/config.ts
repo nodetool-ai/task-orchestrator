@@ -87,7 +87,7 @@ function strEnv(key: string, dflt?: string): string | undefined {
   return v == null || v === "" ? dflt : v;
 }
 
-export type RunnerProviderKind = "local" | "fly" | "box";
+export type RunnerProviderKind = "local" | "fly";
 export type NestedDispatchMode = "isolate" | "inline";
 
 // ── Derived values (were duplicated across modules) ────────────────────────
@@ -99,8 +99,6 @@ export function runnerProviderKind(): RunnerProviderKind {
   switch (process.env.TASK_ORCH_RUNNER) {
     case "fly":
       return "fly";
-    case "box":
-      return "box";
     default:
       return "local";
   }
@@ -119,7 +117,7 @@ export function insideWorker(): boolean {
  * True when user turns run out-of-process (detached worker per turn).
  * INTERACTION: managed remote providers FORCE this on — their deployments are
  * detached by construction — so an unset/"0" TASK_ORCH_DETACHED_RUNS is
- * overridden to true whenever runnerProviderKind() is "fly" or "box". Local
+ * overridden to true whenever runnerProviderKind() is "fly". Local
  * execution uses the plain flag.
  */
 export function detachedRunsEnabled(): boolean {
@@ -156,7 +154,7 @@ export function nestedDispatchMode(): NestedDispatchMode {
 export const config = Object.freeze({
   /** Deployment / execution backend. */
   deployment: Object.freeze({
-    /** "local" | "fly" | "box". @see runnerProviderKind */
+    /** "local" | "fly". @see runnerProviderKind */
     get runnerKind(): RunnerProviderKind {
       return runnerProviderKind();
     },
@@ -210,6 +208,14 @@ export const config = Object.freeze({
     get nestedDispatch(): NestedDispatchMode {
       return nestedDispatchMode();
     },
+    /** Remote repo + ref the worker build SHA resolves from (git ls-remote);
+     *  identifies which worker code an execution artifact must contain. */
+    get repoUrl(): string {
+      return strEnv("TASK_ORCH_WORKER_REPO_URL", "https://github.com/nodetool-ai/task-orchestrator.git") as string;
+    },
+    get repoRef(): string {
+      return strEnv("TASK_ORCH_WORKER_REPO_REF", "main") as string;
+    },
     get channelInstanceId(): string | undefined {
       return strEnv("TASK_ORCH_WORKER_INSTANCE_ID");
     },
@@ -251,7 +257,7 @@ export const config = Object.freeze({
     get debugLog(): boolean {
       return strEnv("TASK_ORCH_LOG_LEVEL")?.toLowerCase() === "debug";
     },
-    /** Existing checkout supplied by a managed runner snapshot (for example Box). */
+    /** Existing checkout supplied by a managed runner snapshot. */
     get runnerRepoPath(): string | undefined {
       return strEnv("TASK_ORCH_RUNNER_REPO_PATH");
     },
@@ -319,8 +325,7 @@ export const config = Object.freeze({
     },
     /** Absolute path to an external Claude Code executable for the Claude
      *  backend to drive instead of the SDK's bundled platform binary.
-     *  Explicit-only — never probed from PATH. Set by the Box worker env
-     *  (the Box image ships /usr/local/bin/claude); unset everywhere else. */
+     *  Explicit-only — never probed from PATH. */
     get claudeBinary(): string | undefined {
       return strEnv("TASK_ORCH_CLAUDE_BINARY");
     },
@@ -456,84 +461,6 @@ export const config = Object.freeze({
     },
   }),
 
-  /** Box managed-runner settings. These remain inert until TASK_ORCH_RUNNER=box. */
-  box: Object.freeze({
-    /** Control-plane credential. Deliberately excluded from snapshot(). */
-    get apiKey(): string | undefined {
-      return strEnv("BOX_API_KEY");
-    },
-    get baseUrl(): string {
-      return strEnv("TASK_ORCH_BOX_BASE_URL", "https://ascii.dev/api/box/v1");
-    },
-    get templateId(): string | undefined {
-      return strEnv("TASK_ORCH_BOX_TEMPLATE_ID");
-    },
-    get templateVersion(): string | undefined {
-      return strEnv("TASK_ORCH_BOX_TEMPLATE_VERSION");
-    },
-    get repoPath(): string | undefined {
-      return strEnv("TASK_ORCH_BOX_REPO_PATH");
-    },
-    /** How a Box run is provisioned: "blank" (default — create a blank box,
-     *  download the worker bundle from the control plane, clone the run's
-     *  repo) or "template" (legacy — fork a pre-built template snapshot). */
-    get provisionMode(): "blank" | "template" {
-      const raw = strEnv("TASK_ORCH_BOX_PROVISION", "blank").trim().toLowerCase();
-      if (raw === "blank" || raw === "template") return raw;
-      throw new Error(`TASK_ORCH_BOX_PROVISION must be 'blank' or 'template', got '${raw}'.`);
-    },
-    /** Overrides where the worker bundle to upload is read from (tests point
-     *  it at fixtures). Default: dist/run-worker.standalone.js under cwd. */
-    get bundlePath(): string | undefined {
-      return strEnv("TASK_ORCH_BUNDLE_PATH");
-    },
-    /** Budget for the blank-box provision command (assemble + clone + manifest). */
-    get provisionTimeoutSeconds(): number {
-      const value = intEnv("TASK_ORCH_BOX_PROVISION_TIMEOUT_S", 300);
-      return value > 0 ? value : 300;
-    },
-    get workerRepoUrl(): string {
-      return strEnv("TASK_ORCH_BOX_WORKER_REPO_URL", "https://github.com/nodetool-ai/task-orchestrator.git");
-    },
-    get workerRepoRef(): string {
-      return strEnv("TASK_ORCH_BOX_WORKER_REPO_REF", "main");
-    },
-    get agentRepoUrl(): string {
-      return strEnv("TASK_ORCH_BOX_AGENT_REPO_URL", "https://github.com/nodetool-ai/nodetool.git");
-    },
-    get agentRepo(): string {
-      return strEnv("TASK_ORCH_BOX_AGENT_REPO", "nodetool-ai/nodetool");
-    },
-    /** Per-step budget for template build commands (npm ci can take minutes). */
-    get buildStepTimeoutSeconds(): number {
-      return intEnv("TASK_ORCH_BOX_BUILD_STEP_TIMEOUT_S", 900);
-    },
-    /** Cooldown after a failed template build before another is attempted for
-     *  the same worker SHA. Without it, a deterministic failure (e.g. an
-     *  unpushed SHA) would rebuild — and burn a fresh Box — every pump tick. */
-    get buildRetryCooldownMs(): number {
-      return intEnv("TASK_ORCH_BOX_BUILD_RETRY_COOLDOWN_S", 120) * 1000;
-    },
-    /** Grace before checkpointing an idle Box. */
-    get idleStopMs(): number {
-      return intEnv("TASK_ORCH_BOX_IDLE_STOP_MS", 30_000);
-    },
-    get pollMs(): number {
-      return intEnv("TASK_ORCH_BOX_POLL_MS", 5_000);
-    },
-    get readyTimeoutMs(): number {
-      return intEnv("TASK_ORCH_BOX_READY_TIMEOUT_MS", 120_000);
-    },
-    /** Archived-Box retention; defaults to 30 days. */
-    get retentionMs(): number {
-      return intEnv("TASK_ORCH_BOX_RETENTION_MS", 30 * 24 * 60 * 60_000);
-    },
-    /** 0 delegates the active-Box limit to the Box account. */
-    get maxActive(): number {
-      return intEnv("TASK_ORCH_BOX_MAX_ACTIVE", 0);
-    },
-  }),
-
   /** Storage / persistence. */
   db: Object.freeze({
     /** SQLite/pg path override (TASK_ORCH_DB); DATABASE_URL is separate. */
@@ -553,29 +480,6 @@ export const config = Object.freeze({
 });
 
 /**
- * Validate the Box-only deployment settings before a provider forks a Box.
- * This intentionally reads the live registry and has no SDK or network side
- * effects, so tests and long-lived processes can change env between calls.
- * Local and Fly deployments remain valid without any Box variables.
- */
-export function validateBoxConfig(): void {
-  if (runnerProviderKind() !== "box") return;
-
-  // Box supplies worker-channel ingress via the ascii.dev `host` proxy: the
-  // worker binds tcp:0.0.0.0:8787 inside the Box, runs `host 8787`, and the
-  // control plane dials the resulting public WSS URL (token-gated). Validate the
-  // account credential and the template the fork is created from; the endpoint
-  // itself is discovered per-run at provision time.
-  if (!config.box.apiKey) {
-    throw new Error("BOX_API_KEY is required when TASK_ORCH_RUNNER=box.");
-  }
-  // App-managed template provisioning is the default: with no pinned
-  // TASK_ORCH_BOX_TEMPLATE_ID the app builds a template per worker SHA on first
-  // dispatch, starting from a fresh blank box it creates itself. So BOX_API_KEY
-  // is the only hard requirement; a pin is an optional override.
-}
-
-/**
  * A frozen, plain-value snapshot of the whole config for logging/telemetry.
  * Evaluates every getter ONCE at call time — do not cache it across an env
  * mutation. Not for control-flow (use the live accessors above).
@@ -593,8 +497,6 @@ export function snapshot() {
     agent: dump(config.agent),
     features: dump(config.features),
     fly: dump(config.fly),
-    // Never serialize a control-plane credential into logs or telemetry.
-    box: Object.freeze({ ...dump(config.box), apiKey: "[redacted]" }),
     db: dump(config.db),
     derived: Object.freeze({
       runnerProviderKind: runnerProviderKind(),

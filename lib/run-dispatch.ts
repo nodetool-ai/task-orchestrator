@@ -63,7 +63,7 @@ export type SpawnFn = (runId: number, scope: string) => number | null | Promise<
 export type AdmitDecision = "admit" | "defer" | "never-fits";
 /** Injectable admission check (tests override it; defaults to `admit`). */
 export type AdmitFn = (runId: number) => AdmitDecision | Promise<AdmitDecision>;
-/** Injectable provider admission (used by Box capacity tests). */
+/** Injectable provider admission (used by capacity tests). */
 export type ProviderAdmitFn = (input: RunnerAdmissionInput) => RunnerAdmission | Promise<RunnerAdmission>;
 
 export type DispatchResult =
@@ -273,10 +273,6 @@ export function admissionDecision(i: {
 
 /** The gate only runs for managed worker backends, and can be turned off. */
 function admissionEnabled(): boolean {
-  // Box admission always probes account limits before a fork/resume. Unlike the
-  // legacy host gate, disabling TASK_ORCH_ADMISSION_ENABLED must not allow a
-  // deployment to exceed the remote account's capacity.
-  if (runnerProviderKind() === "box") return true;
   if (!config.dispatch.admissionFlag) return false;
   if (runnerProviderKind() === "fly") return config.dispatch.maxMachines > 0;
   return !!config.deployment.workerImage;
@@ -313,17 +309,11 @@ async function admit(runId: number): Promise<AdmitDecision> {
 }
 
 async function providerAdmit(input: RunnerAdmissionInput): Promise<RunnerAdmission> {
-  // Fly and local retain the established host/DB admission gates below.  In
-  // particular, do not instantiate FlyRunnerProvider just to decide capacity:
-  // its client correctly requires TASK_ORCH_FLY_APP, while the legacy
-  // TASK_ORCH_MAX_MACHINES gate is deliberately usable without it (including
-  // before a worker image/app has been configured).  Box is the only provider
-  // with a remote-account admission probe.
-  if (runnerProviderKindFromEnv() !== "box") {
-    return { decision: await admit(input.runId) };
-  }
-  const provider = getRunnerProvider();
-  if (provider.admit) return provider.admit(input);
+  // Fly and local use the established host/DB admission gates.  In particular,
+  // do not instantiate FlyRunnerProvider just to decide capacity: its client
+  // correctly requires TASK_ORCH_FLY_APP, while the legacy TASK_ORCH_MAX_MACHINES
+  // gate is deliberately usable without it (including before a worker image/app
+  // has been configured).
   return { decision: await admit(input.runId) };
 }
 
@@ -383,7 +373,7 @@ export async function dispatchRun(
   };
 
   // dispatchRun is the single front door: every run executes in an
-  // out-of-process worker (docker/fly/box container or a local detached tsx
+  // out-of-process worker (docker/fly container or a local detached tsx
   // worker). The emit-time inbox wakes (lib/inbox) and the pump's parked-wake
   // sweep both call dispatchRun, so they inherit this routing for free — no
   // per-caller placement logic.
@@ -470,7 +460,7 @@ export async function dispatchRun(
     }
 
     // Admission gate: the provider-gated memory/machine gate (admit()), active
-    // only for a managed backend (Docker image / Fly / Box).
+    // only for a managed backend (Docker image / Fly).
     const gateActive = admissionEnabled();
     if (gateActive) {
       let decision: AdmitDecision;
@@ -664,36 +654,6 @@ export async function dispatchRun(
         console.error(`Worker channel start failed for run ${runId}:`, err)
       );
       handle = ref.handle;
-    } else if (provider === "box") {
-      // Box channel provisioning (plan section 20; ingress via the ascii.dev
-      // `host` proxy): reserve the instance id/credential, let
-      // BoxRunnerProvider.create fork the Box with the channel env, launch the
-      // worker, host its port, and resolve the public WSS dial endpoint. Then
-      // store it and push the run.start snapshot exactly like the fly path. The
-      // channel endpoint isn't passed in — the provider discovers it per run.
-      const channel = await provisionBoxChannel(runId);
-      const ref = await timeRunnerPhase(
-        "runner_create",
-        () => getRunnerProvider().create({
-          runId,
-          scope: outcome.scope,
-          channelInstanceId: channel.instanceId,
-        }),
-        { provider, fields: { runId, scope: outcome.scope } }
-      );
-      if (!ref) {
-        return finish(await failSpawn(runId, outcome.scope, "run worker did not start (Box provisioning returned no runner)"));
-      }
-      // Success means the worker's port was hosted and a control-plane-dialable
-      // WSS endpoint resolved — never merely that the Box reports state "ready".
-      if (!ref.channelEndpoint) {
-        return finish(await failSpawn(runId, outcome.scope, "runner started without a worker channel endpoint"));
-      }
-      await setChannelEndpoint(runId, ref.channelInstanceId ?? channel.instanceId, ref.channelEndpoint);
-      void startChannelForRun(runId, ref.channelInstanceId ?? channel.instanceId, { freshWorker: true }).catch((err) =>
-        console.error(`Worker channel start failed for run ${runId}:`, err)
-      );
-      handle = ref.handle;
     } else {
       // Any genuinely unknown provider still fails fast rather than silently
       // falling back to a transport that no longer exists.
@@ -742,12 +702,11 @@ export interface LocalChannelProvisioning {
   socketPath: string;
 }
 
-/** The exact unsupported-provider message for a provider whose ws provisioning
- *  section has not landed (Box: pending private ingress). Docker provisioning
- *  landed in plan section 19 (see dockerSpawn); Fly landed in section 20 (see
- *  provisionFlyChannel). */
+/** The exact unsupported-provider message for a genuinely unknown provider
+ *  kind. Docker provisioning landed in plan section 19 (see dockerSpawn); Fly
+ *  landed in section 20 (see provisionFlyChannel). */
 export function unsupportedWsProviderMessage(provider: string): string {
-  // local, fly, and box all have dispatch branches that provision a WS channel;
+  // local and fly both have dispatch branches that provision a WS channel;
   // this message is only reached for a genuinely unknown provider kind.
   return `Runner provider '${provider}' does not expose a private control-plane-to-worker WebSocket endpoint.`;
 }
@@ -780,33 +739,6 @@ export async function provisionFlyChannel(
   // Machine's private IP resolves; setChannelEndpoint corrects it below.
   await reserveChannelIdentity(runId, instanceId, `pending:fly:${instanceId}`);
   return { instanceId, listenEndpoint };
-}
-
-/** Reserve a channel identity for a Box worker (plan section 20; Box ingress via
- *  the ascii.dev `host` proxy). Like Fly, the dial endpoint is not known until
- *  the worker is up and its port is hosted — BoxRunnerProvider.create runs
- *  `host 8787` and returns the real `wss://…on.ascii.dev/worker/channel?_port_auth=…`
- *  endpoint, which dispatch stores via `setChannelEndpoint`. Resume-identity
- *  rule: a run that already has a channel instance id (its Box snapshot survived)
- *  reuses it; a first provision mints one. */
-export async function provisionBoxChannel(
-  runId: number,
-): Promise<{ instanceId: string }> {
-  const [existing] = await db
-    .select({ channelInstanceId: runnerInstances.channelInstanceId })
-    .from(runnerInstances)
-    .where(eq(runnerInstances.runId, runId));
-  const instanceId = existing?.channelInstanceId || newChannelInstanceId();
-  // Seed a stub row so the channel identity has somewhere to live before
-  // BoxRunnerProvider persists the Box mapping, mirroring provisionFlyChannel.
-  await db
-    .insert(runnerInstances)
-    .values({ runId, provider: "box", state: "starting" })
-    .onConflictDoNothing();
-  // Placeholder dial endpoint — the real wss URL isn't known until the worker's
-  // port is hosted; setChannelEndpoint corrects it once create() returns.
-  await reserveChannelIdentity(runId, instanceId, `pending:box:${instanceId}`);
-  return { instanceId };
 }
 
 /**
@@ -887,7 +819,7 @@ async function connectWithBootBackoff(runId: number) {
  * Connect to a run's worker channel and ensure it has (or gets) its `run.start`
  * bootstrap. `opts.freshWorker` must be true when the caller just ran a
  * provider `create()`/`resume()` that (re)launched the worker process — e.g.
- * dispatchRun's local/fly/box branches — and false for a channel that is only
+ * dispatchRun's local/fly branches — and false for a channel that is only
  * being RE-ADOPTED (reconnectActiveChannels on control-plane boot): there the
  * worker process may still be the SAME live one that already has this run's
  * full state in memory, and must not be re-sent a kickoff command it never
@@ -925,7 +857,7 @@ export async function startChannelForRun(
 
   // No run.start has ever been persisted for this instance, OR this call
   // follows a provider create()/resume() that just (re)launched the worker
-  // process for a brand-new generation (e.g. a Box checkpoint resume): mint a
+  // process for a brand-new generation (e.g. a checkpoint resume): mint a
   // fresh command scoped to the current epoch. buildRunStart re-derives mode
   // ("resume" once the run carries a backend session id) plus the latest
   // pendingInput/inboxDigest, so a resumed worker gets current state, not the
@@ -1124,7 +1056,7 @@ export function stopPendingRunPump(): void {
 // Worker execution runs in its own process/container so a web-service restart or
 // redeploy cannot signal it. The worker protocol is WebSocket-only (plan section
 // 18). The plain detached tsx process and the Docker worker container (plan
-// section 19) both provision a private channel endpoint; Fly and Box dispatch
+// section 19) both provision a private channel endpoint; Fly dispatch
 // still fail fast with the unsupported-provider error until their sections land.
 export const defaultSpawn = async (
   runId: number,

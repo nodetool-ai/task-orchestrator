@@ -9,7 +9,6 @@ import {
 } from "../config";
 import { FlyRunnerProvider } from "./fly";
 import { LocalRunnerProvider } from "./local";
-import { BoxRunnerProvider } from "./box";
 
 export type { NestedDispatchMode } from "../config";
 
@@ -24,7 +23,7 @@ export type RunnerState =
 export interface RunnerRef {
   /** Run id this runner serves. */
   runId: number;
-  /** Provider-scoped id: Docker container name, Fly machine id, or Box id. */
+  /** Provider-scoped id: Docker container name or Fly machine id. */
   handle: string;
   provider: RunnerProviderKind;
   channelEndpoint?: string;
@@ -113,8 +112,6 @@ export function getRunnerProvider(): RunnerProvider {
         return new LocalRunnerProvider();
       case "fly":
         return new FlyRunnerProvider();
-      case "box":
-        return new BoxRunnerProvider();
     }
   })();
   g[PROVIDER_KEY] = { kind, provider } satisfies ProviderCache;

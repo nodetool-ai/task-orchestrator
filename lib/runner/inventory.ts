@@ -1,23 +1,20 @@
 // lib/runner/inventory.ts
-// Runner cost/inventory view: reconcile live Fly Machines + Volumes and expose
-// persisted Box mappings. Operators can see what belongs to a run, how old it
-// is, roughly what it costs, and which Fly volumes have leaked (orphans). Box
-// rows are deliberately DB-only here: inventory must not cause lifecycle API
-// calls or wake an archived Box.
+// Runner cost/inventory view: reconcile live Fly Machines + Volumes against
+// the persisted runner_instances mappings. Operators can see what belongs to a
+// run, how old it is, roughly what it costs, and which Fly volumes have leaked
+// (orphans).
 
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { runnerInstances, agentSessions } from "@/db/schema";
 import { makeFlyClient, type FlyClient, type FlyMachine, type FlyVolume } from "./fly-client";
-import { redactBoxErrorText } from "./box-errors";
 
 /** Fly volume storage list price. This is an ESTIMATE for visibility only —
  *  actual billing depends on region and any negotiated pricing. */
 export const VOLUME_USD_PER_GB_MONTH = 0.15;
 
 export interface RunnerInventoryRow {
-  /** The resource family. Existing Fly rows remain `fly`; Box rows are additive. */
-  provider: "fly" | "box";
+  provider: "fly";
   runId: number | null; // from runner_instances (may be null for a volume with no mapping row)
   machineId: string | null;
   machineState: string | null; // live Fly state, or null if machine absent/gone
@@ -32,22 +29,6 @@ export interface RunnerInventoryRow {
   estMonthlyCostUsd: number; // sizeGb * VOLUME_USD_PER_GB_MONTH
   /** Normalized state persisted in runner_instances; null for unmapped Fly volumes. */
   runnerState: string | null;
-
-  // Persisted Box context. These stay null for Fly output so existing consumers
-  // retain their machine/volume fields unchanged.
-  boxId: string | null;
-  /** The persisted (normalized) Box state. Inventory performs no live Box read. */
-  boxState: string | null;
-  boxTemplateId: string | null;
-  boxSourceId: string | null;
-  workerVersion: string | null;
-  snapshotId: string | null;
-  checkpointStatus: "completed" | "pending" | null;
-  checkpointAgeMs: number | null;
-  /** Estimated current active period; null once a Box is stopped/gone. */
-  activeDurationMs: number | null;
-  /** Redacted, capped diagnostic text retained from the provider. */
-  lastProviderError: string | null;
 }
 
 export interface RunnerInventory {
@@ -58,7 +39,6 @@ export interface RunnerInventory {
     totalGb: number;
     estMonthlyCostUsd: number;
     orphanVolumes: number;
-    boxes: number;
   };
 }
 
@@ -79,38 +59,8 @@ type InstanceRow = {
   state: string;
   createdAt: Date | null;
   runStatus: string | null;
-  boxId: string | null;
-  boxTemplateId: string | null;
-  boxSourceId: string | null;
-  snapshotId: string | null;
-  snapshotCompletedAt: Date | null;
-  checkpointRequestedAt: Date | null;
-  lastCheckpointAt: Date | null;
   lastStartedAt: Date | null;
-  workerVersion: string | null;
-  lastProviderError: string | null;
 };
-
-const ACTIVE_BOX_STATES = new Set(["creating", "starting", "running"]);
-
-function checkpointStatus(instance: InstanceRow): "completed" | "pending" | null {
-  if (instance.snapshotId && (instance.lastCheckpointAt ?? instance.snapshotCompletedAt)) return "completed";
-  if (instance.checkpointRequestedAt) return "pending";
-  return null;
-}
-
-function redactedProviderError(value: string | null): string | null {
-  if (!value) return null;
-  // Inventory is terminal-facing, not an error archive. Cap a malformed/raw
-  // payload after applying the Box error redactor so neither secrets nor an
-  // unexpectedly huge API response reach CLI/JSON consumers.
-  const redacted = redactBoxErrorText(value)
-    // Database access is never a legitimate Box error detail, but redact it
-    // defensively in case an upstream/proxy echoes a server environment value.
-    .replace(/\bDATABASE_URL\s*([:=])\s*[^\s,;"']+/gi, "DATABASE_URL$1[redacted]")
-    .replace(/\bpostgres(?:ql)?:\/\/[^\s"'<>]+/gi, "[redacted-url]");
-  return redacted.length > 512 ? `${redacted.slice(0, 509)}...` : redacted;
-}
 
 export async function collectRunnerInventory(flyClient?: FlyClient): Promise<RunnerInventory> {
   const now = Date.now();
@@ -151,15 +101,6 @@ export async function collectRunnerInventory(flyClient?: FlyClient): Promise<Run
       state: runnerInstances.state,
       createdAt: runnerInstances.createdAt,
       lastStartedAt: runnerInstances.lastStartedAt,
-      boxId: runnerInstances.boxId,
-      boxTemplateId: runnerInstances.boxTemplateId,
-      boxSourceId: runnerInstances.boxSourceId,
-      snapshotId: runnerInstances.snapshotId,
-      snapshotCompletedAt: runnerInstances.snapshotCompletedAt,
-      checkpointRequestedAt: runnerInstances.checkpointRequestedAt,
-      lastCheckpointAt: runnerInstances.lastCheckpointAt,
-      workerVersion: runnerInstances.workerVersion,
-      lastProviderError: runnerInstances.lastProviderError,
       runStatus: agentSessions.status,
     })
     .from(runnerInstances)
@@ -212,16 +153,6 @@ export async function collectRunnerInventory(flyClient?: FlyClient): Promise<Run
       orphan,
       estMonthlyCostUsd: volumeCost(vol.sizeGb),
       runnerState: mapping?.state ?? null,
-      boxId: null,
-      boxState: null,
-      boxTemplateId: null,
-      boxSourceId: null,
-      workerVersion: null,
-      snapshotId: null,
-      checkpointStatus: null,
-      checkpointAgeMs: null,
-      activeDurationMs: null,
-      lastProviderError: null,
     });
   }
 
@@ -246,59 +177,12 @@ export async function collectRunnerInventory(flyClient?: FlyClient): Promise<Run
       orphan: false,
       estMonthlyCostUsd: 0,
       runnerState: inst.state,
-      boxId: null,
-      boxState: null,
-      boxTemplateId: null,
-      boxSourceId: null,
-      workerVersion: null,
-      snapshotId: null,
-      checkpointStatus: null,
-      checkpointAgeMs: null,
-      activeDurationMs: null,
-      lastProviderError: null,
-    });
-  }
-
-  // 3) Every persisted Box mapping becomes one inventory row. There is no Box
-  // client call here by design: an archived Box is a durable checkpoint, not a
-  // resource an inventory page should resume or otherwise mutate.
-  for (const inst of instances) {
-    if (inst.provider !== "box" || !inst.boxId) continue;
-    const checkpointAt = inst.lastCheckpointAt ?? inst.snapshotCompletedAt;
-    const activeSince = inst.lastStartedAt ?? inst.createdAt;
-    rows.push({
-      provider: "box",
-      runId: inst.runId,
-      machineId: null,
-      machineState: null,
-      volumeId: null,
-      volumeName: null,
-      volumeState: null,
-      sizeGb: null,
-      region: null,
-      runStatus: inst.runStatus,
-      ageMs: inst.createdAt ? now - inst.createdAt.getTime() : null,
-      orphan: false,
-      estMonthlyCostUsd: 0,
-      runnerState: inst.state,
-      boxId: inst.boxId,
-      boxState: inst.state,
-      boxTemplateId: inst.boxTemplateId,
-      boxSourceId: inst.boxSourceId,
-      workerVersion: inst.workerVersion,
-      snapshotId: inst.snapshotId,
-      checkpointStatus: checkpointStatus(inst),
-      checkpointAgeMs: checkpointAt ? now - checkpointAt.getTime() : null,
-      activeDurationMs:
-        ACTIVE_BOX_STATES.has(inst.state) && activeSince ? now - activeSince.getTime() : null,
-      lastProviderError: redactedProviderError(inst.lastProviderError),
     });
   }
 
   const totalGb = rows.reduce((sum, r) => sum + (r.sizeGb ?? 0), 0);
   const estMonthlyCostUsd = roundCents(rows.reduce((sum, r) => sum + r.estMonthlyCostUsd, 0));
   const orphanVolumes = rows.filter((r) => r.orphan).length;
-  const boxes = rows.filter((r) => r.provider === "box").length;
 
   return {
     rows,
@@ -308,7 +192,6 @@ export async function collectRunnerInventory(flyClient?: FlyClient): Promise<Run
       totalGb,
       estMonthlyCostUsd,
       orphanVolumes,
-      boxes,
     },
   };
 }

@@ -48,7 +48,7 @@ This direction matters operationally:
 - Making WebSocket delivery exactly-once. Delivery is at-least-once and effects
   are idempotent.
 - Sending provider lifecycle operations over this protocol. Creating, starting,
-  suspending, and destroying a Docker/Fly/Box instance remain provider concerns.
+  suspending, and destroying a Docker/Fly instance remain provider concerns.
 - Replacing browser-facing SSE or HTTP APIs.
 
 ## Roles and state ownership
@@ -77,7 +77,6 @@ The worker listens on a provider-private endpoint supplied at provisioning:
 | Local child | Unix socket at a control-plane-created path. TCP loopback is a fallback. |
 | Docker | Fixed container port on the private Docker/Compose network; dial by container name. Do not publish it on the host. |
 | Fly | Fixed port on the Machine's private 6PN address, obtained from the Machines API. |
-| Box | Requires a provider-supported private ingress/tunnel and endpoint discovery. Box must not silently fall back to worker-initiated HTTP or WebSocket. |
 
 `RunnerRef` therefore grows a `channelEndpoint` field. The resolved endpoint is
 stored on `runner_instances` so a new control-plane process can reconnect after
@@ -473,9 +472,8 @@ source. WebSocket transport logs are diagnostics, not a second run history.
 5. **Remove HTTP worker ingress.** Delete `/api/worker/*`,
    `http-transport.ts`, worker API tokens/URLs, and the worker-side SSE control
    stream. Keep the DB transport only inside the control plane.
-6. **Enable providers one at a time.** Local, Docker, Fly, then Box after Box has
-   a supported control-plane-to-worker endpoint. Do not mix transport direction
-   within one provider.
+6. **Enable providers one at a time.** Local, Docker, then Fly. Do not mix
+   transport direction within one provider.
 
 Migration is complete when a worker network policy can deny all worker egress
 to the control plane and a full run—including input, cancellation, tool calls,

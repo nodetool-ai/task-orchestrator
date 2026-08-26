@@ -48,11 +48,11 @@ describe("an agent turn", () => {
   const say: Frame = { kind: "agent", at: 0, run: 42, text: "Reading the plan." };
 
   it("opens with the dot and no byline when it is the run you are reading", () => {
-    expect(drawn(say)).toEqual(["⏺ Reading the plan."]);
+    expect(drawn(say)).toEqual([`${UNICODE.dot} Reading the plan.`]);
   });
 
   it("names anyone else, because the dot alone would not say who", () => {
-    expect(drawn({ ...say, run: 44 })).toEqual(["⏺ implementor #44", "  Reading the plan."]);
+    expect(drawn({ ...say, run: 44 })).toEqual([`${UNICODE.dot} implementor #44`, "  Reading the plan."]);
   });
 });
 
@@ -82,12 +82,12 @@ describe("a tool call", () => {
   };
 
   it("is the name, its argument, and one line of what came back", () => {
-    expect(drawn(call)).toEqual(["⏺ Read(cli.ts)", "  ⎿  946 lines", "     +2 lines (^o to expand)"]);
+    expect(drawn(call)).toEqual([`${UNICODE.dot} Read(cli.ts)`, "  ⎿  946 lines", "     +2 lines (^o to expand)"]);
   });
 
   it("opens the whole result and the arguments under ^o", () => {
     expect(drawn(call, { trace: true })).toEqual([
-      "⏺ Read(cli.ts)",
+      `${UNICODE.dot} Read(cli.ts)`,
       "  ⎿  946 lines",
       "     ok",
       "     and more",
@@ -97,7 +97,7 @@ describe("a tool call", () => {
 
   it("blinks its dot until the result lands, and never anything else", () => {
     const pending = frameLines({ ...call, result: [], done: false }, 0, ctx())[0] as TSpanLine;
-    expect(pending.spans.filter((s) => s.blink === true).map((s) => s.text)).toEqual(["⏺ "]);
+    expect(pending.spans.filter((s) => s.blink === true).map((s) => s.text)).toEqual([`${UNICODE.dot} `]);
     // A blinking span still measures its own width, so the line under it
     // cannot move when the dot goes dark.
     expect(pending.spans[0]?.text).toHaveLength(2);
@@ -127,14 +127,14 @@ describe("a tool call", () => {
   });
 
   it("says nothing under a call that has not answered yet", () => {
-    expect(drawn({ ...call, result: [], done: false })).toEqual(["⏺ Read(cli.ts)"]);
+    expect(drawn({ ...call, result: [], done: false })).toEqual([`${UNICODE.dot} Read(cli.ts)`]);
   });
 });
 
 describe("a spawn", () => {
   it("is a Task call with the children drawn live under it", () => {
     const lines = transcriptLines([{ kind: "spawn", at: 0, run: 42, children: [45] }], ctx());
-    expect(flat(lines[0] as TSpanLine)).toBe("⏺ Task(implementor #45)");
+    expect(flat(lines[0] as TSpanLine)).toBe(`${UNICODE.dot} Task(implementor #45)`);
     expect(lines[1]?.row?.run.id).toBe(45);
   });
 });
