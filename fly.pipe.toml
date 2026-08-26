@@ -1,0 +1,73 @@
+# Fly.io config for the Task Orchestrator DISCORD PIPE (`npm run pipe`).
+#
+# A third app alongside the web server (fly.toml) and the runner pool
+# (fly.runner.toml), built from the SAME Dockerfile.server image and pointed at
+# the SAME Postgres. It runs the channel bridge: one Discord gateway connection
+# per persona bot, the breadcrumb relay, and the wake pump that drives milestone
+# turns for mapped persona threads.
+#
+# WHY ITS OWN APP, and not a process group on the web app.
+#
+#   1. One gateway session per bot token. The web app is a singleton by
+#      construction (`fly deploy --ha=false`), but Fly's rolling deploy still
+#      overlaps the old and new Machines — two live gateway connections on one
+#      token means every Discord message is answered twice. A separate app with
+#      a single Machine keeps that blast radius to the bridge itself, and its
+#      deploys don't restart the dashboard.
+#   2. Persona turns execute IN this process (`runtime = 'server'` runs, design
+#      §3): a heavy turn's memory and CPU would otherwise compete with Next SSR
+#      and the server's lifecycle pumps.
+#
+# Deployed by `./scripts/fly-deploy.sh` when FLY_PIPE=1 (or FLY_PIPE_APP is set);
+# see docs/fly-deployment.md. The `app` and `primary_region` values below are
+# overwritten by that script from FLY_PIPE_APP / FLY_REGION.
+
+app = "task-orchestrator-pipe"
+primary_region = "ams"
+
+[build]
+  dockerfile = "Dockerfile.server"
+
+# Replaces the image's CMD (`npm run start` -> next start) with the bridge.
+# A named process group also keeps `fly deploy` from inferring a web service for
+# an app that deliberately exposes no port.
+[processes]
+  pipe = "npm run pipe"
+
+[env]
+  # Child worker runs the personas spawn go to ephemeral Machines in the runner
+  # app, exactly as they do from the web server — the pipe dispatches them
+  # itself, so it needs the same runner wiring and its own FLY_API_TOKEN
+  # (staged by fly-deploy.sh). Without this the bridge would try to drive child
+  # turns in-process, where there is no worktree and no container.
+  TASK_ORCH_RUNNER = "fly"
+  TASK_ORCH_DETACHED_RUNS = "1"
+  TASK_ORCH_AGENT_BACKEND = "claude"
+  TASK_ORCH_CHAT_MODEL = "openai/gpt-5.6-sol"
+  TASK_ORCH_AGENT_MODEL = "anthropic/claude-opus-4-8"
+
+# No [http_service] and no [[services]]: the bridge is an outbound gateway
+# client with no inbound surface. That also means no Fly health check — the
+# liveness signal is `task_orch_pipe_stale_pending_events` on the WEB app's
+# /api/metrics, which is DB-derived and therefore visible from a process other
+# than the one that died. Alert on it > 0 (see README, "The pipe is load-bearing").
+#
+# TASK_ORCH_PIPE_METRICS_PORT stays off here on purpose: it binds loopback only,
+# so nothing off-Machine could scrape it anyway.
+
+# Restart the Machine when the bridge exits non-zero (a dropped gateway that
+# fails to resume, an OOM). Bounded rather than "always": loadPipeConfig()
+# refuses to start when no bot is configured or every bot fails validation, and
+# an unbounded policy would crash-loop that misconfiguration forever instead of
+# stopping with the reason in `fly logs`. Fix it in Settings -> Discord, then
+# `fly machine restart -a <pipe app>`.
+[[restart]]
+  policy = "on-failure"
+  retries = 10
+
+# Persona turns are model calls plus control-plane tool calls — no container, no
+# worktree, no build. 1 GB covers the gateway clients and a few concurrent
+# conversations; raise it if you run many persona bots or long threads.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
