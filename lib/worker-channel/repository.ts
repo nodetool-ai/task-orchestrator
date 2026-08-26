@@ -393,7 +393,11 @@ function channelInstanceRow(row: RawRow): ChannelInstanceRow {
 /**
  * Active worker channels a freshly booted (or hot-deployed) controller must
  * re-adopt: every runner instance that still carries a dial identity for a run
- * that has not reached a terminal status. The startup scan connects to each.
+ * that has not reached a terminal status AND whose instance the provider still
+ * reports as live (creating/starting/running/suspended). A `stopped`/`gone`
+ * instance has no process to adopt: dialing it only burns the full boot
+ * deadline per row, and a run left `idle` on a dead worker gets a fresh worker
+ * from dispatch on its next turn instead.
  */
 export async function listReconnectableChannels(): Promise<ChannelInstanceRow[]> {
   const result = await queryRows(
@@ -405,6 +409,7 @@ export async function listReconnectableChannels(): Promise<ChannelInstanceRow[]>
       JOIN agent_runs r ON r.id = ri.run_id
       WHERE ri.channel_instance_id IS NOT NULL
         AND ri.channel_endpoint IS NOT NULL
+        AND ri.state NOT IN ('stopped', 'gone')
         AND r.status NOT IN ('completed', 'failed', 'cancelled', 'closed')
     `
   );

@@ -62,8 +62,14 @@ export async function register(): Promise<void> {
       // mid-run worker keeps streaming instead of stranding on the dropped socket.
       // No-op off the ws transport. Best-effort — a genuinely dead worker fails to
       // dial and is left to the reaper above.
+      //
+      // NOT awaited: Next.js holds every request until register() resolves, and
+      // each re-adopt dial retries up to BOOT_DEADLINE_MS (3 min) per channel,
+      // sequentially. Awaiting it kept the server deaf (health check failing,
+      // deploys marked failed) for as long as dead rows existed. Serving traffic
+      // does not depend on re-adoption, so let it finish in the background.
       const channelMod = await import("./lib/worker-channel/controller");
-      await channelMod.reconnectActiveChannels().catch((e) => {
+      void channelMod.reconnectActiveChannels().catch((e) => {
         console.error("[instrumentation] worker channel re-adoption failed:", e);
       });
     } catch (err) {

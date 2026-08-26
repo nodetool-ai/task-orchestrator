@@ -19,7 +19,7 @@ primary_region = "ams"
   # Route agent runs onto ephemeral Fly Machines in the companion runner app
   # (fly.runner.toml). FLY_API_TOKEN / TASK_ORCH_FLY_APP / FLY_RUNNER_IMAGE are
   # Fly secrets set by fly-deploy.sh.
-  TASK_ORCH_RUNNER = "fly"
+  TASK_ORCH_RUNNER = "sprites"
   # Run each agent turn in its own Machine, never in this web process, so a
   # redeploy/restart of the server never kills an in-flight run.
   TASK_ORCH_DETACHED_RUNS = "1"

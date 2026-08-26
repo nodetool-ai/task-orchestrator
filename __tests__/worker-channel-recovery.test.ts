@@ -25,6 +25,7 @@ import {
   acquireControllerLease,
   getChannelIdentity,
   getLastAcceptedWorkerSeq,
+  listReconnectableChannels,
   releaseControllerLease,
   touchChannel,
 } from "../lib/worker-channel/repository";
@@ -147,6 +148,18 @@ describe("worker channel recovery (plan section 17)", () => {
     // The re-adopted channel delivers commands.
     await sendCommand(runId, "run.cancel", { reason: "stop", requestId: "r", deadline: null });
     await waitFor(async () => (await commandRows(runId, "run.cancel")).every((r) => r.state === "acked"));
+  });
+
+  it("boot re-adoption skips instances the provider reports stopped/gone", async () => {
+    // A dead worker has nothing to adopt; dialing it would only burn the boot
+    // deadline. The run's next turn provisions a fresh worker instead.
+    const live = await provisionRun("running");
+    const dead = await provisionRun("idle");
+    await db.update(runnerInstances).set({ state: "gone" }).where(eq(runnerInstances.runId, dead.runId));
+
+    const ids = (await listReconnectableChannels()).map((c) => c.runId);
+    expect(ids).toContain(live.runId);
+    expect(ids).not.toContain(dead.runId);
   });
 
   it("worker restart resumes the durable spool with a monotonic worker sequence", async () => {
