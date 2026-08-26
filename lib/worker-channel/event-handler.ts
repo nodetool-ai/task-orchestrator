@@ -194,6 +194,17 @@ async function handleRunPhase(tx: WorkerChannelTransaction, frame: WorkerEventFr
     .set(set)
     .where(and(eq(agentSessions.id, frame.runId), notInArray(agentSessions.status, TERMINAL_STATUSES)));
   await tx.insert(agentEvents).values(buildStatusEventValues(frame.runId, target, { phase }));
+  // Sprites: an open proxy tunnel is activity – close the channel when the run
+  // goes idle so the sprite can hibernate. The next dispatchRun will re-dial.
+  // Scheduled after commit so the channel.ack is flushed first.
+  if (target === "idle") {
+    const doClose = () => {
+      void import("./registry").then((m) => m.maybeCloseSpritesChannel(frame.runId).catch(() => undefined));
+    };
+    // afterWorkerEventCommit queues post-commit; in tests without a tx it returns false
+    const { afterWorkerEventCommit } = await import("./repository");
+    if (!afterWorkerEventCommit(doClose)) doClose();
+  }
 }
 
 async function handleRunCheckpoint(tx: WorkerChannelTransaction, frame: WorkerEventFrame): Promise<void> {

@@ -87,7 +87,7 @@ function strEnv(key: string, dflt?: string): string | undefined {
   return v == null || v === "" ? dflt : v;
 }
 
-export type RunnerProviderKind = "local" | "fly";
+export type RunnerProviderKind = "local" | "fly" | "sprites";
 export type NestedDispatchMode = "isolate" | "inline";
 
 // ── Derived values (were duplicated across modules) ────────────────────────
@@ -99,6 +99,8 @@ export function runnerProviderKind(): RunnerProviderKind {
   switch (process.env.TASK_ORCH_RUNNER) {
     case "fly":
       return "fly";
+    case "sprites":
+      return "sprites";
     default:
       return "local";
   }
@@ -461,6 +463,40 @@ export const config = Object.freeze({
     },
   }),
 
+  /** Sprites (Fly) provider settings. See docs/sprites-migration-design.md */
+  sprites: Object.freeze({
+    get token(): string | undefined {
+      return strEnv("SPRITES_TOKEN") ?? strEnv("TASK_ORCH_SPRITES_TOKEN");
+    },
+    get baseUrl(): string {
+      return strEnv("TASK_ORCH_SPRITES_BASE_URL", "https://api.sprites.dev/v1") as string;
+    },
+    get prefix(): string {
+      return strEnv("TASK_ORCH_SPRITE_PREFIX", "to-run-") as string;
+    },
+    get pollMs(): number {
+      return intEnv("TASK_ORCH_SPRITES_POLL_MS", intEnv("TASK_ORCH_FLY_POLL_MS", 10_000));
+    },
+    get poolSize(): number {
+      return intEnv("TASK_ORCH_SPRITE_POOL_SIZE", 0);
+    },
+    get maxSprites(): number {
+      return intEnv("TASK_ORCH_MAX_SPRITES", 0);
+    },
+    get netAllow(): string | undefined {
+      return strEnv("TASK_ORCH_SPRITE_NET_ALLOW");
+    },
+    get terminalMs(): number {
+      return intEnv("TASK_ORCH_RUNNER_TERMINAL_MS", 24 * 60 * 60 * 1000);
+    },
+    get orphanGraceMs(): number {
+      return intEnv("TASK_ORCH_SPRITES_ORPHAN_GRACE_MS", 10 * 60_000);
+    },
+    get workerBundleUrl(): string | undefined {
+      return strEnv("TASK_ORCH_SPRITES_WORKER_BUNDLE_URL");
+    },
+  }),
+
   /** Storage / persistence. */
   db: Object.freeze({
     /** SQLite/pg path override (TASK_ORCH_DB); DATABASE_URL is separate. */
@@ -497,6 +533,7 @@ export function snapshot() {
     agent: dump(config.agent),
     features: dump(config.features),
     fly: dump(config.fly),
+    sprites: dump(config.sprites),
     db: dump(config.db),
     derived: Object.freeze({
       runnerProviderKind: runnerProviderKind(),

@@ -27,7 +27,8 @@
     "trace-run": "tsx scripts/trace-run.ts",
     "gc": "tsx scripts/worktree-gc.ts",
     "isolate-env": "tsx scripts/isolate-worktree-env.ts",
-    "worktree-dev": "tsx scripts/worktree-dev.ts"
+    "worktree-dev": "tsx scripts/worktree-dev.ts",
+    "spike:sprites": "tsx scripts/sprites-feasibility.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.178",

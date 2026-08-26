@@ -49,6 +49,8 @@ import {
   localDialEndpoint,
   localListenEndpoint,
   localSocketPath,
+  spritesDialEndpoint,
+  spritesListenEndpoint,
   workerSocketDir,
   runStartCommandId,
   workerChannelDispatchEnv,
@@ -275,10 +277,12 @@ export function admissionDecision(i: {
 function admissionEnabled(): boolean {
   if (!config.dispatch.admissionFlag) return false;
   if (runnerProviderKind() === "fly") return config.dispatch.maxMachines > 0;
+  if (runnerProviderKind() === "sprites") return config.sprites.maxSprites > 0;
   return !!config.deployment.workerImage;
 }
 
 const FLY_ADMISSION_STATES = ["creating", "starting", "running"];
+const SPRITES_ADMISSION_STATES = ["creating", "starting", "running"];
 
 async function flyAdmit(): Promise<AdmitDecision> {
   const maxMachines = intEnv("TASK_ORCH_MAX_MACHINES", 0);
@@ -290,9 +294,20 @@ async function flyAdmit(): Promise<AdmitDecision> {
   return active.length >= maxMachines ? "defer" : "admit";
 }
 
+async function spritesAdmit(): Promise<AdmitDecision> {
+  const maxSprites = intEnv("TASK_ORCH_MAX_SPRITES", 0);
+  if (maxSprites <= 0) return "admit";
+  const active = await db
+    .select({ runId: runnerInstances.runId })
+    .from(runnerInstances)
+    .where(and(eq(runnerInstances.provider, "sprites"), inArray(runnerInstances.state, SPRITES_ADMISSION_STATES)));
+  return active.length >= maxSprites ? "defer" : "admit";
+}
+
 async function admit(runId: number): Promise<AdmitDecision> {
   void runId; // reserved for future per-run sizing; decision is host-global today
   if (runnerProviderKindFromEnv() === "fly") return flyAdmit();
+  if (runnerProviderKindFromEnv() === "sprites") return spritesAdmit();
   const capMB = intEnv("TASK_ORCH_WORKER_MEMORY_MB", 0);
   const reserveMB = intEnv("TASK_ORCH_HOST_MEMORY_RESERVE_MB", 0);
   const maxWorkers = intEnv("TASK_ORCH_MAX_WORKERS", 0);
@@ -654,6 +669,34 @@ export async function dispatchRun(
         console.error(`Worker channel start failed for run ${runId}:`, err)
       );
       handle = ref.handle;
+    } else if (provider === "sprites") {
+      // Sprites channel provisioning (see docs/sprites-migration-design.md §5):
+      // reserve the instance id, let SpritesRunnerProvider create the sprite
+      // and define the worker service, then store the logical `sprite://` endpoint
+      // which the channel dialer resolves through the authenticated TCP proxy.
+      const channel = await provisionSpritesChannel(runId);
+      const ref = await timeRunnerPhase(
+        "runner_create",
+        () =>
+          getRunnerProvider().create({
+            runId,
+            scope: outcome.scope,
+            channelInstanceId: channel.instanceId,
+            channelEndpoint: channel.listenEndpoint,
+          }),
+        { provider, fields: { runId, scope: outcome.scope } },
+      );
+      if (!ref) {
+        return finish(await failSpawn(runId, outcome.scope, "run worker did not start (spawn returned no pid — worker image/runtime available?)"));
+      }
+      if (!ref.channelEndpoint) {
+        return finish(await failSpawn(runId, outcome.scope, "runner started without a worker channel endpoint"));
+      }
+      await setChannelEndpoint(runId, ref.channelInstanceId ?? channel.instanceId, ref.channelEndpoint);
+      void startChannelForRun(runId, ref.channelInstanceId ?? channel.instanceId, { freshWorker: true }).catch((err) =>
+        console.error(`Worker channel start failed for run ${runId}:`, err),
+      );
+      handle = ref.handle;
     } else {
       // Any genuinely unknown provider still fails fast rather than silently
       // falling back to a transport that no longer exists.
@@ -738,6 +781,30 @@ export async function provisionFlyChannel(
   // Reserve with a placeholder — the real dial endpoint isn't known until the
   // Machine's private IP resolves; setChannelEndpoint corrects it below.
   await reserveChannelIdentity(runId, instanceId, `pending:fly:${instanceId}`);
+  return { instanceId, listenEndpoint };
+}
+
+/** Endpoints a Sprites dispatch reserves (see docs/sprites-migration-design.md §3).
+ *  Resume-identity rule mirrors Fly: reuse the channel instance id already on
+ *  record for this run's sprite (its filesystem survived), else mint fresh.
+ *  The dial endpoint is deterministic from the sprite name (`sprite://`), so the
+ *  provider can compute it without a private-IP lookup. */
+export async function provisionSpritesChannel(
+  runId: number,
+): Promise<{ instanceId: string; listenEndpoint: string }> {
+  const [existing] = await db
+    .select({ channelInstanceId: runnerInstances.channelInstanceId })
+    .from(runnerInstances)
+    .where(eq(runnerInstances.runId, runId));
+  const instanceId = existing?.channelInstanceId || newChannelInstanceId();
+  const listenEndpoint = spritesListenEndpoint();
+  await db
+    .insert(runnerInstances)
+    .values({ runId, provider: "sprites", state: "starting" })
+    .onConflictDoNothing();
+  // Concrete dial endpoint (sprite://<name>:8787) is computed by the provider
+  // after the sprite name is known, so we seed with a pending placeholder.
+  await reserveChannelIdentity(runId, instanceId, `pending:sprites:${instanceId}`);
   return { instanceId, listenEndpoint };
 }
 

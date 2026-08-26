@@ -22,6 +22,14 @@ import { CLOSE_CODE_PROTOCOL_MISMATCH, DEFAULT_DISCONNECT_GRACE_MS } from "./pro
 
 const REGISTRY = Symbol.for("task-orchestrator.worker-channel.registry");
 
+// When a Fly run parks (status → parked/idle), the control-plane WebSocket
+// stays open. The Fly Machine is later suspended via the lifecycle sweep;
+// the channel remains until the next resume (or until the machine is destroyed).
+// For Sprites, an open proxy tunnel counts as activity and would keep the
+// sprite billing forever, so sprites runs must close the channel at turn end
+// (idle/parked/terminal) after the final frame is acked. The next dispatchRun
+// re-dials and wakes the sprite. See maybeCloseSpritesChannel below.
+
 /** One supervised run channel: the live connection plus its reconnect state. */
 type Supervisor = {
   runId: number;
@@ -345,6 +353,33 @@ export async function shutdownAll(options: { drain?: boolean } = {}): Promise<vo
   }
   await Promise.all(supervisors.map((supervisor) => disconnectRun(supervisor.runId)));
   registry().blobs.clear();
+}
+
+/**
+ * For sprites only: close the proxy tunnel when a run leaves the active states.
+ * An open tunnel is activity and would keep the sprite awake and billing.
+ * The next `dispatchRun` will re-dial and wake it. Normal close code 1000 is
+ * used so the worker sees a clean shutdown. Local and Fly endpoints are left
+ * open (their lifecycle is via suspend/stop, not via channel close).
+ */
+export async function maybeCloseSpritesChannel(runId: number): Promise<void> {
+  const supervisor = registry().supervisors.get(runId);
+  if (!supervisor || supervisor.stopped) return;
+  const identity = await getChannelIdentity(runId);
+  if (!identity?.endpoint || !identity.endpoint.startsWith("sprite://")) return;
+  // Check current run status — only close when idle/parked/terminal
+  const { db } = await import("../../db");
+  const { agentSessions } = await import("../../db/schema");
+  const { eq } = await import("drizzle-orm");
+  const rows = await db.select({ status: agentSessions.status }).from(agentSessions).where(eq(agentSessions.id, runId)).limit(1);
+  const status = rows[0]?.status;
+  if (!status || !["idle", "parked", "completed", "failed", "cancelled", "closed", "budget_exhausted"].includes(status)) return;
+  // Close after the final frame's ack is flushed — next tick
+  setTimeout(() => {
+    if (supervisor.connection.connected) {
+      void supervisor.connection.disconnect(false).catch(() => undefined);
+    }
+  }, 0);
 }
 
 export type { WorkerEventHandler };

@@ -1,6 +1,6 @@
 # Fly Machines → Sprites migration: design and plan
 
-**Status:** proposal (design + phased plan; no implementation yet)
+**Status:** Phase 1–6 landed; Phase 0 findings pending (feasibility script not yet run), bootstrap (Prompt 8) and channel close (Prompt 9) pending
 **Scope:** replace the Fly Machines runner provider (`TASK_ORCH_RUNNER=fly`)
 with a Sprites-backed provider (`TASK_ORCH_RUNNER=sprites`), keeping the
 control-plane / worker architecture unchanged.
@@ -477,6 +477,21 @@ Retired with Fly: `FLY_API_TOKEN`, `TASK_ORCH_FLY_APP`, `FLY_RUNNER_IMAGE`,
 capping is ever needed), `TASK_ORCH_RUNNER_VOLUME_GB`,
 `TASK_ORCH_PREWARM_SEED_VOLUME`, `TASK_ORCH_FLY_POLL_MS` (→ a generic
 `TASK_ORCH_SPRITES_POLL_MS` if the default doesn't fit).
+
+### Phase 0 findings (run `npm run spike:sprites` with `SPRITES_TOKEN` set and paste below)
+
+| Spike | Item | Result | Notes / Measurements |
+|-------|------|--------|----------------------|
+| S1 | Hibernation: worker process survives cold wake | PASS/FAIL/INFO | `pgrep` survives, cold status, wake latency |
+| S1 | Fork from checkpoint available | PASS/FAIL/INFO | |
+| S2 | Proxy tunnel handshake + echo RT | PASS/FAIL/INFO | RT ms |
+| S2 | Idle 60 s tunnel still works | PASS/FAIL/INFO | error if any |
+| S2 | Cold-wake latency | PASS/FAIL/INFO | ms |
+| S3 | Base image: `node --version` etc | PASS/FAIL/INFO | delta vs Dockerfile.fly-runner |
+| S3 | `which ffmpeg pandoc pdftotext rg jq` | PASS/FAIL/INFO | |
+| S3 | `checkpoint` / `restoreCheckpoint` timings | PASS/FAIL/INFO | ms |
+| S4 | Quota / rate limits | PASS/FAIL/INFO | |
+| S5 | Error shapes | PASS/FAIL/INFO | |
 
 ---
 

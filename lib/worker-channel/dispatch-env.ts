@@ -95,6 +95,45 @@ export function flyChannelDialEndpoint(privateIp: string): string {
   return `ws://[${privateIp}]:${DOCKER_CHANNEL_PORT}${CHANNEL_PATH}`;
 }
 
+// ── Sprites worker endpoints (see docs/sprites-migration-design.md §5) ───────
+// A Sprites sprite also binds the fixed channel port (8787). The control plane
+// does NOT dial a private IP directly — it tunnels through the authenticated
+// Sprites TCP proxy (WSS /sprites/{name}/proxy → {host:"localhost",port:8787}).
+// The logical channel endpoint stored in runner_instances is `sprite://<name>:8787`
+// which the dialer resolves via the proxy. The worker still binds tcp:[::]:8787.
+
+/** Endpoint the Sprites worker sprite binds. Same fixed-port dual-stack convention. */
+export function spritesListenEndpoint(): string {
+  return `tcp:[::]:${DOCKER_CHANNEL_PORT}`;
+}
+
+/** Logical endpoint the control plane stores for a Sprites worker: resolved via
+ *  the Sprites proxy. Not a directly dialable URL — the channel dialer
+ *  performs the `WSS /sprites/{name}/proxy` handshake first. */
+export function spritesDialEndpoint(spriteName: string): string {
+  return `sprite://${spriteName}:${DOCKER_CHANNEL_PORT}${CHANNEL_PATH}`;
+}
+
+/** Parse a `sprite://<name>:<port>/worker/channel` endpoint. Returns null for
+ * non-sprite endpoints. */
+export function parseSpritesDialEndpoint(endpoint: string): { spriteName: string; port: number } | null {
+  const prefix = "sprite://";
+  const suffix = CHANNEL_PATH;
+  if (!endpoint.startsWith(prefix) || !endpoint.endsWith(suffix)) return null;
+  const mid = endpoint.slice(prefix.length, endpoint.length - suffix.length);
+  const colon = mid.lastIndexOf(":");
+  if (colon === -1) return null;
+  const name = mid.slice(0, colon);
+  const port = Number(mid.slice(colon + 1));
+  if (!name || !Number.isSafeInteger(port) || port <= 0 || port >= 65536) return null;
+  return { spriteName: name, port };
+}
+
+/** True when the endpoint needs the Sprites proxy tunnel. */
+export function isSpritesDialEndpoint(endpoint: string): boolean {
+  return endpoint.startsWith("sprite://");
+}
+
 /**
  * WebSocket-only supervisor environment. It intentionally contains no
  * control-plane URL, API token, or database credential — the worker learns

@@ -1609,6 +1609,12 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       retries: FINALIZE_RETRIES,
     });
 
+    // Sprites: close the proxy channel when the run leaves the active states
+    // (idle/parked/terminal). An open tunnel is activity and prevents hibernation.
+    if (["idle", "parked", "completed", "failed", "cancelled", "closed", "budget_exhausted"].includes(nextStatus)) {
+      void import("./worker-channel/registry").then((m) => m.maybeCloseSpritesChannel(run.id).catch(() => undefined));
+    }
+
     yield { type: "done" };
   } finally {
     if (heartbeat) clearInterval(heartbeat);

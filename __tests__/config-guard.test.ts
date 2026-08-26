@@ -40,6 +40,7 @@ const ALLOWLIST = new Set([
   "lib/run-dispatch.ts",
   "lib/runner/fly-client.ts",
   "lib/runner/fly.ts",
+  "lib/runner/sprites-client.ts",
   "lib/runner/worker-sha.ts",
   "lib/runs.ts",
   "lib/worker/log.ts",

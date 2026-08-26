@@ -94,9 +94,13 @@ function isActiveRunStatus(status: string): boolean {
 }
 
 /**
- * Pure lifecycle policy for cost control. Actively-used machines (creating/
- * starting, or holding a live worker claim) are never touched. Everything else
- * splits on whether the run is TERMINAL (done forever) or merely idle/resumable:
+ * Pure lifecycle policy for Fly Machines (cost control). Sprites use the
+ * simpler {@link nextSpritesLifecycleAction} — see its doc for the collapsed
+ * destroy-or-keep predicate. This function remains the Fly predicate.
+ *
+ * Actively-used machines (creating/ starting, or holding a live worker claim)
+ * are never touched. Everything else splits on whether the run is TERMINAL
+ * (done forever) or merely idle/resumable:
  *
  * Terminal runs (completed/failed/cancelled/closed/budget_exhausted) hold no
  * live worker, so within their window a still-running machine is suspended to
@@ -174,5 +178,41 @@ export function nextLifecycleAction(i: LifecycleInput): LifecycleAction {
     return state === "running" || state === "suspended" ? { kind: "stop" } : { kind: "none" };
   }
   if (state === "running") return { kind: "suspend" };
+  return { kind: "none" };
+}
+
+/**
+ * Sprites lifecycle predicate: collapse the lifecycle to one question —
+ * destroy or keep. Sprites hibernate themselves; we never suspend/stop.
+ *
+ * Rules in order:
+ * 1. `runnerState` is `gone`, `creating`, or `starting` → `none`.
+ * 2. `isWorkerLive(i)` → `none`.
+ * 3. Terminal, non-conversational run with `idleMs >= TASK_ORCH_RUNNER_TERMINAL_MS` (default 24h) → `destroy`.
+ * 4. Active run status → `none`.
+ * 5. Otherwise (idle/parked/conversational-terminal) with `idleMs >= TASK_ORCH_RUNNER_STOP_MS` (default 7d) → `destroy`.
+ * 6. Else `none`.
+ *
+ * `wakeRequestedAt` is ignored entirely; sprites do not use wake intents.
+ */
+export type SpritesLifecycleAction = { kind: "none" } | { kind: "destroy" };
+
+export function nextSpritesLifecycleAction(i: LifecycleInput): SpritesLifecycleAction {
+  const state = i.runnerState;
+  if (state === "gone" || state === "creating" || state === "starting") return { kind: "none" };
+
+  if (isWorkerLive(i)) return { kind: "none" };
+
+  if (isTerminalStatus(i.runStatus as SessionStatus) && !isConversationalTerminal(i)) {
+    const terminalWindowMs = intEnv("TASK_ORCH_RUNNER_TERMINAL_MS", DAY_MS);
+    if (i.idleMs >= terminalWindowMs) return { kind: "destroy" };
+    return { kind: "none" };
+  }
+
+  if (isActiveRunStatus(i.runStatus)) return { kind: "none" };
+
+  const stopWindowMs = intEnv("TASK_ORCH_RUNNER_STOP_MS", 7 * DAY_MS);
+  if (i.idleMs >= stopWindowMs) return { kind: "destroy" };
+
   return { kind: "none" };
 }

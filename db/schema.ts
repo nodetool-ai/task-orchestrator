@@ -332,6 +332,7 @@ export const runnerInstances = pgTable(
     flyApp: text("fly_app"),
     machineId: text("machine_id"),
     volumeId: text("volume_id"),
+    spriteName: text("sprite_name"),
     region: text("region"),
     // RunnerState: creating | starting | running | suspended | stopped | gone.
     state: text("state").notNull().default("creating"),

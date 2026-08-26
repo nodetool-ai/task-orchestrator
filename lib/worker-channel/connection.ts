@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { Duplex } from "node:stream";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket, { type RawData } from "ws";
@@ -50,6 +51,10 @@ import {
 } from "./protocol";
 import { executeToolInvoke, reserveToolInvoke, sweepOrphanedToolInvokes, type ToolChannelIO } from "./tool-invoke";
 
+import { config } from "../config";
+import { isSpritesDialEndpoint, parseSpritesDialEndpoint } from "./dispatch-env";
+import { openSpritesProxyTunnel } from "../runner/sprites-tunnel";
+
 export type { WorkerEventHandler };
 
 /** WebSocket ping cadence. A test seam shrinks it so the missed-pong liveness
@@ -76,6 +81,8 @@ export interface ControllerConnectionOptions {
   onTerminal?: (info: { status: string }) => void;
   /** Dependency injection for socket-level tests. */
   createSocket?: (endpoint: string, protocols: string[], options: WebSocket.ClientOptions) => WebSocket;
+  /** Injection for the Sprites proxy tunnel. Default is {@link openSpritesProxyTunnel}. */
+  openTunnel?: (target: { spriteName: string; port: number }) => Promise<Duplex>;
   /** A per-run blob coordinator that outlives individual connections so a
    * reconnect resumes the same durable receiver instead of racing a second one
    * over the shared on-disk blob store. */
@@ -101,10 +108,15 @@ function safeCloseReason(reason: string): string {
  * headers it implies. Every current endpoint (ws+unix://…, ws://[ip]:8787/…)
  * passes through unchanged with no extra headers; the seam exists so a future
  * proxied provider can attach per-endpoint auth without touching the dialer.
+ * Sprites `sprite://` endpoints are handled separately via the proxy tunnel
+ * (see `createSpritesProxiedSocket`) — this helper leaves them untouched for
+ * callers that only need to inspect the raw endpoint.
  */
 export function resolveDialTarget(endpoint: string): { url: string; headers: Record<string, string> } {
   return { url: endpoint, headers: {} };
 }
+
+
 
 function raw(data: RawData): string | ArrayBuffer | Uint8Array {
   if (typeof data === "string") return data;
@@ -131,6 +143,7 @@ export class ControllerConnection {
   private readonly onClose?: (info: { code: number }) => void;
   private readonly onTerminal?: (info: { status: string }) => void;
   private readonly createSocket: NonNullable<ControllerConnectionOptions["createSocket"]>;
+  private readonly openTunnel: NonNullable<ControllerConnectionOptions["openTunnel"]>;
   private socket?: WebSocket;
   private epoch = 0;
   private stopped = false;
@@ -152,6 +165,7 @@ export class ControllerConnection {
     this.onClose = options.onClose;
     this.onTerminal = options.onTerminal;
     this.createSocket = options.createSocket ?? ((url, protocols, socketOptions) => new WebSocket(url, protocols, socketOptions));
+    this.openTunnel = options.openTunnel ?? ((target) => openSpritesProxyTunnel(target));
     // Blob store is anchored per run+instance so a fresh connection after a
     // reconnect resumes a partial transfer from the durable receiver cursor. The
     // coordinator is normally supplied by the registry and shared across
@@ -197,11 +211,16 @@ export class ControllerConnection {
     const lease = await acquireControllerLease(this.runId, this.controllerId, new Date());
     this.epoch = lease.epoch;
     const credential = mintChannelCredential(this.runId, this.instanceId);
-    const { url: dialUrl, headers: proxyHeaders } = resolveDialTarget(this.endpoint);
-    const socket = this.createSocket(dialUrl, [WORKER_CHANNEL_SUBPROTOCOL], {
-      headers: { Authorization: `Bearer ${credential}`, ...proxyHeaders },
-      handshakeTimeout: 10_000,
-    });
+    let socket: WebSocket;
+    if (isSpritesDialEndpoint(this.endpoint)) {
+      socket = await this.createSpritesProxiedSocket(credential);
+    } else {
+      const { url: dialUrl, headers: proxyHeaders } = resolveDialTarget(this.endpoint);
+      socket = this.createSocket(dialUrl, [WORKER_CHANNEL_SUBPROTOCOL], {
+        headers: { Authorization: `Bearer ${credential}`, ...proxyHeaders },
+        handshakeTimeout: 10_000,
+      });
+    }
     this.socket = socket;
     // The worker speaks first. Its `channel.hello` is frequently coalesced into
     // the same TCP segment as the 101 handshake, so `ws` emits 'open' and then
@@ -263,6 +282,27 @@ export class ControllerConnection {
       await releaseControllerLease(this.runId, this.controllerId, lease.epoch).catch(() => undefined);
       throw error;
     }
+  }
+
+  /** Sprites proxy → inner WebSocket tunnel. The control plane holds
+   * SPRITES_TOKEN, the worker dials `sprite://<name>:8787`. The proxy handshake
+   * (`WSS /sprites/{name}/proxy` + JSON {host,port}) is performed first, then
+   * the inner channel WS is upgraded over that TCP relay (WS-over-WS). */
+  private async createSpritesProxiedSocket(credential: string): Promise<WebSocket> {
+    const parsed = parseSpritesDialEndpoint(this.endpoint);
+    if (!parsed) {
+      throw new ControllerProtocolError(`malformed sprites endpoint: ${this.endpoint}`, CLOSE_CODE_SCOPE_MISMATCH, false);
+    }
+    if (!config.sprites.token) {
+      throw new ControllerProtocolError("SPRITES_TOKEN is required to dial sprite:// endpoints", CLOSE_CODE_SCOPE_MISMATCH, false);
+    }
+    const tunnel = await this.openTunnel(parsed);
+    const innerUrl = `ws://localhost:${parsed.port}/worker/channel`;
+    return this.createSocket(innerUrl, [WORKER_CHANNEL_SUBPROTOCOL], {
+      headers: { Authorization: `Bearer ${credential}` },
+      handshakeTimeout: 10_000,
+      createConnection: () => tunnel as unknown as import("node:net").Socket,
+    } as unknown as WebSocket.ClientOptions);
   }
 
   /** Attach the persistent message/pong/close/error listeners for one socket.

@@ -9,6 +9,7 @@ import {
 } from "../config";
 import { FlyRunnerProvider } from "./fly";
 import { LocalRunnerProvider } from "./local";
+import { SpritesRunnerProvider } from "./sprites";
 
 export type { NestedDispatchMode } from "../config";
 
@@ -112,6 +113,8 @@ export function getRunnerProvider(): RunnerProvider {
         return new LocalRunnerProvider();
       case "fly":
         return new FlyRunnerProvider();
+      case "sprites":
+        return new SpritesRunnerProvider();
     }
   })();
   g[PROVIDER_KEY] = { kind, provider } satisfies ProviderCache;

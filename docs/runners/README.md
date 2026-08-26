@@ -73,10 +73,11 @@ variable:
 | --- | --- | --- |
 | unset / `local` / anything else | **local** | a process or Docker container on the same host |
 | `fly` | **Fly** | an ephemeral Fly Machine (micro-VM) + volume |
+| `sprites` | **Sprites** | a persistent, auto-hibernating Fly Sprite |
 
-The value is matched by exact equality, so anything that isn't `fly`
-(including the empty string) resolves to `local` — local is the default and the
-catch-all (`lib/config.ts`, `runnerProviderKind()`).
+The value is matched by exact equality, so anything that isn't `fly` or
+`sprites` (including the empty string) resolves to `local` — local is the
+default and the catch-all (`lib/config.ts`, `runnerProviderKind()`).
 
 Every provider implements the same small interface
 (`lib/runner/provider.ts`, `RunnerProvider`):
@@ -186,10 +187,13 @@ that differs between them:
 | local (host process) | a Unix domain socket | `ws+unix://` to that socket path |
 | local (Docker) | TCP `:8787` in the container | by container name (compose network) or private bridge IP |
 | Fly | TCP `:8787` on the Machine | the Machine's private 6PN IPv6 address |
+| Sprites | TCP `:8787` on the sprite | `sprite://<name>:8787` via the authenticated TCP proxy (`WSS /sprites/{name}/proxy`) |
 
 The resolved endpoint is stored on `runner_instances.channel_endpoint` so the
 control plane can reconnect after a restart. Full protocol design:
 [worker-websocket-protocol.md](../worker-websocket-protocol.md).
+Sprites proxy details: [Sprites integration](sprites.md) and
+[sprites-migration-design.md](../sprites-migration-design.md) §5.
 
 ---
 
@@ -209,10 +213,11 @@ then claiming it must be atomic, or two concurrent dispatches could both look at
 the same free capacity and both say yes. `dispatchRun` serializes this in a
 single in-process promise chain (`withAdmissionLock`). Inside it:
 
-- The provider's admission gate runs. Each provider measures capacity
-  differently — this is the other big provider difference:
-  - **local** measures free host RAM (does one more worker fit in memory?);
-  - **Fly** counts active Machines against `TASK_ORCH_MAX_MACHINES`.
+ - The provider's admission gate runs. Each provider measures capacity
+   differently — this is the other big provider difference:
+   - **local** measures free host RAM (does one more worker fit in memory?);
+   - **Fly** counts active Machines against `TASK_ORCH_MAX_MACHINES`;
+   - **Sprites** counts active sprites against `TASK_ORCH_MAX_SPRITES`.
 - If the answer is `defer`, the run is parked back in `pending` with a
   human-readable `pending_reason` (e.g. *"Waiting for runner capacity."*),
   and the pump will retry it later.
@@ -249,14 +254,15 @@ never clobbered.
 
 ## 6. Choosing an integration
 
-| | Local (host / Docker) | Fly |
-| --- | --- | --- |
-| **A worker is** | a process or container on one host | an ephemeral micro-VM + volume |
-| **Isolation** | shared host / container cgroup | full VM per run |
-| **Capacity gate** | free host RAM | Machine count |
-| **State between turns** | host filesystem / repo cache | Fly volume (survives suspend) |
-| **Setup** | Docker (or nothing) | Fly app + token + images |
-| **Best for** | local dev, single-box deploys | horizontal cloud scale |
+| | Local (host / Docker) | Fly | Sprites |
+| --- | --- | --- | --- |
+| **A worker is** | a process or container on one host | an ephemeral micro-VM + volume | a persistent, auto-hibernating sprite |
+| **Isolation** | shared host / container cgroup | full VM per run | full VM per run |
+| **Capacity gate** | free host RAM | Machine count | Sprite count |
+| **State between turns** | host filesystem / repo cache | Fly volume (survives suspend) | Sprite filesystem (survives hibernate) |
+| **Idle cost** | host held | Machine billed while running | free while hibernated (storage only) |
+| **Setup** | Docker (or nothing) | Fly app + token + images | Sprites token |
+| **Best for** | local dev, single-box deploys | horizontal cloud scale (VMs) | horizontal cloud scale (cheaper idle) |
 
 Rough guidance:
 
@@ -266,6 +272,9 @@ Rough guidance:
 - **Fly** — you want each run in its own VM and to scale horizontally across a
   cloud without managing a host. See [fly-deployment.md](../fly-deployment.md)
   for the full operator guide.
+- **Sprites** — like Fly but sprites hibernate after ~30s idle and bill nothing
+  while hibernated. Keep `fly` as rollback (`TASK_ORCH_RUNNER=sprites` vs `fly`).
+  See [Sprites integration](sprites.md) and the [migration design](../sprites-migration-design.md).
 
 ## 7. Environments
 
@@ -282,6 +291,8 @@ command). The shared `environments` registry table backs both.
 
 - [Local / Docker integration](docker-local.md)
 - [Fly.io integration](fly.md)
+- [Sprites integration](sprites.md) — the successor to Fly
+- [Migration design](../sprites-migration-design.md) — Fly → Sprites
 - [Worker WebSocket protocol](../worker-websocket-protocol.md) — the normative channel design
 - [Fly deployment guide](../fly-deployment.md) · [Local Docker stack](../test-deployment.md)
 - [Agent event system](../agent-events.md) — how parked runs are woken by events
