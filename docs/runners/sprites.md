@@ -151,10 +151,26 @@ via `lib/runner/sprites-bootstrap.ts`.
 - The worker service is then defined with `dir: /home/user/worker` and `cmd: node dist/run-worker.js <runId>`.
 - No `git clone` and no `npm ci` are done in the sprite during bootstrap; the worker does its own blobless checkout per turn via `containerCheckoutAt`. This keeps bootstrap to a single `curl | tar` plus a `test -f` and a checkpoint.
 
-**How to publish the bundle tarball:**
-1. Run `npm run build:worker:standalone` to produce `dist/run-worker.standalone.js` and `dist/run-worker.standalone.js.sha`.
-2. Tar it: `tar -czf worker-<sha>.tar.gz -C dist run-worker.js` (or the standalone bundle) and upload to your bundle store (GitHub release asset or R2/S3).
-3. Set `TASK_ORCH_SPRITES_WORKER_BUNDLE_URL=https://cdn.example.com/worker-{sha}.tar.gz` on the control plane. The `{sha}` placeholder is expanded to the current worker SHA (from `lib/runner/worker-sha.ts:workerBuildSha`).
+**How the bundle is served (default):** the control plane image already ships
+`dist/run-worker.standalone.js` plus its `.sha` sidecar (Dockerfile.server). The
+route `GET /api/worker-bundle/<sha>.tar.gz` (unauthenticated) packs it as
+`dist/run-worker.js` on the fly and refuses any sha other than the shipped one.
+Set on the control plane:
+
+```
+TASK_ORCH_SPRITES_WORKER_BUNDLE_URL=https://task-orchestrator.fly.dev/api/worker-bundle/{sha}.tar.gz
+```
+
+The `{sha}` placeholder is expanded to `workerBuildSha()` (the pushed tip of
+`TASK_ORCH_WORKER_REPO_REF`), so the shipped sha must equal that tip: push
+first, then deploy from that commit with
+`flyctl deploy --build-arg GIT_SHA=$(git rev-parse HEAD)`. Without the build
+arg the Docker build has no `.git` and cannot bake the sidecar (a stale local
+`dist/` copy would be shipped instead).
+
+**Alternative store:** tar `dist/run-worker.standalone.js` as `dist/run-worker.js`
+(`worker-<sha>.tar.gz`), upload to a GitHub release asset or R2/S3, and point the
+URL template there.
 
 **Idempotency:** Bootstrap checks `listCheckpoints` for an existing checkpoint with comment `bootstrap <sha>` and skips `fetch-worker`/`verify-worker`/`checkpoint` entirely when found. This covers the `409` sprite-already-exists path.
 

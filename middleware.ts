@@ -32,6 +32,11 @@ export default auth((req) => {
   if (path === "/api/health" || path === "/api/metrics") {
     return NextResponse.next();
   }
+  // /api/worker-bundle/<sha>.tar.gz is curl'd by sprites at bootstrap with no
+  // session; it serves only the public worker build this image ships.
+  if (path.startsWith("/api/worker-bundle/")) {
+    return NextResponse.next();
+  }
   // /api/mcp has its own Bearer-token auth (lib/api-tokens). Bypass the
   // session gate so MCP clients without a browser session can reach it.
   if (path === "/api/mcp") {
