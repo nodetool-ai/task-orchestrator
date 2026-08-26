@@ -120,18 +120,18 @@ Full rationale in [PRD §6.3](../tui/PRD.md).
 |---|---|---|---|---|
 | `↵` | send (or confirm a pending cancel) | talk to the row | open the run | open |
 | `esc` | clear notice → chip → scrollback → input | back to chat | back to chat | close |
-| `tab` | address the next waiting agent (`tab` completes a `/model` suggestion while one is up) | — | — | — |
+| `tab` | complete the command word, then address the next waiting agent | — | — | — |
 | `↑` `↓` | walk what you sent before (the `/model` suggestions while one is up) | move the cursor | move the cursor | move the cursor |
-| `←` `→` | move the cursor; with `⌥`, by word | — | — | — |
-| `home` `end` · `^a` `^e` | jump to the start or end of the line | — | — | — |
+| `←` `→` | move the cursor; with `⌥` or `^`, by word | — | — | — |
+| `home` `end` · `^a` `^e` | jump to the start or end of the line (the palette's filter too) | — | — | — |
 | letters | type into the composer | — | — | fuzzy-filter the palette |
-| `pgup` `pgdn` | scroll the transcript | — | — | — |
+| `pgup` `pgdn` | scroll the transcript a page at a time | — | — | — |
 | `backspace` | erase behind the cursor; with `⌥` or as `^w`, the whole word | — | — | — |
 | `del` | erase at the cursor | — | — | — |
 | `^u` | clear the input | — | — | — |
 | `c` | — | cancel the subtree (confirm) | — | — |
 | `n` | — | new agent (hands back `/new `) | — | — |
-| `d` | — | — | dismiss (not wired yet — it says so) | — |
+| `d` | — | — | dismiss for this session — it says so, and it returns when orch restarts | — |
 | `o` | — | open the PR, else the run page | open the PR, else the run page | — |
 | `^f` | toggle the floor (global) | | | |
 | `^n` | toggle needs you (global) | | | |
@@ -188,7 +188,9 @@ empty turns it on.
 ## Slash commands
 
 Typing `/` in the composer lists the matching commands with one-line help
-above the prompt.
+above the prompt. `tab` completes a half-typed command word — `/mo` becomes
+`/model ` with its space, ready for the argument; while several commands
+still share the prefix it completes as far as they agree.
 
 | Command | What it does |
 |---|---|
@@ -196,6 +198,7 @@ above the prompt.
 | `/inbox` | Toggle the needs-you list. |
 | `/new <persona> <goal>` | Start a top-level run with that persona's defaults and open it. |
 | `/open #id` | Open that run's conversation. |
+| `/say <id> <message>` | Message another run without leaving this conversation — the typed form of the `@#id` chip. |
 | `/spawn <persona> <goal\|T-id>` | Ask the run you are in to delegate to a child agent. Never creates a run itself — it messages the agent that owns the `spawn` tool. |
 | `/cancel` | Cancel the current run and its live children (same confirmation as `c`). |
 | `/model <id>` | Change the model the current run uses; the header shows it. |

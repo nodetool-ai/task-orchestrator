@@ -186,7 +186,7 @@ PRD §6.3. `^x` is Ctrl-X.
 |---|---|---|---|---|
 | `↵` | send | talk to row | answer / open | open |
 | `esc` | clear the `@#id` chip, then clear the input | back | back | close |
-| `tab` | address the next waiting agent; completes a `/model` suggestion while one is up | — | — | — |
+| `tab` | complete the command word, then address the next waiting agent; completes a `/model` suggestion while one is up | — | — | — |
 | `↑` `↓` | recall history (walk `/model` suggestions while one is up) | move | move | move |
 | `←` `→` | move the cursor · `⌥←` `⌥→` by word · `home`/`end`, `^a`/`^e` to the ends | — | — | — |
 | `backspace` / `del` | erase behind / at the cursor · `⌥⌫` or `^w` kills a word | — | — | — |
@@ -198,14 +198,15 @@ PRD §6.3. `^x` is Ctrl-X.
 | `^c` | quit — agents keep running | | | |
 | `c` | — | cancel subtree (confirm) | — | — |
 | `n` | — | new agent | — | — |
-| `d` | — | — | dismiss | — |
+| `d` | — | — | dismiss (this session; back on restart) | — |
 | `o` | — | open PR / run URL | open PR / run URL | — |
 | `pgup`/`pgdn` | scroll the transcript | — | — | — |
 
 Slash commands in the composer (PRD §6.4): `/floor` `/inbox`
-`/new <persona> <goal>` `/open #id` `/spawn <persona> <goal|T-id>` `/cancel`
-`/model <id>` `/budget <usd|turns>` `/trace` `/quit`. Typing `/` lists the
-matching commands with one-line help above the prompt.
+`/new <persona> <goal>` `/open #id` `/say <id> <message>` `/spawn <persona>
+<goal|T-id>` `/cancel` `/model <id>` `/budget <usd|turns>` `/trace` `/quit`.
+Typing `/` lists the matching commands with one-line help above the prompt,
+and `tab` completes a half-typed command word.
 
 ## Verbs
 

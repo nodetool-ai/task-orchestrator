@@ -6,7 +6,19 @@ import { openInBrowser } from "./cli/open.js";
 import { floorGroups } from "./model/forest.js";
 import { isLive } from "./model/status.js";
 import * as ed from "./model/composer.js";
-import type { Composer } from "./model/composer.js";
+import type { Composer, Line } from "./model/composer.js";
+import {
+  backspace,
+  del,
+  insert,
+  killWordBack,
+  left,
+  right,
+  toEnd,
+  toStart,
+  wordBack,
+  wordForward,
+} from "./model/composer.js";
 import { applyModelCompletion, matchModels } from "./model/models.js";
 import { filterPalette } from "./model/palette.js";
 import { useOrch } from "./store.js";
@@ -16,16 +28,12 @@ import { Floor } from "./views/floor.js";
 import { Inbox } from "./views/inbox.js";
 import { Palette } from "./views/palette.js";
 import { Roster } from "./views/roster.js";
-import { Prompt, matchCommands } from "./views/prompt.js";
+import { Prompt, completeCommand, matchCommands } from "./views/prompt.js";
 import { MotionProvider, motionEnabled } from "./views/motion.js";
 import { LiveLine } from "./views/spinner.js";
 import { RAIL_MIN_COLS, cursorWindow, paletteHeight, paletteRows, screenLayout } from "./views/layout.js";
 
 type View = "chat" | "floor" | "inbox" | "palette";
-
-// Not wired yet: /say is an M3 CLI verb with no cockpit form. It answers
-// honestly rather than pretending to work.
-const LATER_COMMANDS = new Set(["/say"]);
 
 const DEFAULT_URL = "http://localhost:3000";
 
@@ -96,7 +104,13 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
   // The whole composer — line, cursor and recall history — is one value with
   // one setter (model/composer.ts), so a keystroke updates all three or none.
   const [comp, setComp] = useState<Composer>(ed.emptyComposer);
-  const [pq, setPq] = useState("");
+  // The jump palette's filter, same Line shape as the composer so every field
+  // you type into edits the same way.
+  const [pq, setPq] = useState<Line>(ed.emptyLine);
+  // Needs-you rows dismissed this session. The server has no acknowledge for
+  // an inbox event, so dismissal is honest about its reach: it lasts until
+  // you quit, which is exactly the triage window an operator wants anyway.
+  const [dismissed, setDismissed] = useState<ReadonlySet<string>>(() => new Set());
   const [cursor, setCursor] = useState(0);
   const [trace, setTrace] = useState(false);
   const [scrollBack, setScrollBack] = useState(0);
@@ -116,7 +130,12 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
   // transcript is sized from what the prompt leaves over and an under-count
   // here over-draws the screen. `help` and `pending` are what <Prompt> is
   // about to paint above the composer.
-  const pending = s.inbox.length > 0 && to === null;
+  // Needs-you, minus what you dismissed. Every count an operator acts on —
+  // the nudge above the prompt, the floor badge, the rail — reads this list,
+  // so a dismissed row stops nagging everywhere at once.
+  const inbox = useMemo(() => s.inbox.filter((it) => !dismissed.has(it.id)), [s.inbox, dismissed]);
+
+  const pending = inbox.length > 0 && to === null;
   // The live line only exists while the open run is working, so it is part of
   // the same arithmetic as the command help: a row the transcript gives up.
   const live = view === "chat" && run !== null && isLive(run.status);
@@ -136,7 +155,7 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
     const { live, rest } = floorGroups(s.forest, g);
     return [...live, ...rest];
   }, [s.forest, g]);
-  const paletteItems = useMemo(() => filterPalette(s.palette, pq), [s.palette, pq]);
+  const paletteItems = useMemo(() => filterPalette(s.palette, pq.text), [s.palette, pq.text]);
 
   // Warm, so `/new implementor …` can be validated the moment it is typed and
   // `/model ` completes on the first space.
@@ -163,7 +182,7 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
     setCursor(0);
     setNotice(null);
     if (next === "palette") {
-      setPq("");
+      setPq(ed.emptyLine());
       s.actions.ensurePalette();
     }
     setView(view === next ? "chat" : next);
@@ -259,6 +278,14 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
           .catch(() => setNotice(`could not start a ${p.id} run`));
         return;
       }
+      case "/say": {
+        // Same door as the @#id chip — send(text, target) — just typed
+        // instead of cycled. The optimistic frame lands here with its `to`
+        // mark, exactly as a chip answer would.
+        const m = /^#?(\d+)\s+(.+)$/.exec(arg);
+        if (!m) return setNotice("/say <run id> <message> — e.g. /say #45 try the fix");
+        return say(m[2]!, Number(m[1]));
+      }
       case "/spawn": {
         const [who, ...goalWords] = rest;
         const what = goalWords.join(" ").trim();
@@ -303,9 +330,7 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
       case "/quit":
         return exit();
       default:
-        return setNotice(
-          LATER_COMMANDS.has(cmd ?? "") ? `${cmd} is not wired yet` : `${cmd}: unknown command`,
-        );
+        return setNotice(`${cmd}: unknown command`);
     }
   };
 
@@ -323,13 +348,25 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
       if (key.return) return openPaletteItem(cursor);
       if (key.upArrow) return setCursor((c) => Math.max(0, c - 1));
       if (key.downArrow) return setCursor((c) => Math.min(paletteItems.length - 1, c + 1));
-      if (key.backspace || key.delete) {
+      // The filter is a composer line too: same motions, same word kill, so
+      // muscle memory from the prompt works over the palette. A keystroke
+      // that changes the query re-ranks the rows, so the row cursor restarts;
+      // moving within the line does not.
+      if (key.home || (key.ctrl && ch === "a")) return setPq(toStart);
+      if (key.end || (key.ctrl && ch === "e")) return setPq(toEnd);
+      if (key.leftArrow) return setPq(key.meta || key.ctrl ? wordBack : left);
+      if (key.rightArrow) return setPq(key.meta || key.ctrl ? wordForward : right);
+      if (key.backspace) {
         setCursor(0);
-        return setPq((q) => q.slice(0, -1));
+        return setPq(key.meta || (key.ctrl && ch === "w") ? killWordBack : backspace);
+      }
+      if (key.delete) {
+        setCursor(0);
+        return setPq(del);
       }
       if (ch && !key.ctrl && !key.meta) {
         setCursor(0);
-        setPq((q) => q + ch);
+        return setPq((q) => insert(q, ch));
       }
       return;
     }
@@ -372,30 +409,45 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
     if (view === "inbox") {
       if (key.escape) return setView("chat");
       if (key.upArrow) return setCursor((c) => Math.max(0, c - 1));
-      if (key.downArrow) return setCursor((c) => Math.min(s.inbox.length - 1, c + 1));
+      if (key.downArrow) return setCursor((c) => Math.min(inbox.length - 1, c + 1));
       if (key.return) {
-        const it = s.inbox[cursor];
+        const it = inbox[cursor];
         if (it) open(it.runId);
         return;
       }
       if (ch === "o") {
-        const it = s.inbox[cursor];
+        const it = inbox[cursor];
         if (!it) return;
         return browse({ id: it.runId, prUrl: it.prUrl });
       }
-      if (ch === "d") return setNotice("dismiss is not wired yet");
+      // Dismiss is session-scoped: the server keeps no acknowledge for an
+      // inbox row, so the row hides until you quit and says so.
+      if (ch === "d") {
+        const it = inbox[cursor];
+        if (!it) return;
+        setDismissed((d) => new Set(d).add(it.id));
+        setCursor((c) => Math.max(0, Math.min(c, inbox.length - 2)));
+        return setNotice(`#${it.runId} hidden until you quit orch`);
+      }
       return;
     }
 
     // Chat: the composer owns the keyboard, apart from transcript scrolling.
-    if (key.pageUp) return setScrollBack((n) => n + 5);
-    if (key.pageDown) return setScrollBack((n) => Math.max(0, n - 5));
+    // A page of transcript per press, not five lines — the key is named after
+    // what it does.
+    if (key.pageUp) return setScrollBack((n) => n + bodyH);
+    if (key.pageDown) return setScrollBack((n) => Math.max(0, n - bodyH));
     // While `/model` suggests, the arrows walk the suggestions; they had no
     // job in the composer before (scrolling is pgup/pgdn). Otherwise ↓/↑ walk
     // the recall history, newest first.
     if (shownComps.length > 0 && key.upArrow) return setCompIx((i) => Math.max(0, i - 1));
     if (shownComps.length > 0 && key.downArrow) return setCompIx((i) => Math.min(shownComps.length - 1, i + 1));
     if (key.tab) {
+      // A half-typed command word completes first: `/mo` becomes `/model `,
+      // ready for its argument. Once the word is whole (or has a space), the
+      // suggestions and then agent addressing get their turns.
+      const cmd = completeCommand(comp.line.text);
+      if (cmd !== null) return edit(ed.replaced(cmd));
       // Mid-command the suggestions own `tab`: a leading slash routes to the
       // command switch, never to an agent, so there is no addressing to lose.
       if (comp.line.text.startsWith("/") && shownComps.length > 0) {
@@ -425,8 +477,8 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
     // append-only, so a typo at the top of a long goal cost the whole line.
     if (key.home || (key.ctrl && ch === "a")) return edit(ed.cursorHome);
     if (key.end || (key.ctrl && ch === "e")) return edit(ed.cursorEnd);
-    if (key.leftArrow) return edit(key.meta ? ed.cursorWordBack : ed.cursorLeft);
-    if (key.rightArrow) return edit(key.meta ? ed.cursorWordForward : ed.cursorRight);
+    if (key.leftArrow) return edit(key.meta || key.ctrl ? ed.cursorWordBack : ed.cursorLeft);
+    if (key.rightArrow) return edit(key.meta || key.ctrl ? ed.cursorWordForward : ed.cursorRight);
     if (key.upArrow) return edit((c) => ed.recallPrev(c));
     if (key.downArrow) return edit((c) => ed.recallNext(c));
     if (key.backspace) return edit(key.meta || (key.ctrl && ch === "w") ? ed.killWord : ed.erase);
@@ -449,8 +501,8 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
 
   const main = (() => {
     if (view === "floor")
-      return <Floor forest={s.forest} inboxCount={s.inbox.length} now={s.now} width={mainW} height={bodyH} cursor={cursor} />;
-    if (view === "inbox") return <Inbox items={s.inbox} now={s.now} width={mainW} height={bodyH} cursor={cursor} />;
+      return <Floor forest={s.forest} inboxCount={inbox.length} now={s.now} width={mainW} height={bodyH} cursor={cursor} />;
+    if (view === "inbox") return <Inbox items={inbox} now={s.now} width={mainW} height={bodyH} cursor={cursor} />;
     return (
       <Box flexDirection="column" width={mainW}>
         <ChatHeader run={run} forest={s.forest} now={s.now} width={mainW} />
@@ -480,7 +532,7 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
               value={comp.line.text}
               cur={comp.line.cur}
               to={to}
-              pendingCount={s.inbox.length}
+              pendingCount={inbox.length}
               width={mainW}
               busy={s.loading}
               maxHelp={screen.helpShown}
@@ -492,7 +544,8 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
             <Box flexDirection="column" width={mainW} alignItems="center" marginBottom={2}>
               <Palette
                 items={paletteItems.slice(paletteWin.start, paletteWin.end)}
-                query={pq}
+                query={pq.text}
+                cur={pq.cur}
                 cursor={cursor - paletteWin.start}
                 width={mainW}
               />
@@ -507,7 +560,7 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
             </Box>
             <Roster
               forest={s.forest}
-              inboxCount={s.inbox.length}
+              inboxCount={inbox.length}
               now={s.now}
               width={railW - 1}
               height={rows}

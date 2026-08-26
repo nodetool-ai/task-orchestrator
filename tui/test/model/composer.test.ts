@@ -16,6 +16,7 @@ import {
   recallNext,
   recallPrev,
   right,
+  sanitize,
   toEnd,
   toStart,
   wordBack,
@@ -23,6 +24,22 @@ import {
 } from "../../src/model/composer.js";
 
 const line = (text: string, cur = text.length) => ({ text, cur });
+
+describe("sanitize (what a paste may carry)", () => {
+  it("folds line breaks and tabs into spaces so one line stays one line", () => {
+    expect(sanitize("one\ntwo\rthree\tfour")).toBe("one two three four");
+    expect(insert(emptyLine(), "a\nb")).toEqual(line("a b", 3));
+  });
+
+  it("strips ANSI escapes and control characters", () => {
+    expect(sanitize("\x1b[31mred\x1b[0m")).toBe("red");
+    expect(sanitize("a\x00b\x7fc")).toBe("abc");
+  });
+
+  it("keeps deliberate spacing exactly as pasted", () => {
+    expect(sanitize("two  spaces")).toBe("two  spaces");
+  });
+});
 
 describe("line editing", () => {
   it("inserts at the cursor and leaves the rest in place", () => {

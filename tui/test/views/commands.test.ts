@@ -21,6 +21,7 @@ import {
   resolvePersona,
   spawnMessage,
 } from "../../src/app.js";
+import { completeCommand } from "../../src/views/prompt.js";
 
 const PERSONAS = [
   { id: "implementor", name: "Implementor", budgetMaxTurns: 40, budgetMaxSeconds: null },
@@ -286,5 +287,25 @@ describe("glyphs", () => {
     expect(glyphs(true).bar).toBe("|");
     expect(glyphs(false).rule).toBe("─");
     expect(glyphs(false).rail).toBe("│");
+  });
+});
+
+describe("completeCommand", () => {
+  it("completes an unambiguous prefix with the space that invites arguments", () => {
+    expect(completeCommand("/flo")).toBe("/floor ");
+    expect(completeCommand("/o")).toBe("/open ");
+    expect(completeCommand("/new")).toBe("/new "); // already whole: still wants its space
+  });
+
+  it("completes a shared prefix while the word is still ambiguous", () => {
+    expect(completeCommand("/s")).toBeNull(); // /say and /spawn share only what is typed
+    expect(completeCommand("/sp")).toBe("/spawn ");
+  });
+
+  it("stands aside once there are arguments or nothing to add", () => {
+    expect(completeCommand("/model sonnet")).toBeNull(); // tab belongs to model completion
+    expect(completeCommand("/floor ")).toBeNull();
+    expect(completeCommand("/zzz")).toBeNull();
+    expect(completeCommand("hello")).toBeNull(); // plain words are for agents
   });
 });

@@ -16,11 +16,22 @@ export function emptyLine(): Line {
   return { text: "", cur: 0 };
 }
 
+/** A bracketed paste arrives as one string and may carry anything: newlines
+ *  that would break the one-line layout, tabs, stray escapes. Line breaks and
+ *  tabs become spaces; every other control character and escape sequence goes. */
+export function sanitize(s: string): string {
+  return s
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07/g, "")
+    .replace(/[\t\n\r\v\f]/g, " ")
+    .replace(/[\x00-\x08\x0e-\x1f\x7f]/g, "");
+}
+
 /** Typed characters (a keystroke or a paste) land at the cursor, which moves
  *  after them — the behaviour every editor shares. */
 export function insert(l: Line, s: string): Line {
-  if (!s) return l;
-  return { text: l.text.slice(0, l.cur) + s + l.text.slice(l.cur), cur: l.cur + s.length };
+  const clean = sanitize(s);
+  if (!clean) return l;
+  return { text: l.text.slice(0, l.cur) + clean + l.text.slice(l.cur), cur: l.cur + clean.length };
 }
 
 /** Delete the character before the cursor; at column zero it is a no-op. */

@@ -172,7 +172,11 @@ for (const [view, keys, marker] of VIEWS) {
 // stripped — so they catch wiring bugs the pure model tests cannot: a key the
 // handler never receives, or a Prompt that ignores the cursor it was given.
 describe("the composer under keystrokes", () => {
-  const promptLine = (lines: string[]): string => lines.find((l) => l.startsWith("❯ ")) ?? "";
+  // The composer owns the bottom of the screen; transcript user frames also
+  // open with `❯ `, so take the LAST such line — and the fake client's
+  // message log is module state, so earlier tests' sent lines show up in
+  // later transcripts and must not be mistaken for the prompt.
+  const promptLine = (lines: string[]): string => [...lines].reverse().find((l) => l.startsWith("❯ ")) ?? "";
 
   it("edits mid-line", async () => {
     const lines = await screenshot(80, 24, ["h", "i", "\x1b[D", "!"], "h!i");
@@ -192,6 +196,28 @@ describe("the composer under keystrokes", () => {
   it("recalls a sent line with the arrow that typed it back", async () => {
     const lines = await screenshot(80, 24, ["o", "n", "e", "\r", "t", "w", "\x1b[A"], "❯ one");
     expect(promptLine(lines)).toMatch(/^❯ one\b/);
+  });
+
+  it("completes a half-typed command word on tab", async () => {
+    const lines = await screenshot(80, 24, ["/", "o", "\t"], "❯ /open");
+    expect(promptLine(lines)).toContain("❯ /open ");
+  });
+
+  it("sends to another run without leaving this one", async () => {
+    // /say posts through the same door as the @#id chip: the optimistic
+    // frame carries a `to` mark in the open transcript.
+    const lines = await screenshot(80, 24, ["/", "s", "a", "y", " ", "4", "3", " ", "h", "i", "\r"], "@#43");
+    expect(lines.join("\n")).toContain("@#43 hi");
+  });
+
+  it("dismisses a needs-you row and says for how long", async () => {
+    const lines = await screenshot(80, 24, ["\x0e", "d"], "hidden until you quit orch");
+    expect(lines.join("\n")).toContain("hidden until you quit orch");
+  });
+
+  it("edits the jump palette's filter mid-line", async () => {
+    const lines = await screenshot(80, 24, ["\x0b", "4", "\x1b[D", "2"], "jump to 2");
+    expect(lines.join("\n")).toContain("jump to 24");
   });
 });
 });

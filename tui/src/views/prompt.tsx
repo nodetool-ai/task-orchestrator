@@ -12,6 +12,7 @@ export const COMMANDS: { cmd: string; help: string }[] = [
   { cmd: "/inbox", help: "what needs you" },
   { cmd: "/new", help: "start an agent  /new implementor <goal>" },
   { cmd: "/open", help: "look at a run  /open #45" },
+  { cmd: "/say", help: "message another run  /say #45 try the fix" },
   { cmd: "/spawn", help: "ask this agent to delegate  /spawn reviewer T-42" },
   { cmd: "/cancel", help: "stop this run and its live children" },
   { cmd: "/model", help: "retune this run  /model claude-sonnet-4-6" },
@@ -25,6 +26,27 @@ export function matchCommands(input: string) {
   const head = input.split(" ")[0];
   if (input.includes(" ")) return COMMANDS.filter((c) => c.cmd === head);
   return COMMANDS.filter((c) => c.cmd.startsWith(head));
+}
+
+/**
+ * What `tab` makes of a half-typed command word. One match completes it with
+ * the trailing space that invites the arguments — even a word typed in full,
+ * which otherwise could only end by addressing an agent by mistake. Several
+ * matches complete their longest common prefix; when even that adds nothing,
+ * null stands aside.
+ */
+export function completeCommand(input: string): string | null {
+  if (!input.startsWith("/") || input.includes(" ")) return null;
+  const matches = matchCommands(input);
+  if (matches.length === 0) return null;
+  if (matches.length === 1) return `${matches[0]!.cmd} `;
+  let prefix = matches[0]!.cmd;
+  for (const m of matches.slice(1)) {
+    let i = 0;
+    while (i < prefix.length && i < m.cmd.length && prefix[i] === m.cmd[i]) i++;
+    prefix = prefix.slice(0, i);
+  }
+  return prefix.length > input.length ? prefix : null;
 }
 
 // The composer. Addressing: when `to` is set the prompt shows a coloured
