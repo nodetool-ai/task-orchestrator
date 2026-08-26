@@ -39,14 +39,6 @@ import { StartupIndicator } from "@/components/runs/startup-indicator";
 import { useConfirm } from "@/components/ui/dialog-provider";
 import { WorkerLogPanel } from "@/components/runs/worker-log-panel";
 import { takePendingMessage } from "@/lib/pending-first-message";
-import {
-  reduceTemplateBuildEvent,
-  type TemplateBuildState,
-} from "@/lib/runner/box-template-events";
-import {
-  reduceBoxBootEvent,
-  type BoxBootState,
-} from "@/lib/runner/box-boot-events";
 
 interface SidebarRepo {
   id: string;
@@ -59,14 +51,6 @@ interface Props {
   initialMessages: MessageRow[];
   /** Max message/event ids at server render; seeds the read-only SSE tail. */
   initialCursor: { msgId: number; evtId: number };
-  /** Box-template build state folded from persisted events at render, so the
-   *  stepper shows immediately for a run opened mid-build. Null when there's no
-   *  build (non-box runs, or a ready/pinned template). */
-  initialTemplateBuild: TemplateBuildState | null;
-  /** Box boot / worker-startup state folded from persisted events at render, so
-   *  the stepper shows immediately for a run opened mid-boot. Null when there's
-   *  no box boot in flight (non-box runs, or a run already past startup). */
-  initialBoxBoot: BoxBootState | null;
   live: boolean;
   userEmail: string | null;
   repositories: SidebarRepo[];
@@ -144,8 +128,6 @@ export function RunView({
   run: initialRun,
   initialMessages,
   initialCursor,
-  initialTemplateBuild,
-  initialBoxBoot,
   live,
   userEmail,
   repositories,
@@ -169,10 +151,6 @@ export function RunView({
   const [awaitingFirstToken, setAwaitingFirstToken] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [showWorkerLog, setShowWorkerLog] = useState(false);
-  const [templateBuild, setTemplateBuild] = useState<TemplateBuildState | null>(
-    initialTemplateBuild
-  );
-  const [boxBoot, setBoxBoot] = useState<BoxBootState | null>(initialBoxBoot);
   const [showInbox, setShowInbox] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -411,27 +389,6 @@ export function RunView({
 
   function handleSseEvent(event: StreamEventClient) {
     const raw = event as unknown as Record<string, unknown> & { type: string };
-    if (raw.type.startsWith("runner_box_template_")) {
-      setTemplateBuild((prev) => reduceTemplateBuildEvent(prev, raw, Date.now()));
-      return;
-    }
-    // Per-run box boot / worker-startup lifecycle. These flat runner_* frames
-    // ride the same stream; fold them into the boot stepper. runner_failed is
-    // shared with other lifecycle paths but the reducer only reacts to it while
-    // a boot is in flight, so a later failure can't revive the stepper.
-    if (
-      raw.type === "runner_box_forking" ||
-      raw.type === "runner_box_provisioning" ||
-      raw.type === "runner_box_ready" ||
-      raw.type === "runner_box_bootstrap_log" ||
-      raw.type === "runner_box_channel_hosted" ||
-      raw.type === "runner_failed"
-    ) {
-      setBoxBoot((prev) => reduceBoxBootEvent(prev, raw, Date.now()));
-      // runner_failed also surfaces through status/error; don't return so the
-      // rest of the handler still runs for it.
-      if (raw.type !== "runner_failed") return;
-    }
     if (event.type === "status" && event.status) {
       setRun((r) => ({ ...r, status: event.status! }));
       // Status transitions show up inline as a compact system row so the
@@ -935,36 +892,21 @@ export function RunView({
               )
             )}
             {(() => {
-              const buildVisible =
-                templateBuild != null &&
-                templateBuild.phase !== "ready" &&
-                (status === "pending" || status === "preparing");
-              // The box boot stepper stays up until it hits its terminal ready
-              // (channel hosted) or failed phase — the agent's first token then
-              // clears it via awaitingFirstToken.
-              const bootVisible = boxBoot != null && boxBoot.phase !== "ready";
-              if (!sending && !buildVisible && !bootVisible) return null;
-              if (awaitingFirstToken || buildVisible || bootVisible) {
+              if (!sending) return null;
+              if (awaitingFirstToken) {
                 return (
                   <StartupIndicator
                     status={status}
-                    templateBuild={templateBuild}
-                    boxBoot={boxBoot}
                     onShowLog={() => setShowWorkerLog(true)}
                   />
                 );
               }
               return <ThinkingIndicator />;
             })()}
-            {/* A pending run with no live stepper still explains itself: the
-                admission defer reason (capacity, a template build it's waiting
-                behind, account backpressure). Otherwise it reads as hung. */}
+            {/* A pending run still explains itself: the admission defer reason
+                (capacity, account backpressure). Otherwise it reads as hung. */}
             {status === "pending" &&
-              run.pendingReason &&
-              !(
-                templateBuild != null &&
-                templateBuild.phase !== "ready"
-              ) && (
+              run.pendingReason && (
                 <div className="mx-4 my-2 flex items-center gap-2 rounded-lg border border-border/60 bg-card/40 px-3 py-2.5 text-[11px] text-muted-foreground">
                   <Spinner className="size-3 text-state-progress" />
                   <span>{run.pendingReason}</span>

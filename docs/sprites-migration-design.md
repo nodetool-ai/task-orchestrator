@@ -12,8 +12,11 @@ Primary sources: the [Sprites API reference](https://sprites.dev/api)
 [policies](https://sprites.dev/api/sprites/policies),
 [proxy](https://sprites.dev/api/sprites/proxy),
 [filesystem](https://sprites.dev/api/sprites/filesystem)), and this repo's
-[runner architecture](runners/README.md), [Fly integration](runners/fly.md),
-and [Box integration](runners/box.md) docs.
+[runner architecture](runners/README.md) and
+[Fly integration](runners/fly.md) docs.
+(The Box integration this doc originally cited as precedent has since been
+removed from the codebase; references to it below describe patterns from git
+history, not live code.)
 
 ---
 
@@ -72,7 +75,7 @@ plan; this is the single biggest migration risk.
 Base URL `https://api.sprites.dev/v1`, auth `Authorization: Bearer
 $SPRITES_TOKEN` (org-scoped token). Official SDKs exist (Go, Node
 `@fly/sprites`, Python, Elixir); we'll write our own thin client like
-`fly-client.ts` / `box-client.ts` to keep the dependency surface unchanged.
+`fly-client.ts` to keep the dependency surface unchanged.
 
 | Concern | Endpoint |
 | --- | --- |
@@ -197,8 +200,7 @@ workers get **no `DATABASE_URL`, no `SPRITES_TOKEN`**.
 
 ## 4. Security model
 
-- **`SPRITES_TOKEN` is control-plane-only**, exactly like `FLY_API_TOKEN` /
-  `BOX_API_KEY`. It is org-scoped (can create/destroy/exec into *any* sprite
+- **`SPRITES_TOKEN` is control-plane-only**, exactly like `FLY_API_TOKEN`. It is org-scoped (can create/destroy/exec into *any* sprite
   in the org), so it must never appear in a sprite's env, service definition,
   filesystem, or logs. The worker service env is built by
   `buildSpritesWorkerEnv` mirroring `buildFlyWorkerEnv`'s explicit
@@ -226,8 +228,9 @@ workers get **no `DATABASE_URL`, no `SPRITES_TOKEN`**.
 The one genuinely new piece of plumbing. Today `flyChannelDialEndpoint`
 produces `ws://[ipv6]:8787/worker/channel` and the generic WS client dials it.
 Sprites has no control-plane-reachable private network, but it has exactly
-what Box taught us to want: an authenticated tunnel to a port inside the
-runner (Box uses the ascii.dev `host` proxy; Sprites' is first-party).
+what the removed Box integration taught us to want: an authenticated tunnel
+to a port inside the runner (Box used the ascii.dev `host` proxy; Sprites'
+is first-party).
 
 Mechanism: open `WSS api.sprites.dev/v1/sprites/{name}/proxy` with the bearer
 token, send `{"host":"localhost","port":8787}`, receive
@@ -263,8 +266,8 @@ cross-sprite forks. Plan in two phases:
 On `create()`, after `POST /sprites`, run a bootstrap script via exec:
 
 1. Fetch the **prebuilt worker bundle** for the current worker SHA — we
-   already produce a standalone bundle (`scripts/build-worker-standalone.mjs`,
-   Box builds it in-sprite too); publish it as a per-SHA tarball the control
+   already produce a standalone bundle (`scripts/build-worker-standalone.mjs`);
+   publish it as a per-SHA tarball the control
    plane can hand the sprite a URL for (GitHub release asset or R2). `node
    dist/run-worker.js` then needs no `npm ci` of task-orchestrator at all.
    The base image's Node 22 matches `Dockerfile.fly-runner`'s pin.
@@ -278,11 +281,11 @@ On `create()`, after `POST /sprites`, run a bootstrap script via exec:
 5. **Checkpoint** (`POST …/checkpoint`, comment `bootstrap <worker-sha>`) so
    this sprite never pays bootstrap again, and record readiness.
 
-This is Box's template-build flow (steps, per-step progress events,
-`pending_reason` while building) reused nearly verbatim — same UX machinery
-(`box-template-events.ts` patterns), but per-run rather than once, which is
-why Phase A alone isn't the end state. Acceptable for correctness/rollout
-validation; first-turn latency will be minutes, like a cold Box build.
+This is the removed Box integration's template-build flow (steps, per-step
+progress events, `pending_reason` while building) resurrected from git
+history, but per-run rather than once, which is why Phase A alone isn't the
+end state. Acceptable for correctness/rollout validation; first-turn latency
+will be minutes.
 
 ### Phase B (latency): the warm pool
 
@@ -317,7 +320,7 @@ bind them to runs on demand.
   `git fetch`es, so a stale pool checkout is a seed, not a source of truth.
 
 **If Fly ships create-from-checkpoint / cross-sprite fork** (spike S1 asks),
-Phase B collapses to Box's model — one golden sprite per worker SHA in the
+Phase B collapses to a template model — one golden sprite per worker SHA in the
 `environments` table, forked per run — and the pool manager shrinks to a
 cache-warmer. The `sprite_pool` schema should be designed so this is a
 simplification, not a migration.
@@ -394,7 +397,7 @@ implementation proceeds — each maps to a design decision above:
   destroyed sprite, restore-while-running semantics.
 
 A throwaway `scripts/sprites-feasibility.ts` (modeled on
-`scripts/box-feasibility.ts` and `scripts/fly-channel-probe.ts`) exercises all
+`scripts/fly-channel-probe.ts`) exercises all
 five and becomes the basis of the client's integration tests.
 
 ---
@@ -434,7 +437,8 @@ own sprites via the pump).
 
 **Phase 4 — Phase-A bootstrap productionized.** Per-SHA worker tarball
 publishing in the deploy pipeline; bootstrap steps with per-step progress
-events + pending-reason + run-view stepper (reusing the Box build UX);
+events + pending-reason + run-view stepper (reviving the removed Box
+integration's build-stepper UX from git history);
 post-bootstrap checkpoint; `environments` rows (`provider='sprites'`,
 keyed by worker SHA) so `/environments` shows sprite readiness.
 
@@ -451,8 +455,8 @@ rollback. After a stable period: delete `fly.ts`, `fly-client.ts`,
 their CI; simplify `lifecycle.ts` to the destroy-only policy; drop the
 `suspend`-side wake-intent machinery; rewrite `docs/runners/fly.md` →
 `docs/runners/sprites.md` and update the README comparison table (the
-"Choosing an integration" row becomes Local / Sprites / Box). The
-`machineId`/`volumeId` columns stay (Box-shared table, historical rows).
+"Choosing an integration" row becomes Local / Sprites). The
+`machineId`/`volumeId` columns stay for historical rows.
 
 ### New configuration surface
 

@@ -1,7 +1,7 @@
 # Agent caveats — hard-won debugging lessons
 
-Accumulated from real debugging sessions (fly runs #131–145, box runs #26/27,
-the worker-WS migration, box template work). Read this before debugging a
+Accumulated from real debugging sessions (fly runs #131–145, and the
+worker-WS migration). Read this before debugging a
 failed run or touching runner/worker code. Each entry is a trap that has
 already cost real time once.
 
@@ -14,14 +14,13 @@ already cost real time once.
 - **A sub-100ms `running` → `failed` transition means the agent never ran.**
   It's a spawn/infrastructure failure (bad cwd, missing binary, in-process
   execution on the wrong host) — not an agent error. (Seen on fly runs
-  133/137/140/144 and box runs 26/27.)
+  133/137/140/144.)
 - **Error text can lie.** The Claude Agent SDK's "native binary … exists but
   failed to launch / libc mismatch" message fires on ANY spawn syscall failure
   when the binary file exists. The actual cause in every observed case was a
   **cwd that doesn't exist in the worker** (Node reports spawn-ENOENT against
   the executable, not the cwd). Verify the cwd before suspecting the binary.
-- `runner_instances` uses column `state` (not `status`); box mappings live
-  there (`box_id`, `box_template_id`).
+- `runner_instances` uses column `state` (not `status`).
 
 ## cwd / repository resolution
 
@@ -29,59 +28,16 @@ already cost real time once.
   SDK spawn error. The **ws-worker turn driver now validates cwd too**:
   `lib/worker-runtime/context.ts` runs it before falling back to the
   snapshot's `repository.localPath`, so a **control-plane path** (e.g.
-  `/Users/mg/dev/...`) that does not exist inside a box/fly worker is caught
-  before spawn instead of surfacing as a misleading SDK error. Runs 26/27
-  failed the old way. Any cwd handed to a backend must be validated *inside
-  the worker that will spawn from it*.
-- **A repository with no `remote` cannot run on a remote runner** (box/fly):
-  the worker has nothing to clone. Box admission now rejects this before any
-  template work (`lib/runner/box.ts` checks `ownerRepoFromRemote` up front),
-  instead of burning a full template build and dying at spawn. Check
-  `repositories.remote` first when a box run is rejected for a "local" repo.
+  `/Users/mg/dev/...`) that does not exist inside a fly worker is caught
+  before spawn instead of surfacing as a misleading SDK error. Any cwd
+  handed to a backend must be validated *inside the worker that will spawn
+  from it*.
+- **A repository with no `remote` cannot run on a remote runner** (fly):
+  the worker has nothing to clone. Check `repositories.remote` first when a
+  remote run is rejected for a "local" repo.
 - `followUp()` (CI-autofix turns) executes **in the control-plane process**,
   which on deployed servers has no git/SESSION_ROOT → `git worktree add`
   exit 128 / `spawn git ENOENT`, retried every 2 min by the autofix poller.
-
-## ascii.dev Box runners
-
-- Base image: **Ubuntu 24.04, glibc 2.39** (no musl anywhere), ~7.7 GB RAM,
-  node via nvm, `claude` preinstalled at `/usr/local/bin/claude`,
-  passwordless sudo, systemd 255.
-- **Archive→fork is NOT racy.** Verified with a controlled repro (fork 10 s
-  after checkpoint, 250 MB binary, identical sha256, execs fine). Don't
-  blame snapshot propagation for exec failures — see the cwd caveat instead.
-- The box `command` API has a hard per-call duration limit. Long steps must
-  use the detached pattern: launch with `setsid sh -c '(cmd) > log 2>&1;
-  echo $? > rc' </dev/null &`, then poll the `.rc` marker with short calls
-  (see `lib/runner/box-template-builder.ts`).
-- Processes backgrounded over plain `box ssh` die with the session. Durable
-  processes need **systemd units** (snapshotted, restart on resume/fork) or
-  the setsid-detach pattern via the command API.
-- A **stopped box cannot receive commands**, but its checkpoint can be
-  **forked** — that's how you do a postmortem on a failed run's exact
-  filesystem. Fork readiness after a checkpoint can exceed 60 s; pass a
-  longer `timeoutMs` to `waitForBoxReady`.
-- First run with no warm template triggers an **inline template build
-  (~11 min)** on the run's critical path (`reason:"no-template"`). CI warms
-  templates; local dev may still hit cold builds.
-- **Blank provisioning is now the default** — a box run needs no template
-  snapshot. The control plane **uploads** its `dist/run-worker.standalone.js`
-  into the box via the files API (chunked base64, sha256-verified on
-  reassembly); there is no download URL and no bundle route. Run
-  `npm run build:worker:standalone` first or dispatch fails naming that
-  command.
-- The build has a pre-archive `verifying-worker` step: it runs the
-  standalone bundle alone in a scratch dir (expects exit 2, its own usage
-  check) and execs `/usr/local/bin/claude --version` (the Box's preinstalled
-  binary, not the SDK's native binary), then `sync`s — a template whose
-  worker or claude binary can't launch fails at build time, not run time.
-- Reusable live probes (all `BOX_LIVE_TEST=1`, fork disposables, remove in
-  `finally`): `scripts/box-inspect-run26.ts` (template health),
-  `scripts/box-inspect-run27-postmortem.ts` (fork a failed box),
-  `scripts/box-fork-race-repro.ts` (archive→fork timing).
-- `host` proxy dialing: dial the wss URL **without** the `?_token` query
-  (it 302s); carry the token as a `Cookie: _port_auth=<t>` header plus the
-  worker's own `Authorization: Bearer` credential.
 
 ## Worker channel
 
@@ -118,7 +74,7 @@ already cost real time once.
   (`security find-generic-password -s "Claude Code-credentials" -w`), not a
   file — mounting `~/.claude` into a container carries no token. The
   auto-mode classifier blocks an agent from copying that secret to an
-  external box; the user must run the copy (or `claude login` in the box).
+  external machine; the user must run the copy (or `claude login` there).
 
 ## Fly runners
 

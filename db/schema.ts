@@ -350,16 +350,6 @@ export const runnerInstances = pgTable(
     // write).
     wakeRequestedAt: ts("wake_requested_at"),
     archivedUri: text("archived_uri"),
-    // Box-specific restoration and checkpoint metadata. These are deliberately
-    // separate from Fly's machine/volume mapping so existing Fly rows retain
-    // their semantics throughout the provider migration.
-    boxId: text("box_id"),
-    boxTemplateId: text("box_template_id"),
-    boxSourceId: text("box_source_id"),
-    snapshotId: text("snapshot_id"),
-    snapshotCompletedAt: ts("snapshot_completed_at"),
-    checkpointRequestedAt: ts("checkpoint_requested_at"),
-    lastCheckpointAt: ts("last_checkpoint_at"),
     credentialsVersion: integer("credentials_version"),
     credentialsExpiresAt: ts("credentials_expires_at"),
     workerVersion: text("worker_version"),
@@ -373,8 +363,6 @@ export const runnerInstances = pgTable(
     channelLastSeenAt: ts("channel_last_seen_at"),
   },
   (t) => ({
-    // Reconciliation and orphan detection locate current Box mappings by ID.
-    boxIdIdx: index("runner_instances_box_id_idx").on(t.boxId),
     controllerLeaseExpiresIdx: index("runner_instances_controller_lease_expires_at_idx").on(
       t.controllerLeaseExpiresAt
     ),
@@ -574,27 +562,24 @@ export const runTimers = pgTable(
 );
 
 // Environments: the execution artifact each runner provider launches from
-// (docker image / fly runner image / box template snapshot), one row per
-// build, versioned by worker SHA. Replaces the box template registry (migration 0021).
-// The partial unique index is the per-provider single-flight build lock.
+// (docker image / fly runner image), one row per build, versioned by worker
+// SHA. The partial unique index is the per-provider single-flight build lock.
 export const environments = pgTable(
   "environments",
   {
     id: serial("id").primaryKey(),
-    // 'docker' | 'fly' | 'box'
+    // 'docker' | 'fly'
     provider: text("provider").notNull(),
     workerSha: text("worker_sha").notNull(),
     // building → ready | failed; ready → superseded when a newer SHA lands.
     state: text("state").notNull().default("building"),
-    // Box artifact: the archived template box.
-    boxId: text("box_id"),
     // Docker/fly artifact: image tag / registry ref.
     image: text("image"),
     // Current build step — manual (page-triggered) builds are observed by
-    // polling this; run-triggered box builds also stream run events.
+    // polling this.
     detail: text("detail"),
     error: text("error"),
-    // Run whose dispatch started a box build; NULL for manual/page builds.
+    // Run whose dispatch started a build; NULL for manual/page builds.
     triggeringRunId: integer("triggering_run_id"),
     createdAt: ts("created_at").notNull().defaultNow(),
     readyAt: ts("ready_at"),

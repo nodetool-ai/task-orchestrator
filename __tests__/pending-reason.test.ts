@@ -25,14 +25,13 @@ async function pendingReasonOf(runId: number): Promise<string | null> {
 
 describe("pending_reason", () => {
   it("persists the provider defer reason when admission defers", async () => {
-    process.env.TASK_ORCH_RUNNER = "box";
     process.env.TASK_ORCH_WORKER_IMAGE = "worker:test"; // keep placement on the worker path
     const run = await create({ goal: "<implement>", defer: true });
     const result = await dispatchRun(run.id, {
-      providerAdmit: async () => ({ decision: "defer", reason: "Building box template…" }),
+      providerAdmit: async () => ({ decision: "defer", reason: "Runner capacity exhausted…" }),
     });
     expect(result).toBe("deferred");
-    expect(await pendingReasonOf(run.id)).toBe("Building box template…");
+    expect(await pendingReasonOf(run.id)).toBe("Runner capacity exhausted…");
   });
 
   it("falls back to a generic reason when the defer carries none", async () => {
@@ -60,10 +59,10 @@ describe("run overview", () => {
     const run = await create({ goal: "<implement>", defer: true });
     await db
       .update(agentSessions)
-      .set({ status: "pending", pendingReason: "Building box template…" })
+      .set({ status: "pending", pendingReason: "Runner capacity exhausted…" })
       .where(eq(agentSessions.id, run.id));
     const rows = await getRunOverview();
     const row = rows.find((r) => r.id === run.id)!;
-    expect(row.pendingReason).toBe("Building box template…");
+    expect(row.pendingReason).toBe("Runner capacity exhausted…");
   });
 });

@@ -3,8 +3,8 @@ import { dockerContextSha, resetWorkerShaCache, workerBuildSha } from "../lib/ru
 
 afterEach(() => {
   delete process.env.TASK_ORCH_WORKER_SHA;
-  delete process.env.TASK_ORCH_BOX_WORKER_REPO_URL;
-  delete process.env.TASK_ORCH_BOX_WORKER_REPO_REF;
+  delete process.env.TASK_ORCH_WORKER_REPO_URL;
+  delete process.env.TASK_ORCH_WORKER_REPO_REF;
   resetWorkerShaCache();
 });
 
@@ -20,8 +20,8 @@ describe("workerBuildSha", () => {
   });
 
   it("resolves the tip of the remote worker ref via ls-remote, and caches it", async () => {
-    process.env.TASK_ORCH_BOX_WORKER_REPO_URL = "https://example.com/repo.git";
-    process.env.TASK_ORCH_BOX_WORKER_REPO_REF = "main";
+    process.env.TASK_ORCH_WORKER_REPO_URL = "https://example.com/repo.git";
+    process.env.TASK_ORCH_WORKER_REPO_REF = "main";
     const sha = "b".repeat(40);
     const calls: string[][] = [];
     const first = await workerBuildSha({

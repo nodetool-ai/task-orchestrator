@@ -15,14 +15,6 @@ import { assistantText, toolUses, type SdkMessageEnvelope } from "./lib/sdk-mess
 import { collectRunnerInventory } from "./lib/runner/inventory";
 import { reapOrphanVolumes } from "./lib/runner/fly";
 import { makeFlyClient } from "./lib/runner/fly-client";
-import { makeBoxClient } from "./lib/runner/box-client";
-import {
-  publishBoxTemplate,
-  requireTemplatePublishConfirmation,
-  validateBoxTemplate,
-} from "./lib/runner/box-template-operator";
-import { config as taskOrchConfig } from "./lib/config";
-import { normalizeBoxApiError, redactBoxErrorText } from "./lib/runner/box-errors";
 
 function isTaskState(s: string): s is TaskState {
   return (TASK_STATES as readonly string[]).includes(s);
@@ -374,9 +366,8 @@ async function cmdPlanTransition(args: Args) {
 
 async function cmdAgent(args: Args) {
   // lib/agent starts control-plane background jobs at import time (orphan
-  // reaping and PR polling). Load it only for `task agent ...`: Box template
-  // commands are intentionally DB-free and must not acquire a background DB
-  // connection that can fail or race their provider waiters.
+  // reaping and PR polling). Load it only for `task agent ...` so other CLI
+  // verbs never acquire a background DB connection they don't need.
   const agent = await import("./lib/agent");
   const sub = args._[0];
   if (sub === "list") {
@@ -606,12 +597,6 @@ async function cmdUser(args: Args): Promise<number> {
   }
 }
 
-function safeBoxCliText(value: string): string {
-  return redactBoxErrorText(value)
-    .replace(/\bDATABASE_URL\s*([:=])\s*[^\s,;"']+/gi, "DATABASE_URL$1[redacted]")
-    .replace(/\bpostgres(?:ql)?:\/\/[^\s"'<>]+/gi, "[redacted-url]");
-}
-
 async function cmdCodex(args: Args): Promise<number> {
   const sub = args._.shift();
   if (sub === "login") {
@@ -661,49 +646,6 @@ async function cmdCodex(args: Args): Promise<number> {
   throw new Error("Usage: codex <login|logout|status>");
 }
 
-async function cmdBox(args: Args): Promise<number> {
-  const area = args._.shift();
-  const action = args._.shift();
-  const boxId = args._.shift();
-  if (area !== "template" || (action !== "validate" && action !== "publish") || !boxId) {
-    throw new Error("Usage: box template <validate|publish> <bx_...> [--yes]");
-  }
-
-  try {
-    // Confirmation happens before creating a client or making any API read,
-    // keeping a mistyped publish command completely side-effect free.
-    if (action === "publish") requireTemplatePublishConfirmation(args.yes);
-    const client = makeBoxClient();
-    const options = { expectedRepositoryPath: taskOrchConfig.box.repoPath };
-    if (action === "validate") {
-      const validated = await validateBoxTemplate(client, boxId, options);
-      console.log(
-        `Box template ${validated.boxId} has a verified archived completed snapshot ${validated.snapshot.id}. ` +
-          "Filesystem/runtime checks require `box template publish ... --yes`, which resumes the template."
-      );
-      return 0;
-    }
-
-    const published = await publishBoxTemplate(client, boxId, {
-      ...options,
-      timeoutMs: taskOrchConfig.box.readyTimeoutMs,
-      pollMs: taskOrchConfig.box.pollMs,
-    });
-    console.log(
-      `Box template ${published.boxId} published with completed snapshot ${published.snapshot.id}. ` +
-        `resume-action=${published.resumeActionId} stop-action=${published.stopActionId}`
-    );
-    return 0;
-  } catch (error) {
-    // Never let the top-level CLI error handler serialize a generated SDK
-    // error: responses may include a signed URL or echoed bearer credential.
-    const normalized = await normalizeBoxApiError(error);
-    const message = safeBoxCliText(normalized.message);
-    const requestId = normalized.requestId ? ` (Box request ID: ${safeBoxCliText(normalized.requestId)})` : "";
-    throw new Error(`Box template ${action} failed: ${message}${requestId}`);
-  }
-}
-
 function formatAge(ms: number | null): string {
   if (ms == null) return "—";
   const mins = Math.floor(ms / 60_000);
@@ -720,14 +662,11 @@ async function cmdRunners(args: Args): Promise<number> {
     return 0;
   }
 
-  const flyRows = inv.rows.filter((row) => row.provider === "fly");
-  const boxRows = inv.rows.filter((row) => row.provider === "box");
+  const flyRows = inv.rows;
 
   if (inv.rows.length === 0) {
     console.log("(no runner machines or volumes)");
   } else {
-    // Keep Fly's established table intact. Box output is a distinct block so
-    // an operator cannot mistake a Box ID for a Machine or Volume ID.
     if (flyRows.length) {
       console.log(
         `${pad("RUN", 6)} ${pad("MACHINE", 20)} ${pad("M-STATE", 10)} ${pad("VOLUME", 22)} ${pad("V-STATE", 10)} ${pad("SIZE", 6)} ${pad("AGE", 6)} ${pad("$/MO", 8)} ORPHAN`
@@ -746,28 +685,11 @@ async function cmdRunners(args: Args): Promise<number> {
         );
       }
     }
-    if (boxRows.length) {
-      if (flyRows.length) console.log("");
-      console.log("Box runners (persisted mappings; no live Box API read):");
-      for (const r of boxRows) {
-        const checkpoint = r.checkpointStatus
-          ? `${r.checkpointStatus}${r.checkpointAgeMs != null ? ` ${formatAge(r.checkpointAgeMs)} ago` : ""}`
-          : "—";
-        console.log(
-          `  run=${r.runId != null ? `#${r.runId}` : "—"} ` +
-            `box=${r.boxId ?? "—"} state=${r.boxState ?? r.runnerState ?? "—"} ` +
-            `template=${r.boxTemplateId ?? "—"} worker=${r.workerVersion ?? "—"} ` +
-            `checkpoint=${checkpoint} source=${r.boxSourceId ?? "—"} ` +
-            `active=${formatAge(r.activeDurationMs)}` +
-            (r.lastProviderError ? ` error=${r.lastProviderError}` : "")
-        );
-      }
-    }
   }
 
   const t = inv.totals;
   console.log(
-    `\n${t.machines} machines, ${t.volumes} volumes, ${t.boxes} boxes, ${t.totalGb} GB, ~$${t.estMonthlyCostUsd.toFixed(2)}/mo (${t.orphanVolumes} orphan volumes)`
+    `\n${t.machines} machines, ${t.volumes} volumes, ${t.totalGb} GB, ~$${t.estMonthlyCostUsd.toFixed(2)}/mo (${t.orphanVolumes} orphan volumes)`
   );
 
   if (args.reap) {
@@ -845,10 +767,7 @@ Commands:
   codex logout                      Revoke the Codex token and remove ~/.codex/auth.json.
   codex status                      Report whether a Codex login is present.
 
-  runners [--json] [--reap]         List runner Fly Machines/volumes and persisted Box mappings. --reap destroys orphan Fly volumes.
-  box template validate <bx_...>    Read-only archived-state and completed-snapshot validation.
-  box template publish <bx_...> --yes
-                                    Resume, stop, and verify a new template snapshot.
+  runners [--json] [--reap]         List runner Fly Machines/volumes. --reap destroys orphan Fly volumes.
 
 States:
   Tasks: ${TASK_STATES.join(", ")}
@@ -907,9 +826,6 @@ async function main(): Promise<void> {
       case "runners":
         code = await cmdRunners(args);
         break;
-      case "box":
-        code = await cmdBox(args);
-        break;
       case "codex":
         code = await cmdCodex(args);
         break;
@@ -932,8 +848,8 @@ async function shutdown(code: number): Promise<void> {
   try {
     await closeDb();
   } catch {
-    // Closing an already-used DB connection is best-effort. Do not turn a
-    // successful remote Box checkpoint into a failed CLI command.
+    // Closing an already-used DB connection is best-effort. Never turn a
+    // successful command into a failed one over connection teardown.
   }
   // Do not force process.exit(): it can truncate the publish-success line when
   // stdout is piped, and it bypasses the awaited connection shutdown above.

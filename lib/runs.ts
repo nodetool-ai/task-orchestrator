@@ -674,7 +674,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     // NO carve-out for goal '<execute>' + planId (M2 re-verification, residual 1).
     // That branch only self-drives in the NON-detached else-branch below, where
     // create() takes the turn in-process under withServerClaim. Under
-    // detachedRunsEnabled() — forced true on fly/box (lib/config.ts) — the same
+    // detachedRunsEnabled() — forced true on fly (lib/config.ts) — the same
     // branch goes launchDetached → dispatchRun → (server placement) wakeServerRun,
     // which finds no pending inbox events on a brand-new run and no-ops. The row
     // is then left at 'pending' on a true-server placement: outside every belt
@@ -2276,13 +2276,10 @@ async function repoDefaultBranch(run: {
  * No-op once a branch exists (later turns re-materialize via prepareCwd).
  */
 function sessionRepoPath(): string | null {
-  // A managed runner with a pre-populated filesystem (currently Box) supplies
-  // its checkout directly. It must be an absolute path: accepting a relative
-  // value would make a worker's repo depend on its launch cwd and risks
-  // operating in the worker-runtime checkout instead of the selected repo.
-  // This is deliberately provider-neutral. Box translates its control-plane
-  // template setting into this run-scoped worker value; reading the Box setting
-  // here would unexpectedly alter local/Fly workers in a shared environment.
+  // A managed runner with a pre-populated filesystem supplies its checkout
+  // directly. It must be an absolute path: accepting a relative value would
+  // make a worker's repo depend on its launch cwd and risks operating in the
+  // worker-runtime checkout instead of the selected repo.
   const configured = config.worker.runnerRepoPath;
   if (configured) {
     if (!path.isAbsolute(configured)) {
@@ -2336,13 +2333,13 @@ async function containerCheckoutAt(
   const url = `https://github.com/${parsed.owner}/${parsed.repo}`;
   await mkdir(dirname(work), { recursive: true });
   if (!(await hasUsableGitCheckout(work))) {
-    // A Box template promises an already-selected checkout. Never delete and
-    // reclone its configured path: a bad template should fail loudly, while a
-    // resumed template may contain the only copy of uncommitted run work.
+    // A configured runner repo path promises an already-selected checkout.
+    // Never delete and reclone it: a bad path should fail loudly, while a
+    // resumed runner may contain the only copy of uncommitted run work.
     if (isConfiguredRunnerRepoPath(work)) {
       throw new Error(
         `Run #${run.id}: configured runner repository '${work}' is missing or is not a valid Git checkout. ` +
-          "Repair TASK_ORCH_RUNNER_REPO_PATH or publish a valid Box template."
+          "Repair TASK_ORCH_RUNNER_REPO_PATH."
       );
     }
     if (existsSync(work)) await rm(work, { recursive: true, force: true });
@@ -3356,7 +3353,7 @@ export async function* sendMessageToRun(opts: {
       } else if ((await runDispatch.dispatchRun(runId)) === "spawn-failed") {
         // Dispatch failed synchronously (admission reject, spawn error): no
         // worker will ever write to the run stream, so relaying would hang the
-        // caller forever (box runs 26/27: the resume UI spun with no feedback).
+        // caller forever (incident: the resume UI spun with no feedback).
         // Surface the recorded failure and end the stream.
         yield* yieldDispatchFailure(runId);
         return;
@@ -5315,7 +5312,7 @@ export async function setError(runId: number, error: string, opts?: { retries?: 
  * Record a DISPATCH failure (admission reject, tree-limit violation, provider
  * spawn error). Unlike setError — whose terminal guard makes it a no-op on an
  * already-terminal row — a re-dispatch of a resumable FAILED run (a user
- * resuming it) must still surface WHY this attempt failed: box runs 26/27
+ * resuming it) must still surface WHY this attempt failed: past incidents
  * resumed into an admission reject whose message vanished behind the previous
  * attempt's stale error, and the stream relay hung with nothing to show.
  * For a row already 'failed', refresh the error text in place (status
