@@ -4,6 +4,7 @@ import { agentSessions, runnerInstances } from "../db/schema";
 import { create } from "../lib/runs";
 import { connectRun, maybeCloseSpritesChannel, getConnection } from "../lib/worker-channel/registry";
 import { ControllerConnection } from "../lib/worker-channel/connection";
+import { persistCommand } from "../lib/worker-channel/repository";
 import { eq } from "drizzle-orm";
 
 describe("sprites channel close at turn end", () => {
@@ -177,5 +178,36 @@ describe("connectRun after the sprites idle close (run 187)", () => {
     // because the stood-down object was reused.
     expect(message).not.toMatch(/shut down/);
     expect(registry.supervisors.get(run.id)).not.toBe(dead);
+  });
+});
+
+describe("maybeCloseSpritesChannel with a command in flight (run 187)", () => {
+  it("keeps the tunnel open while a persisted command is still unacked", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    const instanceId = "wi_11111111111111111111111111111111";
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      provider: "sprites",
+      spriteName: "to-run-x",
+      state: "running",
+      channelInstanceId: instanceId,
+      channelEndpoint: "sprite://to-run-x:8787/worker/channel",
+      controllerEpoch: 3,
+    });
+    await db.update(agentSessions).set({ status: "idle" }).where(eq(agentSessions.id, run.id));
+    await persistCommand({ runId: run.id, instanceId, controllerEpoch: 3, type: "run.start", payload: {} });
+    const close = vi.fn(async () => {});
+    const conn = { connected: true, controllerEpoch: 3, disconnect: close } as unknown as ControllerConnection;
+    const REGISTRY = Symbol.for("task-orchestrator.worker-channel.registry");
+    const registry = ((globalThis as unknown as Record<symbol, unknown>)[REGISTRY] ??= {
+      supervisors: new Map(),
+      blobs: new Map(),
+      controllerId: "test_x",
+    }) as { supervisors: Map<number, unknown> };
+    registry.supervisors.set(run.id, { runId: run.id, instanceId, connection: conn, stopped: false });
+
+    await maybeCloseSpritesChannel(run.id);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(close).not.toHaveBeenCalled();
   });
 });

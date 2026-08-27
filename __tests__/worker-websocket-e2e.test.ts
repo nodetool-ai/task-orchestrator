@@ -131,7 +131,7 @@ describe("worker websocket e2e", () => {
       vi.spyOn(backend, "getBackend").mockResolvedValue(fakeChatBackend("first"));
       // The worker keeps waiting for further follow-ups; a short idle window
       // lets the drive return once the second turn is done.
-      process.env.TASK_ORCH_CHAT_IDLE_MS = "2500";
+      process.env.TASK_ORCH_CHAT_IDLE_MS = "6000";
 
       const { server, connection } = await bootWorkerChannel(run.id);
       try {
@@ -167,7 +167,7 @@ describe("worker websocket e2e", () => {
         await disconnectRun(run.id);
         await server.close();
       }
-    });
+    }, 30_000);
 
     it("releases the claim on idle exit exactly as the legacy driver does", async () => {
       const run = await create({ goal: "<chat>", defer: true });

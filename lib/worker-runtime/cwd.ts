@@ -8,7 +8,7 @@
 import { existsSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 
-import { config } from "../config";
+import { config, insideWorker } from "../config";
 import { checkoutRepositoryAt } from "../repo-checkout";
 import { validateCwd } from "../run-cwd";
 import type { RunStart } from "../worker-channel/protocol";
@@ -99,7 +99,7 @@ export async function prepareWorkerCwd(start: RunStart): Promise<PreparedCwd> {
     base: defaultBranch,
     mirrorDir: process.env.REPO_CACHE_DIR ? undefined : null,
     configuredPath: config.worker.runnerRepoPath ?? null,
-    provider: process.env.TASK_ORCH_INSIDE_WORKER ? "sprites" : "local",
+    provider: insideWorker() ? "sprites" : "local",
   });
   const strategy = field<string>(run, "cwdStrategy") ?? "worktree";
   const reports = strategy === "worktree" || strategy === "worktree_at_pr";

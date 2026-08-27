@@ -11,7 +11,7 @@ function git(args: string[], cwd: string): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
 }
 
-function makeStart(over: Partial<RunStart> & { run?: Record<string, unknown>; repository?: Record<string, unknown> }): RunStart {
+function makeStart(over: Omit<Partial<RunStart>, "run" | "repository"> & { run?: Record<string, unknown>; repository?: Record<string, unknown> }): RunStart {
   return {
     mode: "start",
     run: { id: 42, status: "running", goal: "<chat>", cwdStrategy: "repo", ...(over.run ?? {}) },

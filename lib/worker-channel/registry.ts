@@ -367,6 +367,15 @@ export async function maybeCloseSpritesChannel(runId: number): Promise<void> {
   const rows = await db.select({ status: agentSessions.status }).from(agentSessions).where(eq(agentSessions.id, runId)).limit(1);
   const status = rows[0]?.status;
   if (!status || !["idle", "parked", "completed", "failed", "cancelled", "closed", "budget_exhausted"].includes(status)) return;
+  // A command the worker has not acked yet (its run.start, an input) is in
+  // flight on this very channel: closing now loses it, and sendPersisted has
+  // nothing to reconnect to. This happens for real — a fresh worker replays
+  // its predecessor's spooled `run.phase idle` on connect, and that idle
+  // landed here a tick before the new generation's run.start went out
+  // (run 187, 2026-08-27). The next idle after delivery closes the tunnel.
+  const { listPendingCommands } = await import("./repository");
+  const pending = await listPendingCommands(runId, supervisor.instanceId, supervisor.connection.controllerEpoch).catch(() => []);
+  if (pending.length > 0) return;
   // Close after the final frame's ack is flushed — next tick
   setTimeout(() => {
     if (supervisor.connection.connected) {

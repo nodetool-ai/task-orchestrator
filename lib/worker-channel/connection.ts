@@ -349,7 +349,13 @@ export class ControllerConnection {
 
   async sendPersisted(command: CommandRow): Promise<void> {
     if (command.controllerEpoch !== this.epoch) return;
-    if (this.connected) this.sendCommandRow(command);
+    if (this.connected) {
+      this.sendCommandRow(command);
+      return;
+    }
+    // The durable row is the delivery promise; a reconnect replays it. Say so —
+    // a silently skipped run.start looks exactly like a delivered one.
+    console.warn(`[worker-channel] run ${this.runId}: ${command.type} seq=${command.seq} persisted but not sent (channel not connected)`);
   }
 
   waitForAck(seq: number): Promise<void> {
