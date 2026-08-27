@@ -30,9 +30,6 @@ function fakeSpritesClient(overrides: Partial<SpritesClient> = {}): SpritesClien
     startService: vi.fn(async () => {
       calls.push("startService");
     }),
-    deleteService: vi.fn(async () => {
-      calls.push("deleteService");
-    }),
     stopService: vi.fn(async () => {
       calls.push("stopService");
     }),

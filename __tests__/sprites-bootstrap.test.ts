@@ -13,7 +13,6 @@ function fakeClient(overrides: Partial<SpritesClient> = {}): SpritesClient {
     putService: vi.fn(async () => {}),
     startService: vi.fn(async () => {}),
     stopService: vi.fn(async () => {}),
-    deleteService: vi.fn(async () => {}),
     restartService: vi.fn(async () => {}),
     getServiceLogs: vi.fn(async () => ""),
     exec: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" })),
