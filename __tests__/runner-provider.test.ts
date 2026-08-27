@@ -10,11 +10,9 @@ describe("getRunnerProvider", () => {
     expect(getRunnerProvider().kind).toBe("local");
   });
 
-  it("selects the fly provider when TASK_ORCH_RUNNER=fly", () => {
+  it("rejects the retired fly provider at configuration read", () => {
     vi.stubEnv("TASK_ORCH_RUNNER", "fly");
-    vi.stubEnv("FLY_API_TOKEN", "t");
-    vi.stubEnv("FLY_APP_NAME", "a");
-    expect(getRunnerProvider().kind).toBe("fly");
+    expect(() => getRunnerProvider()).toThrow("TASK_ORCH_RUNNER=fly is no longer supported");
   });
 
 });
@@ -31,6 +29,5 @@ describe("LocalRunnerProvider", () => {
     expect(typeof provider.create).toBe("function");
     expect(typeof provider.stop).toBe("function");
     expect(typeof provider.sweep).toBe("function");
-    expect(typeof provider.startMonitor).toBe("function");
   });
 });

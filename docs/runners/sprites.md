@@ -1,8 +1,8 @@
 # Sprites runner integration
 
 The **Sprites** provider runs each agent run in its own persistent, auto-hibernating
-Fly Sprite. Select it with `TASK_ORCH_RUNNER=sprites`. Use it when you want
-per-run isolation with lower idle cost than raw Fly Machines — sprites bill only
+Sprite. Select it with `TASK_ORCH_RUNNER=sprites`. Use it when you want
+per-run isolation with automatic hibernation — sprites bill only
 while awake.
 
 New here? Read [Workers and runners](README.md) first. This page assumes the
@@ -45,7 +45,7 @@ token (`SPRITES_TOKEN`), a 30s request timeout, and errors surfaced as
 `buildSpritesWorkerEnv` builds each worker service's environment — same
 allowlist as `buildFlyWorkerEnv` (GitHub token, agent credentials, model/backend
 settings, `TASK_ORCH_INSIDE_WORKER=1`, channel identity, etc.) but no
-`PREWARM_DIR` or Fly volume mount.
+`PREWARM_DIR`.
 
 ---
 
@@ -103,7 +103,7 @@ mid-turn is not failure; the heartbeat reaper covers hangs.
 
 ### Lifecycle
 
-Sprites hibernate automatically ~30 s after activity ceases. The control plane closes the channel `WebSocket` with code `1000` when a run enters `idle`, `parked`, or any terminal status (`completed`/`failed`/…), after the final frame is acked. An open proxy tunnel would otherwise count as activity and keep the sprite billing. Local and Fly runs keep the socket open; their lifecycle is via `suspend`/`stop`. Reconnect on the next `dispatchRun` re-dials the proxy and wakes a cold sprite.
+Sprites hibernate automatically ~30 s after activity ceases. The control plane closes the channel `WebSocket` with code `1000` when a run enters `idle`, `parked`, or any terminal status (`completed`/`failed`/…), after the final frame is acked. An open proxy tunnel would otherwise count as activity and keep the sprite billing. Reconnect on the next `dispatchRun` re-dials the proxy and wakes a cold sprite.
 
 ### Hard cancel (`stop`)
 
@@ -213,6 +213,5 @@ passed into each sprite's worker service env by `buildSpritesWorkerEnv`.
 ## Related
 
 - [Workers and runners](README.md) — the overview
-- [Fly.io integration](fly.md) — the predecessor (still selectable as rollback)
 - [Migration design](../sprites-migration-design.md) — full phased plan
 - [Worker WebSocket protocol](../worker-websocket-protocol.md)

@@ -4,8 +4,8 @@
 // place the "flag" truthiness convention, numeric parsing, and cross-flag
 // derivations live. Before this module those were re-implemented ad hoc across
 // lib/, db/, and scripts/ — a truthiness predicate copied a dozen times, the
-// 5-minute stale window written three times, "fly forces detached" and the
-// isolate-on-fly default buried in three functions.
+// 5-minute stale window written three times and remote-provider defaults
+// buried in three functions.
 //
 // DESIGN — lazy, not frozen-at-import. Every accessor reads process.env at CALL
 // time, because the test suite mutates process.env per-test and expects the
@@ -87,18 +87,19 @@ function strEnv(key: string, dflt?: string): string | undefined {
   return v == null || v === "" ? dflt : v;
 }
 
-export type RunnerProviderKind = "local" | "fly" | "sprites";
+export type RunnerProviderKind = "local" | "sprites";
 export type NestedDispatchMode = "isolate" | "inline";
 
 // ── Derived values (were duplicated across modules) ────────────────────────
 
 /** The execution backend. Exact-equality on a supported remote provider (NOT
  *  truthiness): any other value — including "local", "docker", "" — means
- *  the local provider. */
+ *  the local provider. `fly` is explicitly rejected so stale configuration
+ *  cannot silently run workloads on the local host. */
 export function runnerProviderKind(): RunnerProviderKind {
   switch (process.env.TASK_ORCH_RUNNER) {
     case "fly":
-      return "fly";
+      throw new Error("TASK_ORCH_RUNNER=fly is no longer supported; use 'local' or 'sprites'");
     case "sprites":
       return "sprites";
     default:
@@ -106,9 +107,9 @@ export function runnerProviderKind(): RunnerProviderKind {
   }
 }
 
-/** True inside a worker process (Fly Machine / Docker worker container).
- *  buildFlyWorkerEnv (Fly) and the worker container config (Docker) set
- *  TASK_ORCH_INSIDE_WORKER=1. A worker holds no Fly credentials and none of the
+/** True inside a worker process (Sprite / Docker worker container).
+ *  The Sprite bootstrap and worker container config set
+ *  TASK_ORCH_INSIDE_WORKER=1. A worker holds no cloud credentials and none of the
  *  admission/pump/sweep machinery, so this gates the nested-dispatch branch and
  *  the DB guard (workers never touch Postgres). */
 export function insideWorker(): boolean {
@@ -119,8 +120,8 @@ export function insideWorker(): boolean {
  * True when user turns run out-of-process (detached worker per turn).
  * INTERACTION: managed remote providers FORCE this on — their deployments are
  * detached by construction — so an unset/"0" TASK_ORCH_DETACHED_RUNS is
- * overridden to true whenever runnerProviderKind() is "fly". Local
- * execution uses the plain flag.
+ * overridden to true whenever a remote provider is selected. Local execution
+ * uses the plain flag.
  */
 export function detachedRunsEnabled(): boolean {
   if (runnerProviderKind() !== "local") return true;
@@ -135,7 +136,7 @@ export function detachedRunsEnabled(): boolean {
  *     wins; any other value falls through.
  *  2. Default: "isolate" on a managed remote provider, else "inline".
  * INTERACTION: inside a worker the value arrives already RESOLVED via
- * buildFlyWorkerEnv (workers never set TASK_ORCH_RUNNER), so the env passthrough
+ * worker bootstrap (workers never set TASK_ORCH_RUNNER), so the env passthrough
  * — not this default — is what turns isolation on inside the worker.
  */
 export function nestedDispatchMode(): NestedDispatchMode {
@@ -156,7 +157,7 @@ export function nestedDispatchMode(): NestedDispatchMode {
 export const config = Object.freeze({
   /** Deployment / execution backend. */
   deployment: Object.freeze({
-    /** "local" | "fly". @see runnerProviderKind */
+    /** "local" | "sprites". @see runnerProviderKind */
     get runnerKind(): RunnerProviderKind {
       return runnerProviderKind();
     },
@@ -441,29 +442,7 @@ export const config = Object.freeze({
     },
   }),
 
-  /** Fly.io provider settings. */
-  fly: Object.freeze({
-    get app(): string | undefined {
-      return strEnv("TASK_ORCH_FLY_APP") ?? strEnv("FLY_APP_NAME");
-    },
-    get region(): string | undefined {
-      return strEnv("TASK_ORCH_FLY_REGION");
-    },
-    get cpus(): number {
-      return intEnv("TASK_ORCH_FLY_CPUS", 4);
-    },
-    get memoryMb(): number {
-      return intEnv("TASK_ORCH_FLY_MEMORY_MB", 4096);
-    },
-    get pollMs(): number {
-      return intEnv("TASK_ORCH_FLY_POLL_MS", 10_000);
-    },
-    get volumeGb(): number {
-      return intEnv("TASK_ORCH_RUNNER_VOLUME_GB", 10);
-    },
-  }),
-
-  /** Sprites (Fly) provider settings. See docs/sprites-migration-design.md */
+  /** Sprites provider settings. See docs/runners/sprites.md */
   sprites: Object.freeze({
     get token(): string | undefined {
       return strEnv("SPRITES_TOKEN") ?? strEnv("TASK_ORCH_SPRITES_TOKEN");
@@ -475,7 +454,7 @@ export const config = Object.freeze({
       return strEnv("TASK_ORCH_SPRITE_PREFIX", "to-run-") as string;
     },
     get pollMs(): number {
-      return intEnv("TASK_ORCH_SPRITES_POLL_MS", intEnv("TASK_ORCH_FLY_POLL_MS", 10_000));
+      return intEnv("TASK_ORCH_SPRITES_POLL_MS", 10_000);
     },
     get poolSize(): number {
       return intEnv("TASK_ORCH_SPRITE_POOL_SIZE", 0);
@@ -537,7 +516,6 @@ export function snapshot() {
     dispatch: dump(config.dispatch),
     agent: dump(config.agent),
     features: dump(config.features),
-    fly: dump(config.fly),
     sprites: dump(config.sprites),
     db: dump(config.db),
     derived: Object.freeze({

@@ -1,7 +1,7 @@
 // lib/agent-backend/provider-env.ts
 //
 // The credential env vars the agent backends read, shared by every path that
-// hands env to an out-of-process worker (Docker worker containers and Fly
+// hands env to an out-of-process worker (Docker worker containers and Sprites
 // runner Machines). Workers run the agent turn in-process via getBackend(), so
 // whichever credentials the server holds must be forwarded — otherwise a
 // container dispatched with TASK_ORCH_AGENT_BACKEND=pi boots fine and then

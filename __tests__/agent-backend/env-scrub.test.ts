@@ -10,6 +10,7 @@ describe("SECRET_ENV_DENYLIST", () => {
   it("includes server-only secrets", () => {
     expect(SECRET_ENV_DENYLIST).toContain("DATABASE_URL");
     expect(SECRET_ENV_DENYLIST).toContain("FLY_API_TOKEN");
+    expect(SECRET_ENV_DENYLIST).toContain("SPRITES_TOKEN");
     expect(SECRET_ENV_DENYLIST).toContain("AUTH_SECRET");
     expect(SECRET_ENV_DENYLIST).toContain("GITHUB_WEBHOOK_SECRET");
     expect(SECRET_ENV_DENYLIST).toContain("TASK_ORCH_WORKER_CHANNEL_CREDENTIAL");
@@ -114,11 +115,12 @@ describe("scrubClaudeCliEnv", () => {
     expect(result.ANTHROPIC_OAUTH_TOKEN).toBe("oauth2-keep");
   });
 
-  it("drops DATABASE_URL, OPENAI_API_KEY, and FLY_API_TOKEN", () => {
+  it("drops DATABASE_URL, provider credentials, and infrastructure tokens", () => {
     const result = scrubClaudeCliEnv({
       DATABASE_URL: "postgres://leak",
       OPENAI_API_KEY: "sk-openai-leak",
       FLY_API_TOKEN: "fly-leak",
+      SPRITES_TOKEN: "sprites-leak",
       TASK_ORCH_WORKER_CHANNEL_CREDENTIAL: "channel-credential-leak",
       TASK_ORCH_WORKER_CHANNEL_ENDPOINT: "channel-endpoint-leak",
       TASK_ORCH_WORKER_INSTANCE_ID: "instance-id-leak",
@@ -126,6 +128,7 @@ describe("scrubClaudeCliEnv", () => {
     expect(result.DATABASE_URL).toBeUndefined();
     expect(result.OPENAI_API_KEY).toBeUndefined();
     expect(result.FLY_API_TOKEN).toBeUndefined();
+    expect(result.SPRITES_TOKEN).toBeUndefined();
     expect(result.TASK_ORCH_WORKER_CHANNEL_CREDENTIAL).toBeUndefined();
     expect(result.TASK_ORCH_WORKER_CHANNEL_ENDPOINT).toBeUndefined();
     expect(result.TASK_ORCH_WORKER_INSTANCE_ID).toBeUndefined();

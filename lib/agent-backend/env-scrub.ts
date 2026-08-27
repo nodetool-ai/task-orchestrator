@@ -1,6 +1,6 @@
 // lib/agent-backend/env-scrub.ts
 //
-// Tier 0 secret scrubbing for agent tool subprocesses (incident: Fly worker
+// Tier 0 secret scrubbing for agent tool subprocesses (incident: remote worker
 // Machines run an AI agent that executes UNTRUSTED code — npm install,
 // arbitrary bash inside cloned third-party repos — and those subprocesses
 // currently inherit the whole worker process env, including DATABASE_URL
@@ -18,7 +18,7 @@ import { AGENT_CREDENTIAL_ENV_KEYS } from "./provider-env";
 
 // Names kept in bash/tool subprocess env despite being credential-shaped,
 // because the git credential helper baked into the worker image
-// (Dockerfile.fly-runner:46-48, `'!f() { echo username=x-access-token; echo
+// (the worker image's git helper, `'!f() { echo username=x-access-token; echo
 // "password=${GH_TOKEN}"; }; f'`) and the `gh` CLI both need them to do
 // git push/pull/clone and API calls from agent-issued bash commands. This is
 // a documented residual risk: untrusted bash can still read GH_TOKEN /
@@ -30,11 +30,9 @@ const KEEP_FOR_GIT = new Set(["GH_TOKEN", "GITHUB_TOKEN"]);
 // subprocess. These aren't in AGENT_CREDENTIAL_ENV_KEYS (that list is model-
 // provider credentials only) but must still be scrubbed:
 //   - DATABASE_URL: full prod Postgres access — the incident trigger.
-//   - FLY_API_TOKEN: Fly Machines API control-plane credential; note it's
-//     already NOT forwarded into worker env by buildFlyWorkerEnv (see the
-//     regression guard in __tests__/nested-dispatch.test.ts), so this entry
-//     is defense-in-depth in case that ever regresses.
-//   - AUTH_SECRET / GITHUB_WEBHOOK_SECRET: irrelevant to Fly workers (which
+//   - FLY_API_TOKEN / SPRITES_TOKEN: control-plane infrastructure credentials
+//     which must not reach a worker or its agent subprocesses.
+//   - AUTH_SECRET / GITHUB_WEBHOOK_SECRET: irrelevant to remote workers (which
 //     never hold them), but relevant when an agent run happens in-process on
 //     the web server itself (TASK_ORCH_RUNNER unset/local) — there, bash
 //     subprocesses would otherwise inherit the whole server process env,
@@ -46,6 +44,7 @@ const KEEP_FOR_GIT = new Set(["GH_TOKEN", "GITHUB_TOKEN"]);
 const SERVER_ONLY_SECRETS = [
   "DATABASE_URL",
   "FLY_API_TOKEN",
+  "SPRITES_TOKEN",
   "AUTH_SECRET",
   "GITHUB_WEBHOOK_SECRET",
   "TASK_ORCH_WORKER_CHANNEL_CREDENTIAL",

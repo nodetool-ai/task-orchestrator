@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build-time repo-mirror seeder for the Fly runner image.
+# Build-time repo-mirror seeder for a worker image.
 #
 # Seeds <dest-dir> with bare, blobless (--filter=blob:none) --mirror clones of
 # the listed repos. At run time lib/runs.ts's containerCheckoutAt does

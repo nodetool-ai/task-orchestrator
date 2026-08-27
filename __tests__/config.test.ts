@@ -1,7 +1,7 @@
 // __tests__/config.test.ts
 //
 // R6: the typed config module. Locks the truthiness convention and the derived
-// values (fly forces detached; isolate default on fly; INSIDE_WORKER truthiness
+// values (remote providers force detached; isolate default remotely; INSIDE_WORKER truthiness
 // matches the ad-hoc parsers config replaced) so a future refactor can't drift.
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -24,7 +24,6 @@ const KEYS = [
   "TASK_ORCH_ADMISSION_ENABLED",
   "TASK_ORCH_WORKER_IMAGE",
   "TASK_ORCH_GIT_CLONE_DEPTH",
-  "TASK_ORCH_MAX_MACHINES",
   "TASK_ORCH_MAX_RUN_DEPTH",
   "TASK_ORCH_MAX_TREE_RUNS",
   "TASK_ORCH_TREE_BUDGET_MULT",
@@ -33,10 +32,6 @@ const KEYS = [
   "TASK_ORCH_CHAT_IDLE_MS",
   "TASK_ORCH_CHAT_MAX_TOOL_ROUNDS",
   "TASK_ORCH_EXECUTOR_MAX_TOOL_ROUNDS",
-  "TASK_ORCH_FLY_CPUS",
-  "TASK_ORCH_FLY_MEMORY_MB",
-  "TASK_ORCH_FLY_POLL_MS",
-  "TASK_ORCH_RUNNER_VOLUME_GB",
   "AUTH_SECRET",
 ] as const;
 const saved: Record<string, string | undefined> = {};
@@ -96,8 +91,8 @@ describe("insideWorker() truthiness matches the old parsers", () => {
 
 describe("runnerProviderKind() — exact provider equality, not truthiness", () => {
   it("only supported provider literals select remote providers", () => {
-    set("TASK_ORCH_RUNNER", "fly");
-    expect(runnerProviderKind()).toBe("fly");
+    set("TASK_ORCH_RUNNER", "sprites");
+    expect(runnerProviderKind()).toBe("sprites");
     for (const v of [undefined, "", "local", "docker", "box", "FLY", "1", "true"]) {
       set("TASK_ORCH_RUNNER", v);
       expect(runnerProviderKind()).toBe("local");
@@ -105,16 +100,16 @@ describe("runnerProviderKind() — exact provider equality, not truthiness", () 
   });
 });
 
-describe("detachedRunsEnabled() — fly FORCES detached", () => {
-  it("fly is detached even with the flag unset or explicitly off", () => {
-    set("TASK_ORCH_RUNNER", "fly");
+describe("detachedRunsEnabled() — remote providers force detached", () => {
+  it("sprites is detached even with the flag unset or explicitly off", () => {
+    set("TASK_ORCH_RUNNER", "sprites");
     for (const v of [undefined, "0", "false"]) {
       set("TASK_ORCH_DETACHED_RUNS", v);
       expect(detachedRunsEnabled()).toBe(true);
     }
   });
 
-  it("off fly it is the plain flag", () => {
+  it("locally it is the plain flag", () => {
     set("TASK_ORCH_RUNNER", "local");
     set("TASK_ORCH_DETACHED_RUNS", undefined);
     expect(detachedRunsEnabled()).toBe(false);
@@ -126,16 +121,16 @@ describe("detachedRunsEnabled() — fly FORCES detached", () => {
 });
 
 describe("nestedDispatchMode() — isolate default on managed remote providers", () => {
-  it("defaults to isolate on fly, inline locally", () => {
+  it("defaults to isolate on sprites, inline locally", () => {
     set("TASK_ORCH_NESTED_DISPATCH", undefined);
-    set("TASK_ORCH_RUNNER", "fly");
+    set("TASK_ORCH_RUNNER", "sprites");
     expect(nestedDispatchMode()).toBe("isolate");
     set("TASK_ORCH_RUNNER", "local");
     expect(nestedDispatchMode()).toBe("inline");
   });
 
   it("explicit value wins over the provider default (case-insensitive)", () => {
-    set("TASK_ORCH_RUNNER", "fly"); // default would be isolate
+    set("TASK_ORCH_RUNNER", "sprites"); // default would be isolate
     set("TASK_ORCH_NESTED_DISPATCH", "INLINE");
     expect(nestedDispatchMode()).toBe("inline");
     set("TASK_ORCH_RUNNER", "local"); // default would be inline
@@ -144,7 +139,7 @@ describe("nestedDispatchMode() — isolate default on managed remote providers",
   });
 
   it("an unrecognized explicit value falls through to the default", () => {
-    set("TASK_ORCH_RUNNER", "fly");
+    set("TASK_ORCH_RUNNER", "sprites");
     set("TASK_ORCH_NESTED_DISPATCH", "garbage");
     expect(nestedDispatchMode()).toBe("isolate");
   });
@@ -154,8 +149,8 @@ describe("lazy reads — a mid-process env flip takes effect", () => {
   it("config accessors reflect the current env, not an import-time snapshot", () => {
     set("TASK_ORCH_RUNNER", "local");
     expect(config.deployment.runnerKind).toBe("local");
-    set("TASK_ORCH_RUNNER", "fly");
-    expect(config.deployment.runnerKind).toBe("fly");
+    set("TASK_ORCH_RUNNER", "sprites");
+    expect(config.deployment.runnerKind).toBe("sprites");
   });
 });
 
@@ -169,9 +164,7 @@ describe("documented numeric defaults", () => {
           key === "TASK_ORCH_MAX_DEFER_MS" ||
           key === "TASK_ORCH_CHAT_IDLE_MS" ||
           key === "TASK_ORCH_CHAT_MAX_TOOL_ROUNDS" ||
-          key === "TASK_ORCH_EXECUTOR_MAX_TOOL_ROUNDS" ||
-          key.startsWith("TASK_ORCH_FLY_") ||
-          key === "TASK_ORCH_RUNNER_VOLUME_GB") set(key, undefined);
+          key === "TASK_ORCH_EXECUTOR_MAX_TOOL_ROUNDS") set(key, undefined);
     }
     expect(config.dispatch.maxRunDepth).toBe(3);
     expect(config.dispatch.maxTreeRuns).toBe(32);
@@ -181,10 +174,6 @@ describe("documented numeric defaults", () => {
     expect(config.agent.chatIdleMs).toBe(600_000);
     expect(config.agent.chatMaxToolRounds).toBe(64);
     expect(config.agent.executorMaxToolRounds).toBe(30);
-    expect(config.fly.cpus).toBe(4);
-    expect(config.fly.memoryMb).toBe(4096);
-    expect(config.fly.pollMs).toBe(10_000);
-    expect(config.fly.volumeGb).toBe(10);
   });
 
   it("keeps positive-only defaults when configured as zero", () => {
@@ -218,13 +207,12 @@ describe("deployment.gitCloneDepth — shallow in-runner clone depth", () => {
 
 describe("snapshot() — frozen plain-value dump", () => {
   it("captures derived values and is frozen", () => {
-    set("TASK_ORCH_RUNNER", "fly");
+    set("TASK_ORCH_RUNNER", "sprites");
     set("TASK_ORCH_DETACHED_RUNS", "0");
     const snap = snapshot();
-    expect(snap.derived.runnerProviderKind).toBe("fly");
-    expect(snap.derived.detachedRunsEnabled).toBe(true); // fly forces it
+    expect(snap.derived.runnerProviderKind).toBe("sprites");
+    expect(snap.derived.detachedRunsEnabled).toBe(true); // remote provider forces it
     expect(Object.isFrozen(snap)).toBe(true);
     expect(Object.isFrozen(snap.derived)).toBe(true);
   });
 });
-

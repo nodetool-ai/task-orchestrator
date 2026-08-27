@@ -45,7 +45,6 @@ import { connectRun, reapStaleChannels } from "./worker-channel/controller";
 import {
   dockerDialEndpoint,
   dockerListenEndpoint,
-  flyListenEndpoint,
   localDialEndpoint,
   localListenEndpoint,
   localSocketPath,
@@ -123,11 +122,8 @@ function runs(): RunsApi {
   return runsApi;
 }
 
-// Nested-dispatch policy helpers (docs/nested-machine-dispatch.md, Decision 5)
-// live in ./runner/provider — NOT here — because lib/runner/fly.ts also needs
-// nestedDispatchMode (for buildFlyWorkerEnv), and a static value import
-// fly.ts → run-dispatch would close a cycle (run-dispatch → provider → fly →
-// run-dispatch). provider.ts is the shared low-level module both can import.
+// Nested-dispatch policy helpers live in ./runner/provider so workers and
+// dispatch share one low-level policy module without import cycles.
 // Re-exported here so callers reasoning about dispatch policy find them next to
 // detachedRunsEnabled(); runs.ts's launch branches import them from this module.
 export { insideWorker, nestedDispatchMode };
@@ -139,7 +135,7 @@ export function detachedRunsEnabled(): boolean {
 
 /** True when the server must route user turns through an out-of-process runner.
  *  Also true INSIDE an isolate-mode worker: there, turns are remote by policy —
- *  the worker holds no Fly credentials, so append paths must defer to the
+ *  the worker holds no cloud credentials, so append paths must defer to the
  *  server (see runs.sendMessageToRun) rather than drive a child in-process.
  *  Workers never receive TASK_ORCH_RUNNER / TASK_ORCH_WORKER_IMAGE (see
  *  lib/runner/provider.ts:77), so the env-based check alone is always false
@@ -276,23 +272,11 @@ export function admissionDecision(i: {
 /** The gate only runs for managed worker backends, and can be turned off. */
 function admissionEnabled(): boolean {
   if (!config.dispatch.admissionFlag) return false;
-  if (runnerProviderKind() === "fly") return config.dispatch.maxMachines > 0;
   if (runnerProviderKind() === "sprites") return config.sprites.maxSprites > 0;
   return !!config.deployment.workerImage;
 }
 
-const FLY_ADMISSION_STATES = ["creating", "starting", "running"];
 const SPRITES_ADMISSION_STATES = ["creating", "starting", "running"];
-
-async function flyAdmit(): Promise<AdmitDecision> {
-  const maxMachines = intEnv("TASK_ORCH_MAX_MACHINES", 0);
-  if (maxMachines <= 0) return "admit";
-  const active = await db
-    .select({ runId: runnerInstances.runId })
-    .from(runnerInstances)
-    .where(and(eq(runnerInstances.provider, "fly"), inArray(runnerInstances.state, FLY_ADMISSION_STATES)));
-  return active.length >= maxMachines ? "defer" : "admit";
-}
 
 async function spritesAdmit(): Promise<AdmitDecision> {
   const maxSprites = intEnv("TASK_ORCH_MAX_SPRITES", 0);
@@ -306,7 +290,6 @@ async function spritesAdmit(): Promise<AdmitDecision> {
 
 async function admit(runId: number): Promise<AdmitDecision> {
   void runId; // reserved for future per-run sizing; decision is host-global today
-  if (runnerProviderKindFromEnv() === "fly") return flyAdmit();
   if (runnerProviderKindFromEnv() === "sprites") return spritesAdmit();
   const capMB = intEnv("TASK_ORCH_WORKER_MEMORY_MB", 0);
   const reserveMB = intEnv("TASK_ORCH_HOST_MEMORY_RESERVE_MB", 0);
@@ -324,11 +307,8 @@ async function admit(runId: number): Promise<AdmitDecision> {
 }
 
 async function providerAdmit(input: RunnerAdmissionInput): Promise<RunnerAdmission> {
-  // Fly and local use the established host/DB admission gates.  In particular,
-  // do not instantiate FlyRunnerProvider just to decide capacity: its client
-  // correctly requires TASK_ORCH_FLY_APP, while the legacy TASK_ORCH_MAX_MACHINES
-  // gate is deliberately usable without it (including before a worker image/app
-  // has been configured).
+  // Local uses the established host/DB admission gate. Sprites capacity is
+  // handled by the provider's admission path above.
   return { decision: await admit(input.runId) };
 }
 
@@ -388,7 +368,7 @@ export async function dispatchRun(
   };
 
   // dispatchRun is the single front door: every run executes in an
-  // out-of-process worker (docker/fly container or a local detached tsx
+  // out-of-process worker (Docker container, Sprite, or a local detached tsx
   // worker). The emit-time inbox wakes (lib/inbox) and the pump's parked-wake
   // sweep both call dispatchRun, so they inherit this routing for free — no
   // per-caller placement logic.
@@ -493,7 +473,7 @@ export async function dispatchRun(
         if (providerDecision.decision === "defer") deferReason = providerDecision.reason ?? null;
       }
       // Deadlock breaker (M1): a plan-executor run occupies a worker slot for
-      // its ENTIRE turn (countInFlightWorkers/flyAdmit count it the whole
+      // its ENTIRE turn (the admission gate counts it for the whole
       // time), and blocks in await_session waiting on the very children it
       // just spawned. If every slot is held by executors, admission defers
       // every child to 'pending' forever — the executors never finish (so
@@ -504,7 +484,7 @@ export async function dispatchRun(
       // child whose parent still holds a live worker claim is admitted even
       // over the cap — the parent's slot is blocked awaiting this very child,
       // so deferring it only deadlocks the tree. This applies to BOTH the
-      // memory-based gate and flyAdmit's machine-count gate (whichever
+      // applicable admission gate (whichever
       // admitFn returned "defer"); it does
       // NOT apply to "never-fits" (a single reservation exceeding the whole
       // host budget is a fatal misconfig no parent claim can fix). The overshoot
@@ -639,36 +619,6 @@ export async function dispatchRun(
         console.error(`Worker channel start failed for run ${runId}:`, err)
       );
       handle = ref.handle;
-    } else if (provider === "fly") {
-      // Fly channel provisioning (plan section 20): reserve the instance
-      // id/credential, let FlyRunnerProvider.create/resume build the Machine
-      // with the channel env and resolve its private 6PN endpoint, then store
-      // it and push the run.start snapshot exactly like the local/docker
-      // paths above.
-      const channel = await provisionFlyChannel(runId);
-      const ref = await timeRunnerPhase(
-        "runner_create",
-        () => getRunnerProvider().create({
-          runId,
-          scope: outcome.scope,
-          channelInstanceId: channel.instanceId,
-          channelEndpoint: channel.listenEndpoint,
-        }),
-        { provider, fields: { runId, scope: outcome.scope } }
-      );
-      if (!ref) {
-        return finish(await failSpawn(runId, outcome.scope, "run worker did not start (spawn returned no pid — worker image/runtime available?)"));
-      }
-      // Success means a private, control-plane-dialable channel endpoint was
-      // resolved — never merely that the Machine reports state "started".
-      if (!ref.channelEndpoint) {
-        return finish(await failSpawn(runId, outcome.scope, "runner started without a worker channel endpoint"));
-      }
-      await setChannelEndpoint(runId, ref.channelInstanceId ?? channel.instanceId, ref.channelEndpoint);
-      void startChannelForRun(runId, ref.channelInstanceId ?? channel.instanceId, { freshWorker: true }).catch((err) =>
-        console.error(`Worker channel start failed for run ${runId}:`, err)
-      );
-      handle = ref.handle;
     } else if (provider === "sprites") {
       // Sprites channel provisioning (see docs/sprites-migration-design.md §5):
       // reserve the instance id, let SpritesRunnerProvider create the sprite
@@ -745,43 +695,9 @@ export interface LocalChannelProvisioning {
   socketPath: string;
 }
 
-/** The exact unsupported-provider message for a genuinely unknown provider
- *  kind. Docker provisioning landed in plan section 19 (see dockerSpawn); Fly
- *  landed in section 20 (see provisionFlyChannel). */
+/** The exact unsupported-provider message for a genuinely unknown provider kind. */
 export function unsupportedWsProviderMessage(provider: string): string {
-  // local and fly both have dispatch branches that provision a WS channel;
-  // this message is only reached for a genuinely unknown provider kind.
   return `Runner provider '${provider}' does not expose a private control-plane-to-worker WebSocket endpoint.`;
-}
-
-/** Endpoints a Fly ws-mode dispatch reserves for one worker instance (plan
- *  section 20). Unlike the local path the dial endpoint isn't known until the
- *  Machine exists and its private 6PN IPv6 is resolved — FlyRunnerProvider
- *  resolves and persists the real `ws://[<ip>]:8787/worker/channel` endpoint
- *  via `setChannelEndpoint` once the Machine is up (see the fly branch of
- *  dispatchRun). Resume-identity rule: a run that already has a channel
- *  instance id on record (its volume survived) reuses it; a run provisioned
- *  for the first time mints a fresh one. */
-export async function provisionFlyChannel(
-  runId: number,
-): Promise<{ instanceId: string; listenEndpoint: string }> {
-  const [existing] = await db
-    .select({ channelInstanceId: runnerInstances.channelInstanceId })
-    .from(runnerInstances)
-    .where(eq(runnerInstances.runId, runId));
-  const instanceId = existing?.channelInstanceId || newChannelInstanceId();
-  const listenEndpoint = flyListenEndpoint();
-  // Fly dispatch has no runner_instances row of its own until FlyRunnerProvider
-  // creates one; seed a stub so the channel identity has somewhere to live,
-  // exactly like provisionLocalChannel does for the local path.
-  await db
-    .insert(runnerInstances)
-    .values({ runId, provider: "fly", state: "starting" })
-    .onConflictDoNothing();
-  // Reserve with a placeholder — the real dial endpoint isn't known until the
-  // Machine's private IP resolves; setChannelEndpoint corrects it below.
-  await reserveChannelIdentity(runId, instanceId, `pending:fly:${instanceId}`);
-  return { instanceId, listenEndpoint };
 }
 
 /** Endpoints a Sprites dispatch reserves (see docs/sprites-migration-design.md §3).
@@ -1396,6 +1312,12 @@ function detachedSpawn(
     env.SESSION_ROOT = join(process.cwd(), ".worker-sessions", channelInstanceId);
   }
   delete env.DATABASE_URL;
+  // Infrastructure credentials belong only to the control plane. In contrast
+  // to Docker/Sprites, a local detached worker starts from process.env, so
+  // remove them explicitly before spawning it.
+  delete env.FLY_API_TOKEN;
+  delete env.SPRITES_TOKEN;
+  delete env.TASK_ORCH_SPRITES_TOKEN;
   return spawnLocalRunWorker(runId, { env });
 }
 

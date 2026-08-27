@@ -12,9 +12,6 @@ import { createMagicToken } from "./lib/magic-link";
 import { closeDb } from "./db";
 import { TASK_STATES, isTerminalStatus, type TaskState, type SessionStatus } from "./lib/types";
 import { assistantText, toolUses, type SdkMessageEnvelope } from "./lib/sdk-message";
-import { collectRunnerInventory } from "./lib/runner/inventory";
-import { reapOrphanVolumes } from "./lib/runner/fly";
-import { makeFlyClient } from "./lib/runner/fly-client";
 
 function isTaskState(s: string): s is TaskState {
   return (TASK_STATES as readonly string[]).includes(s);
@@ -646,79 +643,6 @@ async function cmdCodex(args: Args): Promise<number> {
   throw new Error("Usage: codex <login|logout|status>");
 }
 
-function formatAge(ms: number | null): string {
-  if (ms == null) return "—";
-  const mins = Math.floor(ms / 60_000);
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h`;
-  return `${Math.floor(hours / 24)}d`;
-}
-
-async function cmdRunners(args: Args): Promise<number> {
-  const inv = await collectRunnerInventory();
-  if (args.json) {
-    console.log(JSON.stringify(inv, null, 2));
-    return 0;
-  }
-
-  const flyRows = inv.rows;
-
-  if (inv.rows.length === 0) {
-    console.log("(no runner machines or volumes)");
-  } else {
-    if (flyRows.length) {
-      console.log(
-        `${pad("RUN", 6)} ${pad("MACHINE", 20)} ${pad("M-STATE", 10)} ${pad("VOLUME", 22)} ${pad("V-STATE", 10)} ${pad("SIZE", 6)} ${pad("AGE", 6)} ${pad("$/MO", 8)} ORPHAN`
-      );
-      for (const r of flyRows) {
-        console.log(
-          `${pad(r.runId != null ? "#" + r.runId : "—", 6)} ` +
-            `${pad(r.machineId ?? "—", 20)} ` +
-            `${pad(r.machineState ?? "—", 10)} ` +
-            `${pad(r.volumeId ?? "—", 22)} ` +
-            `${pad(r.volumeState ?? "—", 10)} ` +
-            `${pad(r.sizeGb != null ? `${r.sizeGb}G` : "—", 6)} ` +
-            `${pad(formatAge(r.ageMs), 6)} ` +
-            `${pad(`$${r.estMonthlyCostUsd.toFixed(2)}`, 8)} ` +
-            `${r.orphan ? "⚠ orphan" : ""}`
-        );
-      }
-    }
-  }
-
-  const t = inv.totals;
-  console.log(
-    `\n${t.machines} machines, ${t.volumes} volumes, ${t.totalGb} GB, ~$${t.estMonthlyCostUsd.toFixed(2)}/mo (${t.orphanVolumes} orphan volumes)`
-  );
-
-  if (args.reap) {
-    // Delegate to the SAME guarded reaper the sweep uses — it re-lists volumes
-    // and applies isReapableVolume's full safety checks (vol_run_* naming +
-    // 10-min grace window + the non-"gone" mapping protection). The inventory
-    // `orphan` flag is display-only and deliberately NOT used to pick destroy
-    // targets: it lacks those guards and could point at a volume that isn't ours
-    // or is still mid-provision.
-    let client;
-    try {
-      client = makeFlyClient();
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      console.error(`\nCannot reap — Fly client unavailable: ${message}`);
-      return 1;
-    }
-    const destroyed = await reapOrphanVolumes(client);
-    if (destroyed.length === 0) {
-      console.log("\nNo orphan volumes to reap.");
-    } else {
-      console.log(`\nReaped ${destroyed.length} orphan volume(s):`);
-      for (const id of destroyed) console.log(`  destroyed ${id}`);
-    }
-  }
-
-  return 0;
-}
-
 function help() {
   console.log(`Usage: npm run task -- <command> [args]
 
@@ -766,8 +690,6 @@ Commands:
   codex login                       Sign in with ChatGPT (Codex OAuth) and write ~/.codex/auth.json.
   codex logout                      Revoke the Codex token and remove ~/.codex/auth.json.
   codex status                      Report whether a Codex login is present.
-
-  runners [--json] [--reap]         List runner Fly Machines/volumes. --reap destroys orphan Fly volumes.
 
 States:
   Tasks: ${TASK_STATES.join(", ")}
@@ -822,9 +744,6 @@ async function main(): Promise<void> {
         break;
       case "user":
         code = await cmdUser(args);
-        break;
-      case "runners":
-        code = await cmdRunners(args);
         break;
       case "codex":
         code = await cmdCodex(args);

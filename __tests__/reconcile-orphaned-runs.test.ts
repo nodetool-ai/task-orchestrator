@@ -131,12 +131,12 @@ describe("reconcileOrphanedRuns", () => {
     vi.restoreAllMocks();
   });
 
-  it("re-dispatches a stale Fly-runner run via its pushed branch (no server-local worktree)", async () => {
-    // Regression: on Fly the worktree lives on the runner Machine's volume
+  it("re-dispatches a stale remote-runner run via its pushed branch (no server-local worktree)", async () => {
+    // Regression: on a remote runner (sprites) the worktree lives on the runner
     // (/mnt/session/repo) — a path that never exists on the SERVER. The old
     // predicate gated branch-based resumability on TASK_ORCH_WORKER_IMAGE
     // (the Docker path), so on Fly every orphan failed instead of resuming.
-    process.env.TASK_ORCH_RUNNER = "fly";
+    process.env.TASK_ORCH_RUNNER = "sprites";
     const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
     try {
       const run = await create({ goal: "<implement>", defer: true });
@@ -144,7 +144,7 @@ describe("reconcileOrphanedRuns", () => {
         .set({
           status: "running",
           heartbeatAt: STALE,
-          sdkSessionId: "sess-fly-1",
+          sdkSessionId: "sess-remote-1",
           branch: "claude/t-0001-1",
           worktreePath: "/mnt/session/repo", // runner Machine path; absent on the server
         })

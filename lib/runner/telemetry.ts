@@ -9,7 +9,7 @@ import {
 import { createLogger, type LogFields } from "@/lib/worker/log";
 
 type Outcome = "success" | "error" | "deferred" | "skipped";
-type Provider = "local" | "fly" | "sprites" | "unknown";
+type Provider = "local" | "sprites" | "unknown";
 
 type TelemetryState = {
   registry: Registry;

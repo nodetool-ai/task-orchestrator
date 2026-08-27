@@ -1,5 +1,5 @@
-// Container env forwarding for the agent backends: both worker paths (Docker
-// containers and Fly Machines) must hand the worker every credential the
+// Container env forwarding for the agent backends: worker paths (Docker
+// containers and Sprites) must hand the worker every credential the
 // server holds, for the claude AND pi backends alike — a container dispatched
 // with TASK_ORCH_AGENT_BACKEND=pi boots fine and then fails its first provider
 // call if only the Anthropic pair was forwarded.
@@ -9,7 +9,7 @@ import {
   AGENT_CREDENTIAL_ENV_KEYS,
   agentCredentialEnv,
 } from "../../lib/agent-backend/provider-env";
-import { buildFlyWorkerEnv } from "../../lib/runner/fly";
+import { buildSpritesWorkerEnv } from "../../lib/runner/sprites";
 import { buildWorkerContainerConfig } from "../../lib/run-dispatch";
 
 // GH_TOKEN doubles as a pi github-copilot credential but is forwarded
@@ -74,12 +74,20 @@ describe("AGENT_CREDENTIAL_ENV_KEYS", () => {
 });
 
 describe("worker env builders forward pi provider credentials", () => {
-  it("buildFlyWorkerEnv includes a set pi key and omits unset ones", async () => {
+  it("buildSpritesWorkerEnv includes a set pi key and omits unset ones", async () => {
     vi.stubEnv(PI_KEY, "sk-or-test");
     delete process.env[UNSET_KEY];
-    const env = await buildFlyWorkerEnv(42);
+    const env = await buildSpritesWorkerEnv(42);
     expect(env[PI_KEY]).toBe("sk-or-test");
     expect(UNSET_KEY in env).toBe(false);
+  });
+
+  it("buildSpritesWorkerEnv omits control-plane infrastructure tokens", async () => {
+    vi.stubEnv("FLY_API_TOKEN", "fly-control-plane-only");
+    vi.stubEnv("SPRITES_TOKEN", "sprites-control-plane-only");
+    const env = await buildSpritesWorkerEnv(42);
+    expect(env.FLY_API_TOKEN).toBeUndefined();
+    expect(env.SPRITES_TOKEN).toBeUndefined();
   });
 
   it("buildWorkerContainerConfig includes a set pi key and omits unset ones", async () => {

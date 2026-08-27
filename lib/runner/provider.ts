@@ -7,7 +7,6 @@ import {
   nestedDispatchMode as nestedDispatchModeCfg,
   type NestedDispatchMode,
 } from "../config";
-import { FlyRunnerProvider } from "./fly";
 import { LocalRunnerProvider } from "./local";
 import { SpritesRunnerProvider } from "./sprites";
 
@@ -24,7 +23,7 @@ export type RunnerState =
 export interface RunnerRef {
   /** Run id this runner serves. */
   runId: number;
-  /** Provider-scoped id: Docker container name or Fly machine id. */
+  /** Provider-scoped id: Docker container name or Sprite name. */
   handle: string;
   provider: RunnerProviderKind;
   channelEndpoint?: string;
@@ -64,8 +63,6 @@ export interface RunnerProvider {
   stop(handle: string): Promise<void>;
   /** Reconcile DB run state against real runner state for this instance's runs. */
   sweep(): Promise<void>;
-  /** Start the process-wide event/state watcher (idempotent). */
-  startMonitor(): void;
 }
 
 /** @deprecated alias — reads via lib/config's runnerProviderKind(). Kept for the
@@ -75,8 +72,8 @@ export function runnerProviderKindFromEnv(): RunnerProviderKind {
 }
 
 /**
- * True when this process is a worker (a Fly Machine / Docker worker container).
- * Branches nested-dispatch behavior: a worker holds no Fly credentials and none
+ * True when this process is a worker (a Sprite / Docker worker container).
+ * Branches nested-dispatch behavior: a worker holds no cloud credentials and none
  * of the admission/pump/sweep machinery, so it must not dispatch child runs
  * itself. Semantics + docs live in lib/config's insideWorker(); re-exported here
  * because run-dispatch re-exports it as part of the dispatch-policy surface.
@@ -111,8 +108,6 @@ export function getRunnerProvider(): RunnerProvider {
     switch (kind) {
       case "local":
         return new LocalRunnerProvider();
-      case "fly":
-        return new FlyRunnerProvider();
       case "sprites":
         return new SpritesRunnerProvider();
     }

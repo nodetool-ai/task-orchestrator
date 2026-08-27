@@ -9,7 +9,7 @@ describe("runner_instances", () => {
     const run = await create({ goal: "<implement>", defer: true });
     await db.insert(runnerInstances).values({
       runId: run.id,
-      provider: "fly",
+      provider: "sprites",
       flyApp: "app",
       machineId: "m1",
       volumeId: "v1",
@@ -26,7 +26,7 @@ describe("runner_instances", () => {
 
     await db.insert(runnerInstances).values({
       runId: run.id,
-      provider: "fly",
+      provider: "sprites",
       state: "stopped",
       credentialsVersion: 2,
       credentialsExpiresAt,

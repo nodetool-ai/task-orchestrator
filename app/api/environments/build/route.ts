@@ -26,7 +26,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   const body = (await req.json().catch(() => ({}))) as { provider?: string };
   const provider = body.provider;
   if (provider !== "docker") {
-    return NextResponse.json({ error: "provider must be 'docker' (fly builds are not in-app)" }, { status: 400 });
+    return NextResponse.json({ error: "provider must be 'docker'" }, { status: 400 });
   }
 
   // The docker host build tars the local checkout, so the artifact's identity

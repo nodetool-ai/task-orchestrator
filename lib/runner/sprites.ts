@@ -18,8 +18,6 @@ import { workerBundleId } from "../worker-bundle";
 import { newChannelInstanceId } from "../worker-channel/credential";
 import { spritesDialEndpoint, spritesListenEndpoint, workerChannelDispatchEnv } from "../worker-channel/dispatch-env";
 
-const SPRITES_MONITOR_KEY = "__taskOrchSpritesRunnerMonitor";
-
 function envValue(key: string): string | undefined {
   const v = process.env[key];
   return v == null ? undefined : v;
@@ -463,27 +461,6 @@ export class SpritesRunnerProvider implements RunnerProvider {
         }
       }
     }
-  }
-
-  startMonitor(): void {
-    const g = globalThis as Record<string, unknown>;
-    if (g[SPRITES_MONITOR_KEY]) return;
-    const intervalMs = config.sprites.pollMs;
-    if (intervalMs <= 0) return;
-    let sweeping = false;
-    const tick = () => {
-      if (sweeping) return;
-      sweeping = true;
-      void this.sweep()
-        .catch(() => {})
-        .finally(() => {
-          sweeping = false;
-        });
-    };
-    const timer = setInterval(tick, intervalMs);
-    (timer as { unref?: () => void }).unref?.();
-    g[SPRITES_MONITOR_KEY] = timer;
-    tick();
   }
 
   private async applyLifecycle(

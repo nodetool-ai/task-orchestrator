@@ -20,7 +20,6 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 //  - lib/run-dispatch.ts  forwards TASK_ORCH_* into worker containers by name
 //                         (pass()/workerDispatchEnv) — serialization, not a read.
 //  - lib/runs.ts          long-tail tunables (chat idle, budgets) not yet migrated.
-//  - lib/runner/fly*.ts   fly machine sizing/region long-tail.
 //  - lib/runner/worker-sha.ts  reads TASK_ORCH_WORKER_SHA at build-SHA
 //                         resolution time (a bootstrap concern with its own
 //                         40-char validation), deliberately before/without
@@ -38,25 +37,17 @@ const ALLOWLIST = new Set([
   "lib/ci-autofix.ts",
   "lib/extensions/spawn.ts",
   "lib/run-dispatch.ts",
-  "lib/runner/fly-client.ts",
-  "lib/runner/fly.ts",
   "lib/runner/sprites-client.ts",
   "lib/runner/worker-sha.ts",
   "lib/runs.ts",
   "lib/worker/log.ts",
   "lib/worktree-gc.ts",
   "scripts/reset.ts",
-  "scripts/seed-prewarm-volume.ts",
   "scripts/seed.ts",
   // Dev CLI harness (npm run chat): reads a few TASK_ORCH_* tunables to launch
   // a worker/chat locally. A script, not runtime code — same category as the
   // other scripts/*.ts entries above.
   "scripts/worker-chat.ts",
-  // Ops probe (see its header): provisions one disposable Fly Machine and dials
-  // its worker channel. Reads TASK_ORCH_FLY_APP/REGION and its own
-  // TASK_ORCH_FLY_PROBE opt-in gate. A script, not runtime code — same category
-  // as the other scripts/*.ts entries above.
-  "scripts/fly-channel-probe.ts",
   // Sprites feasibility spike (see its header): provisions one disposable
   // sprite from a bare token + base URL, before any control plane exists. A
   // script, not runtime code — same category as the other scripts/*.ts entries.

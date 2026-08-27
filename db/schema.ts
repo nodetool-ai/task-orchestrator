@@ -328,7 +328,7 @@ export const runnerInstances = pgTable(
     runId: integer("run_id")
       .primaryKey()
       .references(() => agentSessions.id, { onDelete: "cascade" }),
-    provider: text("provider").notNull().default("fly"),
+    provider: text("provider").notNull().default("sprites"),
     flyApp: text("fly_app"),
     machineId: text("machine_id"),
     volumeId: text("volume_id"),

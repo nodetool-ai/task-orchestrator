@@ -14,6 +14,11 @@
 // See https://nextjs.org/docs/app/building-your-application/optimizing/instrumentation
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME === "nodejs") {
+    // Validate the selected runner before the best-effort recovery block. A
+    // retired provider must fail server boot, not be reduced to a log line by
+    // the recovery catch below.
+    const configMod = await import("./lib/config");
+    configMod.runnerProviderKind();
     // Boot recovery: self-heal runs orphaned by a previous process death (deploy
     // restart, crash, host reboot). Cheap and idempotent, so it runs on every
     // nodejs cold start regardless of feature flags. When TASK_ORCH_DETACHED_RUNS
@@ -37,7 +42,7 @@ export async function register(): Promise<void> {
       const dispatchMod = await import("./lib/run-dispatch");
       const providerMod = await import("./lib/runner/provider");
       // Sweep the selected runner backend BEFORE reconcile. A worker that died
-      // while the server was down may still be visible to Docker/Fly: the sweep
+      // while the server was down may still be visible to Docker/Sprites: the sweep
       // applies the death policy so failures are visible rather than blindly
       // re-dispatched by heartbeat-only reconcile.
       await providerMod.getRunnerProvider().sweep().catch((e) => {
@@ -51,10 +56,6 @@ export async function register(): Promise<void> {
       // import (no webpackIgnore / variable specifier) so it bundles into the prod
       // server chunk; see the reconcile note above.
       dispatchMod.startPendingRunPump();
-      // Watch/poll the selected provider so worker death is reflected on its run
-      // within seconds instead of the 5-minute heartbeat timeout. The pump's
-      // per-tick provider sweep covers anything this subscription/poll misses.
-      providerMod.getRunnerProvider().startMonitor();
       // Re-adopt every active worker WebSocket channel. On the ws transport a
       // fresh boot (or hot deploy) has no in-memory connections: scan the runner
       // instances that still carry a dial identity for a non-terminal run,

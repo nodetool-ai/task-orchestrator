@@ -2,7 +2,6 @@
 import { config as loadEnv } from "dotenv";
 loadEnv({ path: ".env.local" });
 
-import { config } from "../lib/config";
 import { execFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -15,7 +14,6 @@ type Args = {
   _: string[];
   fly: boolean;
   app: string;
-  runnerApp: string;
   out?: string;
   json: boolean;
   tailEvents: number;
@@ -37,9 +35,6 @@ type Trace = {
   recentMessages: any[];
   inbox: any[];
   timers: any[];
-  fly?: {
-    machines: Record<string, { status?: string; logs?: string; error?: string }>;
-  };
 };
 
 function parseArgs(argv: string[]): Args {
@@ -47,7 +42,6 @@ function parseArgs(argv: string[]): Args {
     _: [],
     fly: false,
     app: process.env.FLY_APP ?? "task-orchestrator",
-    runnerApp: config.fly.app ?? process.env.FLY_RUNNER_APP ?? "task-orchestrator-runners",
     json: false,
     tailEvents: 25,
     tailMessages: 10,
@@ -63,7 +57,6 @@ function parseArgs(argv: string[]): Args {
     const value = eq === -1 ? "true" : a.slice(eq + 1);
     if (key === "fly") args.fly = value !== "false";
     else if (key === "app") args.app = value;
-    else if (key === "runner-app") args.runnerApp = value;
     else if (key === "out") args.out = value;
     else if (key === "json") args.json = value !== "false";
     else if (key === "tail-events") args.tailEvents = Number(value);
@@ -82,7 +75,6 @@ function usage(): never {
       "Options:",
       "  --fly                 Query the deployed DB via flyctl ssh console.",
       "  --app=<name>          Fly web/control app for --fly DB queries.",
-      "  --runner-app=<name>   Fly runner app for Machine status/logs.",
       "  --tail-events=<n>     Recent agent_events per run (default 25).",
       "  --tail-messages=<n>   Recent agent_messages per run (default 10).",
       "  --logs=false          Skip flyctl logs enrichment.",
@@ -259,57 +251,6 @@ async function queryFly(root: number, args: Args): Promise<Trace> {
   return { ...JSON.parse(stripFlyNoise(stdout)), source: "fly" };
 }
 
-async function flyctl(args: string[]): Promise<string> {
-  const { stdout, stderr } = await execFileAsync("flyctl", args, { maxBuffer: 50 * 1024 * 1024 });
-  return [stdout, stderr].filter(Boolean).join("");
-}
-
-async function enrichFly(trace: Trace, runnerApp: string, includeLogs: boolean): Promise<void> {
-  const machineIds = new Set<string>();
-  for (const runner of trace.runners) {
-    if (typeof runner.machine_id === "string" && runner.machine_id.length > 0) {
-      machineIds.add(runner.machine_id);
-    }
-  }
-  for (const run of trace.runs) {
-    if (typeof run.worker_scope === "string" && /^[0-9a-f]{14}$/i.test(run.worker_scope)) {
-      machineIds.add(run.worker_scope);
-    }
-  }
-  for (const event of trace.runnerEvents) {
-    const payload = typeof event.payload === "string" ? safeJson(event.payload) : event.payload;
-    if (payload && typeof payload === "object") {
-      const machineId = (payload as { machineId?: unknown }).machineId;
-      if (typeof machineId === "string" && machineId.length > 0) machineIds.add(machineId);
-    }
-  }
-  trace.fly = { machines: {} };
-  for (const machineId of Array.from(machineIds).sort()) {
-    const entry: { status?: string; logs?: string; error?: string } = {};
-    try {
-      entry.status = await flyctl(["machine", "status", machineId, "-a", runnerApp]);
-    } catch (err) {
-      entry.error = err instanceof Error ? err.message : String(err);
-    }
-    if (includeLogs) {
-      try {
-        entry.logs = await flyctl(["logs", "-a", runnerApp, "--machine", machineId, "--no-tail"]);
-      } catch (err) {
-        entry.logs = `flyctl logs failed: ${err instanceof Error ? err.message : String(err)}`;
-      }
-    }
-    trace.fly.machines[machineId] = entry;
-  }
-}
-
-function safeJson(s: string): unknown {
-  try {
-    return JSON.parse(s);
-  } catch {
-    return s;
-  }
-}
-
 function summarize(trace: Trace): string {
   const lines = [
     `Run tree #${trace.root}: ${trace.ids.join(" -> ").replace(/ -> /g, ", ")}`,
@@ -353,7 +294,6 @@ async function main(): Promise<void> {
   const trace = args.fly
     ? await queryFly(runId, args)
     : await queryLocal(runId, args.tailEvents, args.tailMessages);
-  await enrichFly(trace, args.runnerApp, args.logs);
 
   if (args.out) {
     const outPath = path.resolve(args.out);

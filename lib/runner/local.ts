@@ -38,11 +38,10 @@ export class LocalRunnerProvider implements RunnerProvider {
   }
 
   async sweep(): Promise<void> {
+    // The Docker event watcher is local-only and idempotent. Starting it here
+    // makes sweep the sole lifecycle entrypoint for every provider.
+    startWorkerMonitor();
     await sweepWorkerContainers();
     await sweepWorkerSockets();
-  }
-
-  startMonitor(): void {
-    startWorkerMonitor();
   }
 }

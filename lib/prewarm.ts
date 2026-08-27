@@ -1,7 +1,7 @@
 // lib/prewarm.ts
 //
 // Runtime side of the baked-dependency prewarm (see scripts/build-prewarm.sh and
-// Dockerfile.fly-runner). The image ships a fully-installed checkout of the
+// worker image). The image ships a fully-installed checkout of the
 // primary target repo at $PREWARM_DIR (node_modules for root + every workspace,
 // packages built, Playwright browsers under $PLAYWRIGHT_BROWSERS_PATH). After a
 // run clones its repo onto the session volume, applyPrewarmToCheckout symlinks

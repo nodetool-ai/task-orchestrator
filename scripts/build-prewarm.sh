@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build-time dependency pre-warmer for the Fly runner image.
+# Build-time dependency pre-warmer for a worker image.
 #
 # Bakes a ready-to-go checkout of the primary target repo so an agent run never
 # pays a cold `npm ci` + `npx playwright install` on a fresh volume:
@@ -116,7 +116,7 @@ fi
 
 # Playwright browsers are intentionally NOT baked: they add size/build time and
 # most runs don't need a browser. A run that does need one installs it on demand
-# into PLAYWRIGHT_BROWSERS_PATH (set in Dockerfile.fly-runner).
+# into PLAYWRIGHT_BROWSERS_PATH (set in the worker image).
 echo "[build-prewarm] skipping Playwright browser install (not baked by design)."
 
 echo "[build-prewarm] done: $(du -sh "$DEST" 2>/dev/null | cut -f1) baked at $DEST"

@@ -154,7 +154,7 @@ export default async function SettingsPage({
               <h2 className="text-base font-semibold tracking-tight">Environments</h2>
               <p className="text-sm text-muted-foreground">
                 The execution artifact each runner provider launches from — a
-                Docker image or a Fly runner image — versioned by worker build
+                Docker worker image — versioned by worker build
                 SHA.
               </p>
             </header>

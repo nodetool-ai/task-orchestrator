@@ -28,13 +28,12 @@ single Postgres database.
 - **[SCHEMA.md](SCHEMA.md)** — DB schema, state machines, REST surface
 - **[AGENTS.md](AGENTS.md)** — workflow contract for humans and agents
 - **[docs/runners/](docs/runners/README.md)** — how runs actually execute:
-  workers, the control-plane split, and the Local / Fly integrations
+  workers, the control-plane split, and the Local / Sprites integrations
   (start here for architecture)
 - **[docs/mcp-server.md](docs/mcp-server.md)** — the hosted MCP server
   (`POST /api/mcp`): production setup, the bearer-token auth model, and
   client onboarding from Settings → API tokens
-- **[docs/fly-deployment.md](docs/fly-deployment.md)** — one-command deploy of the
-  whole app (server + agent runners + database) to Fly.io
+- **[docs/fly-deployment.md](docs/fly-deployment.md)** — deploy the control plane to Fly.io
 - **[docs/test-deployment.md](docs/test-deployment.md)** — full containerized
   stack (Postgres + server + Docker workers) for validating the run → PR loop
 - **[docs/tui.md](docs/tui.md)** — `orch`, the terminal cockpit: when to use
@@ -185,12 +184,10 @@ Unauthenticated browser visitors are redirected to `/login`; API requests
 get a 401. The CLI talks to the DB directly, so the gate doesn't apply
 there.
 
-## Deploy to Fly.io (whole app + database, one command)
+## Deploy the control plane to Fly.io
 
-Run the entire system — web UI, REST API, agent runners, and Postgres — on
-Fly.io. Agent runs execute as ephemeral Fly Machines (one Machine + persistent
-Volume per run) instead of local Docker containers, so no host with a Docker
-socket is required.
+Fly.io can host the web UI, REST API, and control plane. Agent runs use the
+`sprites` or `local` runner provider; Fly is not a runner provider.
 
 ```bash
 cp .env.fly.example .env.fly       # fill in GH_TOKEN, a Claude credential, admin login
@@ -198,11 +195,8 @@ set -a; . ./.env.fly; set +a
 ./scripts/fly-deploy.sh            # creates apps + Postgres, wires secrets, deploys
 ```
 
-The script provisions two Fly apps (the `task-orchestrator` server and a
-`task-orchestrator-runners` pool) plus a Fly Postgres, stages every secret that
-connects them (`DATABASE_URL`, `AUTH_SECRET`, a scoped `FLY_API_TOKEN` for the
-Machines API, model/GitHub creds), and creates your first login. It's
-idempotent — re-run it to redeploy. Full walkthrough + tuning knobs:
+The script provisions the control-plane app and optionally Fly Postgres, stages
+its application secrets, and creates your first login. Full walkthrough:
 **[docs/fly-deployment.md](docs/fly-deployment.md)**.
 
 ## Production deployment (systemd + Docker Compose)
