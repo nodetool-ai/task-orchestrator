@@ -13,19 +13,17 @@ interface Props {
   onShowLog?: () => void;
 }
 
-// The boot of a container-backed run walks pending → preparing → running before
-// the agent produces a single token. Each maps to a human step so the user can
-// watch progress instead of staring at three anonymous dots for a minute.
+// A cold start of a runner-backed run walks pending → preparing → running
+// before the agent produces a single token. Each maps to a human step so the
+// user can watch progress instead of staring at three anonymous dots.
 const WORKER_STEPS: Array<{ status: SessionStatus; label: string }> = [
   { status: "pending", label: "Queued for a runner" },
-  { status: "preparing", label: "Booting agent container" },
+  { status: "preparing", label: "Starting the runner" },
   { status: "running", label: "Starting the agent session" },
 ];
 
 function workerStepIndex(status: SessionStatus): number {
   const i = WORKER_STEPS.findIndex((s) => s.status === status);
-  // A status outside the boot arc (idle/parked resuming, etc.) is treated as
-  // "on the last step" — the container is up and we're waiting on the agent.
   return i === -1 ? WORKER_STEPS.length - 1 : i;
 }
 
@@ -44,29 +42,21 @@ function useElapsedSeconds(): number {
   return seconds;
 }
 
+/** True when a run is in the boot arc a StartupIndicator narrates. Outside it
+ *  (idle/running) a waiting turn is just the model thinking on a live worker —
+ *  the caller shows a plain thinking indicator, never a fake "waking" story. */
+export function isRunnerBooting(status: SessionStatus): boolean {
+  return status === "pending" || status === "preparing";
+}
+
 export function StartupIndicator({ status, onShowLog }: Props) {
   const elapsed = useElapsedSeconds();
   const elapsedLabel = elapsed >= 3 ? `${elapsed}s` : null;
 
-  // A worker run whose container is already warm (status past the
-  // pending/preparing boot arc) is just waking the agent — not a cold boot, so
-  // show one calm line rather than a fake boot sequence.
-  const booting = status === "pending" || status === "preparing";
-  if (!booting) {
-    const label = "Waking the agent…";
-    const detail = "The container is warm — resuming the agent session.";
+  if (!isRunnerBooting(status)) {
     return (
       <div className="px-4 py-3">
-        <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-          <TypingDots label={label} />
-          <span>{label}</span>
-          {elapsedLabel && (
-            <span className="tabular-nums text-muted-foreground/70">
-              {elapsedLabel}
-            </span>
-          )}
-        </div>
-        <p className="mt-1 pl-0.5 text-[11px] text-muted-foreground/70">{detail}</p>
+        <TypingDots />
       </div>
     );
   }
@@ -77,7 +67,7 @@ export function StartupIndicator({ status, onShowLog }: Props) {
     <div className="mx-4 my-2 rounded-lg border border-border/60 bg-card/40 px-3 py-2.5">
       <div className="flex items-center gap-2 text-[11px] font-medium text-foreground">
         <Spinner className="size-3 text-state-progress" />
-        <span>Booting agent container</span>
+        <span>Starting the runner</span>
         {elapsedLabel && (
           <span className="tabular-nums font-normal text-muted-foreground/70">
             {elapsedLabel}

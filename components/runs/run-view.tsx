@@ -35,7 +35,7 @@ import { SystemEventRow } from "@/components/runs/system-event-row";
 import { EventDigestCard, type DigestEnvelope } from "@/components/runs/event-digest-card";
 import { InboxPanel } from "@/components/runs/inbox-panel";
 import { PlanningReviewCard } from "@/components/runs/planning-review-card";
-import { StartupIndicator } from "@/components/runs/startup-indicator";
+import { StartupIndicator, isRunnerBooting } from "@/components/runs/startup-indicator";
 import { useConfirm } from "@/components/ui/dialog-provider";
 import { WorkerLogPanel } from "@/components/runs/worker-log-panel";
 import { takePendingMessage } from "@/lib/pending-first-message";
@@ -893,7 +893,10 @@ export function RunView({
             )}
             {(() => {
               if (!sending) return null;
-              if (awaitingFirstToken) {
+              // Only a real boot arc (pending/preparing) gets the startup
+              // narration. A follow-up on a live worker is the model
+              // thinking — the worker stays up between turns now.
+              if (awaitingFirstToken && isRunnerBooting(status)) {
                 return (
                   <StartupIndicator
                     status={status}
