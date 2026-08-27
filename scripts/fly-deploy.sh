@@ -39,7 +39,12 @@ fi
 secrets=(NEXTAUTH_URL="$NEXTAUTH_URL")
 if [[ -n "${AUTH_SECRET:-}" ]]; then
   secrets+=(AUTH_SECRET="$AUTH_SECRET")
-elif ! "$FLY" secrets list -a "$APP" 2>/dev/null | grep -qw AUTH_SECRET; then
+else
+  # Read the list into a variable: `list | grep -q` under pipefail fails when
+  # grep closes the pipe early, which minted a new secret (2026-08-27).
+  existing_secrets="$("$FLY" secrets list -a "$APP" 2>/dev/null || true)"
+fi
+if [[ -z "${AUTH_SECRET:-}" ]] && ! grep -qw AUTH_SECRET <<<"${existing_secrets:-}"; then
   secrets+=(AUTH_SECRET="$(openssl rand -base64 32)")
 fi
 # Optional pi-backend provider keys (TASK_ORCH_AGENT_BACKEND=pi): whatever the

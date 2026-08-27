@@ -20,7 +20,7 @@ import {
   runnerProviderKind,
 } from "./config";
 import { runHasChannelThread } from "./repo";
-import { resolveLiveness } from "./run-liveness";
+import { resolveLiveness, serverClaimScope } from "./run-liveness";
 import { isServerRuntimeRun } from "./run-runtime";
 import { runNonce } from "./run-nonce";
 import { HARD_TERMINAL_STATUSES } from "./run-state";
@@ -556,7 +556,14 @@ async function dispatchRunInner(
       }
     }
 
-    const scope = `run-${runId}-${runNonce()}`;
+    // The dispatch claim names THIS process (host@pid@boot id) so resolveLiveness
+    // observes it as a server claim: alive while this process lives, dead after
+    // a restart. A bare token was inspected as a runner handle — the sprites
+    // provider looked up a sprite named `run-186-…`, found none, and the reaper
+    // killed the run mid-bootstrap (2026-08-27). The in-process in-flight Set is
+    // not enough on its own: Next bundles lib/ once per entry, so the pump's
+    // reaper and a route's dispatch can hold different Sets.
+    const scope = serverClaimScope(`dispatch-${runId}-${runNonce()}`);
     // Atomic claim: only succeeds if worker_scope is still NULL AND the status is
     // still claimable. 'cancelled'/'closed' are terminal decisions that must NEVER
     // be resurrected — a claim landing on them would flip the row to 'preparing'

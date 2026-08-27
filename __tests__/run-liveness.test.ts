@@ -78,6 +78,21 @@ describe("resolveLiveness — claims that cannot be observed are never unowned",
   });
 });
 
+describe("resolveLiveness — a run being provisioned by this process", () => {
+  it("is alive while its runner row has a provider but no handle yet (run 186)", async () => {
+    installFakeRunnerProvider();
+    const run = await create({ goal: "<chat>", defer: true });
+    // provisionSpritesChannel inserts the row before the sprite exists.
+    await db.insert(runnerInstances).values({ runId: run.id, provider: "sprites", state: "starting" });
+    await db
+      .update(agentSessions)
+      .set({ workerScope: serverClaimScope(`dispatch-${run.id}-abc`), status: "preparing" })
+      .where(eq(agentSessions.id, run.id));
+
+    expect((await resolveLiveness(run.id)).verdict).toBe("alive");
+  });
+});
+
 describe("isResumableDeadRun — reconciled existence gate", () => {
   const base = {
     detached: true,

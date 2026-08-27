@@ -23,7 +23,7 @@ describe("dispatchRun", () => {
     expect(spawn).toHaveBeenCalledTimes(1);
     const row = (await get(run.id))!;
     expect(row.status).toBe("preparing");
-    expect(row.workerScope).toMatch(/^run-\d+-/);
+    expect(row.workerScope).toMatch(/^server-.*@dispatch-\d+-/);
   });
 
   it("is idempotent — a second dispatch does not spawn again", async () => {
