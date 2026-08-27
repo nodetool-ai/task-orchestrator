@@ -63,7 +63,9 @@ settings, `TASK_ORCH_INSIDE_WORKER=1`, channel identity, etc.) but no
 
 The gate counts active `runner_instances` rows in states `creating`/`starting`/
 `running` for provider `sprites` and defers when the count reaches
-`TASK_ORCH_MAX_SPRITES`. Setting it to `0` disables the gate. A deferred run
+`TASK_ORCH_MAX_SPRITES` — counted as sprites whose worker the provider observes
+`alive`, not sprite rows (idle chats keep a hibernated sprite). Setting it to `0`
+disables the gate. A deferred run
 parks in `pending`; the pump retries oldest-first. Unlike the local provider,
 **Sprites admission never looks at memory** — capacity is a sprite count.
 

@@ -275,14 +275,30 @@ function admissionEnabled(): boolean {
 
 const SPRITES_ADMISSION_STATES = ["creating", "starting", "running"];
 
+/**
+ * The cap counts sprites with a LIVE worker, not sprite rows: every idle chat
+ * keeps its (hibernated, `starting`) sprite, so rows alone would block dispatch
+ * as soon as a handful of conversations exist. Only `alive` counts — an
+ * unobservable worker (API outage) must not turn into a total dispatch block.
+ */
 async function spritesAdmit(): Promise<AdmitDecision> {
   const maxSprites = intEnv("TASK_ORCH_MAX_SPRITES", 0);
   if (maxSprites <= 0) return "admit";
-  const active = await db
+  const candidates = await db
     .select({ runId: runnerInstances.runId })
     .from(runnerInstances)
-    .where(and(eq(runnerInstances.provider, "sprites"), inArray(runnerInstances.state, SPRITES_ADMISSION_STATES)));
-  return active.length >= maxSprites ? "defer" : "admit";
+    .innerJoin(agentSessions, eq(agentSessions.id, runnerInstances.runId))
+    .where(and(
+      eq(runnerInstances.provider, "sprites"),
+      inArray(runnerInstances.state, SPRITES_ADMISSION_STATES),
+      isNotNull(agentSessions.workerScope)
+    ));
+  let active = 0;
+  for (const c of candidates) {
+    if ((await resolveLiveness(c.runId)).verdict === "alive") active++;
+    if (active >= maxSprites) return "defer";
+  }
+  return "admit";
 }
 
 async function admit(runId: number): Promise<AdmitDecision> {
