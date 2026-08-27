@@ -824,11 +824,11 @@ export const BOOT_DEADLINE_MS = (() => {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 180_000;
 })();
 
-async function connectWithBootBackoff(runId: number) {
+async function connectWithBootBackoff(runId: number, opts: { bumpEpoch?: boolean } = {}) {
   const deadline = Date.now() + BOOT_DEADLINE_MS;
   for (let attempt = 0; ; attempt++) {
     try {
-      return await connectRun(runId);
+      return await connectRun(runId, opts);
     } catch (err) {
       const nonRetryable =
         typeof err === "object" && err !== null && "retryable" in err &&
@@ -855,11 +855,27 @@ export async function startChannelForRun(
   instanceId: string,
   opts: { freshWorker?: boolean } = {}
 ): Promise<void> {
-  const connection = await connectWithBootBackoff(runId);
+  // A fresh worker generation gets a fresh controller epoch, so its run.start
+  // id (scoped per epoch) never collides with the previous generation's
+  // already-acked row — see the `existing` branches below.
+  let connection = await connectWithBootBackoff(runId, { bumpEpoch: opts.freshWorker === true });
   // The command id is scoped to (instanceId, controllerEpoch) — see
   // runStartCommandId — so this lookup spans every epoch ever persisted for
   // this instance, not just the current one.
-  const existing = await getLatestRunStartCommand(runId, instanceId);
+  let existing = await getLatestRunStartCommand(runId, instanceId);
+  let freshWorker = opts.freshWorker === true;
+
+  if (!freshWorker && connection.workerNeverAcked && existing && existing.controllerEpoch === connection.controllerEpoch) {
+    // The caller thought this was a re-adoption, but the process on the other
+    // end has never acked anything: it is a new generation (the sprite service
+    // restarted the worker after its previous turn) and the same-epoch
+    // run.start it would be handed was already consumed by its predecessor.
+    // Re-dial with a bumped epoch so a fresh run.start can be minted.
+    await connection.disconnect(false).catch(() => undefined);
+    connection = await connectWithBootBackoff(runId, { bumpEpoch: true });
+    existing = await getLatestRunStartCommand(runId, instanceId);
+    freshWorker = true;
+  }
 
   if (existing && existing.controllerEpoch === connection.controllerEpoch) {
     // Same generation as this connection: replay verbatim (boot-backoff retry,
@@ -869,7 +885,7 @@ export async function startChannelForRun(
     return;
   }
 
-  if (existing && !opts.freshWorker) {
+  if (existing && !freshWorker) {
     // A stale-epoch command from a prior generation, but this call did NOT
     // follow a provider create()/resume() — the worker may still be the same
     // live process (e.g. a control-plane restart just re-adopting it).

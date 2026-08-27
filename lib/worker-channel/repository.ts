@@ -461,7 +461,8 @@ export async function clearChannelClaim(runId: number): Promise<void> {
 export async function acquireControllerLease(
   runId: number,
   controllerId: string,
-  now: Date
+  now: Date,
+  options: { bump?: boolean } = {}
 ): Promise<ControllerLease> {
   const at = asDate(now, "now");
   return db.transaction(async (tx) => {
@@ -482,7 +483,11 @@ export async function acquireControllerLease(
     // No expiry: the epoch IS the single-controller rule. The same controller
     // re-dialing keeps its epoch (its persisted commands stay valid); any other
     // controller bumps it, and the worker closes the older channel on accept.
-    const epoch = currentController === controllerId ? currentEpoch : currentEpoch + 1;
+    // `bump` forces a new epoch for the same controller: dispatch just launched
+    // a NEW worker generation, and run.start ids are scoped per epoch — reusing
+    // the epoch made startChannelForRun "replay" the previous generation's
+    // already-acked run.start and the fresh worker waited forever (run 187).
+    const epoch = currentController === controllerId && !options.bump ? currentEpoch : currentEpoch + 1;
 
     await tx.execute(
       drizzleSql`

@@ -93,8 +93,9 @@ export async function connectRun(
   options: Omit<
     Partial<ControllerConnectionOptions>,
     "runId" | "instanceId" | "endpoint" | "controllerId" | "onClose" | "onTerminal"
-  > = {},
+  > & { bumpEpoch?: boolean } = {},
 ): Promise<ControllerConnection> {
+  const { bumpEpoch, ...connectionOptions } = options;
   let existing = registry().supervisors.get(runId);
   if (existing?.connection.shutDown) {
     // A stood-down connection (the sprites idle close after every turn calls
@@ -117,7 +118,7 @@ export async function connectRun(
       clearTimeout(existing.reconnectTimer);
       existing.reconnectTimer = undefined;
     }
-    if (!existing.connection.connected) await existing.connection.connect();
+    if (!existing.connection.connected) await existing.connection.connect({ bumpEpoch });
     return existing.connection;
   }
   const identity = await getChannelIdentity(runId);
@@ -132,7 +133,7 @@ export async function connectRun(
   supervisor.connection = new ControllerConnection({
     onEvent: handleWorkerEvent,
     blobs,
-    ...options,
+    ...connectionOptions,
     ...identity,
     runId,
     controllerId: registry().controllerId,
@@ -141,7 +142,7 @@ export async function connectRun(
   });
   registry().supervisors.set(runId, supervisor);
   try {
-    await supervisor.connection.connect();
+    await supervisor.connection.connect({ bumpEpoch });
     return supervisor.connection;
   } catch (error) {
     registry().supervisors.delete(runId);

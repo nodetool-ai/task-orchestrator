@@ -193,11 +193,16 @@ export class ControllerConnection {
   }
 
   get connected(): boolean { return this.socket?.readyState === WebSocket.OPEN; }
+  /** The last accepted hello. A worker process that has never acked a command
+   * (`lastAckedControlSeq === 0`) is a fresh generation that still needs its
+   * run.start, whatever the caller believes about it. */
+  get workerNeverAcked(): boolean { return this.lastHello?.lastAckedControlSeq === 0; }
+  private lastHello?: ChannelHello;
   /** True once disconnect()/abandon()/neutralize() ran: connect() refuses forever. */
   get shutDown(): boolean { return this.stopped; }
   get controllerEpoch(): number { return this.epoch; }
 
-  async connect(): Promise<void> {
+  async connect(options: { bumpEpoch?: boolean } = {}): Promise<void> {
     if (this.stopped) throw new Error("controller connection is shut down");
     // Re-entrancy guard: a reconnect backoff timer (attemptReconnect) and
     // connectRun can all dial this same object concurrently.
@@ -205,14 +210,14 @@ export class ControllerConnection {
     // this.epoch — possibly with the losing socket — and orphans the live one.
     // Subsequent callers await and share the one in-flight attempt.
     if (this.connecting) return this.connecting;
-    this.connecting = this.connectInner().finally(() => {
+    this.connecting = this.connectInner(options).finally(() => {
       this.connecting = undefined;
     });
     return this.connecting;
   }
 
-  private async connectInner(): Promise<void> {
-    const lease = await acquireControllerLease(this.runId, this.controllerId, new Date());
+  private async connectInner(options: { bumpEpoch?: boolean }): Promise<void> {
+    const lease = await acquireControllerLease(this.runId, this.controllerId, new Date(), { bump: options.bumpEpoch });
     this.epoch = lease.epoch;
     const credential = mintChannelCredential(this.runId, this.instanceId);
     let socket: WebSocket;
@@ -235,6 +240,7 @@ export class ControllerConnection {
     try {
       await once(socket, "open");
       const hello = this.readHello(await firstFrame);
+      this.lastHello = hello;
       if (hello.protocol.min > WORKER_CHANNEL_PROTOCOL || hello.protocol.max < WORKER_CHANNEL_PROTOCOL) {
         socket.close(CLOSE_CODE_PROTOCOL_MISMATCH, "protocol mismatch");
         throw new ControllerProtocolError("worker does not support protocol v1", CLOSE_CODE_PROTOCOL_MISMATCH, false);

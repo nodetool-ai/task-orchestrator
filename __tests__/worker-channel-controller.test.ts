@@ -27,6 +27,16 @@ const instanceId = "wi_0123456789abcdef0123456789abcdef";
 describe("worker channel controller persistence", () => {
   beforeEach(async () => { await db.delete(agentSessions); });
 
+  it("bumps the epoch for the same controller when asked (fresh worker generation)", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    await db.insert(runnerInstances).values({ runId: run.id, provider: "local", state: "starting", channelInstanceId: "wi_ffffffffffffffffffffffffffffffff", channelEndpoint: "ws+unix:///tmp/x:/worker/channel" });
+    const first = await acquireControllerLease(run.id, "same", new Date("2026-08-27T00:00:00Z"));
+    const again = await acquireControllerLease(run.id, "same", new Date("2026-08-27T00:00:01Z"));
+    const bumped = await acquireControllerLease(run.id, "same", new Date("2026-08-27T00:00:02Z"), { bump: true });
+    expect(again.epoch).toBe(first.epoch);
+    expect(bumped.epoch).toBe(first.epoch + 1);
+  });
+
   it("fences controllers and replays persisted commands in the new epoch", async () => {
     const run = await create({ goal: "<chat>", defer: true });
     await db.insert(runnerInstances).values({ runId: run.id, channelInstanceId: instanceId, channelEndpoint: "ws://127.0.0.1:8787/worker/channel" });
