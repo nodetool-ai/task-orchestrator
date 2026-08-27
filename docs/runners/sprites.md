@@ -147,26 +147,20 @@ bring-your-own-Docker-image**. The worker bundle is installed into the sprite at
 via `lib/runner/sprites-bootstrap.ts`.
 
 **What is installed and where:**
-- The prebuilt worker bundle is fetched from `TASK_ORCH_SPRITES_WORKER_BUNDLE_URL` (a URL template containing `{sha}`) and extracted to `/home/user/worker`. The tarball is produced by `npm run build:worker:standalone` (`scripts/build-worker-standalone.mjs`) and contains `dist/run-worker.js` plus its `node_modules`.
+- The prebuilt worker bundle is fetched from `TASK_ORCH_SPRITES_WORKER_BUNDLE_URL` (default: `${TASK_ORCH_PUBLIC_URL}/api/worker-bundle`) and extracted to `/home/user/worker`. The tarball is produced by `npm run build:worker:standalone` (`scripts/build-worker-standalone.mjs`) and contains `dist/run-worker.js` plus its `node_modules`.
 - The worker service is then defined with `dir: /home/user/worker` and `cmd: node dist/run-worker.js <runId>`.
 - No `git clone` and no `npm ci` are done in the sprite during bootstrap; the worker does its own blobless checkout per turn via `containerCheckoutAt`. This keeps bootstrap to a single `curl | tar` plus a `test -f` and a checkpoint.
 
-**How the bundle is served (default):** the control plane image already ships
-`dist/run-worker.standalone.js` plus its `.sha` sidecar (Dockerfile.server). The
-route `GET /api/worker-bundle/<sha>.tar.gz` (unauthenticated) packs it as
-`dist/run-worker.js` on the fly and refuses any sha other than the shipped one.
-Set on the control plane:
+**How the bundle is served (default):** the control plane image ships
+`dist/run-worker.standalone.js` (Dockerfile.server). The unauthenticated route
+`GET /api/worker-bundle` packs it as `dist/run-worker.js` on the fly. With
+`TASK_ORCH_PUBLIC_URL` set, no bundle URL config is needed. The bootstrap
+checkpoint is keyed by the bundle id (sha1 of the shipped file), so a deploy
+with a new bundle re-bootstraps and a deploy with the same bundle skips. No
+build arg or git sha is involved.
 
-```
-TASK_ORCH_SPRITES_WORKER_BUNDLE_URL=https://task-orchestrator.fly.dev/api/worker-bundle/{sha}.tar.gz
-```
-
-The `{sha}` placeholder is expanded to `workerBuildSha()` (the pushed tip of
-`TASK_ORCH_WORKER_REPO_REF`), so the shipped sha must equal that tip: push
-first, then deploy from that commit with
-`flyctl deploy --build-arg GIT_SHA=$(git rev-parse HEAD)`. Without the build
-arg the Docker build has no `.git` and cannot bake the sidecar (a stale local
-`dist/` copy would be shipped instead).
+To serve the bundle from elsewhere, set `TASK_ORCH_SPRITES_WORKER_BUNDLE_URL`;
+an optional `{sha}` placeholder expands to the bundle id.
 
 **Alternative store:** tar `dist/run-worker.standalone.js` as `dist/run-worker.js`
 (`worker-<sha>.tar.gz`), upload to a GitHub release asset or R2/S3, and point the
@@ -206,7 +200,7 @@ service starts.
 | `TASK_ORCH_SPRITES_POLL_MS` | `10000` | Sweep interval |
 | `TASK_ORCH_SPRITE_POOL_SIZE` | `0` (off) | Warm-pool target (phase 5) |
 | `TASK_ORCH_SPRITE_NET_ALLOW` | — | Extra egress domains (phase 6) |
-| `TASK_ORCH_SPRITES_WORKER_BUNDLE_URL` | — | URL template for worker bundle (must contain `{sha}`), e.g. `https://cdn.example.com/worker-{sha}.tar.gz`. Required. |
+| `TASK_ORCH_SPRITES_WORKER_BUNDLE_URL` | `${TASK_ORCH_PUBLIC_URL}/api/worker-bundle` | Worker bundle URL; optional `{sha}` expands to the bundle id. |
 | `TASK_ORCH_RUNNER_TERMINAL_MS` | `24h` | Retention before destroy |
 
 Credentials (`GH_TOKEN`, `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`,

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,5 +15,17 @@ describe("worker bundle tar", () => {
     execFileSync("tar", ["-xzf", "b.tgz"], { cwd: dir });
     expect(readFileSync(join(dir, "dist", "run-worker.js"))).toEqual(content);
     expect(execFileSync("tar", ["-tzf", "b.tgz"], { cwd: dir }).toString().trim()).toBe("dist/run-worker.js");
+  });
+});
+
+describe("sprites bundle url default", () => {
+  it("derives from TASK_ORCH_PUBLIC_URL when no explicit url is set", async () => {
+    vi.stubEnv("TASK_ORCH_SPRITES_WORKER_BUNDLE_URL", "");
+    vi.stubEnv("TASK_ORCH_PUBLIC_URL", "https://cp.example.com/");
+    const { config } = await import("../lib/config");
+    expect(config.sprites.workerBundleUrl).toBe("https://cp.example.com/api/worker-bundle");
+    vi.stubEnv("TASK_ORCH_SPRITES_WORKER_BUNDLE_URL", "https://cdn.example.com/w-{sha}.tgz");
+    expect(config.sprites.workerBundleUrl).toBe("https://cdn.example.com/w-{sha}.tgz");
+    vi.unstubAllEnvs();
   });
 });

@@ -2,27 +2,35 @@
 // (Dockerfile.server: `npm run build:worker:standalone`) as the tarball the
 // sprites bootstrap expects (`curl -fsSL <url> | tar -xz` → dist/run-worker.js).
 //
-// Identity: dist/run-worker.standalone.js.sha is baked at build time and must
-// equal workerBuildSha() (the pushed tip of the worker repo ref). A request for
-// any other sha is refused so a sprite never bootstraps a bundle that does not
-// match the code the control plane believes it is running. Deploy with
-// `--build-arg GIT_SHA=$(git rev-parse HEAD)` from a pushed commit.
+// Identity: the bundle id is the sha1 of the shipped file. Sprites key their
+// bootstrap checkpoint on it, so a redeploy with a new bundle re-bootstraps
+// and a redeploy with the same bundle skips. No git sha, no sidecar, no
+// build arg: whatever this image ships is by definition the right bundle.
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
 import path from "node:path";
 
 const BUNDLE = path.join(process.cwd(), "dist", "run-worker.standalone.js");
-const SHA_FILE = `${BUNDLE}.sha`;
-const SHA = /^[0-9a-f]{40}$/;
 export const BUNDLE_ENTRY_PATH = "dist/run-worker.js";
 
-export async function shippedWorkerSha(): Promise<string | null> {
-  try {
-    const sha = (await readFile(SHA_FILE, "utf8")).trim();
-    return SHA.test(sha) ? sha : null;
-  } catch {
-    return null;
-  }
+let cached: Promise<{ id: string; tarGz: Buffer }> | undefined;
+
+function load(): Promise<{ id: string; tarGz: Buffer }> {
+  cached ??= (async () => {
+    const js = await readFile(BUNDLE);
+    const id = createHash("sha1").update(js).digest("hex");
+    return { id, tarGz: gzipSync(tarSingleFile(BUNDLE_ENTRY_PATH, js), { level: 6 }) };
+  })().catch((err) => {
+    cached = undefined;
+    throw err;
+  });
+  return cached;
+}
+
+/** sha1 of the shipped bundle. Throws when the image has no bundle. */
+export async function workerBundleId(): Promise<string> {
+  return (await load()).id;
 }
 
 /**
@@ -60,6 +68,5 @@ export function tarSingleFile(entryPath: string, content: Buffer, mtimeSec = 0):
 }
 
 export async function workerBundleTarGz(): Promise<Buffer> {
-  const js = await readFile(BUNDLE);
-  return gzipSync(tarSingleFile(BUNDLE_ENTRY_PATH, js), { level: 6 });
+  return (await load()).tarGz;
 }

@@ -20,6 +20,9 @@ primary_region = "ams"
   # (fly.runner.toml). FLY_API_TOKEN / TASK_ORCH_FLY_APP / FLY_RUNNER_IMAGE are
   # Fly secrets set by fly-deploy.sh.
   TASK_ORCH_RUNNER = "sprites"
+  # Public base URL: deep links, and the default worker-bundle URL sprites
+  # curl at bootstrap (${TASK_ORCH_PUBLIC_URL}/api/worker-bundle).
+  TASK_ORCH_PUBLIC_URL = "https://task-orchestrator.fly.dev"
   # Run each agent turn in its own Machine, never in this web process, so a
   # redeploy/restart of the server never kills an in-flight run.
   TASK_ORCH_DETACHED_RUNS = "1"

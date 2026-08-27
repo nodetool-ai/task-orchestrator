@@ -492,8 +492,13 @@ export const config = Object.freeze({
     get orphanGraceMs(): number {
       return intEnv("TASK_ORCH_SPRITES_ORPHAN_GRACE_MS", 10 * 60_000);
     },
+    /** Where a sprite curls the worker bundle from. Defaults to this control
+     *  plane's own /api/worker-bundle under TASK_ORCH_PUBLIC_URL. */
     get workerBundleUrl(): string | undefined {
-      return strEnv("TASK_ORCH_SPRITES_WORKER_BUNDLE_URL");
+      const explicit = strEnv("TASK_ORCH_SPRITES_WORKER_BUNDLE_URL");
+      if (explicit) return explicit;
+      const base = config.publicUrl;
+      return base ? `${base}/api/worker-bundle` : undefined;
     },
   }),
 

@@ -22,11 +22,13 @@ export class SpritesBootstrapError extends Error {
 }
 
 export interface BootstrapOptions {
+  /** Bundle identity (sha1 of the shipped bundle); keys the checkpoint. */
   workerSha: string;
   bundleUrl: string;
   onStep?: (name: string, status: "running" | "success" | "error", durationMs: number) => void;
 }
 
+// `{sha}` is optional: the default control-plane route needs none.
 function expandBundleUrl(template: string, sha: string): string {
   return template.replaceAll("{sha}", sha);
 }

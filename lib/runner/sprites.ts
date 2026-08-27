@@ -14,7 +14,7 @@ import { recordRunnerEvent, timeRunnerPhase } from "./telemetry";
 import type { CreateRunnerInput, RunnerProvider, RunnerRef, RunnerState } from "./provider";
 import { SpritesApiError, makeSpritesClient, type NetworkPolicy, type SpritesClient, type Sprite } from "./sprites-client";
 import { bootstrapSprite } from "./sprites-bootstrap";
-import { workerBuildSha } from "./worker-sha";
+import { workerBundleId } from "../worker-bundle";
 import { newChannelInstanceId } from "../worker-channel/credential";
 import { spritesDialEndpoint, spritesListenEndpoint, workerChannelDispatchEnv } from "../worker-channel/dispatch-env";
 
@@ -189,7 +189,8 @@ export class SpritesRunnerProvider implements RunnerProvider {
       );
 
       // Phase A bootstrap: fetch the prebuilt worker bundle into the sprite.
-      // The bundle is keyed by the worker SHA; the checkpoint makes this idempotent.
+      // The checkpoint is keyed by the bundle id (sha1 of the shipped bundle),
+      // which makes bootstrap idempotent per deploy.
       // We skip `git clone` and `npm ci` here — the worker does its own checkout
       // per turn via containerCheckoutAt. See sprites-bootstrap.ts.
       if (!config.sprites.token) {
@@ -197,9 +198,9 @@ export class SpritesRunnerProvider implements RunnerProvider {
       }
       const bundleUrl = config.sprites.workerBundleUrl;
       if (!bundleUrl) {
-        throw new Error("TASK_ORCH_SPRITES_WORKER_BUNDLE_URL is required when TASK_ORCH_RUNNER=sprites");
+        throw new Error("Set TASK_ORCH_PUBLIC_URL (or TASK_ORCH_SPRITES_WORKER_BUNDLE_URL) when TASK_ORCH_RUNNER=sprites");
       }
-      const workerSha = await workerBuildSha();
+      const workerSha = await workerBundleId();
       await timeRunnerPhase(
         "sprites_bootstrap",
         () =>
