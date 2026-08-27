@@ -121,13 +121,8 @@ export function ToolUseBlock({ block }: { block: SdkContentBlock }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left hover:bg-muted/30 hover:text-foreground"
+        className="-ml-2 flex w-[calc(100%+0.5rem)] items-center gap-1.5 rounded px-2 py-1.5 text-left hover:bg-muted/30 hover:text-foreground"
       >
-        {open ? (
-          <ChevronDown className="size-3" />
-        ) : (
-          <ChevronRight className="size-3" />
-        )}
         <Wrench className="size-3" />
         <span className="text-foreground/90">{humanizeToolName(block.name)}</span>
       </button>

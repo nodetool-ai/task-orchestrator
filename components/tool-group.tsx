@@ -32,7 +32,7 @@ export function ToolGroup({
 
   return (
     <div
-      className="group/tool relative my-1 mx-4 text-xs text-muted-foreground"
+      className="group/tool relative my-1 mx-2 text-xs text-muted-foreground"
       title={timestamp ?? undefined}
     >
       <button
@@ -41,7 +41,6 @@ export function ToolGroup({
         className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left hover:bg-muted/30 hover:text-foreground"
         aria-expanded={open}
       >
-        {open ? <ChevronDown className="size-3 shrink-0" /> : <ChevronRight className="size-3 shrink-0" />}
         <Wrench className="size-3 shrink-0" />
         <span className="font-medium">{label}</span>
       </button>
@@ -51,7 +50,7 @@ export function ToolGroup({
         </span>
       )}
       {open && (
-        <div className="mt-0.5 space-y-0.5 pl-5">
+        <div className="mt-0.5 space-y-0.5 pl-2">
           {interactions.map((interaction) => (
             <ToolInteractionRow key={interaction.id} interaction={interaction} />
           ))}
