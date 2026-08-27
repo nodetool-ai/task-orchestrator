@@ -870,10 +870,16 @@ export async function startChannelForRun(
   // history alone is NOT enough: the sprite service restarts the worker after
   // an idle exit, and the new process inherits nothing (run 187 sat in
   // 'preparing' for an hour behind a "re-adopted live worker" assumption).
+  // Legacy hello (no `started`): the only proof the process was started is a
+  // run.start acked in the CURRENT epoch. Rows from older epochs belong to
+  // earlier generations (run 187's pid 3204 had acked run.inputs for an hour
+  // without ever holding a start).
+  const startedInThisEpoch =
+    existing != null && existing.controllerEpoch === connection.controllerEpoch && existing.ackedAt != null;
   const needsStart =
     opts.freshWorker === true ||
     connection.workerHasStart === false ||
-    (connection.workerHasStart === undefined && connection.workerNeverAcked);
+    (connection.workerHasStart === undefined && !startedInThisEpoch);
 
   if (!needsStart) {
     // A live, started worker. A same-epoch row that is still unacked is
