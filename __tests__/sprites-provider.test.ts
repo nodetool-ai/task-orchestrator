@@ -237,6 +237,65 @@ describe("SpritesRunnerProvider.resume", () => {
     expect(row.channelEndpoint).toBe(`sprite://${spriteName}:8787/worker/channel`);
   });
 
+  it("redefines the worker service when its baked-in credential is stale (AUTH_SECRET rotation)", async () => {
+    const putSpy = vi.fn(async () => {});
+    const stopSpy = vi.fn(async () => {});
+    const client = fakeSpritesClient({
+      getSprite: vi.fn(async (name: string) => ({ name, status: "warm" })),
+      getService: vi.fn(async (_s: string, serviceName: string) => ({
+        name: serviceName,
+        cmd: "node",
+        env: { TASK_ORCH_WORKER_CHANNEL_CREDENTIAL: "wc1.wi_cccccccccccccccccccccccccccccccc.stale" },
+        state: { status: "running", pid: 7, startedAt: "2026-01-01T00:00:00Z" },
+      })),
+      putService: putSpy,
+      stopService: stopSpy,
+    });
+    const provider = new SpritesRunnerProvider(client);
+    const run = await create({ goal: "<implement>", defer: true });
+    const spriteName = spriteNameForRun(run.id);
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      provider: "sprites",
+      spriteName,
+      state: "running",
+      channelInstanceId: "wi_cccccccccccccccccccccccccccccccc",
+      channelEndpoint: `sprite://${spriteName}:8787/worker/channel`,
+    });
+
+    await provider.resume(run.id);
+
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(putSpy).toHaveBeenCalledTimes(1);
+    const def = (putSpy.mock.calls[0] as unknown as [string, string, { env: Record<string, string> }])[2];
+    expect(def.env.TASK_ORCH_WORKER_INSTANCE_ID).toBe("wi_cccccccccccccccccccccccccccccccc");
+    expect(def.env.TASK_ORCH_WORKER_CHANNEL_CREDENTIAL).toMatch(/^wc1\.wi_cccccccccccccccccccccccccccccccc\./);
+  });
+
+  it("leaves the service definition alone when the credential still matches", async () => {
+    const putSpy = vi.fn(async () => {});
+    const run = await create({ goal: "<implement>", defer: true });
+    const spriteName = spriteNameForRun(run.id);
+    const instanceId = "wi_dddddddddddddddddddddddddddddddd";
+    const { mintChannelCredential } = await import("../lib/worker-channel/credential");
+    const cred = mintChannelCredential(run.id, instanceId);
+    const client = fakeSpritesClient({
+      getService: vi.fn(async (_s: string, serviceName: string) => ({
+        name: serviceName,
+        cmd: "node",
+        env: { TASK_ORCH_WORKER_CHANNEL_CREDENTIAL: cred },
+        state: { status: "running", pid: 7, startedAt: "2026-01-01T00:00:00Z" },
+      })),
+      putService: putSpy,
+    });
+    const provider = new SpritesRunnerProvider(client);
+    await db.insert(runnerInstances).values({ runId: run.id, provider: "sprites", spriteName, state: "running", channelInstanceId: instanceId });
+
+    await provider.resume(run.id);
+
+    expect(putSpy).not.toHaveBeenCalled();
+  });
+
   it("when getSprite returns null marks row gone and returns null", async () => {
     const client = fakeSpritesClient({
       getSprite: vi.fn(async () => null),

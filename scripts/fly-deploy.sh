@@ -32,8 +32,16 @@ elif ! "$FLY" secrets list -a "$APP" 2>/dev/null | grep -qw DATABASE_URL; then
   "$FLY" postgres attach "$PG_APP" --app "$APP" || true
 fi
 
-AUTH_SECRET="${AUTH_SECRET:-$(openssl rand -base64 32)}"
-secrets=(AUTH_SECRET="$AUTH_SECRET" NEXTAUTH_URL="$NEXTAUTH_URL")
+# AUTH_SECRET signs every worker channel credential baked into a sprite (and
+# every browser session). Rotating it on each deploy silently invalidates all
+# existing sprites (401 on dial, 2026-08-27). Set it only when the caller
+# supplies one or the app has none yet.
+secrets=(NEXTAUTH_URL="$NEXTAUTH_URL")
+if [[ -n "${AUTH_SECRET:-}" ]]; then
+  secrets+=(AUTH_SECRET="$AUTH_SECRET")
+elif ! "$FLY" secrets list -a "$APP" 2>/dev/null | grep -qw AUTH_SECRET; then
+  secrets+=(AUTH_SECRET="$(openssl rand -base64 32)")
+fi
 # Optional pi-backend provider keys (TASK_ORCH_AGENT_BACKEND=pi): whatever the
 # web app holds is forwarded into each worker's env by the server
 # (lib/agent-backend/provider-env.ts, AGENT_CREDENTIAL_ENV_KEYS). Stage any set.

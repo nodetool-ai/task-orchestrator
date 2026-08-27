@@ -352,6 +352,31 @@ export class SpritesRunnerProvider implements RunnerProvider {
     // - if processes survive hibernate, start is idempotent (already running)
     // - if not, this restarts it before we dial
     const now = new Date();
+    // The service definition carries the channel credential the worker verifies
+    // every dial against. It is an HMAC over AUTH_SECRET, so a control plane
+    // whose secret changed since the sprite was created (a deploy that rotated
+    // AUTH_SECRET: runs 182-185, 2026-08-27) is refused with 401 forever.
+    // Re-define the service with the current env whenever the stored credential
+    // no longer matches; that also refreshes provider keys and model settings.
+    try {
+      const desiredEnv = await buildSpritesWorkerEnv(runId, { channelInstanceId, channelListenEndpoint: spritesListenEndpoint() });
+      const current = await this.spritesClient.getService(spriteName, "worker").catch(() => null);
+      const staleCredential =
+        current?.env?.TASK_ORCH_WORKER_CHANNEL_CREDENTIAL !== desiredEnv.TASK_ORCH_WORKER_CHANNEL_CREDENTIAL;
+      if (staleCredential) {
+        console.warn(`[SpritesRunnerProvider] worker credential on ${spriteName} is stale; redefining the service`);
+        await this.spritesClient.stopService(spriteName, "worker").catch(() => {});
+        await this.spritesClient.putService(spriteName, "worker", {
+          cmd: "node",
+          args: ["dist/run-worker.js", String(runId)],
+          env: desiredEnv,
+          dir: "/home/user/worker",
+        });
+        await emitRunnerEvent(runId, "runner_service_redefined", { spriteName, reason: "stale-credential" });
+      }
+    } catch (err) {
+      console.warn(`[SpritesRunnerProvider] service refresh failed for ${spriteName}:`, err);
+    }
     try {
       await this.spritesClient.startService(spriteName, "worker");
     } catch (err) {
