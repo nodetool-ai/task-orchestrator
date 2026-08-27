@@ -57,6 +57,10 @@ const ALLOWLIST = new Set([
   // TASK_ORCH_FLY_PROBE opt-in gate. A script, not runtime code — same category
   // as the other scripts/*.ts entries above.
   "scripts/fly-channel-probe.ts",
+  // Sprites feasibility spike (see its header): provisions one disposable
+  // sprite from a bare token + base URL, before any control plane exists. A
+  // script, not runtime code — same category as the other scripts/*.ts entries.
+  "scripts/sprites-feasibility.ts",
 ]);
 
 // git grep emits forward-slash paths on every platform, so no normalization.

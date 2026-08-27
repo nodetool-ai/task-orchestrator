@@ -186,6 +186,32 @@ describe("run.phase", () => {
     expect(await statusEvents(runId, "running")).toBe(1);
   });
 
+  it("releases the worker claim when the chat drive lands idle", async () => {
+    // The worker emits `idle` immediately before exiting. Leaving worker_scope
+    // and a fresh heartbeat behind makes isWorkerLive() true for another five
+    // minutes, and sendMessageToRun then skips dispatchRun for the next user
+    // message — which on sprites is never delivered, because the channel is
+    // closed at idle (run 181).
+    const runId = await newRun();
+    await db
+      .update(agentSessions)
+      .set({ workerScope: "to-run-1", workerPid: 1, heartbeatAt: new Date() })
+      .where(eq(agentSessions.id, runId));
+
+    await apply(makeFrame(runId, "run.phase", { phase: "idle" }));
+
+    const row = (
+      await db
+        .select({ status: agentSessions.status, scope: agentSessions.workerScope, pid: agentSessions.workerPid, h: agentSessions.heartbeatAt })
+        .from(agentSessions)
+        .where(eq(agentSessions.id, runId))
+    )[0];
+    expect(row.status).toBe("idle");
+    expect(row.scope).toBeNull();
+    expect(row.pid).toBeNull();
+    expect(row.h).toBeNull();
+  });
+
   it("never regresses a run that already landed a terminal outcome", async () => {
     const runId = await newRun();
     await apply(makeFrame(runId, "run.cancelled", { requestId: "r", reason: "stop" }));

@@ -189,6 +189,18 @@ async function handleRunPhase(tx: WorkerChannelTransaction, frame: WorkerEventFr
   // Entering a lease status stamps the heartbeat in the same write (see the
   // db-transport.setStatus rationale): a fresh lease row must not look orphaned.
   if (LEASE_STATUSES.includes(target)) set.heartbeatAt = new Date();
+  // Clean chat exit: the worker emits `idle` immediately before it exits (see
+  // driveChatRun), so its claim must go in the same write — the legacy
+  // releaseClaim(..., idle) landing. Without it isWorkerLive() keeps reporting a
+  // live worker for HEARTBEAT_STALE_MS, so sendMessageToRun bridges the next
+  // user message into a channel that is already closed instead of dispatching a
+  // fresh worker. On sprites that channel is deliberately closed at idle, so the
+  // message was never delivered at all (run 181).
+  if (target === "idle") {
+    set.workerScope = null;
+    set.workerPid = null;
+    set.heartbeatAt = null;
+  }
   await tx
     .update(agentSessions)
     .set(set)
