@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { and, asc, desc, eq, gt, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 
 import { db } from "@/db";
-import { agentEvents, agentSessions } from "@/db/schema";
+import { agentEvents, agentSessions, runnerInstances } from "@/db/schema";
 import { autoLaunchEligibleTasks, autoLaunchEnabled, autoLaunchIntervalMs } from "./auto-launch";
 import { syncPrBackedTasks } from "./pr-task-state";
 import * as repo from "./repo";
@@ -165,6 +165,8 @@ async function reapOrphans() {
     // --force` the worktree the live agent is editing, destroying its work.
     // Mirror runs.reconcileOrphanedRuns(), which uses the same lease guard.
     if (runs.isLive(orphan.id)) continue;
+    const storedIncarnation =
+      (await db.select({ i: runnerInstances.workerIncarnation }).from(runnerInstances).where(eq(runnerInstances.runId, orphan.id)))[0]?.i ?? null;
     const liveness = await resolveLiveness(orphan.id);
     if (liveness.verdict === "alive" || liveness.verdict === "unknown") {
       if (liveness.verdict === "unknown") console.warn(`[liveness] leaving boot orphan ${orphan.id} alone: provider observation unknown`);
@@ -193,7 +195,13 @@ async function reapOrphans() {
             eq(agentSessions.status, orphan.status),
             orphan.workerScope == null
               ? isNull(agentSessions.workerScope)
-              : eq(agentSessions.workerScope, orphan.workerScope)
+              : and(
+                  eq(agentSessions.workerScope, orphan.workerScope),
+                  // worker_scope is stable across sprite incarnations; fence on
+                  // the incarnation this reaper observed so a takeover in the
+                  // meantime is never failed underneath its new worker.
+                  sql`NOT EXISTS (SELECT 1 FROM runner_instances ri WHERE ri.run_id = ${orphan.id} AND ri.worker_incarnation IS DISTINCT FROM ${storedIncarnation})`
+                )
           )
         );
       // drizzle/postgres exposes affected-row count as `rowCount`/`count`.

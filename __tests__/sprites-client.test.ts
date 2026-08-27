@@ -107,6 +107,12 @@ describe("SpritesClient", () => {
       fetchImpl: makeFetchMock(async () => textResponse("not found", 404)), baseUrl: BASE_URL, token: TOKEN,
     });
     await expect(missing.getService("to-run-1", "worker")).resolves.toBeNull();
+
+    // Unreadable answers throw (inspect maps a throw to unknown); only 404 is "absent".
+    const noState = makeSpritesClient({ fetchImpl: makeFetchMock(async () => jsonResponse({ name: "worker", cmd: "node" })), baseUrl: BASE_URL, token: TOKEN });
+    await expect(noState.getService("to-run-1", "worker")).rejects.toThrow(/no state.status/);
+    const empty = makeSpritesClient({ fetchImpl: makeFetchMock(async () => textResponse("", 200)), baseUrl: BASE_URL, token: TOKEN });
+    await expect(empty.getService("to-run-1", "worker")).rejects.toThrow(/empty response/);
   });
 
   it("deleteSprite 404 does not throw", async () => {

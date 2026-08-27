@@ -22,7 +22,14 @@ export type RunnerState =
 
 /** A provider's best-effort observation of the worker process behind a handle. */
 export type RunnerObservation =
-  | { status: "alive"; incarnation: string }
+  | {
+      status: "alive";
+      incarnation: string;
+      /** The worker's pid as the PROVIDER sees it. Comparable with the pid the
+       *  worker reports only when both share a pid namespace (sprites, local
+       *  detached process) — not for Docker, where the worker is PID 1. */
+      pid?: number;
+    }
   | { status: "dead"; detail?: string }
   | { status: "unknown" };
 

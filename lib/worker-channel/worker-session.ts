@@ -316,8 +316,11 @@ export class WorkerSession {
 
     // Epoch fencing only. Closing the losing socket is a transport duty owned
     // by the supervisor (plan section 9); the session just stops routing to it.
+    // A SAME-epoch accept is the same controller redialing (its epoch never
+    // expires now): after a half-open socket it must be able to replace the
+    // connection the worker has not yet seen drop. Only an OLDER epoch is stale.
     if (this.active) {
-      if (epoch <= this.active.epoch) throw this.staleEpoch(epoch);
+      if (epoch < this.active.epoch) throw this.staleEpoch(epoch);
       this.active = undefined;
     } else if (epoch < this.controllerEpoch) {
       throw this.staleEpoch(epoch);

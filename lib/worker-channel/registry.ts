@@ -17,7 +17,7 @@ import {
 } from "./connection";
 import { BlobCoordinator, type BlobWireIO } from "./blob-transfer";
 import { handleWorkerEvent } from "./event-handler";
-import { CLOSE_CODE_PROTOCOL_MISMATCH, DEFAULT_DISCONNECT_GRACE_MS } from "./protocol";
+import { CLOSE_CODE_PROTOCOL_MISMATCH, CLOSE_CODE_STALE_CONTROLLER_EPOCH, DEFAULT_DISCONNECT_GRACE_MS } from "./protocol";
 
 const REGISTRY = Symbol.for("task-orchestrator.worker-channel.registry");
 
@@ -193,6 +193,15 @@ async function attemptReconnect(supervisor: Supervisor): Promise<void> {
       registry().supervisors.delete(supervisor.runId);
       registry().blobs.delete(supervisor.runId);
       await replaceWorker(supervisor.runId).catch(() => undefined);
+      return;
+    }
+    if (error instanceof ControllerProtocolError && error.closeCode === CLOSE_CODE_STALE_CONTROLLER_EPOCH) {
+      // Another controller owns this run's epoch now. Redialing would bump the
+      // epoch and steal it back — a ping-pong for as long as both live. Stand
+      // down; the owner drives the run.
+      supervisor.stopped = true;
+      registry().supervisors.delete(supervisor.runId);
+      registry().blobs.delete(supervisor.runId);
       return;
     }
     if (Date.now() < (supervisor.graceDeadline ?? 0)) {

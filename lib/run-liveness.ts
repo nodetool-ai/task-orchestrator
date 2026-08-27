@@ -13,6 +13,8 @@
 // must not import runs.ts (the injected-RunsApi split avoids a boot cycle), and
 // both import from here — so this module owes them a dependency-free surface.
 
+import { randomUUID } from "node:crypto";
+import { hostname } from "node:os";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { agentSessions, runnerInstances } from "@/db/schema";
@@ -26,10 +28,57 @@ export type Liveness =
   | { verdict: "unknown" };
 
 /**
- * Observe a run's worker without using a clock.  In particular, a process that
- * is alive but has released its worker_scope is deliberately `unowned`: it is
+ * Observe a run's worker without using a clock. `unowned` means exactly "no
+ * claim"; a claim whose owner cannot be observed is `unknown`, never `unowned`.
+ * A process that is alive but has released its worker_scope is `unowned`: it is
  * reusable, but it is not currently entitled to consume this run's input.
  */
+/** Identity of this control-plane process for the life of the process. */
+export const CONTROLLER_BOOT_ID = randomUUID();
+
+const SERVER_SCOPE_PREFIX = "server-";
+
+/**
+ * Scope for an in-process (server-runtime) turn. It carries the identity of the
+ * process that took it — host, pid, boot id — so liveness can be OBSERVED, the
+ * same way a runner's incarnation is: no clock, no heartbeat.
+ */
+export function serverClaimScope(nonce: string): string {
+  return `${SERVER_SCOPE_PREFIX}${hostname()}@${process.pid}@${CONTROLLER_BOOT_ID}@${nonce}`;
+}
+
+export function isServerClaimScope(scope: string | null | undefined): boolean {
+  return typeof scope === "string" && scope.startsWith(SERVER_SCOPE_PREFIX);
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: the process exists but is not ours — still alive.
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Observe the process behind a server claim. */
+function observeServerClaim(scope: string): Liveness {
+  const parts = scope.slice(SERVER_SCOPE_PREFIX.length).split("@");
+  if (parts.length < 4) {
+    // Legacy `server-<nonce>` claims predate process identity. They were
+    // taken by a control-plane process that a deploy has since replaced.
+    return { verdict: "dead", reason: "exited", detail: "legacy server claim without process identity" };
+  }
+  const [host, pidText, bootId] = parts;
+  if (bootId === CONTROLLER_BOOT_ID) return { verdict: "alive", incarnation: scope };
+  if (host !== hostname()) return { verdict: "unknown" };
+  const pid = Number(pidText);
+  if (!Number.isInteger(pid) || pid <= 0) return { verdict: "unknown" };
+  return processAlive(pid)
+    ? { verdict: "alive", incarnation: scope }
+    : { verdict: "dead", reason: "exited", detail: `control-plane process ${pid} on ${host} is gone` };
+}
+
 export async function resolveLiveness(runId: number): Promise<Liveness> {
   const [row] = await db
     .select({
@@ -42,11 +91,15 @@ export async function resolveLiveness(runId: number): Promise<Liveness> {
     .leftJoin(runnerInstances, eq(runnerInstances.runId, agentSessions.id))
     .where(eq(agentSessions.id, runId));
 
-  // A left join gives null runner fields.  Do not inspect an unclaimed run: a
-  // reusable runner may still be alive, but the claim is what gives it work.
-  if (!row?.workerScope || !row.provider || !row.workerIncarnation) return { verdict: "unowned" };
+  // No claim → unowned. (A reusable runner may still be alive, but the claim is
+  // what gives it work.)
+  if (!row?.workerScope) return { verdict: "unowned" };
+  // An in-process turn: observe the control-plane process itself.
+  if (isServerClaimScope(row.workerScope)) return observeServerClaim(row.workerScope);
+  // A claim with no runner row at all: nothing to observe. This is NOT "no
+  // owner" — a dispatch may be provisioning the runner right now.
+  if (!row.provider) return { verdict: "unknown" };
   const handle = row.spriteName ?? row.workerScope;
-  if (!handle) return { verdict: "unowned" };
 
   // Prefer the process-wide provider (memoised, and injectable in tests); only
   // build a one-off when the instance was created under a different provider.
@@ -66,6 +119,10 @@ export async function resolveLiveness(runId: number): Promise<Liveness> {
     const runnerGone = /box\s+is\s+gone|sprite.*gone|not found|404|does not exist/i.test(detail ?? "");
     return { verdict: "dead", reason: runnerGone ? "runner-gone" : "exited", ...(detail ? { detail } : {}) };
   }
+  // Boot window: the worker exists but has not completed channel.hello, so no
+  // incarnation is stored yet. Trust the observation as-is; there is nothing to
+  // compare against and "replaced" cannot be decided.
+  if (!row.workerIncarnation) return { verdict: "alive", incarnation: observed.incarnation };
   if (observed.incarnation !== row.workerIncarnation) {
     return { verdict: "dead", reason: "replaced", detail: `stored=${row.workerIncarnation}, observed=${observed.incarnation}` };
   }

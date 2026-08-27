@@ -160,7 +160,6 @@ export interface RunTransport {
   patchRun(runId: number, patch: RunPatch): Promise<void>;
 
   // liveness + control plane
-  /** Bump the liveness lease AND read the cancel flag — one beat, one answer. */
   /** Cross-process cancel poll: the worker learns `cancel_requested` flips here. */
   pollCancel(runId: number): Promise<CancelPollResult>;
   /** Acknowledge the run.cancel_requested control event after aborting. */

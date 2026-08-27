@@ -3,7 +3,10 @@
 // The single liveness module: the provider verdict (no clocks) and the shared
 // reaper policy that decides re-dispatch / idle / failed.
 import { beforeEach, describe, expect, it } from "vitest";
-import { decideDeadRunPolicy, isResumableDeadRun, resolveLiveness } from "../lib/run-liveness";
+import { eq } from "drizzle-orm";
+import { db } from "../db";
+import { agentSessions, runnerInstances } from "../db/schema";
+import { CONTROLLER_BOOT_ID, decideDeadRunPolicy, isResumableDeadRun, resolveLiveness, serverClaimScope } from "../lib/run-liveness";
 import { create } from "../lib/runs";
 import { installFakeRunnerProvider, setFakeRunLiveness } from "./helpers/fake-runner-provider";
 
@@ -22,6 +25,49 @@ describe("resolveLiveness", () => {
 
     await setFakeRunLiveness(run.id, { status: "unknown" }, "same");
     expect(await resolveLiveness(run.id)).toEqual({ verdict: "unknown" });
+  });
+});
+
+describe("resolveLiveness — claims that cannot be observed are never unowned", () => {
+  beforeEach(() => installFakeRunnerProvider());
+
+  it("a claim with no runner row is unknown (a dispatch may be provisioning it)", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
+    await db.update(agentSessions).set({ workerScope: "to-run-booting" }).where(eq(agentSessions.id, run.id));
+    expect(await resolveLiveness(run.id)).toEqual({ verdict: "unknown" });
+  });
+
+  it("a runner row with no stored incarnation reports the observation as-is (boot window)", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
+    await setFakeRunLiveness(run.id, { status: "alive", incarnation: "booting" }, "placeholder");
+    await db.update(runnerInstances).set({ workerIncarnation: null }).where(eq(runnerInstances.runId, run.id));
+    expect(await resolveLiveness(run.id)).toEqual({ verdict: "alive", incarnation: "booting" });
+
+    await setFakeRunLiveness(run.id, { status: "dead", detail: "exited with code 1" }, "placeholder");
+    await db.update(runnerInstances).set({ workerIncarnation: null }).where(eq(runnerInstances.runId, run.id));
+    expect(await resolveLiveness(run.id)).toMatchObject({ verdict: "dead", reason: "exited" });
+  });
+
+  it("a server claim held by THIS process is alive", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    const scope = serverClaimScope("nonce-1");
+    expect(scope).toContain(CONTROLLER_BOOT_ID);
+    await db.update(agentSessions).set({ workerScope: scope }).where(eq(agentSessions.id, run.id));
+    expect(await resolveLiveness(run.id)).toEqual({ verdict: "alive", incarnation: scope });
+  });
+
+  it("a server claim from a dead process on this host is dead; a foreign host is unknown; legacy is dead", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    const { hostname } = await import("node:os");
+    // pid 2^22-1 is above the Linux/macOS pid range → observably gone.
+    await db.update(agentSessions).set({ workerScope: `server-${hostname()}@4194303@other-boot@n` }).where(eq(agentSessions.id, run.id));
+    expect(await resolveLiveness(run.id)).toMatchObject({ verdict: "dead", reason: "exited" });
+
+    await db.update(agentSessions).set({ workerScope: "server-some-other-host@1@boot@n" }).where(eq(agentSessions.id, run.id));
+    expect(await resolveLiveness(run.id)).toEqual({ verdict: "unknown" });
+
+    await db.update(agentSessions).set({ workerScope: "server-legacy-nonce" }).where(eq(agentSessions.id, run.id));
+    expect(await resolveLiveness(run.id)).toMatchObject({ verdict: "dead", reason: "exited" });
   });
 });
 

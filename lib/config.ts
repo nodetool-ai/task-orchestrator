@@ -295,9 +295,6 @@ export const config = Object.freeze({
     get maxWorkers(): number {
       return intEnv("TASK_ORCH_MAX_WORKERS", 0);
     },
-    get maxMachines(): number {
-      return intEnv("TASK_ORCH_MAX_MACHINES", 0);
-    },
     get hostMemoryReserveMb(): number {
       return intEnv("TASK_ORCH_HOST_MEMORY_RESERVE_MB", 0);
     },
@@ -452,9 +449,6 @@ export const config = Object.freeze({
     },
     get prefix(): string {
       return strEnv("TASK_ORCH_SPRITE_PREFIX", "to-run-") as string;
-    },
-    get pollMs(): number {
-      return intEnv("TASK_ORCH_SPRITES_POLL_MS", 10_000);
     },
     get poolSize(): number {
       return intEnv("TASK_ORCH_SPRITE_POOL_SIZE", 0);

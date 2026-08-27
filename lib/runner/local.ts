@@ -55,6 +55,7 @@ export class LocalRunnerProvider implements RunnerProvider {
   }
 
   async stop(handle: string): Promise<void> {
+    localProcesses.delete(handle); // never let a recycled pid read as this worker
     await stopWorkerContainer(handle);
   }
 
@@ -65,7 +66,9 @@ export class LocalRunnerProvider implements RunnerProvider {
         const info = await docker.getContainer(handle).inspect();
         if (info.State?.Running) {
           if (!info.Id || !info.State.StartedAt) return { status: "unknown" };
-          return { status: "alive", incarnation: `${info.Id}#${info.State.StartedAt}`, pid: info.State.Pid } as RunnerObservation & { pid?: number };
+          // No pid: the container's worker is PID 1 in its own namespace, so the
+          // host-side pid is not comparable with what the worker reports.
+          return { status: "alive", incarnation: `${info.Id}#${info.State.StartedAt}` };
         }
         return { status: "dead", detail: `exit ${info.State?.ExitCode ?? "unknown"}` };
       } catch (err) {
@@ -76,8 +79,8 @@ export class LocalRunnerProvider implements RunnerProvider {
     const recorded = localProcesses.get(handle);
     if (!recorded) return { status: "unknown" };
     try {
-      (this.deps.kill ?? process.kill)(recorded.pid, 0);
-      return { status: "alive", incarnation: `${recorded.pid}#${recorded.spawnedAt}`, pid: recorded.pid } as RunnerObservation & { pid?: number };
+      (this.deps.kill ?? process.kill.bind(process))(recorded.pid, 0);
+      return { status: "alive", incarnation: `${recorded.pid}#${recorded.spawnedAt}`, pid: recorded.pid };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ESRCH") return { status: "dead" };
       return { status: "unknown" };

@@ -192,11 +192,17 @@ describe("worker channel recovery (plan section 17)", () => {
     await server.close();
     await waitFor(() => getConnection(runId) === undefined, 4000);
 
-    // The provider now observes the worker dead; run the shared orphan reaper.
-    // A chat run goes idle.
+    // The provider observes the worker dead (this test spawned the worker itself,
+    // so the real local provider has no record of it — inject the verdict); run
+    // the shared orphan reaper. A chat run goes idle.
+    const { installFakeRunnerProvider, setFakeRunLiveness } = await import("./helpers/fake-runner-provider");
+    const { __resetRunnerProviderForTests } = await import("../lib/runner/provider");
+    installFakeRunnerProvider();
+    await setFakeRunLiveness(runId, { status: "dead", detail: "exited" }, "w1");
     const { reconcileOrphanedRuns } = await import("../lib/runs");
     await reconcileOrphanedRuns();
     expect((await db.select().from(agentSessions).where(eq(agentSessions.id, runId)))[0].status).toBe("idle");
+    __resetRunnerProviderForTests();
   });
 
   it("disconnect grace reconnects a provider-live worker whose socket dropped", async () => {

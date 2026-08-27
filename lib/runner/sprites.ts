@@ -67,6 +67,10 @@ export function spritesRunnerStateFromStatus(status: string | undefined): Runner
   }
 }
 
+// Idle clock for the destroy policy. claimed_at is stamped once per claim, so
+// this does NOT advance during a long turn — nextSpritesLifecycleAction is
+// safe only because it returns `none` for a live worker and an active status
+// BEFORE it looks at idleMs. Keep that rule order.
 function lastActivityMs(row: {
   claimedAt: Date | null;
   completedAt: Date | null;
@@ -143,13 +147,21 @@ export class SpritesRunnerProvider implements RunnerProvider {
     try {
       const sprite = await this.spritesClient.getSprite(handle);
       if (!sprite) return { status: "dead", detail: "sprite gone" };
+      const runnerState = spritesRunnerStateFromStatus(sprite.status);
+      if (runnerState === "gone") return { status: "dead", detail: `sprite ${sprite.status}` };
       const service = await this.spritesClient.getService(handle, "worker");
-      if (!service) return { status: "dead", detail: "service absent" };
-      if (service.state.status !== "running") {
-        return { status: "dead", detail: service.state.error ?? service.state.status };
+      const s = service?.state;
+      // A hibernating (cold) or booting sprite is NOT a death: its worker is a
+      // frozen/starting process. Only the service's own verdict may say dead.
+      const settled = runnerState === "running";
+      if (!service) return settled ? { status: "dead", detail: "service absent" } : { status: "unknown" };
+      if (s!.status === "failed") return { status: "dead", detail: s!.error ?? "failed" };
+      if (s!.nextRestartAt) return { status: "unknown" }; // supervisor backoff: identity not settled
+      if (s!.status !== "running") {
+        return settled ? { status: "dead", detail: s!.error ?? s!.status } : { status: "unknown" };
       }
-      if (service.state.pid == null || !service.state.startedAt) return { status: "unknown" };
-      return { status: "alive", incarnation: `${service.state.startedAt}#${service.state.pid}`, pid: service.state.pid } as RunnerObservation & { pid?: number };
+      if (s!.pid == null || !s!.startedAt) return { status: "unknown" };
+      return { status: "alive", incarnation: `${s!.startedAt}#${s!.pid}`, pid: s!.pid };
     } catch {
       return { status: "unknown" };
     }
@@ -405,6 +417,11 @@ export class SpritesRunnerProvider implements RunnerProvider {
       try {
         let sprite = spriteByName.get(row.spriteName);
         if (!sprite) {
+          // The list was snapshotted before the rows: a sprite created in
+          // between is missing here while booting normally. Confirm with a
+          // direct observation and act only on `dead`.
+          const observed = await this.inspect(row.spriteName);
+          if (observed.status !== "dead") continue;
           await this.updateInstance(row.runId, { state: "gone" });
           const isActive = !!row.runStatus && ["preparing", "running", "pushing", "opening_pr"].includes(row.runStatus);
           if (row.workerScope === row.spriteName && isActive) {
@@ -413,6 +430,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
               exitCode: null,
               oomKilled: false,
               containerName: row.spriteName,
+              incarnation: row.workerIncarnation ?? null,
             });
           }
           continue;

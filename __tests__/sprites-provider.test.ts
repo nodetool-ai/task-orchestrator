@@ -92,6 +92,38 @@ describe("SpritesRunnerProvider.inspect", () => {
     const broken = new SpritesRunnerProvider(fakeSpritesClient({ getSprite: vi.fn(async () => { throw new Error("down"); }) }));
     await expect(broken.inspect("to-run-1")).resolves.toEqual({ status: "unknown" });
   });
+
+  it("a hibernating sprite is never dead unless its service proves an exit", async () => {
+    const cold = (state: Record<string, unknown>) => new SpritesRunnerProvider(fakeSpritesClient({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      getSprite: vi.fn(async (name: string) => ({ name, status: "cold" })),
+      getService: vi.fn(async () => ({ name: "worker", cmd: "node", state }) as any),
+    }));
+    // Frozen but intact process: alive, same identity.
+    await expect(cold({ status: "running", pid: 42, startedAt: "2026-08-27T10:00:00Z" }).inspect("to-run-1"))
+      .resolves.toEqual({ status: "alive", incarnation: "2026-08-27T10:00:00Z#42", pid: 42 });
+    // Anything else on a cold sprite is unobservable, not a death.
+    await expect(cold({ status: "stopped" }).inspect("to-run-1")).resolves.toEqual({ status: "unknown" });
+    // The service's own failed verdict is proof of exit.
+    await expect(cold({ status: "failed", error: "exited with code 143" }).inspect("to-run-1"))
+      .resolves.toEqual({ status: "dead", detail: "exited with code 143" });
+    // Supervisor backoff: identity not settled yet.
+    await expect(cold({ status: "running", pid: 42, startedAt: "x", nextRestartAt: "2026-08-27T10:01:00Z" }).inspect("to-run-1"))
+      .resolves.toEqual({ status: "unknown" });
+    // A cold sprite whose service is absent: unknown (a running sprite would be dead).
+    const absent = new SpritesRunnerProvider(fakeSpritesClient({
+      getSprite: vi.fn(async (name: string) => ({ name, status: "cold" })),
+      getService: vi.fn(async () => null),
+    }));
+    await expect(absent.inspect("to-run-1")).resolves.toEqual({ status: "unknown" });
+  });
+
+  it("a destroyed sprite is dead; an unreadable service answer is unknown", async () => {
+    const destroyed = new SpritesRunnerProvider(fakeSpritesClient({ getSprite: vi.fn(async (name: string) => ({ name, status: "destroyed" })) }));
+    await expect(destroyed.inspect("to-run-1")).resolves.toMatchObject({ status: "dead" });
+    const unreadable = new SpritesRunnerProvider(fakeSpritesClient({ getService: vi.fn(async () => { throw new Error("empty body"); }) }));
+    await expect(unreadable.inspect("to-run-1")).resolves.toEqual({ status: "unknown" });
+  });
 });
 
 describe("SpritesRunnerProvider.create", () => {

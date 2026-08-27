@@ -887,7 +887,7 @@ export async function sweepWorkerSockets(dir: string = workerSocketDir()): Promi
     const live =
       row != null &&
       !isTerminalStatus(row.status as Parameters<typeof isTerminalStatus>[0]) &&
-      (await resolveLiveness(row.id)).verdict === "alive";
+      ["alive", "unknown"].includes((await resolveLiveness(row.id)).verdict);
     if (live) continue;
     await unlink(full).catch(() => {});
   }
@@ -914,8 +914,7 @@ async function pumpTick(): Promise<void> {
   } catch {
     // best-effort
   }
-  // Step 1 rollout: compare identities only. The heartbeat reaper remains the
-  // sole liveness decision-maker until the next step.
+  // Log-only cross-check of stored vs observed worker incarnations.
   try {
     await observeWorkerIncarnations();
   } catch {

@@ -146,6 +146,11 @@ interface RawSpriteServiceJson {
 }
 
 function serviceFromJson(raw: RawSpriteServiceJson): SpriteService {
+  // A missing state is "cannot read", never a status of "undefined": throw so
+  // inspect() reports unknown instead of a fabricated dead.
+  if (typeof raw?.state?.status !== "string") {
+    throw new SpritesApiError(0, `service ${String(raw?.name)} has no state.status`);
+  }
   return {
     name: String(raw.name),
     cmd: String(raw.cmd),
@@ -330,7 +335,9 @@ export function makeSpritesClient(input?: SpritesClientOptions): SpritesClient {
           "GET",
           `/sprites/${encodeURIComponent(spriteName)}/services/${encodeURIComponent(serviceName)}`,
         );
-        return result ? serviceFromJson(result) : null;
+        // Only a 404 means "absent". An empty body is an unreadable answer.
+        if (!result) throw new SpritesApiError(0, `empty response for service ${serviceName} on ${spriteName}`);
+        return serviceFromJson(result);
       } catch (err) {
         if (err instanceof SpritesApiError && err.status === 404) return null;
         throw err;

@@ -237,7 +237,6 @@ export class ControllerConnection {
         socket.close(CLOSE_CODE_PROTOCOL_MISMATCH, "protocol mismatch");
         throw new ControllerProtocolError("worker does not support protocol v1", CLOSE_CODE_PROTOCOL_MISMATCH, false);
       }
-      await this.observeHelloIncarnation(hello);
       // Attach the persistent listeners BEFORE sending accept and the post-accept
       // DB awaits below. The worker replays its spooled events the instant it sees
       // channel.accept; a listener attached only after markChannelConnected /
@@ -265,6 +264,11 @@ export class ControllerConnection {
           maxInFlightBytes: DEFAULT_MAX_IN_FLIGHT_BYTES,
         },
       } as WireFrame);
+      // Record the worker's incarnation off the handshake path: it awaits the
+      // provider API (two round trips, 30s timeouts) while the worker's accept
+      // timer is 10s. Liveness treats a missing incarnation as "trust the
+      // observation", so a late or failed record is never a wrong verdict.
+      void this.observeHelloIncarnation(hello);
       await markChannelConnected(this.runId, this.instanceId, new Date());
       await rebasePendingCommands(this.runId, this.instanceId, lease.epoch);
       for (const command of await listPendingCommands(this.runId, this.instanceId, lease.epoch)) this.sendCommandRow(command);
@@ -414,7 +418,6 @@ export class ControllerConnection {
    * provider.inspect().incarnation === stored incarnation.
    */
   private async observeHelloIncarnation(hello: ChannelHello): Promise<void> {
-    if (hello.pid == null) return; // compatibility with an older worker bundle
     try {
       const target = await getWorkerObservationTarget(this.runId, this.instanceId);
       if (!target) return;
@@ -425,15 +428,16 @@ export class ControllerConnection {
       }
       const observed = await provider.inspect(target.handle);
       if (observed.status !== "alive") return;
-      const observedPid = (observed as typeof observed & { pid?: number }).pid
-        ?? Number(observed.incarnation.slice(observed.incarnation.lastIndexOf("#") + 1));
-      if (observedPid !== hello.pid) {
+      // The handle we inspected is the instance registered for this channel, so
+      // the observed process IS the one we dialed. Where provider and worker
+      // share a pid namespace, the pid is an extra cross-check; where they do
+      // not (Docker: the provider has no comparable pid), the handle suffices.
+      if (observed.pid != null && hello.pid != null && observed.pid !== hello.pid) {
         console.warn(`[worker-channel] liveness observation pid mismatch runId=${this.runId} hello=${hello.pid} observed=${observed.incarnation}`);
         return;
       }
       await persistWorkerIncarnation(this.runId, this.instanceId, observed.incarnation);
     } catch (err) {
-      // Observation is deliberately non-blocking during this rollout.
       console.warn(`[worker-channel] liveness observation failed runId=${this.runId}:`, err);
     }
   }

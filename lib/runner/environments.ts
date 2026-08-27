@@ -4,10 +4,9 @@
 // concept (spec 2026-07-18-environments-design.md), one row per build,
 // versioned by worker SHA. The partial unique index on (provider, worker_sha)
 // WHERE state IN ('building','ready') is the per-provider single-flight lock.
-import { and, desc, eq, gt, inArray, lt, ne } from "drizzle-orm";
+import { and, desc, eq, gt, lt } from "drizzle-orm";
 import { db } from "../../db";
 import { environments } from "../../db/schema";
-import { workerBuildSha } from "./worker-sha";
 
 export type EnvironmentProvider = "docker";
 export type EnvironmentRow = typeof environments.$inferSelect;

@@ -1,6 +1,11 @@
 # Liveness without clocks
 
-Status: complete (2026-08-27). Steps 0-3 landed as one commit each; migrations 0028-0030 must be applied before deploy.
+Status: complete (2026-08-27). Steps 0-3 landed as one commit each, followed by one
+review-fix commit (see `docs/plans/review-findings.md`). Migrations 0028-0030 apply at boot
+(`initDb`). 0030 DROPS columns the previous control-plane build still reads: deploy is a
+single-machine replacement (`--ha=false`) and sprite workers never touch the DB, so the
+exposure is the seconds of overlap between the old and new control-plane process. Do not
+run 0030 while an old control-plane build must keep serving.
 
 ## Problem
 

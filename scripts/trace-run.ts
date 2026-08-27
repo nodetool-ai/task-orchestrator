@@ -273,7 +273,7 @@ function summarize(trace: Trace): string {
   lines.push("", "Runner instances:");
   for (const r of trace.runners) {
     lines.push(
-      `- #${r.run_id} state=${r.state} machine=${r.machine_id ?? "-"} volume=${r.volume_id ?? "-"} lastStarted=${r.last_started_at ?? "-"}`
+      `- #${r.run_id} state=${r.state} sprite=${r.sprite_name ?? "-"} incarnation=${r.worker_incarnation ?? "-"} lastStarted=${r.last_started_at ?? "-"}`
     );
   }
   lines.push("", "Inbox/timers:");

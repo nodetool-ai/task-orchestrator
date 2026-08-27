@@ -97,7 +97,7 @@ Auto-wake: dialing a cold sprite wakes it; no explicit start call.
 
 ### Sweep
 
-Every `TASK_ORCH_SPRITES_POLL_MS` the monitor lists sprites by prefix
+Every pump tick (`TASK_ORCH_PENDING_PUMP_MS`, default 15s) the sweep lists sprites by prefix
 (paginating past the 50-item cap), reconciles each row's state
 (`running→running`, `warm→starting`, `cold→suspended`, 404→`gone`), and
 decides a lifecycle action. **Suspension is automatic** — sprites hibernate
@@ -207,7 +207,6 @@ service starts.
 | `TASK_ORCH_SPRITES_BASE_URL` | `https://api.sprites.dev/v1` | API endpoint |
 | `TASK_ORCH_SPRITE_PREFIX` | `to-run-` | Run-sprite name prefix (sweep filter) |
 | `TASK_ORCH_MAX_SPRITES` | `0` (gate off) | Max concurrent sprites |
-| `TASK_ORCH_SPRITES_POLL_MS` | `10000` | Sweep interval |
 | `TASK_ORCH_SPRITE_POOL_SIZE` | `0` (off) | Warm-pool target (phase 5) |
 | `TASK_ORCH_SPRITE_NET_ALLOW` | — | Extra egress domains (phase 6) |
 | `TASK_ORCH_SPRITES_WORKER_BUNDLE_URL` | `${TASK_ORCH_PUBLIC_URL}/api/worker-bundle` | Worker bundle URL; optional `{sha}` expands to the bundle id. |

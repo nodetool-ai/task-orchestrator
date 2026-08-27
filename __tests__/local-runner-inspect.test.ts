@@ -7,7 +7,8 @@ describe("LocalRunnerProvider.inspect", () => {
     const docker = { getContainer: vi.fn(() => ({ inspect: vi.fn(async () => ({ Id: "sha", State: { Running: true, Pid: 77, StartedAt: "2026-08-27T10:00:00Z" } })) })) };
     vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
     const provider = new LocalRunnerProvider({ docker: async () => docker as any });
-    await expect(provider.inspect("run-1")).resolves.toEqual({ status: "alive", incarnation: "sha#2026-08-27T10:00:00Z", pid: 77 });
+    // No pid: the container worker is PID 1 in its own namespace, so the host pid is not comparable.
+    await expect(provider.inspect("run-1")).resolves.toEqual({ status: "alive", incarnation: "sha#2026-08-27T10:00:00Z" });
     const exited = new LocalRunnerProvider({ docker: async () => ({ getContainer: () => ({ inspect: async () => ({ State: { Running: false, ExitCode: 143 } }) }) }) as any });
     await expect(exited.inspect("run-1")).resolves.toEqual({ status: "dead", detail: "exit 143" });
     const absent = new LocalRunnerProvider({ docker: async () => ({ getContainer: () => ({ inspect: async () => { throw { statusCode: 404 }; } }) }) as any });

@@ -72,6 +72,7 @@ import {
 import { config, runnerProviderKind, type RunnerProviderKind } from "./config";
 import {
   resolveLiveness,
+  serverClaimScope,
   isResumableDeadRun,
   decideDeadRunPolicy,
 } from "./run-liveness";
@@ -1070,7 +1071,9 @@ export async function deferRunForServerDispatch(
   const before = await get(runId);
   const [instance] = await db.select({ incarnation: runnerInstances.workerIncarnation })
     .from(runnerInstances).where(eq(runnerInstances.runId, runId));
-  if (!before || (await resolveLiveness(runId)).verdict === "alive") return false;
+  const verdict = before ? (await resolveLiveness(runId)).verdict : "unowned";
+  // Never park a run whose worker may still be alive (unknown is not permission).
+  if (!before || verdict === "alive" || verdict === "unknown") return false;
   const parked = await db.update(agentSessions)
     .set({ status: "pending", pendingSince: new Date(), workerScope: null })
     .where(and(
@@ -1904,7 +1907,8 @@ async function findRivalTaskRun(run: {
       )
   );
   for (const s of siblings) {
-    if ((await resolveLiveness(s.id)).verdict === "alive") return s.id;
+    const v = (await resolveLiveness(s.id)).verdict;
+    if (v === "alive" || v === "unknown") return s.id; // unknown is not permission to spawn a rival
   }
   return null;
 }
@@ -1945,7 +1949,10 @@ export async function followUp(
   // would kick off a SECOND concurrent turn against the same branch/worktree. Bail
   // when the row shows a live lease (a turn in flight anywhere) or a live worker
   // owns it — mirrored below on a fresh read after the lock is acquired.
-  if ((await resolveLiveness(runId)).verdict === "alive") return;
+  {
+    const v = (await resolveLiveness(runId)).verdict;
+    if (v === "alive" || v === "unknown") return;
+  }
   // BUG 4: one-agent-per-task on resume. Reviving this (terminal, resumable) run
   // while a DIFFERENT live run drives the same task would put two agents on the
   // same canonical branch. Bail quietly — same contract as the same-run liveness
@@ -2005,7 +2012,8 @@ export async function followUp(
     lock.busy = null;
     throw err;
   }
-  if (!fresh || (await resolveLiveness(runId)).verdict === "alive") {
+  const freshVerdict = fresh ? (await resolveLiveness(runId)).verdict : "unowned";
+  if (!fresh || freshVerdict === "alive" || freshVerdict === "unknown") {
     release();
     lock.busy = null;
     return;
@@ -3115,7 +3123,7 @@ async function runExecute(
 // scope is prefixed 'server-' purely for forensics — nothing branches on it.
 
 function serverTurnNonce(): string {
-  return `server-${runNonce()}`;
+  return serverClaimScope(runNonce());
 }
 
 /**
@@ -3168,7 +3176,7 @@ export async function claimServerTurn(
   }
   const claimed = await db
     .update(agentSessions)
-    .set({ status: "preparing", workerScope: scope, claimedAt: new Date() })
+    .set({ status: "preparing", workerScope: scope, claimedAt: new Date(), pendingSince: null })
     .where(
       and(
         eq(agentSessions.id, runId),
@@ -3279,8 +3287,10 @@ export async function ensureWorkerConnected(runId: number): Promise<void> {
   // The observation was made outside this mutation.  Only discard an old claim
   // when the exact identity we observed is still recorded; this is the takeover
   // fence that prevents two controllers winning the replacement race.
+  // Only a claim whose owner is OBSERVED gone is discarded; `alive` (without a
+  // dialable channel) and `unknown` keep their claim.
   const run = await get(runId);
-  if (run?.workerScope && liveness.verdict !== "unknown") {
+  if (run?.workerScope && liveness.verdict === "dead") {
     await db.update(agentSessions)
       .set({ workerScope: null })
       .where(and(
@@ -3291,6 +3301,15 @@ export async function ensureWorkerConnected(runId: number): Promise<void> {
   }
   const result = await runDispatch.dispatchRun(runId);
   if (result === "spawn-failed") throw new Error(`could not start worker for run ${runId}`);
+  if (result === "spawned" || result === "server-runtime") return;
+  // "already-claimed" without a connected channel: the claim holder is
+  // unreachable (unknown verdict, or alive but not dialable). Delivery must not
+  // pretend to succeed — surface it so the caller reports a failure instead of
+  // silently stranding the message (the run-181 wedge through another door).
+  const registry = await import("./worker-channel/registry");
+  if (!registry.getConnection(runId)?.connected) {
+    throw new Error(`worker for run ${runId} holds the claim but is not reachable (${liveness.verdict})`);
+  }
 }
 
 /**
@@ -4796,13 +4815,14 @@ async function latestEventStatus(
  * keeps its heartbeat fresh and is skipped. Returns the number reaped.
  */
 export async function reconcileOrphanedRuns(): Promise<number> {
-  const now = Date.now();
   const rows = await db
     .select()
     .from(agentSessions)
     .where(inArray(agentSessions.status, LEASE_STATUSES));
   let reaped = 0;
   for (const row of rows) {
+    // A turn driven by THIS process is live by definition; never consult the DB for it.
+    if (isLive(row.id)) continue;
     const [instance] = await db
       .select({ workerIncarnation: runnerInstances.workerIncarnation })
       .from(runnerInstances)
@@ -4966,7 +4986,13 @@ export async function reconcileOrphanedRuns(): Promise<number> {
  */
 export async function handleWorkerDeath(
   runId: number,
-  info: { exitCode: number | null; oomKilled: boolean; containerName: string }
+  info: {
+    exitCode: number | null;
+    oomKilled: boolean;
+    containerName: string;
+    /** The incarnation the caller observed dead (null = none stored). Omit to fence on the stored value. */
+    incarnation?: string | null;
+  }
 ): Promise<void> {
   const row = await get(runId);
   if (!row) return;
@@ -4984,10 +5010,20 @@ export async function handleWorkerDeath(
   // treats a fresh heartbeat (the dead worker's last beat, ≤20s old) as "still
   // live" and would otherwise no-op the re-dispatch, stranding the run until the
   // 5-minute reaper.
+  // worker_scope alone is NOT a fence on sprites (the sprite name is stable
+  // across incarnations), so also fence on the incarnation the caller observed —
+  // or, failing that, the one stored when we started.
+  const observedIncarnation = info.incarnation !== undefined
+    ? info.incarnation
+    : (await db.select({ i: runnerInstances.workerIncarnation }).from(runnerInstances).where(eq(runnerInstances.runId, runId)))[0]?.i ?? null;
   const released = await db
     .update(agentSessions)
     .set({ workerScope: null })
-    .where(and(eq(agentSessions.id, runId), eq(agentSessions.workerScope, info.containerName)));
+    .where(and(
+      eq(agentSessions.id, runId),
+      eq(agentSessions.workerScope, info.containerName),
+      incarnationFence(runId, observedIncarnation)
+    ));
   if (released.count === 0) return; // lost the race — another handler owns it
 
   // Parked chat run whose worker wound down (idle timeout): the claim release
@@ -5113,7 +5149,9 @@ export async function countInFlightWorkers(): Promise<number> {
     );
   let count = 0;
   for (const row of rows) {
-    if (!isServerRuntimeRun(row) && (await resolveLiveness(row.id)).verdict === "alive") count++;
+    if (isServerRuntimeRun(row)) continue;
+    const v = (await resolveLiveness(row.id)).verdict;
+    if (v === "alive" || v === "unknown") count++; // an unobservable worker still occupies its slot
   }
   return count;
 }

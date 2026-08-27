@@ -1,15 +1,14 @@
 "use client";
 
-// The environments list, grouped by provider (docker / fly). Docker gets an
-// in-app build button (POST /api/environments/build); fly is info-only with
-// the copyable build/push command from docs/fly-deployment.md.
+// The environments list, grouped by provider (docker). Docker gets an
+// in-app build button (POST /api/environments/build).
 // While any row is `building` the list polls via router.refresh() every 5s so
 // step `detail` and the eventual ready/failed transition appear without a
 // manual reload.
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Container, Cloud } from "lucide-react";
+import { Container } from "lucide-react";
 
 import { cn, relativeDate } from "@/lib/utils";
 import { Spinner } from "@/components/ui/spinner";
@@ -27,7 +26,7 @@ export interface EnvironmentRowView {
   readyAt: string | null;
 }
 
-const PROVIDER_ORDER = ["docker", "fly"] as const;
+const PROVIDER_ORDER = ["docker"] as const;
 type Provider = (typeof PROVIDER_ORDER)[number];
 
 const PROVIDER_META: Record<
@@ -38,11 +37,6 @@ const PROVIDER_META: Record<
     label: "Docker",
     blurb: "The worker image built from Dockerfile.worker on this host.",
     icon: Container,
-  },
-  fly: {
-    label: "Fly",
-    blurb: "The runner image pushed to the Fly registry (built out-of-app).",
-    icon: Cloud,
   },
 };
 
@@ -131,11 +125,7 @@ function ProviderSection({
         <span className="text-[11px] text-muted-foreground">{meta.blurb}</span>
       </div>
 
-      {provider === "fly" ? (
-        <FlyBuildCard rows={rows} />
-      ) : (
-        <BuildButton provider={provider} building={building} onRefresh={onRefresh} />
-      )}
+      <BuildButton provider={provider} building={building} onRefresh={onRefresh} />
 
       {rows.length === 0 ? (
         <p className="text-[13px] text-muted-foreground">No {meta.label} environments yet.</p>
@@ -241,24 +231,3 @@ function BuildButton({
   );
 }
 
-function FlyBuildCard({ rows }: { rows: EnvironmentRowView[] }) {
-  const current = rows.find((r) => r.state === "ready") ?? rows[0];
-  const image = current?.artifact ?? "registry.fly.io/<runner-app>:latest";
-  const command = `fly deploy --config fly.runner.toml --app <runner-app> \\
-  --dockerfile Dockerfile.fly-runner --build-only --push --image-label latest`;
-
-  return (
-    <div className="rounded-lg border border-border/60 bg-card/30 px-4 py-3 space-y-2">
-      <p className="text-[13px] text-muted-foreground">
-        Fly runner images are built and pushed outside the app. Current image:{" "}
-        <span className="font-mono text-foreground/90">{image}</span>.
-      </p>
-      <CodeBlock tone="muted" selectable>
-        {command}
-      </CodeBlock>
-      <p className="text-[11px] text-muted-foreground">
-        See <span className="font-mono">docs/fly-deployment.md</span> for the full flow.
-      </p>
-    </div>
-  );
-}

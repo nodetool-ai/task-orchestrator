@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { WorkerSession, WorkerSessionProtocolError } from "../lib/worker-channel/worker-session";
+import { WorkerSession } from "../lib/worker-channel/worker-session";
 import { CLOSE_CODE_STALE_CONTROLLER_EPOCH } from "../lib/worker-channel/protocol";
 import type { WireFrame } from "../lib/worker-channel/protocol";
 
@@ -76,12 +76,16 @@ describe("WorkerSession", () => {
     await value.close();
   });
 
-  it("fences a lower or equal controller epoch", async () => {
+  it("fences a lower controller epoch; the same epoch may redial (its controller never expires)", async () => {
     const value = await session();
-    await value.attach({ controllerEpoch: 2, transport: sink().transport });
-    await expect(value.attach({ controllerEpoch: 2, transport: sink().transport })).rejects.toBeInstanceOf(
-      WorkerSessionProtocolError,
-    );
+    const first = sink();
+    await value.attach({ controllerEpoch: 2, transport: first.transport });
+    // Same controller, half-open socket on our side: the redial replaces the connection.
+    const second = sink();
+    await value.attach({ controllerEpoch: 2, lastAcceptedWorkerSeq: 0, transport: second.transport });
+    await value.emit("agent.event", { event: { kind: "checkpoint" } } as never);
+    expect(seqs(second.frames)).toEqual([1]);
+    expect(seqs(first.frames)).toEqual([]);
     await expect(value.attach({ controllerEpoch: 1, transport: sink().transport })).rejects.toMatchObject({
       closeCode: CLOSE_CODE_STALE_CONTROLLER_EPOCH,
     });

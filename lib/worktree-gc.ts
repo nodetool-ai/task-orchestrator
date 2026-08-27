@@ -464,13 +464,12 @@ async function defaultSharedWorktreeBusy(
   const nowMs = now.getTime();
 
   for (const r of rows) {
+    // A turn in flight protects the checkout regardless of who holds the claim.
+    if (IN_FLIGHT_STATUSES.has(r.status)) return true;
     if (r.workerScope) {
       const liveness = await resolveLiveness(r.id);
       // Unknown is never permission to remove a checkout a worker may own.
       if (liveness.verdict === "alive" || liveness.verdict === "unknown") return true;
-    } else if (IN_FLIGHT_STATUSES.has(r.status)) {
-      // An in-process/server drive has no provider handle to inspect.
-      return true;
     }
     const last = coerceDate(r.lastMessageAt) ?? coerceDate(r.startedAt);
     if (last && nowMs - last.getTime() < windowMs) return true;
