@@ -11,6 +11,19 @@ function makeFetchMock(
   return (async (url: unknown, init?: unknown) => handler(String(url), (init ?? {}) as RequestInit)) as typeof fetch;
 }
 
+/** One HTTP chunk per frame: [streamId, payload]. */
+function framedResponse(frames: Array<[number, string]>): Response {
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const [id, payload] of frames) {
+        controller.enqueue(Buffer.concat([Buffer.from([id]), Buffer.from(payload, "latin1")]));
+      }
+      controller.close();
+    },
+  });
+  return new Response(stream, { status: 200, headers: { "Content-Type": "application/octet-stream" } });
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -205,17 +218,17 @@ describe("SpritesClient", () => {
     await client.createSprite({ name: "x" });
   });
 
-  it("exec sends cmd/dir/env as query params, not JSON body", async () => {
+  it("exec sends the line as sh -c argv in query params and parses the framed stream", async () => {
     const fetchImpl = makeFetchMock(async (url, init) => {
       expect(url).toContain("/sprites/to-run-1/exec?");
-      expect(url).toContain("cmd=node+%2B+version");
+      expect(url).toContain("cmd=sh&cmd=-c&cmd=node+%2B+version");
       expect(url).toContain("dir=%2Fhome%2Fuser");
       expect(url).toContain("env=FOO%3Dbar");
       expect(init.method).toBe("POST");
       const headers = init.headers as Record<string, string>;
       expect(headers["Content-Type"]).toBeUndefined();
       expect(init.body).toBeUndefined();
-      return jsonResponse({ exit_code: 0, stdout: "v20", stderr: "" });
+      return framedResponse([[1, "v20"], [3, "\0"]]);
     });
     const client = makeSpritesClient({ fetchImpl, baseUrl: BASE_URL, token: TOKEN });
     const res = await client.exec("to-run-1", {
@@ -232,11 +245,12 @@ describe("SpritesClient", () => {
       expect(url).not.toContain("timeout_ms");
       expect(url).not.toContain("timeoutMs");
       expect(init.body).toBeUndefined();
-      return jsonResponse({ exit_code: 1, stdout: "", stderr: "oops" });
+      return framedResponse([[2, "oops"], [3, "\x01"]]);
     });
     const client = makeSpritesClient({ fetchImpl, baseUrl: BASE_URL, token: TOKEN });
     const res = await client.exec("to-run-1", { cmd: "false", timeoutMs: 5000 });
     expect(res.exitCode).toBe(1);
+    expect(res.stderr).toBe("oops");
   });
 
   it("startService handles NDJSON stream without JSON parse error", async () => {
@@ -313,5 +327,14 @@ describe("SpritesClient", () => {
     expect(page.sprites[0].name).toBe("to-run-1");
     expect(page.sprites[0].status).toBeUndefined();
     expect(page.sprites[0].createdAt).toBeNull();
+  });
+});
+
+describe("parseExecFrames", () => {
+  it("routes stdout, stderr and the exit byte", async () => {
+    const { parseExecFrames } = await import("../lib/runner/sprites-client");
+    const f = (id: number, s: string) => Buffer.concat([Buffer.from([id]), Buffer.from(s)]);
+    const r = parseExecFrames([f(1, "a\nb\n"), f(1, "noline"), f(2, "e\n"), Buffer.from([3, 5])]);
+    expect(r).toEqual({ exitCode: 5, stdout: "a\nb\nnoline", stderr: "e\n" });
   });
 });

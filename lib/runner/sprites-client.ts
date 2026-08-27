@@ -123,10 +123,47 @@ interface RawListSpritesJson {
   next_continuation_token?: string | null;
 }
 
-interface RawExecJson {
-  exit_code: number;
-  stdout: string;
-  stderr: string;
+/**
+ * POST /exec answers with a framed byte stream, one frame per HTTP data
+ * chunk: the first byte is the stream id (1 stdout, 2 stderr, 3 exit — one
+ * payload byte with the code). Frames carry no length, so chunk boundaries
+ * are the framing.
+ */
+export function parseExecFrames(chunks: Uint8Array[]): { exitCode: number; stdout: string; stderr: string } {
+  const out: Uint8Array[] = [];
+  const err: Uint8Array[] = [];
+  let exitCode = 0;
+  for (const chunk of chunks) {
+    if (chunk.length === 0) continue;
+    const payload = chunk.subarray(1);
+    switch (chunk[0]) {
+      case 1:
+        out.push(payload);
+        break;
+      case 2:
+        err.push(payload);
+        break;
+      case 3:
+        if (payload.length > 0) exitCode = payload[0];
+        break;
+      default:
+        // Unknown stream: keep the bytes visible rather than drop them.
+        err.push(chunk);
+    }
+  }
+  return { exitCode, stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8") };
+}
+
+async function readChunks(response: Response): Promise<Uint8Array[]> {
+  const chunks: Uint8Array[] = [];
+  if (!response.body) return chunks;
+  const reader = response.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) chunks.push(value);
+  }
+  return chunks;
 }
 
 function spriteFromJson(raw: RawSpriteJson): Sprite {
@@ -312,20 +349,32 @@ export function makeSpritesClient(input?: SpritesClientOptions): SpritesClient {
       spriteName: string,
       input: { cmd: string; dir?: string; env?: Record<string, string>; timeoutMs?: number },
     ) {
+      // `cmd` is argv on the wire (repeated param), so a shell line goes
+      // through `sh -c`; the caller's string is one argument, never split.
       const params = new URLSearchParams();
-      params.set("cmd", input.cmd);
+      for (const a of ["sh", "-c", input.cmd]) params.append("cmd", a);
       if (input.dir) params.set("dir", input.dir);
       if (input.env) {
         for (const [k, v] of Object.entries(input.env)) params.append("env", `${k}=${v}`);
       }
-      const qs = params.toString() ? `?${params.toString()}` : "";
-      const result = await request<RawExecJson>("POST", `/sprites/${encodeURIComponent(spriteName)}/exec${qs}`);
-      if (!result) return { exitCode: 0, stdout: "", stderr: "" };
-      return {
-        exitCode: typeof result.exit_code === "number" ? result.exit_code : 0,
-        stdout: String(result.stdout ?? ""),
-        stderr: String(result.stderr ?? ""),
-      };
+      const path = `/sprites/${encodeURIComponent(spriteName)}/exec?${params.toString()}`;
+      let response: Response;
+      try {
+        response = await fetchImpl(`${baseUrl}${path}`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+          signal: AbortSignal.timeout(input.timeoutMs ?? REQUEST_TIMEOUT_MS),
+        });
+      } catch (err) {
+        if (err instanceof Error && err.name === "TimeoutError") {
+          throw new SpritesApiError(0, `request timed out: POST ${path}`);
+        }
+        throw err;
+      }
+      if (!response.ok) {
+        throw new SpritesApiError(response.status, await response.text());
+      }
+      return parseExecFrames(await readChunks(response));
     },
 
     async checkpoint(spriteName: string, comment?: string) {
