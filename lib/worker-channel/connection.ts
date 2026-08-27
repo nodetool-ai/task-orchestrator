@@ -431,12 +431,14 @@ export class ControllerConnection {
       const observed = await provider.inspect(target.handle);
       if (observed.status !== "alive") return;
       // The handle we inspected is the instance registered for this channel, so
-      // the observed process IS the one we dialed. Where provider and worker
-      // share a pid namespace, the pid is an extra cross-check; where they do
-      // not (Docker: the provider has no comparable pid), the handle suffices.
+      // the observed process IS the one we dialed: the handle suffices. The pid
+      // is NOT a cross-check — a sprite service reports its wrapper's pid
+      // (2768) while the node worker sees its own (2379), and Docker has no
+      // comparable pid at all. Vetoing on that mismatch froze run 187's stored
+      // incarnation at its first worker, so every later liveness check said
+      // dead(replaced) and the reapers cleared live claims (2026-08-27).
       if (observed.pid != null && hello.pid != null && observed.pid !== hello.pid) {
-        console.warn(`[worker-channel] liveness observation pid mismatch runId=${this.runId} hello=${hello.pid} observed=${observed.incarnation}`);
-        return;
+        console.log(`[worker-channel] hello pid ${hello.pid} differs from provider pid ${observed.pid} for run ${this.runId}; trusting the handle`);
       }
       await persistWorkerIncarnation(this.runId, this.instanceId, observed.incarnation);
     } catch (err) {

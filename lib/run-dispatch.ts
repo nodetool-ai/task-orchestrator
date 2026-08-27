@@ -1064,9 +1064,13 @@ export async function observeWorkerIncarnations(): Promise<void> {
     }
     const observedValue = observed.status === "alive" ? observed.incarnation : observed.status === "dead" ? observed.detail ?? "" : "";
     const agree = observed.status === "alive" && observed.incarnation === row.workerIncarnation;
-    console.log(
-      `liveness-observe runId=${row.runId} stored=${row.workerIncarnation} observed=${observedValue} status=${observed.status} agree=${agree}`,
-    );
+    // Only disagreement is worth a line: the agreeing case fired for every run
+    // on every tick and pushed everything else out of Fly's 100-line log buffer.
+    if (!agree) {
+      console.log(
+        `liveness-observe runId=${row.runId} stored=${row.workerIncarnation} observed=${observedValue} status=${observed.status} agree=${agree}`,
+      );
+    }
   }
 }
 
