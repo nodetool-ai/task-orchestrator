@@ -7,6 +7,7 @@
 // shows a live lease (isLeaseLive) or a live worker owns the run (isWorkerLive) —
 // both before taking the per-run lock slot and after acquiring it.
 
+import { installFakeRunnerProvider, setFakeRunLiveness } from "./helpers/fake-runner-provider";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
@@ -54,6 +55,8 @@ describe("followUp() bails on a cross-process live run (FIX 4)", () => {
       .update(agentSessions)
       .set({ status: "running", heartbeatAt: new Date() })
       .where(eq(agentSessions.id, runId));
+    installFakeRunnerProvider();
+    await setFakeRunLiveness(runId, { status: "alive", incarnation: "w1" }, "w1");
 
     await followUp(runId, "please fix CI");
 
@@ -71,6 +74,8 @@ describe("followUp() bails on a cross-process live run (FIX 4)", () => {
       .update(agentSessions)
       .set({ status: "idle", workerScope: "scope-live", heartbeatAt: new Date() })
       .where(eq(agentSessions.id, runId));
+    installFakeRunnerProvider();
+    await setFakeRunLiveness(runId, { status: "alive", incarnation: "w1" }, "w1");
 
     await followUp(runId, "please fix CI");
 
@@ -127,6 +132,8 @@ describe("followUp() dispatches instead of executing on a remote-runner deployme
       .update(agentSessions)
       .set({ status: "idle", workerScope: "scope-live", heartbeatAt: new Date() })
       .where(eq(agentSessions.id, runId));
+    installFakeRunnerProvider();
+    await setFakeRunLiveness(runId, { status: "alive", incarnation: "w1" }, "w1");
 
     await followUp(runId, "please fix CI");
 

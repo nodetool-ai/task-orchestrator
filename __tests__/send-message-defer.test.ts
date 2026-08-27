@@ -8,6 +8,7 @@
 // up, resuming the child's own Machine. Mirrors launchDetached's isolate
 // deferral for child CREATION (docs/nested-machine-dispatch.md).
 
+import { installFakeRunnerProvider, setFakeRunLiveness } from "./helpers/fake-runner-provider";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { and, desc, eq } from "drizzle-orm";
@@ -84,12 +85,14 @@ describe("sendMessageToRun inside an isolate-mode worker", () => {
     await db.update(agentSessions)
       .set({ status: "running", workerScope: "run-live-1", heartbeatAt: new Date() })
       .where(eq(agentSessions.id, run.id));
+    installFakeRunnerProvider();
+    await setFakeRunLiveness(run.id, { status: "alive", incarnation: "w1" }, "w1");
 
     await fireAppend(run.id, "additional guidance mid-turn");
 
     const after = await get(run.id);
     expect(after?.status).toBe("running"); // NOT parked
-    expect(after?.workerScope).toBe("run-live-1"); // claim intact
+    expect(after?.workerScope).toBe(`fake-runner-${run.id}`); // claim intact
     expect(spy).not.toHaveBeenCalled();
   });
 });

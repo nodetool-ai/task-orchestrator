@@ -388,6 +388,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
         lastStartedAt: runnerInstances.lastStartedAt,
         lastSuspendedAt: runnerInstances.lastSuspendedAt,
         archivedUri: runnerInstances.archivedUri,
+        workerIncarnation: runnerInstances.workerIncarnation,
         runStatus: agentSessions.status,
         runGoal: agentSessions.goal,
         workerScope: agentSessions.workerScope,
@@ -408,9 +409,8 @@ export class SpritesRunnerProvider implements RunnerProvider {
         let sprite = spriteByName.get(row.spriteName);
         if (!sprite) {
           await this.updateInstance(row.runId, { state: "gone" });
-          const lastSeen = row.heartbeatAt?.getTime() ?? 0;
           const isActive = !!row.runStatus && ["preparing", "running", "pushing", "opening_pr"].includes(row.runStatus);
-          if (row.workerScope === row.spriteName && isActive && now - lastSeen >= 30_000) {
+          if (row.workerScope === row.spriteName && isActive) {
             const runs = await import("../runs");
             await runs.handleWorkerDeath(row.runId, {
               exitCode: null,
@@ -441,7 +441,8 @@ export class SpritesRunnerProvider implements RunnerProvider {
         }
 
         const runStatus = (row.runStatus ?? "closed") as SessionStatus;
-        await this.applyLifecycle(row, runnerState, runStatus, now);
+        const observed = await this.inspect(row.spriteName);
+        await this.applyLifecycle(row, runnerState, runStatus, now, observed.status === "dead" ? false : true);
       } catch (err) {
         console.error(`[SpritesRunnerProvider] sweep failed for run ${row.runId}:`, err);
       }
@@ -496,6 +497,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
     runnerState: RunnerState,
     runStatus: SessionStatus,
     nowMs: number,
+    workerLive: boolean,
   ): Promise<void> {
     if (!row.spriteName) return;
     const idleMs = Math.max(0, nowMs - lastActivityMs(row));
@@ -505,6 +507,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
       idleMs,
       workerScope: row.workerScope,
       heartbeatAt: row.heartbeatAt,
+      workerLive,
       goal: row.runGoal,
     });
     if (action.kind !== "destroy") return;

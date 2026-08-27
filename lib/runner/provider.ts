@@ -131,3 +131,8 @@ export function createRunnerProvider(kind: RunnerProviderKind): RunnerProvider {
 export function __resetRunnerProviderForTests(): void {
   delete (globalThis as Record<string, unknown>)[PROVIDER_KEY];
 }
+
+/** Inject a provider without changing environment configuration. */
+export function __setRunnerProviderForTests(provider: RunnerProvider): void {
+  (globalThis as Record<string, unknown>)[PROVIDER_KEY] = { kind: provider.kind, provider } satisfies ProviderCache;
+}

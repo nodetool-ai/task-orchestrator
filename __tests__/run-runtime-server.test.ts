@@ -13,6 +13,7 @@
 //   • the pending-run pump / dispatch front door never spawn a worker for a
 //     server-runtime row; a wake is handed to the in-process turn driver.
 
+import { installFakeRunnerProvider, setFakeRunLiveness } from "./helpers/fake-runner-provider";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 
@@ -573,6 +574,9 @@ describe("a server-runtime append takes the same single-owner claim", () => {
       .update(agentSessions)
       .set({ workerScope: "server-someone-else", heartbeatAt: new Date() })
       .where(eq(agentSessions.id, run.id));
+    // The other owner is observably alive (provider verdict, not a clock).
+    installFakeRunnerProvider();
+    await setFakeRunLiveness(run.id, { status: "alive", incarnation: "other" }, "other");
 
     const events: any[] = [];
     for await (const ev of append({ runId: run.id, role: "user", text: "hi" })) events.push(ev);
@@ -588,7 +592,7 @@ describe("a server-runtime append takes the same single-owner claim", () => {
     expect(await db.select().from(agentMessages).where(eq(agentMessages.runId, run.id))).toHaveLength(0);
     const after = await get(run.id);
     expect(after!.status).toBe("idle");
-    expect(after!.workerScope).toBe("server-someone-else");
+    expect(after!.workerScope).toBe(`fake-runner-${run.id}`);
   });
 
   it("still takes over a STALE claim (a crashed process must not wedge the chat)", async () => {

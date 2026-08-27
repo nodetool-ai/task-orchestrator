@@ -39,7 +39,7 @@ import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, notInArray, or,
 import { alias } from "drizzle-orm/pg-core";
 
 import { db } from "@/db";
-import { agentEvents, agentMessages, agentSessions, runTimers, tasks } from "@/db/schema";
+import { agentEvents, agentMessages, agentSessions, runTimers, runnerInstances, tasks } from "@/db/schema";
 import { describe } from "@/lib/utils";
 import { parseProviderQualifiedModel } from "@/lib/model-id";
 import * as repo from "./repo";
@@ -75,6 +75,7 @@ import {
   HEARTBEAT_STALE_MS,
   isLeaseLive,
   isWorkerLive,
+  resolveLiveness,
   isResumableDeadRun,
   decideDeadRunPolicy,
 } from "./run-liveness";
@@ -1042,6 +1043,18 @@ async function emitRunnerDeferred(runId: number, parentRunId: number | null): Pr
   }
 }
 
+
+/**
+ * Identity fence for a write that follows an out-of-transaction liveness
+ * observation: the row may change only while no runner_instances row DISAGREES
+ * with the incarnation we observed. Phrased as NOT EXISTS so a claim with no
+ * runner instance at all (a server-scoped turn) still passes — EXISTS would
+ * silently veto every takeover of such a claim.
+ */
+function incarnationFence(runId: number, storedIncarnation: string | null | undefined) {
+  return sql`NOT EXISTS (SELECT 1 FROM runner_instances ri WHERE ri.run_id = ${runId} AND ri.worker_incarnation IS DISTINCT FROM ${storedIncarnation ?? null})`;
+}
+
 /**
  * Park a run at 'pending' as a dispatch request for the SERVER's pump — the
  * worker-side counterpart of dispatchRun for FOLLOW-UP messages, mirroring
@@ -1059,17 +1072,21 @@ export async function deferRunForServerDispatch(
   runId: number,
   parentRunId: number | null
 ): Promise<boolean> {
-  const staleBefore = new Date(Date.now() - HEARTBEAT_STALE_MS);
+  const before = await get(runId);
+  const [instance] = await db.select({ incarnation: runnerInstances.workerIncarnation })
+    .from(runnerInstances).where(eq(runnerInstances.runId, runId));
+  if (!before || (await resolveLiveness(runId)).verdict === "alive") return false;
   const parked = await db.update(agentSessions)
     .set({ status: "pending", heartbeatAt: new Date(), workerScope: null, workerPid: null })
     .where(and(
       eq(agentSessions.id, runId),
       notInArray(agentSessions.status, HARD_TERMINAL_STATUSES),
-      or(
-        isNull(agentSessions.workerScope),
-        isNull(agentSessions.heartbeatAt),
-        lt(agentSessions.heartbeatAt, staleBefore)
-      )
+      before.workerScope == null
+        ? isNull(agentSessions.workerScope)
+        : and(
+            eq(agentSessions.workerScope, before.workerScope),
+            incarnationFence(runId, instance?.incarnation ?? null)
+          )
     ))
     .returning({ id: agentSessions.id });
   if (parked.length === 0) return false;
@@ -1199,7 +1216,8 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // fresh heartbeat that dispatchRun set is its own. Honor takeover only for
     // `preparing`; a `running` lease still means a real turn is underway.
     const adoptingOwnClaim = input.takeover === true && run.status === "preparing";
-    if (runners.has(input.runId) || (isLeaseLive(run) && !adoptingOwnClaim)) {
+    const liveness = await resolveLiveness(input.runId);
+    if (runners.has(input.runId) || (liveness.verdict === "alive" && !adoptingOwnClaim)) {
       // A live turn is in flight and must not be double-driven:
       //   • runners.has → an in-process runner exists (append/runReview/
       //     runExecute/followUp is mid-turn in THIS process). The per-run lock
@@ -1878,7 +1896,6 @@ async function findRivalTaskRun(run: {
   cwdStrategy: string;
 }): Promise<number | null> {
   if (run.goal === "<chat>" || !run.taskId || run.cwdStrategy !== "worktree") return null;
-  const now = Date.now();
   const siblings = await db
     .select()
     .from(agentSessions)
@@ -1890,9 +1907,9 @@ async function findRivalTaskRun(run: {
         sql`${agentSessions.id} != ${run.id}`,
         notInArray(agentSessions.status, TERMINAL_STATUS_LIST)
       )
-    );
+  );
   for (const s of siblings) {
-    if (isLeaseLive(s, now) || isWorkerLive(s, now)) return s.id;
+    if ((await resolveLiveness(s.id)).verdict === "alive") return s.id;
   }
   return null;
 }
@@ -1933,7 +1950,7 @@ export async function followUp(
   // would kick off a SECOND concurrent turn against the same branch/worktree. Bail
   // when the row shows a live lease (a turn in flight anywhere) or a live worker
   // owns it — mirrored below on a fresh read after the lock is acquired.
-  if (isLeaseLive(run) || isWorkerLive(run)) return;
+  if ((await resolveLiveness(runId)).verdict === "alive") return;
   // BUG 4: one-agent-per-task on resume. Reviving this (terminal, resumable) run
   // while a DIFFERENT live run drives the same task would put two agents on the
   // same canonical branch. Bail quietly — same contract as the same-run liveness
@@ -1993,7 +2010,7 @@ export async function followUp(
     lock.busy = null;
     throw err;
   }
-  if (!fresh || isLeaseLive(fresh) || isWorkerLive(fresh)) {
+  if (!fresh || (await resolveLiveness(runId)).verdict === "alive") {
     release();
     lock.busy = null;
     return;
@@ -3121,6 +3138,7 @@ export async function claimServerTurn(
   opts: { takeoverStale?: boolean } = {}
 ): Promise<{ claimed: boolean; scope: string; previousStatus: SessionStatus | null }> {
   const scope = serverTurnNonce();
+  const current = await get(runId);
   // WHO MAY TAKE THE CLAIM. Default: an unowned run only (worker_scope IS NULL),
   // byte-identical to dispatchRun's worker claim — a wake that loses is a clean
   // no-op, so waiting for the owner is always correct there.
@@ -3132,12 +3150,16 @@ export async function claimServerTurn(
   // this, adding the claim to append would REMOVE that recovery (worker_scope
   // survives a process death; nothing clears it for a server row until
   // reconcileOrphanedRuns). Same stale window as every other liveness decision.
-  const claimable = opts.takeoverStale
-    ? or(
-        isNull(agentSessions.workerScope),
-        isNull(agentSessions.heartbeatAt),
-        lt(agentSessions.heartbeatAt, new Date(Date.now() - HEARTBEAT_STALE_MS))
-      )!
+  const [instance] = current ? await db.select({ incarnation: runnerInstances.workerIncarnation })
+    .from(runnerInstances).where(eq(runnerInstances.runId, runId)) : [];
+  const verdict = opts.takeoverStale && current ? await resolveLiveness(runId) : null;
+  const claimable = opts.takeoverStale && current && verdict?.verdict !== "alive" && verdict?.verdict !== "unknown"
+    ? (current.workerScope == null
+        ? isNull(agentSessions.workerScope)
+        : and(
+            eq(agentSessions.workerScope, current.workerScope),
+            incarnationFence(runId, instance?.incarnation ?? null)
+          ))
     : isNull(agentSessions.workerScope);
   const prior = (
     await db
@@ -3243,6 +3265,40 @@ export async function withServerClaim(
 // ──────────────────────────────────────────────────────────
 
 /**
+ * Make the worker channel usable before delivering a durable input.  This is
+ * intentionally not a liveness gate: an alive process is dialled, and every
+ * other verdict gets a fresh dispatch attempt.  `unknown` is conservative for
+ * destructive reaping, but delivery is not destructive and must not be lost.
+ */
+export async function ensureWorkerConnected(runId: number): Promise<void> {
+  const [instance] = await db
+    .select({ instanceId: runnerInstances.channelInstanceId, incarnation: runnerInstances.workerIncarnation })
+    .from(runnerInstances)
+    .where(eq(runnerInstances.runId, runId));
+  const liveness = await resolveLiveness(runId);
+  if (liveness.verdict === "alive" && instance?.instanceId) {
+    await runDispatch.startChannelForRun(runId, instance.instanceId);
+    return;
+  }
+
+  // The observation was made outside this mutation.  Only discard an old claim
+  // when the exact identity we observed is still recorded; this is the takeover
+  // fence that prevents two controllers winning the replacement race.
+  const run = await get(runId);
+  if (run?.workerScope && liveness.verdict !== "unknown") {
+    await db.update(agentSessions)
+      .set({ workerScope: null, workerPid: null })
+      .where(and(
+        eq(agentSessions.id, runId),
+        eq(agentSessions.workerScope, run.workerScope),
+        incarnationFence(runId, instance?.incarnation ?? null)
+      ));
+  }
+  const result = await runDispatch.dispatchRun(runId);
+  if (result === "spawn-failed") throw new Error(`could not start worker for run ${runId}`);
+}
+
+/**
  * Server-side entry for a user/system message. In the containerized model the
  * server runs as root and cannot run the agent turn, so it persists the message
  * (firing run_input to wake a live chat worker + run_stream for viewers), ensures
@@ -3289,45 +3345,16 @@ export async function* sendMessageToRun(opts: {
   const ownMsg = await persistMessage(runId, role, [{ type: "text", text }]);
 
   const workerIsolate = runDispatch.insideWorker() && runDispatch.nestedDispatchMode() === "isolate";
-
   const fresh = await get(runId);
   if (fresh) {
     if (run.goal === "<chat>") {
-      if (!isWorkerLive(fresh)) {
-        if (workerIsolate) {
-          // Worker context: no Fly credentials — park the row for the server's
-          // pump instead of dispatching (deferRunForServerDispatch re-checks the
-          // claim atomically, so the isWorkerLive read above going stale is safe).
-          await deferRunForServerDispatch(runId, run.parentRunId ?? null);
-        } else {
-          // Clear a dead worker's stale claim so dispatchRun can re-claim (idle chat
-          // rows aren't a lease status, so reconcile never cleared it). BUG 6a:
-          // guard the clear exactly as deferRunForServerDispatch does — only when
-          // the claim is unowned OR its heartbeat has gone stale. The isWorkerLive
-          // read above is a snapshot; a worker that (re-)claimed between it and this
-          // UPDATE is live, and an unguarded clear would rip its claim out from
-          // under a turn already in flight.
-          const staleBefore = new Date(Date.now() - HEARTBEAT_STALE_MS);
-          await db
-            .update(agentSessions)
-            .set({ workerScope: null, workerPid: null })
-            .where(
-              and(
-                eq(agentSessions.id, runId),
-                or(
-                  isNull(agentSessions.workerScope),
-                  isNull(agentSessions.heartbeatAt),
-                  lt(agentSessions.heartbeatAt, staleBefore)
-                )
-              )
-            );
-          if ((await runDispatch.dispatchRun(runId)) === "spawn-failed") {
-            yield* yieldDispatchFailure(runId);
-            return;
-          }
-        }
+      try {
+        await ensureWorkerConnected(runId);
+        await bridgeToChannel(runId, "run.input", { messages: [{ id: ownMsg.id, role, content: [{ type: "text", text }] }] });
+      } catch {
+        yield* yieldDispatchFailure(runId);
+        return;
       }
-      // else: a live worker will pick up the run_input notify.
     } else {
       // BUG 4: one-agent-per-task on dispatch. A resumable (terminal) worktree run
       // re-driven by this follow-up must not join a DIFFERENT live run already on
@@ -3425,7 +3452,7 @@ const SERVER_WAKE_PROMPT =
 export async function wakeServerRun(runId: number): Promise<void> {
   const run = await get(runId);
   if (!run || !isServerRuntimeRun(run)) return;
-  if (isLive(runId) || isLeaseLive(run)) return;
+  if (isLive(runId) || (await resolveLiveness(runId)).verdict === "alive") return;
   if (isTerminalStatus(run.status) && run.status !== "idle" && !isResumableRun(run)) return;
   // (b), cheap pre-check: no pending events ⇒ the wake was already serviced by a
   // racing driver. Advisory only — it saves a claim round-trip in the common
@@ -4588,8 +4615,9 @@ async function bridgeToChannel(
   commandId?: string
 ): Promise<void> {
   try {
+    // Callers make the worker reachable first (ensureWorkerConnected); the
+    // bridge itself never dispatches, so one message costs one dispatch at most.
     const registry = await import("./worker-channel/registry");
-    if (!registry.getConnection(runId)) return;
     await registry.sendCommand(runId, type, payload, commandId);
   } catch {
     // Channel racing shutdown/replacement: the durable intent still lands via
@@ -4807,9 +4835,16 @@ export async function reconcileOrphanedRuns(): Promise<number> {
     .from(agentSessions)
     .where(inArray(agentSessions.status, LEASE_STATUSES));
   let reaped = 0;
-  const staleBefore = new Date(now - HEARTBEAT_STALE_MS);
   for (const row of rows) {
-    if (isLeaseLive(row, now)) continue; // fresh lease → owned by a live process
+    const [instance] = await db
+      .select({ workerIncarnation: runnerInstances.workerIncarnation })
+      .from(runnerInstances)
+      .where(eq(runnerInstances.runId, row.id));
+    const liveness = await resolveLiveness(row.id);
+    if (liveness.verdict === "alive" || liveness.verdict === "unknown") {
+      if (liveness.verdict === "unknown") console.warn(`[liveness] leaving run ${row.id} alone: provider observation unknown`);
+      continue;
+    }
     // BUG 6b: the SELECT above is a snapshot; a run can be re-claimed (re-dispatch
     // / worker adoption) between it and any write below. Every mutation on this row
     // is therefore conditioned on `stillOrphan` — a CAS (like handleWorkerDeath's
@@ -4817,15 +4852,15 @@ export async function reconcileOrphanedRuns(): Promise<number> {
     // heartbeat, and STILL held by the SAME worker scope we snapshotted. A
     // re-claim stamps a fresh heartbeat (and a new scope), so it fails this guard
     // and we leave the row to its new owner instead of clobbering it.
+    const incarnationCas = row.workerScope == null
+      ? isNull(agentSessions.workerScope)
+      : and(
+          eq(agentSessions.workerScope, row.workerScope),
+          incarnationFence(row.id, instance?.workerIncarnation ?? null)
+        );
     const stillOrphan = and(
       inArray(agentSessions.status, LEASE_STATUSES),
-      or(
-        isNull(agentSessions.heartbeatAt),
-        lt(agentSessions.heartbeatAt, staleBefore)
-      ),
-      row.workerScope == null
-        ? isNull(agentSessions.workerScope)
-        : eq(agentSessions.workerScope, row.workerScope)
+      incarnationCas
     );
     // A completion EVENT can outlive a lost terminal column write: if the DB
     // drops the connection mid-finalize, emitStatus's event insert can land
@@ -5105,11 +5140,14 @@ export async function countInFlightWorkers(): Promise<number> {
     .where(
       and(
         inArray(agentSessions.runtime, ["worker", "server"]),
-        isNotNull(agentSessions.workerScope),
-        gt(agentSessions.heartbeatAt, new Date(Date.now() - HEARTBEAT_STALE_MS))
+        isNotNull(agentSessions.workerScope)
       )
     );
-  return rows.filter((r) => !isServerRuntimeRun(r)).length;
+  let count = 0;
+  for (const row of rows) {
+    if (!isServerRuntimeRun(row) && (await resolveLiveness(row.id)).verdict === "alive") count++;
+  }
+  return count;
 }
 
 const pendingParent = alias(agentSessions, "pending_parent");
@@ -5140,7 +5178,7 @@ export async function listPendingRunIds(): Promise<number[]> {
       runtime: agentSessions.runtime,
       toolsProfile: agentSessions.toolsProfile,
       parentWorkerScope: pendingParent.workerScope,
-      parentHeartbeatAt: pendingParent.heartbeatAt,
+      parentId: pendingParent.id,
     })
     .from(agentSessions)
     .leftJoin(pendingParent, eq(agentSessions.parentRunId, pendingParent.id))
@@ -5163,7 +5201,7 @@ export async function listPendingRunIds(): Promise<number[]> {
   const rest: number[] = [];
   for (const r of rows) {
     if (isServerRuntimeRun(r)) continue;
-    const parentLive = isWorkerLive({ workerScope: r.parentWorkerScope, heartbeatAt: r.parentHeartbeatAt });
+    const parentLive = r.parentId != null && (await resolveLiveness(r.parentId)).verdict === "alive";
     (parentLive ? liveParentChildren : rest).push(r.id);
   }
   return [...liveParentChildren, ...rest];

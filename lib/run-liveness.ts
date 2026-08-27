@@ -13,7 +13,65 @@
 // must not import runs.ts (the injected-RunsApi split avoids a boot cycle), and
 // both import from here — so this module owes them a dependency-free surface.
 
+import { eq } from "drizzle-orm";
+import { db } from "@/db";
+import { agentSessions, runnerInstances } from "@/db/schema";
+import { createRunnerProvider, getRunnerProvider, type RunnerObservation } from "./runner/provider";
 import { LEASE_STATUSES, type SessionStatus } from "./run-state";
+
+/** The provider-authoritative answer to "does this run still have its worker?" */
+export type Liveness =
+  | { verdict: "alive"; incarnation: string }
+  | { verdict: "dead"; reason: "exited" | "replaced" | "runner-gone"; detail?: string }
+  | { verdict: "unowned" }
+  | { verdict: "unknown" };
+
+/**
+ * Observe a run's worker without using a clock.  In particular, a process that
+ * is alive but has released its worker_scope is deliberately `unowned`: it is
+ * reusable, but it is not currently entitled to consume this run's input.
+ */
+export async function resolveLiveness(runId: number): Promise<Liveness> {
+  const [row] = await db
+    .select({
+      workerScope: agentSessions.workerScope,
+      provider: runnerInstances.provider,
+      spriteName: runnerInstances.spriteName,
+      workerIncarnation: runnerInstances.workerIncarnation,
+    })
+    .from(agentSessions)
+    .leftJoin(runnerInstances, eq(runnerInstances.runId, agentSessions.id))
+    .where(eq(agentSessions.id, runId));
+
+  // A left join gives null runner fields.  Do not inspect an unclaimed run: a
+  // reusable runner may still be alive, but the claim is what gives it work.
+  if (!row?.workerScope || !row.provider || !row.workerIncarnation) return { verdict: "unowned" };
+  const handle = row.spriteName ?? row.workerScope;
+  if (!handle) return { verdict: "unowned" };
+
+  // Prefer the process-wide provider (memoised, and injectable in tests); only
+  // build a one-off when the instance was created under a different provider.
+  let observed: RunnerObservation;
+  try {
+    const active = getRunnerProvider();
+    const provider = active.kind === row.provider ? active : createRunnerProvider(row.provider as "local" | "sprites");
+    observed = await provider.inspect(handle);
+  } catch (err) {
+    // No provider (missing credentials in this process) is "cannot observe", never "dead".
+    console.warn(`[liveness] cannot observe run ${runId}: ${err instanceof Error ? err.message : String(err)}`);
+    return { verdict: "unknown" };
+  }
+  if (observed.status === "unknown") return { verdict: "unknown" };
+  if (observed.status === "dead") {
+    const detail = observed.detail;
+    const runnerGone = /box\s+is\s+gone|sprite.*gone|not found|404|does not exist/i.test(detail ?? "");
+    return { verdict: "dead", reason: runnerGone ? "runner-gone" : "exited", ...(detail ? { detail } : {}) };
+  }
+  if (observed.incarnation !== row.workerIncarnation) {
+    return { verdict: "dead", reason: "replaced", detail: `stored=${row.workerIncarnation}, observed=${observed.incarnation}` };
+  }
+  return { verdict: "alive", incarnation: observed.incarnation };
+}
 
 /** How often a live turn bumps its heartbeat. */
 export const HEARTBEAT_INTERVAL_MS = 20_000;

@@ -22,6 +22,8 @@ export interface LifecycleInput {
   workerScope?: string | null;
   /** agent_sessions.heartbeat_at for this run. */
   heartbeatAt?: Date | null;
+  /** Provider observation supplied by async callers. Unknown is protected. */
+  workerLive?: boolean;
   /** runner_instances.wake_requested_at: stamped just before the Fly start/create
    *  call that wakes this runner, cleared by the worker's first heartbeat. A
    *  fresh intent (younger than TASK_ORCH_RUNNER_WAKE_GRACE_MS) is treated
@@ -43,12 +45,6 @@ function intEnv(key: string, dflt: number): number {
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : dflt;
 }
-
-// The worker-claim liveness predicate + the single HEARTBEAT_STALE_MS live in
-// lib/run-liveness now (R8). Re-exported under the historical name so fly.ts's
-// pre-action re-check (`isWorkerClaimLive(row)`) keeps working; run-liveness is
-// a leaf module, so importing it does not break lifecycle's dependency-lightness.
-export { isWorkerLive as isWorkerClaimLive };
 
 /**
  * True while a recorded wake intent is still within its grace window
@@ -138,7 +134,7 @@ export function nextLifecycleAction(i: LifecycleInput): LifecycleAction {
   // strips its claim. Only once the worker itself releases the claim (a
   // parked chat worker winds down after its own idle timeout; an executor
   // finishes its turn) does the machine become eligible for suspend/stop.
-  if (isWorkerLive(i)) return { kind: "none" };
+  if (i.workerLive ?? isWorkerLive(i)) return { kind: "none" };
 
   // A fresh wake intent is a claim-in-the-making: the resume path just told Fly
   // to start this machine so a worker can boot and take the run over, but the
@@ -201,7 +197,7 @@ export function nextSpritesLifecycleAction(i: LifecycleInput): SpritesLifecycleA
   const state = i.runnerState;
   if (state === "gone" || state === "creating" || state === "starting") return { kind: "none" };
 
-  if (isWorkerLive(i)) return { kind: "none" };
+  if (i.workerLive ?? isWorkerLive(i)) return { kind: "none" };
 
   if (isTerminalStatus(i.runStatus as SessionStatus) && !isConversationalTerminal(i)) {
     const terminalWindowMs = intEnv("TASK_ORCH_RUNNER_TERMINAL_MS", DAY_MS);

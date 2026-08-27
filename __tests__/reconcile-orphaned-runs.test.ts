@@ -6,13 +6,14 @@
 // boot using the heartbeat lease: stale heartbeat => orphaned => demote.
 // A run live in ANOTHER process keeps its heartbeat fresh and must be spared.
 
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
 import { agentSessions, agentEvents } from "../db/schema";
 import { create, get, reconcileOrphanedRuns } from "../lib/runs";
 import * as dispatch from "../lib/run-dispatch";
 import * as repo from "../lib/repo";
+import { installFakeRunnerProvider, setFakeRunLiveness } from "./helpers/fake-runner-provider";
 
 const STALE = new Date(Date.now() - 10 * 60_000); // 10 min ago
 const FRESH = new Date(Date.now() - 5_000); // 5 s ago
@@ -24,6 +25,7 @@ async function setRun(id: number, status: string, heartbeatAt: Date | null) {
 }
 
 describe("reconcileOrphanedRuns", () => {
+  beforeEach(() => installFakeRunnerProvider());
   it("demotes a stale-heartbeat running chat run to idle", async () => {
     const run = await create({ goal: "<chat>", defer: true });
     await setRun(run.id, "running", STALE);
@@ -53,13 +55,39 @@ describe("reconcileOrphanedRuns", () => {
     expect((await get(run.id))?.status).toBe("idle");
   });
 
-  it("spares an active run whose heartbeat is fresh (live in another process)", async () => {
+  it("spares an active run observed alive in another process", async () => {
     const run = await create({ goal: "<chat>", defer: true });
     await setRun(run.id, "running", FRESH);
+    await setFakeRunLiveness(run.id, { status: "alive", incarnation: "fake-incarnation" });
 
     await reconcileOrphanedRuns();
 
     expect((await get(run.id))?.status).toBe("running");
+  });
+
+  it("never reaps an active run when provider observation is unknown", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    await setRun(run.id, "running", STALE);
+    await setFakeRunLiveness(run.id, { status: "unknown" });
+
+    await reconcileOrphanedRuns();
+
+    expect((await get(run.id))?.status).toBe("running");
+  });
+
+  it("re-dispatches immediately when the observed incarnation was replaced", async () => {
+    process.env.TASK_ORCH_DETACHED_RUNS = "1";
+    const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
+    try {
+      const run = await create({ goal: "<execute>", planId: (await repo.createPlan({ title: "replacement", date: "2026-08-27" })).id, defer: true });
+      await setRun(run.id, "running", STALE);
+      await setFakeRunLiveness(run.id, { status: "alive", incarnation: "replacement" }, "old");
+      await reconcileOrphanedRuns();
+      expect(spy).toHaveBeenCalledWith(run.id);
+    } finally {
+      delete process.env.TASK_ORCH_DETACHED_RUNS;
+      vi.restoreAllMocks();
+    }
   });
 
   it("ignores runs already in a terminal/idle status", async () => {

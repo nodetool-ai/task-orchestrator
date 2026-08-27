@@ -6,6 +6,7 @@
 // status with a fresh heartbeat) and rejected the worker's OWN turn as "already
 // in flight" — wedging every dispatched run in 'preparing' with no output.
 // The `takeover` flag lets the claiming worker adopt its own preparing claim.
+import { installFakeRunnerProvider, setFakeRunLiveness } from "./helpers/fake-runner-provider";
 import { describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
@@ -29,6 +30,9 @@ async function claim(id: number) {
   await db.update(agentSessions)
     .set({ status: "preparing", heartbeatAt: new Date() })
     .where(eq(agentSessions.id, id));
+  // The claiming worker is observably alive (provider verdict, not a clock).
+  installFakeRunnerProvider();
+  await setFakeRunLiveness(id, { status: "alive", incarnation: "w1" }, "w1");
 }
 
 describe("dispatched-worker takeover of its own preparing claim", () => {

@@ -7,6 +7,7 @@
 // trip that early break and starve the child until TASK_ORCH_MAX_DEFER_MS fails
 // it, even though dispatchRun would have admitted it every time. See
 // docs/nested-machine-dispatch.md, Decision 2, "Starvation fix (required)".
+import { installFakeRunnerProvider, setFakeRunLiveness } from "./helpers/fake-runner-provider";
 import { describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
@@ -27,6 +28,13 @@ async function markLiveClaim(runId: number, ageMs = 0): Promise<void> {
       heartbeatAt: new Date(Date.now() - ageMs),
     })
     .where(eq(agentSessions.id, runId));
+  installFakeRunnerProvider();
+  // The old 5-minute heartbeat window is gone: age past it now means the
+  // provider observes the parent's worker as dead.
+  const observation = ageMs >= 5 * 60_000
+    ? { status: "dead" as const, detail: "exited" }
+    : { status: "alive" as const, incarnation: `p-${runId}` };
+  await setFakeRunLiveness(runId, observation, `p-${runId}`);
 }
 
 // The schema is shared across `it` blocks in this file (vitest.setup.ts isolates
@@ -70,7 +78,7 @@ describe("listPendingRunIds ordering", () => {
     const root = await create({ goal: "<implement>", defer: true });
     await markPending(root.id);
     const parent = await create({ goal: "<implement>", defer: true });
-    await markLiveClaim(parent.id, 6 * 60_000); // past the 5-minute HEARTBEAT_STALE_MS window
+    await markLiveClaim(parent.id, 6 * 60_000); // observed dead by the provider
     const child = await create({ goal: "<implement>", defer: true, parentRunId: parent.id });
     await markPending(child.id);
 

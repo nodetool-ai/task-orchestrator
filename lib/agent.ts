@@ -17,7 +17,7 @@ import { autoLaunchEligibleTasks, autoLaunchEnabled, autoLaunchIntervalMs } from
 import { syncPrBackedTasks } from "./pr-task-state";
 import * as repo from "./repo";
 import { insideWorker } from "./runner/provider";
-import { HEARTBEAT_STALE_MS } from "./run-liveness";
+import { resolveLiveness } from "./run-liveness";
 import * as runs from "./runs";
 import {
   isTerminalStatus,
@@ -165,14 +165,17 @@ async function reapOrphans() {
     // --force` the worktree the live agent is editing, destroying its work.
     // Mirror runs.reconcileOrphanedRuns(), which uses the same lease guard.
     if (runs.isLive(orphan.id)) continue;
-    if (runs.isLeaseLive(orphan)) continue;
+    const liveness = await resolveLiveness(orphan.id);
+    if (liveness.verdict === "alive" || liveness.verdict === "unknown") {
+      if (liveness.verdict === "unknown") console.warn(`[liveness] leaving boot orphan ${orphan.id} alone: provider observation unknown`);
+      continue;
+    }
     const now = new Date();
     // CAS guard: only fail the row if it's STILL in the snapshot status with no
     // fresh heartbeat. The isLeaseLive check above is a stale snapshot — a
     // dispatch that claimed this row (status→preparing, fresh heartbeat) between
     // our SELECT and here must not be clobbered to `failed`, nor have its
     // worktree removed underneath the live turn.
-    const staleThreshold = new Date(now.getTime() - HEARTBEAT_STALE_MS);
     let reaped = false;
     // One transaction for the status column write and its paired event: the same
     // both-or-neither guarantee the runs.ts finalize path now gives — a lost
@@ -188,10 +191,9 @@ async function reapOrphans() {
           and(
             eq(agentSessions.id, orphan.id),
             eq(agentSessions.status, orphan.status),
-            or(
-              isNull(agentSessions.heartbeatAt),
-              lt(agentSessions.heartbeatAt, staleThreshold)
-            )
+            orphan.workerScope == null
+              ? isNull(agentSessions.workerScope)
+              : eq(agentSessions.workerScope, orphan.workerScope)
           )
         );
       // drizzle/postgres exposes affected-row count as `rowCount`/`count`.

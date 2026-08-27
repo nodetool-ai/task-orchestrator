@@ -3,14 +3,17 @@
 // R8: the single liveness module. Proves the extracted predicates give the SAME
 // verdicts as the three ad-hoc copies they replaced, and that the shared reaper
 // policy decides re-dispatch / idle / failed the way both reapers used to.
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   HEARTBEAT_STALE_MS,
   decideDeadRunPolicy,
   isLeaseLive,
   isResumableDeadRun,
   isWorkerLive,
+  resolveLiveness,
 } from "../lib/run-liveness";
+import { create } from "../lib/runs";
+import { installFakeRunnerProvider, setFakeRunLiveness } from "./helpers/fake-runner-provider";
 
 const NOW = 1_000_000_000_000;
 const fresh = new Date(NOW - 5_000);
@@ -42,6 +45,24 @@ describe("isLeaseLive equivalence", () => {
   });
   it("idle holds no lease even with a fresh heartbeat", () => {
     expect(isLeaseLive({ status: "idle", heartbeatAt: fresh }, NOW)).toBe(false);
+  });
+});
+
+describe("resolveLiveness", () => {
+  beforeEach(() => installFakeRunnerProvider());
+
+  it("distinguishes alive, replaced, unknown, and unowned without clocks", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    expect(await resolveLiveness(run.id)).toEqual({ verdict: "unowned" });
+
+    await setFakeRunLiveness(run.id, { status: "alive", incarnation: "same" }, "same");
+    expect(await resolveLiveness(run.id)).toEqual({ verdict: "alive", incarnation: "same" });
+
+    await setFakeRunLiveness(run.id, { status: "alive", incarnation: "new" }, "same");
+    expect(await resolveLiveness(run.id)).toMatchObject({ verdict: "dead", reason: "replaced" });
+
+    await setFakeRunLiveness(run.id, { status: "unknown" }, "same");
+    expect(await resolveLiveness(run.id)).toEqual({ verdict: "unknown" });
   });
 });
 

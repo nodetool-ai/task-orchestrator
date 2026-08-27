@@ -32,7 +32,7 @@ import { desc, eq, isNotNull, max } from "drizzle-orm";
 import { db } from "@/db";
 import { agentMessages, agentSessions, repositories } from "@/db/schema";
 import { describe } from "@/lib/utils";
-import { isLeaseLive, isWorkerLive } from "./run-liveness";
+import { resolveLiveness } from "./run-liveness";
 
 const DEFAULT_GC_DAYS = 7;
 const HOUR_MS = 60 * 60 * 1000;
@@ -450,6 +450,7 @@ async function defaultSharedWorktreeBusy(
 
   const rows = await db
     .select({
+      id: agentSessions.id,
       status: agentSessions.status,
       startedAt: agentSessions.startedAt,
       heartbeatAt: agentSessions.heartbeatAt,
@@ -464,10 +465,14 @@ async function defaultSharedWorktreeBusy(
   const nowMs = now.getTime();
 
   for (const r of rows) {
-    if (IN_FLIGHT_STATUSES.has(r.status)) return true;
-    const heartbeatAt = coerceDate(r.heartbeatAt);
-    const liveRow = { status: r.status, heartbeatAt, workerScope: r.workerScope };
-    if (isLeaseLive(liveRow, nowMs) || isWorkerLive(liveRow, nowMs)) return true;
+    if (r.workerScope) {
+      const liveness = await resolveLiveness(r.id);
+      // Unknown is never permission to remove a checkout a worker may own.
+      if (liveness.verdict === "alive" || liveness.verdict === "unknown") return true;
+    } else if (IN_FLIGHT_STATUSES.has(r.status)) {
+      // An in-process/server drive has no provider handle to inspect.
+      return true;
+    }
     const last = coerceDate(r.lastMessageAt) ?? coerceDate(r.startedAt);
     if (last && nowMs - last.getTime() < windowMs) return true;
   }

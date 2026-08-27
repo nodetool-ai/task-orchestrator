@@ -14,11 +14,13 @@ import { _reapOrphansForTest, startSession } from "../lib/agent";
 import { create, get } from "../lib/runs";
 import * as runs from "../lib/runs";
 import * as repo from "../lib/repo";
+import { installFakeRunnerProvider, setFakeRunLiveness } from "./helpers/fake-runner-provider";
 
 const YOUNG = new Date(Date.now() - 5 * 60_000); // 5 minutes ago
 const OLD = new Date(Date.now() - 20 * 60_000); // 20 minutes ago (beyond 15 min grace)
 
 beforeEach(async () => {
+  installFakeRunnerProvider();
   // Clear agent sessions, tasks, and plans before each test
   await db.delete(agentSessions);
   await db.delete(tasks);
@@ -106,7 +108,7 @@ describe("reapOrphans (orphan reaper in lib/agent.ts)", () => {
     expect(after?.error).toMatch(/[Oo]rphaned/);
   });
 
-  it("spares a fresh-heartbeat preparing run (live in another process)", async () => {
+  it("spares a preparing run observed alive in another process", async () => {
     // A preparing run with a fresh heartbeat is mid-turn in another process.
     // The reaper must never touch it.
     const taskId = await createTestTask();
@@ -120,6 +122,7 @@ describe("reapOrphans (orphan reaper in lib/agent.ts)", () => {
       .update(agentSessions)
       .set({ status: "preparing", startedAt: YOUNG, heartbeatAt: FRESH })
       .where(eq(agentSessions.id, run.id));
+    await setFakeRunLiveness(run.id, { status: "alive", incarnation: "fake-incarnation" });
 
     await _reapOrphansForTest();
 
