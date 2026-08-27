@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db";
 import { agentSessions, runnerInstances } from "../db/schema";
 import { create } from "../lib/runs";
-import { maybeCloseSpritesChannel, getConnection } from "../lib/worker-channel/registry";
+import { connectRun, maybeCloseSpritesChannel, getConnection } from "../lib/worker-channel/registry";
 import { ControllerConnection } from "../lib/worker-channel/connection";
 import { eq } from "drizzle-orm";
 
@@ -143,5 +143,39 @@ describe("sprites channel close at turn end", () => {
     expect(close).toHaveBeenCalledTimes(1);
 
     registry.supervisors.delete(run.id);
+  });
+});
+
+describe("connectRun after the sprites idle close (run 187)", () => {
+  it("does not reuse a shut-down connection object", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    const instanceId = "wi_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      provider: "sprites",
+      spriteName: "to-run-187",
+      state: "running",
+      channelInstanceId: instanceId,
+      channelEndpoint: "sprite://to-run-187:8787/worker/channel",
+    });
+    const REGISTRY = Symbol.for("task-orchestrator.worker-channel.registry");
+    const registry = ((globalThis as unknown as Record<symbol, unknown>)[REGISTRY] ??= {
+      supervisors: new Map(),
+      blobs: new Map(),
+      controllerId: "test_187",
+    }) as { supervisors: Map<number, unknown> };
+    const dead = { connected: false, shutDown: true, connect: async () => { throw new Error("controller connection is shut down"); } };
+    registry.supervisors.set(run.id, { runId: run.id, instanceId, connection: dead, stopped: true });
+
+    let message = "";
+    try {
+      await connectRun(run.id);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    // A fresh dial fails for a real reason (no SPRITES_TOKEN / no worker), never
+    // because the stood-down object was reused.
+    expect(message).not.toMatch(/shut down/);
+    expect(registry.supervisors.get(run.id)).not.toBe(dead);
   });
 });

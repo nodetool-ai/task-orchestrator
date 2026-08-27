@@ -95,7 +95,16 @@ export async function connectRun(
     "runId" | "instanceId" | "endpoint" | "controllerId" | "onClose" | "onTerminal"
   > = {},
 ): Promise<ControllerConnection> {
-  const existing = registry().supervisors.get(runId);
+  let existing = registry().supervisors.get(runId);
+  if (existing?.connection.shutDown) {
+    // A stood-down connection (the sprites idle close after every turn calls
+    // disconnect(false) but keeps the supervisor registered) can never dial
+    // again: connect() throws "controller connection is shut down". Drop it and
+    // build a fresh connection below; the blob coordinator is kept (run 187).
+    if (existing.reconnectTimer) clearTimeout(existing.reconnectTimer);
+    registry().supervisors.delete(runId);
+    existing = undefined;
+  }
   if (existing) {
     existing.stopped = false;
     // Cancel any pending reconnect backoff and clear the grace so this connect and

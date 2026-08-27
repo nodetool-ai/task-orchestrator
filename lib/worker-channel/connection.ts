@@ -193,6 +193,8 @@ export class ControllerConnection {
   }
 
   get connected(): boolean { return this.socket?.readyState === WebSocket.OPEN; }
+  /** True once disconnect()/abandon()/neutralize() ran: connect() refuses forever. */
+  get shutDown(): boolean { return this.stopped; }
   get controllerEpoch(): number { return this.epoch; }
 
   async connect(): Promise<void> {
