@@ -30,7 +30,7 @@ async function makeActiveChild(parentRunId: number) {
   const child = await create({ goal: "adhoc-worker", cwdStrategy: "none", parentRunId, defer: true });
   await db
     .update(agentSessions)
-    .set({ status: "running", heartbeatAt: new Date() })
+    .set({ status: "running"})
     .where(eq(agentSessions.id, child.id));
   return child.id;
 }

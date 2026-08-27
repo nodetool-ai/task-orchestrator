@@ -17,7 +17,6 @@ import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { agentSessions, runnerInstances } from "@/db/schema";
 import { createRunnerProvider, getRunnerProvider, type RunnerObservation } from "./runner/provider";
-import { LEASE_STATUSES, type SessionStatus } from "./run-state";
 
 /** The provider-authoritative answer to "does this run still have its worker?" */
 export type Liveness =
@@ -71,54 +70,6 @@ export async function resolveLiveness(runId: number): Promise<Liveness> {
     return { verdict: "dead", reason: "replaced", detail: `stored=${row.workerIncarnation}, observed=${observed.incarnation}` };
   }
   return { verdict: "alive", incarnation: observed.incarnation };
-}
-
-/** How often a live turn bumps its heartbeat. */
-export const HEARTBEAT_INTERVAL_MS = 20_000;
-
-/**
- * Age past which an active-status run is considered orphaned. Must comfortably
- * exceed HEARTBEAT_INTERVAL_MS and any plausible pause between bumps (the
- * interval keeps ticking even while a slow model/tool call is awaited, so this
- * only needs slack for scheduling jitter / GC pauses). This is the ONE stale
- * window — the former WORKER_CLAIM_STALE_MS copies in run-dispatch.ts and
- * runner/lifecycle.ts were this same value and now import it from here.
- */
-export const HEARTBEAT_STALE_MS = 5 * 60_000;
-
-/** True when this run holds a live lease: an active (turn-in-flight) status
- *  with a heartbeat fresher than the stale window. Unlike isWorkerLive this is
- *  false the moment the run leaves a lease status (e.g. a chat parked at
- *  'idle'), even while a worker still owns it. */
-export function isLeaseLive(
-  run: { status: string; heartbeatAt: Date | null },
-  now = Date.now()
-): boolean {
-  if (!LEASE_STATUSES.includes(run.status as SessionStatus)) return false;
-  return run.heartbeatAt != null && now - run.heartbeatAt.getTime() < HEARTBEAT_STALE_MS;
-}
-
-/**
- * True when a worker container owns this run and is still alive — a worker_scope
- * set plus a fresh heartbeat — REGARDLESS of status. Unlike isLeaseLive this
- * stays true for a long-lived chat worker parked at 'idle' between turns (idle
- * is not a lease status) and for a plan-executor mid-turn at 'running'. The
- * server uses it to choose notify-only (a live worker will pick up the input)
- * vs dispatching a fresh worker; the sweep re-checks it immediately before a
- * suspend/stop (the decision snapshot can go stale before the action executes).
- *
- * This is the single definition that replaced runs.ts's isWorkerLive,
- * run-dispatch's hasLiveWorkerClaim, and lifecycle's isWorkerClaimLive.
- */
-export function isWorkerLive(
-  run: { workerScope?: string | null; heartbeatAt?: Date | null },
-  now = Date.now()
-): boolean {
-  return (
-    run.workerScope != null &&
-    run.heartbeatAt != null &&
-    now - run.heartbeatAt.getTime() < HEARTBEAT_STALE_MS
-  );
 }
 
 /**

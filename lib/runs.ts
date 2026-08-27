@@ -71,10 +71,6 @@ import {
 } from "./run-state";
 import { config, runnerProviderKind, type RunnerProviderKind } from "./config";
 import {
-  HEARTBEAT_INTERVAL_MS,
-  HEARTBEAT_STALE_MS,
-  isLeaseLive,
-  isWorkerLive,
   resolveLiveness,
   isResumableDeadRun,
   decideDeadRunPolicy,
@@ -145,7 +141,6 @@ import { contentText, runTransport } from "./worker";
 // failed instead of no-oping behind the terminal guard.
 runDispatch.__setRunsApi({
   get,
-  isLeaseLive,
   failRun: recordDispatchFailure,
   failPendingRun,
   countInFlightWorkers,
@@ -288,12 +283,12 @@ export interface RunRow {
   planningStage: string | null;
   startedAt: Date;
   completedAt: Date | null;
-  /** Liveness lease; bumped while a turn runs. Null/stale in an active status = orphan. */
-  heartbeatAt: Date | null;
-  /** Detached worker (0020): the transient systemd-run scope owning this run, or null. */
+  /** Start of the current pending episode (bounds the dispatch pump's max defer). */
+  pendingSince: Date | null;
+  /** When the current worker claim was taken. Bookkeeping, not liveness. */
+  claimedAt: Date | null;
+  /** The worker scope/container that owns this run, or null. */
   workerScope: string | null;
-  /** Detached worker (0020): pid of the child worker process, or null. */
-  workerPid: number | null;
   /** Detached worker (0020): 1 = cross-process cancel requested; the worker aborts at the next poll. */
   cancelRequested: number | null;
   /** Event system (§4.3): rework generation; bumped when a terminal-but-resumable run starts a new turn. */
@@ -1077,7 +1072,7 @@ export async function deferRunForServerDispatch(
     .from(runnerInstances).where(eq(runnerInstances.runId, runId));
   if (!before || (await resolveLiveness(runId)).verdict === "alive") return false;
   const parked = await db.update(agentSessions)
-    .set({ status: "pending", heartbeatAt: new Date(), workerScope: null, workerPid: null })
+    .set({ status: "pending", pendingSince: new Date(), workerScope: null })
     .where(and(
       eq(agentSessions.id, runId),
       notInArray(agentSessions.status, HARD_TERMINAL_STATUSES),
@@ -1331,7 +1326,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // tool call is awaited, so a long-but-alive turn is never mistaken for an
     // orphan. It also polls the cross-process cancel flag so a detached worker
     // aborts when cancel() flips cancel_requested. Cleared in the finally below.
-    heartbeat = startHeartbeatWithCancel(input.runId, abort);
+    heartbeat = startCancelPoll(input.runId, abort);
 
     // First turn of a worktree run: create its branch + worktree. On later
     // turns this is a no-op and prepareCwd re-materializes a missing worktree
@@ -2021,7 +2016,7 @@ export async function followUp(
   registerRunner(runId, { abort, bus });
   // Keep the liveness lease fresh so this webhook-driven follow-up turn isn't
   // treated as an orphan by append()/reconcileOrphanedRuns() mid-turn.
-  const heartbeat = startHeartbeat(runId);
+  const heartbeat = startCancelPoll(runId);
 
   try {
     await persistMessage(runId, "system", [{ type: "text", text: prompt }]);
@@ -2797,7 +2792,7 @@ async function runReview(
   let worktreePath = "";
 
   try {
-    heartbeat = startHeartbeatWithCancel(runId, abort);
+    heartbeat = startCancelPoll(runId, abort);
     run = (await get(runId))!;
     const parsed = parsePrUrl(prUrl);
     if (!parsed) {
@@ -2963,7 +2958,7 @@ async function runExecute(
   let run!: RunRow;
 
   try {
-    heartbeat = startHeartbeatWithCancel(runId, abort);
+    heartbeat = startCancelPoll(runId, abort);
     run = (await get(runId))!;
     const transport = await runTransport();
     const plan = await transport.getPlan(planId);
@@ -3173,7 +3168,7 @@ export async function claimServerTurn(
   }
   const claimed = await db
     .update(agentSessions)
-    .set({ status: "preparing", workerScope: scope, heartbeatAt: new Date() })
+    .set({ status: "preparing", workerScope: scope, claimedAt: new Date() })
     .where(
       and(
         eq(agentSessions.id, runId),
@@ -3200,7 +3195,7 @@ export async function claimServerTurn(
 export async function releaseServerTurn(runId: number, scope: string): Promise<void> {
   await db
     .update(agentSessions)
-    .set({ workerScope: null, workerPid: null })
+    .set({ workerScope: null })
     .where(and(eq(agentSessions.id, runId), eq(agentSessions.workerScope, scope)));
 }
 
@@ -3287,7 +3282,7 @@ export async function ensureWorkerConnected(runId: number): Promise<void> {
   const run = await get(runId);
   if (run?.workerScope && liveness.verdict !== "unknown") {
     await db.update(agentSessions)
-      .set({ workerScope: null, workerPid: null })
+      .set({ workerScope: null })
       .where(and(
         eq(agentSessions.id, runId),
         eq(agentSessions.workerScope, run.workerScope),
@@ -4658,30 +4653,17 @@ async function setStatus(runId: number, status: SessionStatus) {
 }
 
 // ──────────────────────────────────────────────────────────
-// Liveness lease (heartbeat) + orphan recovery
+// Cross-process cancel poll + orphan recovery
 // ──────────────────────────────────────────────────────────
 
-// LEASE_STATUSES ("a turn is in flight") moved to lib/types.ts — it is shared
-// with the worker transport's claim-release guard and must not fork.
-//
-// HEARTBEAT_INTERVAL_MS / HEARTBEAT_STALE_MS and the isLeaseLive / isWorkerLive
-// predicates now live in lib/run-liveness (R8, the single liveness module) and
-// are imported at the top of this file. They are re-exported below so the
-// existing `runs.isLeaseLive` / `runs.HEARTBEAT_STALE_MS` call sites still work.
+// LEASE_STATUSES ("a turn is in flight") lives in lib/types.ts — it is shared
+// with the worker transport's claim-release guard and must not fork. Liveness
+// itself is the provider verdict (lib/run-liveness.resolveLiveness); nothing
+// here writes a clock.
 
-/** Bump a run's heartbeat to now (and learn the cancel verdict — discarded
- *  here). Best-effort; a missed bump just risks a reap. */
-async function touchHeartbeat(runId: number): Promise<void> {
-  await (await runTransport()).heartbeat(runId);
-}
+/** How often a worker asks whether a cross-process cancel was requested. */
+const CANCEL_POLL_INTERVAL_MS = 20_000;
 
-/**
- * Open the liveness lease and keep it fresh for the whole active period of a
- * turn/worker (prepare → turn → push/PR). Returns the interval handle; the
- * caller MUST clear it (in a finally) when the active period ends. The interval
- * keeps ticking even while a slow model/tool call is awaited, so a long-but-live
- * turn is never mistaken for an orphan by isLeaseLive()/reconcileOrphanedRuns().
- */
 function isProtocolMismatchError(err: unknown): boolean {
   // Keep runs.ts independent of the worker-side HTTP implementation (and its
   // class identity across bundles): the protocol error deliberately has a
@@ -4689,43 +4671,32 @@ function isProtocolMismatchError(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { name?: unknown }).name === "ProtocolMismatchError";
 }
 
-function surfaceHeartbeatFatal(err: unknown): void {
-  // Interval callbacks have no awaiting caller. Escalate terminal heartbeat
-  // failures to the process safety net so a detached worker exits nonzero and
-  // the reaper can replace its now-incompatible image.
+function surfacePollFatal(err: unknown): void {
+  // Interval callbacks have no awaiting caller. Escalate terminal poll failures
+  // to the process safety net so a detached worker exits nonzero and the reaper
+  // can replace its now-incompatible image.
   queueMicrotask(() => {
     throw err;
   });
 }
 
-function handleHeartbeatFailure(
+function handlePollFailure(
   err: unknown,
   abort?: AbortController,
-  onFatal: (err: unknown) => void = surfaceHeartbeatFatal
+  onFatal: (err: unknown) => void = surfacePollFatal
 ): void {
-  // Ordinary missed beats are tolerated: the lease has minutes of slack.
+  // Ordinary missed polls are tolerated; a wire-protocol mismatch is terminal.
   if (!isProtocolMismatchError(err)) return;
   if (abort && !abort.signal.aborted) abort.abort(err);
   onFatal(err);
 }
 
-function startHeartbeat(
-  runId: number,
-  onFatal: (err: unknown) => void = surfaceHeartbeatFatal
-): ReturnType<typeof setInterval> {
-  // The beat is async I/O (DB or HTTP); ordinary rejections are best-effort,
-  // but a wire-protocol mismatch is terminal for this worker image.
-  const beat = () => void touchHeartbeat(runId).catch((err) => handleHeartbeatFailure(err, undefined, onFatal));
-  beat();
-  return setInterval(beat, HEARTBEAT_INTERVAL_MS);
-}
-
 /**
  * Fresh read of the cross-process cancel flag. cancel() sets `cancel_requested`
  * on the row; a detached worker (which can't see the web process's
- * AbortController) learns it via the heartbeat answer (or the /control SSE
- * push in HTTP mode) and aborts its own turn. Kept as a direct read for the
- * server-side callers and tests that inspect the flag.
+ * AbortController) learns it via the poll (or the /control SSE push in HTTP
+ * mode) and aborts its own turn. Kept as a direct read for the server-side
+ * callers and tests that inspect the flag.
  */
 export async function isCancelRequested(runId: number): Promise<boolean> {
   const row = (await db
@@ -4736,44 +4707,40 @@ export async function isCancelRequested(runId: number): Promise<boolean> {
 }
 
 /**
- * Like startHeartbeat, but the same beat that keeps the liveness lease fresh
- * also carries back the cross-process cancel verdict and aborts the turn when
- * it flips. Used by the workers a detached run process actually executes in
- * (append/runReview/runExecute) so a UI/`/stop` cancel — which only writes the
- * flag on the server — still stops the turn within one heartbeat interval.
- * Callers thread their turn's AbortController through `abort`.
+ * Poll the cross-process cancel verdict for the active period of a turn and
+ * abort it when the flag flips. Used by the workers a detached run process
+ * executes in (append/runReview/runExecute) so a UI/`/stop` cancel — which only
+ * writes the flag on the server — still stops the turn within one poll
+ * interval. Without `abort` the poll only serves protocol-mismatch detection.
+ * Returns the interval handle; the caller MUST clear it (in a finally).
  */
-function startHeartbeatWithCancel(
+function startCancelPoll(
   runId: number,
-  abort: AbortController,
-  onFatal: (err: unknown) => void = surfaceHeartbeatFatal
+  abort?: AbortController,
+  onFatal: (err: unknown) => void = surfacePollFatal
 ): ReturnType<typeof setInterval> {
   // The interval body is async I/O; wrap it so a transient blip can't surface
   // as an unhandled rejection (which, with no global handler, can crash the
-  // worker under Node's default). Mirrors the guard on startHeartbeat above.
-  const beat = () => {
+  // worker under Node's default).
+  const poll = () => {
     void (async () => {
       const transport = await runTransport();
-      const { cancelRequested } = await transport.heartbeat(runId);
-      if (cancelRequested && !abort.signal.aborted) {
+      const { cancelRequested } = await transport.pollCancel(runId);
+      if (abort && cancelRequested && !abort.signal.aborted) {
         abort.abort();
         // Event system (§6.6): the abort IS the enforcement of the
         // run.cancel_requested control event — acknowledge its inbox row so
         // the next digest can show WHY the previous turn ended.
         void transport.ackCancel(runId).catch(() => {});
       }
-    })().catch((err) => handleHeartbeatFailure(err, abort, onFatal));
+    })().catch((err) => handlePollFailure(err, abort, onFatal));
   };
-  beat();
-  return setInterval(beat, HEARTBEAT_INTERVAL_MS);
+  poll();
+  return setInterval(poll, CANCEL_POLL_INTERVAL_MS);
 }
 
-/** Narrow heartbeat test seam; production callers use the defaults above. */
-export const __heartbeatTest = { startHeartbeat, startHeartbeatWithCancel };
-
-// isLeaseLive / isWorkerLive re-exported from lib/run-liveness (imported above)
-// so `runs.isLeaseLive(...)` (lib/agent.ts) and the injected RunsApi keep working.
-export { isLeaseLive, isWorkerLive, HEARTBEAT_STALE_MS };
+/** Narrow test seam; production callers use the defaults above. */
+export const __cancelPollTest = { startCancelPoll };
 
 /**
  * Repair a run whose in-flight turn was aborted. If cancel()/interrupt()/close()
@@ -4941,7 +4908,7 @@ export async function reconcileOrphanedRuns(): Promise<number> {
     // worker's last beat as "still live"). If the CAS matches 0 rows the run was
     // re-claimed since our SELECT — leave it to its new owner without reaping.
     const claimed = await db.update(agentSessions)
-      .set({ workerScope: null, workerPid: null, heartbeatAt: null })
+      .set({ workerScope: null })
       .where(and(eq(agentSessions.id, row.id), stillOrphan))
       .returning({ id: agentSessions.id });
     if (claimed.length === 0) continue;
@@ -4963,18 +4930,19 @@ export async function reconcileOrphanedRuns(): Promise<number> {
         scopeKey: row.workerScope ?? "lease",
         resumable: false,
       });
-      // Say what we actually observed (a lost heartbeat), not a guessed cause —
-      // "process restart" sent incident debugging down the wrong path more than
-      // once. Include the forensics we have: heartbeat age, the worker scope
-      // (= machine/container name), and any PR the run delivered before dying.
-      const beatAge = row.heartbeatAt
-        ? `last heartbeat ${Math.max(0, Math.round((now - row.heartbeatAt.getTime()) / 60_000))} min ago`
-        : "no heartbeat recorded";
+      // Say what we actually observed (the provider's verdict), not a guessed
+      // cause — "process restart" sent incident debugging down the wrong path
+      // more than once. Include the forensics we have: the verdict and its
+      // detail, the worker scope (= container/sprite name), and any PR the run
+      // delivered before dying.
+      const observed = liveness.verdict === "dead"
+        ? `worker ${liveness.reason}${liveness.detail ? `: ${liveness.detail}` : ""}`
+        : "no worker claim";
       const delivered = row.prUrl ? ` Work delivered before the interruption: ${row.prUrl}` : "";
       await setError(
         row.id,
-        `Worker heartbeat lost — turn interrupted mid-flight (${beatAge}; scope ${row.workerScope ?? "none"}). ` +
-          `The worker process or its machine died or hung.${delivered}`
+        `Worker gone — turn interrupted mid-flight (${observed}; scope ${row.workerScope ?? "none"}). ` +
+          `The worker process or its runner died.${delivered}`
       );
     }
     reaped++;
@@ -5018,7 +4986,7 @@ export async function handleWorkerDeath(
   // 5-minute reaper.
   const released = await db
     .update(agentSessions)
-    .set({ workerScope: null, workerPid: null, heartbeatAt: null })
+    .set({ workerScope: null })
     .where(and(eq(agentSessions.id, runId), eq(agentSessions.workerScope, info.containerName)));
   if (released.count === 0) return; // lost the race — another handler owns it
 
@@ -5499,9 +5467,9 @@ export function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     planningStage: row.planningStage ?? null,
     startedAt: row.startedAt,
     completedAt: row.completedAt,
-    heartbeatAt: row.heartbeatAt ?? null,
+    pendingSince: row.pendingSince ?? null,
+    claimedAt: row.claimedAt ?? null,
     workerScope: row.workerScope ?? null,
-    workerPid: row.workerPid ?? null,
     cancelRequested: row.cancelRequested ?? null,
     attempt: row.attempt ?? 1,
     result: row.result ?? null,

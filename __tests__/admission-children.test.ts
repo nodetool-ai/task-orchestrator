@@ -5,6 +5,7 @@
 // Without this, every executor's children pile up in 'pending' while every
 // executor blocks forever waiting on them — a livelock that eventually
 // hard-fails the children on TASK_ORCH_MAX_DEFER_MS.
+import { installFakeRunnerProvider, setFakeRunLiveness } from "./helpers/fake-runner-provider";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
@@ -23,9 +24,14 @@ async function markLiveClaim(runId: number, ageMs = 0): Promise<void> {
     .set({
       status: "running",
       workerScope: `parent-${runId}-scope`,
-      heartbeatAt: new Date(Date.now() - ageMs),
     })
     .where(eq(agentSessions.id, runId));
+  installFakeRunnerProvider();
+  // Age past the old 5-minute window now means "observed dead by the provider".
+  const observation = ageMs >= 5 * 60_000
+    ? { status: "dead" as const, detail: "exited" }
+    : { status: "alive" as const, incarnation: `p-${runId}` };
+  await setFakeRunLiveness(runId, observation, `p-${runId}`);
 }
 
 describe("dispatchRun admission: parent-blocked-on-child deadlock breaker", () => {

@@ -5,19 +5,17 @@ import { runnerInstances } from "../db/schema";
 import { create } from "../lib/runs";
 
 describe("runner_instances", () => {
-  it("stores the machine/volume/region mapping for a run", async () => {
+  it("stores the sprite/region mapping for a run", async () => {
     const run = await create({ goal: "<implement>", defer: true });
     await db.insert(runnerInstances).values({
       runId: run.id,
       provider: "sprites",
-      flyApp: "app",
-      machineId: "m1",
-      volumeId: "v1",
+      spriteName: "to-run-1",
       region: "ams",
       state: "running",
     });
     const [row] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
-    expect(row).toMatchObject({ machineId: "m1", volumeId: "v1", region: "ams", state: "running" });
+    expect(row).toMatchObject({ spriteName: "to-run-1", region: "ams", state: "running" });
   });
 
   it("persists nullable credential and diagnostic metadata", async () => {

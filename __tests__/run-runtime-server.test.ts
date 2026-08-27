@@ -456,7 +456,7 @@ describe("wakeServerRun is single-owner and event-driven", () => {
   it("refuses to drive a turn while another process holds the run's claim", async () => {
     // The deterministic half of finding 2a: another process (a pipe user turn or
     // a sibling wake) already won the claim — worker_scope stamped, heartbeat
-    // fresh — but the row's STATUS is still 'idle', so isLeaseLive is false and
+    // fresh — but the row's STATUS is still 'idle', so there is no lease and
     // the pre-CAS gates all pass. Only consulting the claim keeps this wake from
     // driving a second concurrent postgres turn into the same agent_messages.
     const seen = stubBackend();
@@ -470,7 +470,7 @@ describe("wakeServerRun is single-owner and event-driven", () => {
     });
     await db
       .update(agentSessions)
-      .set({ workerScope: "server-someone-else", heartbeatAt: new Date() })
+      .set({ workerScope: "server-someone-else"})
       .where(eq(agentSessions.id, run.id));
 
     await wakeServerRun(run.id);
@@ -572,7 +572,7 @@ describe("a server-runtime append takes the same single-owner claim", () => {
     const run = await create(SERVER_CHAT);
     await db
       .update(agentSessions)
-      .set({ workerScope: "server-someone-else", heartbeatAt: new Date() })
+      .set({ workerScope: "server-someone-else"})
       .where(eq(agentSessions.id, run.id));
     // The other owner is observably alive (provider verdict, not a clock).
     installFakeRunnerProvider();
@@ -600,7 +600,7 @@ describe("a server-runtime append takes the same single-owner claim", () => {
     const run = await create(SERVER_CHAT);
     await db
       .update(agentSessions)
-      .set({ workerScope: "server-dead-process", heartbeatAt: new Date(Date.now() - 30 * 60_000) })
+      .set({ workerScope: "server-dead-process"})
       .where(eq(agentSessions.id, run.id));
 
     for await (const ev of append({ runId: run.id, role: "user", text: "hi" })) void ev;
@@ -667,7 +667,6 @@ describe("reconcile treats a dead server run as resumable, not failed", () => {
       .update(agentSessions)
       .set({
         status: "running",
-        heartbeatAt: new Date(Date.now() - 30 * 60_000),
         workerScope: null,
       })
       .where(eq(agentSessions.id, run.id));
@@ -690,7 +689,6 @@ describe("reconcile treats a dead server run as resumable, not failed", () => {
       .set({
         goal: "<implement>",
         status: "running",
-        heartbeatAt: new Date(Date.now() - 30 * 60_000),
         workerScope: null,
       })
       .where(eq(agentSessions.id, id));

@@ -28,7 +28,7 @@ function fakeBackend() {
 // Simulate dispatchRun's atomic claim: preparing + fresh heartbeat.
 async function claim(id: number) {
   await db.update(agentSessions)
-    .set({ status: "preparing", heartbeatAt: new Date() })
+    .set({ status: "preparing"})
     .where(eq(agentSessions.id, id));
   // The claiming worker is observably alive (provider verdict, not a clock).
   installFakeRunnerProvider();

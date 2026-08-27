@@ -28,6 +28,7 @@
 import { and, desc, eq } from "drizzle-orm";
 
 import { db } from "@/db";
+import { resolveLiveness } from "@/lib/run-liveness";
 import { agentEvents } from "@/db/schema";
 import { CODE_REVIEW_RECEPTION_GUIDANCE } from "./code-review-guidance";
 import * as repo from "./repo";
@@ -209,7 +210,7 @@ export async function maybeTriggerAutofix(
   //
   // followUp returns void, so it gives no post-hoc dispatch signal; the safe fix
   // is to re-read the run immediately before recording and mirror followUp's own
-  // gate (isLive / isLeaseLive / isWorkerLive + resumable-worktree shape). If it
+  // gate (isLive / resolveLiveness + resumable-worktree shape). If it
   // would no-op, consume no budget and do not arm escalation. Residual (tiny)
   // race: the run could still go live between this re-check and followUp's own
   // internal re-check a couple of awaits later, in which case the attempt is
@@ -219,8 +220,7 @@ export async function maybeTriggerAutofix(
   const willDispatch =
     !!fresh &&
     !runs.isLive(target.id) &&
-    !runs.isLeaseLive(fresh) &&
-    !runs.isWorkerLive(fresh) &&
+    (await resolveLiveness(target.id)).verdict !== "alive" &&
     fresh.cwdStrategy === "worktree" &&
     !!fresh.branch &&
     !!fresh.worktreePath;

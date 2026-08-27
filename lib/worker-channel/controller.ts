@@ -3,7 +3,6 @@ export {
   connectRun,
   disconnectRun,
   getConnection,
-  reapStaleChannels,
   reconnectActiveChannels,
   sendCommand,
   shutdownAll,

@@ -144,10 +144,10 @@ async function reapOrphans() {
       return false;
     }
     // pending rows are fresh dispatch-queue entries; only reap if genuinely
-    // stale. Measure from the last heartbeat (the pump re-defers long-lived runs
-    // into `pending` and restamps the heartbeat), falling back to startedAt.
+    // stale. Measure from pending_since (the pump re-defers long-lived runs into
+    // `pending` and stamps it), falling back to startedAt.
     if (row.status === "pending") {
-      const since = (row.heartbeatAt ?? row.startedAt).getTime();
+      const since = (row.pendingSince ?? row.startedAt).getTime();
       return now.getTime() - since > PENDING_GRACE_PERIOD_MS;
     }
     return true;
@@ -156,7 +156,7 @@ async function reapOrphans() {
   for (const orphan of orphans) {
     // Never reap a run that is genuinely in flight:
     //   • runs.isLive → an in-process runner exists here.
-    //   • runs.isLeaseLive → an active status with a FRESH heartbeat, i.e. a
+    //   • resolveLiveness alive → the provider observes its worker, i.e. a
     //     turn running in ANOTHER process (this reaper fires on every module
     //     import — Next server boot, but also short-lived cli.ts / pipe
     //     processes that share the SQLite DB).
@@ -172,7 +172,7 @@ async function reapOrphans() {
     }
     const now = new Date();
     // CAS guard: only fail the row if it's STILL in the snapshot status with no
-    // fresh heartbeat. The isLeaseLive check above is a stale snapshot — a
+    // fresh claim. The liveness check above is a stale snapshot — a
     // dispatch that claimed this row (status→preparing, fresh heartbeat) between
     // our SELECT and here must not be clobbered to `failed`, nor have its
     // worktree removed underneath the live turn.

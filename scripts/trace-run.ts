@@ -109,7 +109,7 @@ try {
     SELECT id, parent_run_id, task_id, plan_id, repo_id, goal, status,
            persona_id, backend, model, cwd_strategy, tools_profile,
            branch, pr_url, error, outcome, result, park_reason,
-           pending_question, attempt, heartbeat_at, worker_scope, worker_pid,
+           pending_question, attempt, claimed_at, pending_since, worker_scope,
            worker_exit_code, worker_log, started_at, completed_at, depth
       FROM tree
      ORDER BY path

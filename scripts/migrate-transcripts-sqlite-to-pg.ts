@@ -112,9 +112,7 @@ async function main(): Promise<void> {
     planningStage: r.planning_stage ?? null,
     startedAt: toDate(r.started_at) ?? new Date(),
     completedAt: toDate(r.completed_at),
-    heartbeatAt: null,
     workerScope: null,
-    workerPid: null,
     cancelRequested: null,
   }));
   await chunkInsert(schema.agentSessions, runRows);

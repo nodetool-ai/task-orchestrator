@@ -25,7 +25,6 @@ async function markLiveClaim(runId: number, ageMs = 0): Promise<void> {
     .set({
       status: "running",
       workerScope: `parent-${runId}-scope`,
-      heartbeatAt: new Date(Date.now() - ageMs),
     })
     .where(eq(agentSessions.id, runId));
   installFakeRunnerProvider();

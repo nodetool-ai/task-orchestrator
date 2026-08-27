@@ -20,7 +20,7 @@ import {
   runnerProviderKind,
 } from "./config";
 import { runHasChannelThread } from "./repo";
-import { isWorkerLive } from "./run-liveness";
+import { resolveLiveness } from "./run-liveness";
 import { isServerRuntimeRun } from "./run-runtime";
 import { runNonce } from "./run-nonce";
 import { HARD_TERMINAL_STATUSES } from "./run-state";
@@ -42,7 +42,7 @@ import {
   reserveChannelIdentity,
   setChannelEndpoint,
 } from "./worker-channel/repository";
-import { connectRun, reapStaleChannels } from "./worker-channel/controller";
+import { connectRun } from "./worker-channel/controller";
 import {
   dockerDialEndpoint,
   dockerListenEndpoint,
@@ -83,7 +83,6 @@ export type DispatchResult =
 // injects these on load). See the longer note kept from the systemd era.
 type RunsApi = {
   get: (id: number) => Promise<RunRow | null>;
-  isLeaseLive: (run: { status: string; heartbeatAt: Date | null }, now?: number) => boolean;
   /** Mark a run failed with an error (updates status + emits a status event). */
   failRun: (runId: number, error: string) => Promise<void>;
   /** Atomically fail a run still 'pending' with no worker claim (status + event
@@ -266,9 +265,6 @@ export function admissionDecision(i: {
   return "admit";
 }
 
-// hasLiveWorkerClaim was a third copy of the worker-liveness predicate; it now
-// lives in lib/run-liveness as isWorkerLive (R8). The stale window is that
-// module's single HEARTBEAT_STALE_MS.
 
 /** The gate only runs for managed worker backends, and can be turned off. */
 function admissionEnabled(): boolean {
@@ -436,7 +432,8 @@ export async function dispatchRun(
   >(async () => {
     const run = await runs().get(runId);
     if (!run) return { kind: "not-found" };
-    if (runs().isLeaseLive(run)) return { kind: "already-claimed" };
+    // A claim is a claim; whether its holder is alive is the reaper's question,
+    // not dispatch's (reconcileOrphanedRuns clears dead claims first).
     if (run.workerScope) return { kind: "already-claimed" };
 
     // Tree-limit re-verify (Decision 2 in docs/nested-machine-dispatch.md):
@@ -492,7 +489,7 @@ export async function dispatchRun(
       // this permits is bounded by the run tree's own depth/spawn caps.
       if (decision === "defer" && run.parentRunId != null) {
         const parent = await runs().get(run.parentRunId);
-        if (parent && isWorkerLive(parent)) decision = "admit";
+        if (parent && (await resolveLiveness(parent.id)).verdict === "alive") decision = "admit";
       }
       if (decision === "never-fits") {
         await runs().failRun(
@@ -502,26 +499,20 @@ export async function dispatchRun(
         return { kind: "spawn-failed" };
       }
       if (decision === "defer") {
-        // Park for the pending-run pump. 'pending' is NOT a lease status, so
-        // reconcileOrphanedRuns won't fail it while it waits. Stamp the START of
-        // this pending episode (heartbeatAt) ONLY on the transition INTO pending,
-        // so the pump's MAX_DEFER bound measures time-in-pending — not time since
-        // creation, which would instantly fail a long-running orphan re-dispatched
-        // under memory pressure. Re-defers of an already-pending run must NOT reset
-        // the stamp (that would let a run defer forever). A run born 'pending'
-        // keeps heartbeatAt null and is bounded from startedAt (≈ its enqueue
-        // time). heartbeatAt is inert on a 'pending' row (isLeaseLive/reconcile only
-        // consider lease statuses), so reusing it here can't disturb liveness.
+        // Park for the pending-run pump. Stamp pending_since ONLY on the
+        // transition INTO pending so the pump's MAX_DEFER bound measures time in
+        // THIS pending episode; a re-defer must not reset it (that would let a
+        // run defer forever). A run born 'pending' has no stamp and is bounded
+        // from startedAt (≈ its enqueue time).
         const stampEpisode = run.status !== "pending";
         await db
           .update(agentSessions)
           .set({
             status: "pending",
             workerScope: null,
-            workerPid: null,
             // Spec §2: pending is never bare — persist why admission deferred.
             pendingReason: deferReason ?? "Waiting for runner capacity.",
-            ...(stampEpisode ? { heartbeatAt: new Date() } : {}),
+            ...(stampEpisode ? { pendingSince: new Date() } : {}),
           })
           .where(eq(agentSessions.id, runId));
         return { kind: "deferred" };
@@ -536,7 +527,7 @@ export async function dispatchRun(
     // (runs.cancel() no-ops stopRunner when no container exists yet). Every other
     // status IS claimable here: 'pending'/'idle'/'parked' (a parked run woken by
     // an inbox event resumes exactly like an idle run), the lease statuses (only reached
-    // once isLeaseLive is false — an orphan whose stale claim was cleared), and the
+    // once the orphan reaper cleared a dead worker's claim), and the
     // resumable terminal statuses (completed/failed/budget_exhausted) for follow-up
     // turns. scope is the claim's ownership token. Also clear every PRIOR
     // attempt's terminal artifact so the freshly-claimed run never displays a
@@ -551,7 +542,8 @@ export async function dispatchRun(
         status: "preparing",
         workerScope: scope,
         cancelRequested: 0,
-        heartbeatAt: new Date(),
+        claimedAt: new Date(),
+        pendingSince: null,
         workerLog: null,
         workerExitCode: null,
         error: null,
@@ -575,7 +567,7 @@ export async function dispatchRun(
   // Start the worker through the selected provider. A throw/null must NOT leave
   // the run wedged in 'preparing' with no error — mark it failed and release the
   // claim. opts.spawn remains as the legacy test seam and is adapted to a local
-  // RunnerRef while preserving the returned pid in worker_pid.
+  // RunnerRef.
   let pid = 1;
   let handle = outcome.scope;
   try {
@@ -664,7 +656,7 @@ export async function dispatchRun(
   // orphaned container, if any, is reaped as a stray by the sweep).
   const owned = await db
     .update(agentSessions)
-    .set({ workerPid: pid, workerScope: handle })
+    .set({ workerScope: handle })
     .where(and(eq(agentSessions.id, runId), eq(agentSessions.workerScope, outcome.scope)));
   if (owned.count === 0) return finish("already-claimed");
   recordRunnerEvent("runner_spawned", { provider, runId, fields: { handle } });
@@ -677,7 +669,7 @@ async function failSpawn(runId: number, scope: string, message: string): Promise
   // marking the run failed would kill a live worker for a spawn that's no longer ours.
   const released = await db
     .update(agentSessions)
-    .set({ workerScope: null, workerPid: null })
+    .set({ workerScope: null })
     .where(and(eq(agentSessions.id, runId), eq(agentSessions.workerScope, scope)));
   if (released.count === 0) return "already-claimed";
   await runs().failRun(runId, message);
@@ -886,11 +878,7 @@ export async function sweepWorkerSockets(dir: string = workerSocketDir()): Promi
     if (!info.isSocket()) continue;
     if (uid !== undefined && info.uid !== uid) continue;
     const rows = await db
-      .select({
-        status: agentSessions.status,
-        workerScope: agentSessions.workerScope,
-        heartbeatAt: agentSessions.heartbeatAt,
-      })
+      .select({ id: agentSessions.id, status: agentSessions.status })
       .from(runnerInstances)
       .innerJoin(agentSessions, eq(runnerInstances.runId, agentSessions.id))
       .where(eq(runnerInstances.channelInstanceId, instanceId));
@@ -899,7 +887,7 @@ export async function sweepWorkerSockets(dir: string = workerSocketDir()): Promi
     const live =
       row != null &&
       !isTerminalStatus(row.status as Parameters<typeof isTerminalStatus>[0]) &&
-      isWorkerLive({ workerScope: row.workerScope, heartbeatAt: row.heartbeatAt });
+      (await resolveLiveness(row.id)).verdict === "alive";
     if (live) continue;
     await unlink(full).catch(() => {});
   }
@@ -939,15 +927,6 @@ async function pumpTick(): Promise<void> {
   } catch {
     // best-effort
   }
-  // Half 1b: detect stale worker channels off channel_last_seen_at and reconnect
-  // a provider-live worker whose socket dropped without an in-memory supervisor
-  // (e.g. a give-up after a long partition). A still-dead worker's dial fails and
-  // its run stays with the heartbeat reaper above.
-  try {
-    await reapStaleChannels();
-  } catch {
-    // best-effort
-  }
   // Half 2: drain the deferred queue, oldest first. Stop at the first defer (the
   // host is full); the next tick retries.
   let ids: number[];
@@ -961,10 +940,10 @@ async function pumpTick(): Promise<void> {
   for (const id of ids) {
     const run = await runs().get(id);
     if (!run || run.status !== "pending") continue;
-    // Time in THIS pending episode: heartbeatAt is stamped when a run is deferred
-    // into pending (dispatchRun's defer branch); a run born pending has no stamp
-    // and is measured from startedAt (≈ its enqueue time).
-    const pendingSince = run.heartbeatAt ?? run.startedAt;
+    // Time in THIS pending episode: pending_since is stamped when a run is
+    // deferred into pending (dispatchRun's defer branch); a run born pending has
+    // no stamp and is measured from startedAt (≈ its enqueue time).
+    const pendingSince = run.pendingSince ?? run.startedAt;
     if (maxDeferMs > 0 && pendingSince && now - pendingSince.getTime() > maxDeferMs) {
       // Atomically take the terminal transition in ONE guarded write (status
       // column + status event in the same tx). Guarded against a claim that
@@ -1717,8 +1696,8 @@ export async function sweepWorkerContainers(dockerArg?: DockerLike): Promise<voi
 
   // Reverse direction: runs holding a worker claim whose container doesn't exist
   // at all (died and was removed while nothing was watching). Declare them dead
-  // now instead of waiting out the 5-minute heartbeat timeout. The silence guard
-  // avoids racing a dispatch whose container is still being created.
+  // now. The claim-age guard avoids racing a dispatch whose container is still
+  // being created.
   let leased: RunRow[];
   try {
     leased = await runs().listLeasedRuns();
@@ -1732,8 +1711,8 @@ export async function sweepWorkerContainers(dockerArg?: DockerLike): Promise<voi
     // container, so the predicate deliberately keeps it in this sweep.
     if (isServerRuntimeRun(run)) continue;
     if (!run.workerScope || liveNames.has(run.workerScope)) continue;
-    const lastSeen = run.heartbeatAt?.getTime() ?? 0;
-    if (now - lastSeen < SWEEP_MIN_SILENCE_MS) continue;
+    const claimedAt = run.claimedAt?.getTime() ?? 0;
+    if (now - claimedAt < SWEEP_MIN_SILENCE_MS) continue;
     await runs().handleWorkerDeath(run.id, {
       exitCode: null,
       oomKilled: false,

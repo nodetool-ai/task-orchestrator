@@ -428,7 +428,7 @@ const IN_FLIGHT_STATUSES = new Set(["pending", "preparing", "running"]);
 /**
  * True iff any run sharing `worktreePath` is still live or recently active.
  * "Live" = an in-flight status OR a live lease/worker heartbeat (reusing the
- * shared HEARTBEAT_STALE_MS window via isLeaseLive/isWorkerLive). "Recently
+ * provider verdict via resolveLiveness). "Recently
  * active" = its newest activity (max agent_messages.created_at, else startedAt)
  * is within the GC threshold window. A safely-idle candidate whose own activity
  * predates the window does NOT trip this on itself — that's the whole point of
@@ -453,7 +453,6 @@ async function defaultSharedWorktreeBusy(
       id: agentSessions.id,
       status: agentSessions.status,
       startedAt: agentSessions.startedAt,
-      heartbeatAt: agentSessions.heartbeatAt,
       workerScope: agentSessions.workerScope,
       lastMessageAt: lastMsg.last,
     })

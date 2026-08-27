@@ -70,7 +70,7 @@ describe("sendMessageToRun inside an isolate-mode worker", () => {
 
     const after = await get(run.id);
     expect(after?.status).toBe("pending"); // the dispatch request for the server pump
-    expect(after?.heartbeatAt).not.toBeNull(); // pending-episode stamp (MAX_DEFER_MS clock)
+    expect(after?.pendingSince).not.toBeNull(); // pending-episode stamp (MAX_DEFER_MS clock)
     expect(spy).not.toHaveBeenCalled(); // workers must never dispatch
     const deferred = await db.select().from(agentEvents)
       .where(and(eq(agentEvents.sessionId, run.id), eq(agentEvents.type, "runner_deferred")))
@@ -83,7 +83,7 @@ describe("sendMessageToRun inside an isolate-mode worker", () => {
     const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
     const run = await create({ goal: "<implement>", defer: true });
     await db.update(agentSessions)
-      .set({ status: "running", workerScope: "run-live-1", heartbeatAt: new Date() })
+      .set({ status: "running", workerScope: "run-live-1"})
       .where(eq(agentSessions.id, run.id));
     installFakeRunnerProvider();
     await setFakeRunLiveness(run.id, { status: "alive", incarnation: "w1" }, "w1");

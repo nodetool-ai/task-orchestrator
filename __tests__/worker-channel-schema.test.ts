@@ -35,19 +35,12 @@ function commandValues(runId: number, id: string, epoch: number, seq: number) {
 describe("worker channel schema", () => {
   it("persists runner channel identity, endpoint, lease, and liveness fields", async () => {
     const runId = await makeRun();
-    const leaseExpiresAt = new Date("2026-07-15T10:00:00.000Z");
-    const connectedAt = new Date("2026-07-15T09:59:00.000Z");
-    const lastSeenAt = new Date("2026-07-15T09:59:30.000Z");
-
     await db.insert(runnerInstances).values({
       runId,
       channelInstanceId: INSTANCE_ID,
       channelEndpoint: "unix:///tmp/worker.sock",
       controllerEpoch: 4,
       controllerId: "controller-test",
-      controllerLeaseExpiresAt: leaseExpiresAt,
-      channelConnectedAt: connectedAt,
-      channelLastSeenAt: lastSeenAt,
     });
 
     const [row] = await db
@@ -59,9 +52,6 @@ describe("worker channel schema", () => {
       channelEndpoint: "unix:///tmp/worker.sock",
       controllerEpoch: 4,
       controllerId: "controller-test",
-      controllerLeaseExpiresAt: leaseExpiresAt,
-      channelConnectedAt: connectedAt,
-      channelLastSeenAt: lastSeenAt,
     });
   });
 

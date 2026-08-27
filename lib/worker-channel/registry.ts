@@ -5,7 +5,6 @@ import {
   clearChannelClaim,
   getChannelIdentity,
   listReconnectableChannels,
-  listStaleChannelRuns,
   persistCommand,
   releaseChannelForReplacement,
   type CommandRow,
@@ -170,7 +169,7 @@ async function attemptReconnect(supervisor: Supervisor): Promise<void> {
   if (supervisor.stopped) return;
   // Give up if this supervisor was already replaced by a fresh connectRun.
   if (registry().supervisors.get(supervisor.runId) !== supervisor) return;
-  // A concurrent connectRun/reapStaleChannels may already have reconnected this
+  // A concurrent connectRun may already have reconnected this
   // supervisor while the backoff timer was pending; do not dial a second socket
   // on top of the live one.
   if (supervisor.connection.connected) {
@@ -304,31 +303,6 @@ export async function reconnectActiveChannels(): Promise<number> {
     }
   }
   return reconnected;
-}
-
-/**
- * Detect stale worker channels off `channel_last_seen_at` (never a worker
- * heartbeat request) and nudge each toward recovery. A run in a lease status
- * whose channel has been silent past the grace window and has NO live connected
- * supervisor is reconnected; a still-dead worker's dial fails and the run is left
- * to the heartbeat reaper's re-dispatch/idle/fail policy. Runs every pump tick.
- * Returns the number of stale channels a reconnect recovered.
- */
-export async function reapStaleChannels(): Promise<number> {
-  const staleBefore = new Date(Date.now() - reconnectTiming.graceMs);
-  const stale = await listStaleChannelRuns(staleBefore);
-  let recovered = 0;
-  for (const channel of stale) {
-    const supervisor = registry().supervisors.get(channel.runId);
-    if (supervisor && supervisor.connection.connected) continue; // already live
-    try {
-      await connectRun(channel.runId);
-      recovered++;
-    } catch {
-      // Worker unreachable: the heartbeat reaper (reconcileOrphanedRuns) owns it.
-    }
-  }
-  return recovered;
 }
 
 /**

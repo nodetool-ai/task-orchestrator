@@ -76,10 +76,11 @@ already cost real time once.
   auto-mode classifier blocks an agent from copying that secret to an
   external machine; the user must run the copy (or `claude login` there).
 
-## Fly runners
+## Liveness
 
-- Park/suspend/resume races: a machine can resume and be idle-suspended
-  ~64 ms later ("heartbeat lost, scope none"); waking a suspended machine
-  can 409 "machine exited abruptly" — treat as retryable.
-- `npm run trace-run -- <id> --fly` is the fastest way to reconstruct a
-  fly run tree.
+- There is no heartbeat and no stale window. "Is the worker alive" is
+  `resolveLiveness(runId)`: the provider's `inspect()` plus an incarnation
+  compare. `unknown` (API down, no credentials in this process) means
+  "leave it alone", never "reap".
+- `agent_runs.pending_since` and `claimed_at` are bookkeeping (defer bound,
+  claim age), not liveness inputs.

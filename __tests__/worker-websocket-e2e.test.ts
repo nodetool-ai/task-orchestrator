@@ -354,7 +354,7 @@ describe("worker websocket e2e", () => {
       });
       await db
         .update(agentSessions)
-        .set({ status: "failed", workerScope: "run-x", workerPid: 42, completedAt: new Date() })
+        .set({ status: "failed", workerScope: "run-x", completedAt: new Date() })
         .where(eq(agentSessions.id, run.id));
 
       const dispatchSpy = vi.spyOn(runDispatch, "dispatchRun").mockResolvedValue("spawned" as never);
@@ -380,7 +380,7 @@ describe("worker websocket e2e", () => {
       });
       await db
         .update(agentSessions)
-        .set({ status: "idle", workerScope: "run-x", workerPid: 42, completedAt: new Date() })
+        .set({ status: "idle", workerScope: "run-x", completedAt: new Date() })
         .where(eq(agentSessions.id, run.id));
 
       const dispatchSpy = vi.spyOn(runDispatch, "dispatchRun").mockResolvedValue("spawned" as never);

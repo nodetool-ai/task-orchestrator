@@ -1,3 +1,4 @@
+import { installFakeRunnerProvider, setFakeRunLiveness } from "./helpers/fake-runner-provider";
 import { EventEmitter } from "node:events";
 import { eq } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -61,8 +62,11 @@ async function markLive(runId: number): Promise<AbortController> {
 async function markLeaseLive(runId: number): Promise<void> {
   await db
     .update(agentSessions)
-    .set({ status: "running", heartbeatAt: new Date() })
+    .set({ status: "running"})
     .where(eq(agentSessions.id, runId));
+  // The other process's worker is observably alive (provider verdict, not a clock).
+  installFakeRunnerProvider();
+  await setFakeRunLiveness(runId, { status: "alive", incarnation: "elsewhere" }, "elsewhere");
 }
 
 beforeEach(async () => {

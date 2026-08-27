@@ -53,7 +53,7 @@ describe("reapOrphans (orphan reaper in lib/agent.ts)", () => {
     });
     await db
       .update(agentSessions)
-      .set({ status: "pending", startedAt: YOUNG, heartbeatAt: null })
+      .set({ status: "pending", startedAt: YOUNG})
       .where(eq(agentSessions.id, run.id));
 
     await _reapOrphansForTest();
@@ -74,7 +74,7 @@ describe("reapOrphans (orphan reaper in lib/agent.ts)", () => {
     });
     await db
       .update(agentSessions)
-      .set({ status: "pending", startedAt: OLD, heartbeatAt: null })
+      .set({ status: "pending", startedAt: OLD})
       .where(eq(agentSessions.id, run.id));
 
     await _reapOrphansForTest();
@@ -98,7 +98,7 @@ describe("reapOrphans (orphan reaper in lib/agent.ts)", () => {
     const STALE = new Date(Date.now() - 10 * 60_000); // 10 min ago
     await db
       .update(agentSessions)
-      .set({ status: "preparing", startedAt: YOUNG, heartbeatAt: STALE })
+      .set({ status: "preparing", startedAt: YOUNG})
       .where(eq(agentSessions.id, run.id));
 
     await _reapOrphansForTest();
@@ -120,7 +120,7 @@ describe("reapOrphans (orphan reaper in lib/agent.ts)", () => {
     const FRESH = new Date(Date.now() - 5_000); // 5 seconds ago
     await db
       .update(agentSessions)
-      .set({ status: "preparing", startedAt: YOUNG, heartbeatAt: FRESH })
+      .set({ status: "preparing", startedAt: YOUNG})
       .where(eq(agentSessions.id, run.id));
     await setFakeRunLiveness(run.id, { status: "alive", incarnation: "fake-incarnation" });
 
@@ -137,7 +137,7 @@ describe("reapOrphans (orphan reaper in lib/agent.ts)", () => {
     const STALE = new Date(Date.now() - 30 * 60_000);
     await db
       .update(agentSessions)
-      .set({ status: "pending", startedAt: STALE, heartbeatAt: null })
+      .set({ status: "pending", startedAt: STALE})
       .where(eq(agentSessions.id, run.id));
 
     await _reapOrphansForTest();

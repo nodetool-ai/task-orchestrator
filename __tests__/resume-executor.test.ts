@@ -195,7 +195,6 @@ describe("runs.resumeExecutorRun (fork a fresh generation)", () => {
         goal: "<execute>",
         status: "running",
         planId: plan.id,
-        heartbeatAt: new Date(),
       })
       .returning();
     await expect(runs.resumeExecutorRun(prior.id)).rejects.toThrow(/send it a message/);

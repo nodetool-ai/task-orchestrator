@@ -141,33 +141,32 @@ describe("dispatchRun admission integration", () => {
     expect(spawn).toHaveBeenCalledTimes(1);
     const row = (await get(run.id))!;
     expect(row.status).toBe("preparing");
-    expect(row.workerPid).toBe(4242);
   });
 
-  it("stamps a fresh pending-episode heartbeat when deferring a non-pending run, but not on re-defer", async () => {
+  it("stamps a fresh pending_since when deferring a non-pending run, but not on re-defer", async () => {
     // Regression: the MAX_DEFER bound must measure time-in-pending, not time since
     // creation — else an old orphan re-dispatched + deferred is failed instantly.
     process.env.TASK_ORCH_WORKER_IMAGE = "worker:test";
     const run = await create({ goal: "<implement>", defer: true });
-    // Simulate an orphaned, resumable run: a lease status with a STALE heartbeat
-    // and a released claim (as reconcileOrphanedRuns leaves it before re-dispatch).
+    // Simulate an orphaned, resumable run: a lease status with a released claim
+    // (as reconcileOrphanedRuns leaves it before re-dispatch).
     const old = new Date(Date.now() - 60 * 60_000);
     await db
       .update(agentSessions)
-      .set({ status: "running", heartbeatAt: old, workerScope: null })
+      .set({ status: "running", workerScope: null })
       .where(eq(agentSessions.id, run.id));
 
     // First defer: running → pending stamps a FRESH episode start.
     expect(await dispatchRun(run.id, { spawn: () => 1, admit: () => "defer" })).toBe("deferred");
     const afterFirst = (await get(run.id))!;
     expect(afterFirst.status).toBe("pending");
-    expect(afterFirst.heartbeatAt!.getTime()).toBeGreaterThan(old.getTime());
-    const episodeStart = afterFirst.heartbeatAt!.getTime();
+    expect(afterFirst.pendingSince!.getTime()).toBeGreaterThan(old.getTime());
+    const episodeStart = afterFirst.pendingSince!.getTime();
 
     // Second defer while ALREADY pending: must NOT reset the episode clock.
     expect(await dispatchRun(run.id, { spawn: () => 1, admit: () => "defer" })).toBe("deferred");
     const afterSecond = (await get(run.id))!;
-    expect(afterSecond.heartbeatAt!.getTime()).toBe(episodeStart);
+    expect(afterSecond.pendingSince!.getTime()).toBe(episodeStart);
   });
 
   it("skips the gate entirely off the containerized path (no WORKER_IMAGE)", async () => {

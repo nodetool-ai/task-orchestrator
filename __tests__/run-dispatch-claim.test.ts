@@ -53,7 +53,7 @@ describe("dispatchRun claim guards", () => {
       // Simulate the sweep + re-dispatch stealing the claim while we "create".
       await db
         .update(agentSessions)
-        .set({ status: "running", workerScope: stolenScope, workerPid: 999, heartbeatAt: new Date() })
+        .set({ status: "running", workerScope: stolenScope})
         .where(eq(agentSessions.id, run.id));
       return 5555; // our container's pid — now orphaned
     });
@@ -63,7 +63,6 @@ describe("dispatchRun claim guards", () => {
     expect(result).toBe("already-claimed");
     const row = (await get(run.id))!;
     expect(row.workerScope).toBe(stolenScope); // winner's claim untouched
-    expect(row.workerPid).toBe(999); // not clobbered to our 5555
     expect(row.status).toBe("running");
   });
 
@@ -75,7 +74,7 @@ describe("dispatchRun claim guards", () => {
     const spawn = vi.fn(async () => {
       await db
         .update(agentSessions)
-        .set({ status: "running", workerScope: stolenScope, workerPid: 999, heartbeatAt: new Date() })
+        .set({ status: "running", workerScope: stolenScope})
         .where(eq(agentSessions.id, run.id));
       throw new Error("boom-superseded");
     });

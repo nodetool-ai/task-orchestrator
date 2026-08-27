@@ -1,4 +1,5 @@
 // __tests__/run-dispatch.test.ts
+import { installFakeRunnerProvider, setFakeRunLiveness } from "./helpers/fake-runner-provider";
 import { describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { join } from "node:path";
@@ -22,7 +23,6 @@ describe("dispatchRun", () => {
     const row = (await get(run.id))!;
     expect(row.status).toBe("preparing");
     expect(row.workerScope).toMatch(/^run-\d+-/);
-    expect(row.workerPid).toBe(5555);
   });
 
   it("is idempotent — a second dispatch does not spawn again", async () => {
@@ -37,11 +37,13 @@ describe("dispatchRun", () => {
     expect(await dispatchRun(999999, { spawn: () => 1 })).toBe("not-found");
   });
 
-  it("does not dispatch a run holding a live lease", async () => {
+  it("does not dispatch a run whose worker is observably alive", async () => {
     const run = await create({ goal: "<implement>", defer: true });
     await db.update(agentSessions)
-      .set({ status: "running", heartbeatAt: new Date() })
+      .set({ status: "running" })
       .where(eq(agentSessions.id, run.id));
+    installFakeRunnerProvider();
+    await setFakeRunLiveness(run.id, { status: "alive", incarnation: "w1" }, "w1");
     expect(await dispatchRun(run.id, { spawn: () => 1 })).toBe("already-claimed");
   });
 

@@ -5,6 +5,7 @@
 // code onto the run, removes the container, and applies the death policy —
 // within seconds, instead of the 5-minute heartbeat timeout.
 
+import { installFakeRunnerProvider, setFakeRunLiveness } from "./helpers/fake-runner-provider";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { existsSync } from "node:fs";
@@ -311,7 +312,6 @@ describe("handleWorkerDeath policy", () => {
     await patchRun(run.id, {
       status: "running",
       workerScope: "run-r-1",
-      heartbeatAt: FRESH(), // the dead worker's last beat, still "fresh"
       sdkSessionId: "sess-1",
       branch: "claude/task-1",
     });
@@ -321,23 +321,18 @@ describe("handleWorkerDeath policy", () => {
     expect(spy).toHaveBeenCalledWith(run.id);
     const after = await get(run.id);
     expect(after?.workerScope).toBeNull();
-    // Regression (finding 1): heartbeatAt MUST be cleared, or the real
-    // dispatchRun's isLeaseLive guard would see the dead worker's fresh beat and
-    // no-op the re-dispatch, stranding the run until the 5-minute reaper.
-    expect(after?.heartbeatAt).toBeNull();
     expect(after?.status).toBe("running"); // untouched; the fresh dispatch owns it now
   });
 
-  it("the cleared heartbeat actually lets the real dispatchRun re-claim (finding 1)", async () => {
-    // A run left 'running' with a fresh heartbeat but no scope (the bug's state)
-    // is rejected by dispatchRun's guard...
+  it("the cleared claim actually lets the real dispatchRun re-claim (finding 1)", async () => {
+    // A run still carrying its dead worker's claim is rejected by dispatchRun's guard...
     const blocked = await create({ goal: "<implement>", defer: true });
-    await patchRun(blocked.id, { status: "running", workerScope: null, heartbeatAt: FRESH() });
+    await patchRun(blocked.id, { status: "running", workerScope: "run-dead-scope" });
     expect(await dispatchRun(blocked.id, { spawn: () => 1 })).toBe("already-claimed");
 
-    // ...and with the heartbeat cleared (what handleWorkerDeath now does) it claims.
+    // ...and with the claim cleared (what handleWorkerDeath does) it claims.
     const ok = await create({ goal: "<implement>", defer: true });
-    await patchRun(ok.id, { status: "running", workerScope: null, heartbeatAt: null });
+    await patchRun(ok.id, { status: "running", workerScope: null});
     expect(await dispatchRun(ok.id, { spawn: () => 1 })).toBe("spawned");
   });
 
@@ -349,7 +344,6 @@ describe("handleWorkerDeath policy", () => {
     await patchRun(run.id, {
       status: "running",
       workerScope: "run-dup",
-      heartbeatAt: FRESH(),
       sdkSessionId: "sess-d",
       branch: "claude/task-d",
     });
@@ -574,7 +568,7 @@ describe("sweepWorkerContainers", () => {
   it("leaves a live run's running container alone", async () => {
     const run = await create({ goal: "<implement>", defer: true });
     const scope = `run-${run.id}-s4`;
-    await patchRun(run.id, { status: "running", workerScope: scope, heartbeatAt: new Date() });
+    await patchRun(run.id, { status: "running", workerScope: scope});
     const { docker, calls } = fakeDocker({
       containers: [
         { Id: "c4", Names: [`/${scope}`], State: "running", Labels: { [RUN_LABEL]: String(run.id) } },
@@ -594,7 +588,6 @@ describe("sweepWorkerContainers", () => {
     await patchRun(run.id, {
       status: "running",
       workerScope: `run-${run.id}-NEW`,
-      heartbeatAt: new Date(),
     });
     const { docker, calls } = fakeDocker({
       containers: [
@@ -612,7 +605,6 @@ describe("sweepWorkerContainers", () => {
     await patchRun(run.id, {
       status: "running",
       workerScope: `run-${run.id}-gone`,
-      heartbeatAt: new Date(Date.now() - 60_000),
     });
     const { docker } = fakeDocker({ containers: [] });
 
@@ -623,12 +615,12 @@ describe("sweepWorkerContainers", () => {
     expect(after?.error).toMatch(/container is gone/);
   });
 
-  it("spares a leased run inside the container-creation window (fresh heartbeat)", async () => {
+  it("spares a leased run inside the container-creation window (fresh claim)", async () => {
     const run = await create({ goal: "<implement>", defer: true });
     await patchRun(run.id, {
       status: "preparing",
       workerScope: `run-${run.id}-new`,
-      heartbeatAt: new Date(),
+      claimedAt: new Date(), // claim younger than the sweep's silence guard
     });
     const { docker } = fakeDocker({ containers: [] });
 
@@ -659,12 +651,10 @@ describe("sweepWorkerSockets", () => {
     const closers = [await bindSocket(deadCh.socketPath), await bindSocket(liveCh.socketPath)];
     try {
       // The dead run is terminal; the live run holds a fresh worker claim.
-      await patchRun(dead.id, { status: "failed", workerScope: null, heartbeatAt: null });
-      await patchRun(live.id, {
-        status: "running",
-        workerScope: `run-${live.id}-live`,
-        heartbeatAt: new Date(),
-      });
+      await patchRun(dead.id, { status: "failed", workerScope: null});
+      await patchRun(live.id, { status: "running" });
+      installFakeRunnerProvider();
+      await setFakeRunLiveness(live.id, { status: "alive", incarnation: "w1" }, "w1");
 
       await sweepWorkerSockets();
 

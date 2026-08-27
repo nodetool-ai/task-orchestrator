@@ -4,7 +4,7 @@
 // in-process isLive() check, which is blind to a DETACHED worker driving the same
 // run in another process. It would then start a SECOND concurrent turn against the
 // same branch/worktree. followUp() now also bails on a FRESH read when the DB
-// shows a live lease (isLeaseLive) or a live worker owns the run (isWorkerLive) —
+// shows a live worker (resolveLiveness alive) —
 // both before taking the per-run lock slot and after acquiring it.
 
 import { installFakeRunnerProvider, setFakeRunLiveness } from "./helpers/fake-runner-provider";
@@ -53,7 +53,7 @@ describe("followUp() bails on a cross-process live run (FIX 4)", () => {
     // Detached worker mid-turn in another process: running + fresh heartbeat.
     await db
       .update(agentSessions)
-      .set({ status: "running", heartbeatAt: new Date() })
+      .set({ status: "running"})
       .where(eq(agentSessions.id, runId));
     installFakeRunnerProvider();
     await setFakeRunLiveness(runId, { status: "alive", incarnation: "w1" }, "w1");
@@ -72,7 +72,7 @@ describe("followUp() bails on a cross-process live run (FIX 4)", () => {
     // idle is not a lease status, but the worker still holds its claim + heartbeat.
     await db
       .update(agentSessions)
-      .set({ status: "idle", workerScope: "scope-live", heartbeatAt: new Date() })
+      .set({ status: "idle", workerScope: "scope-live"})
       .where(eq(agentSessions.id, runId));
     installFakeRunnerProvider();
     await setFakeRunLiveness(runId, { status: "alive", incarnation: "w1" }, "w1");
@@ -130,7 +130,7 @@ describe("followUp() dispatches instead of executing on a remote-runner deployme
     const runId = await makeWorktreeRun();
     await db
       .update(agentSessions)
-      .set({ status: "idle", workerScope: "scope-live", heartbeatAt: new Date() })
+      .set({ status: "idle", workerScope: "scope-live"})
       .where(eq(agentSessions.id, runId));
     installFakeRunnerProvider();
     await setFakeRunLiveness(runId, { status: "alive", incarnation: "w1" }, "w1");

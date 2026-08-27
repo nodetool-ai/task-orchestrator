@@ -258,14 +258,16 @@ export const agentSessions = pgTable(
     planningStage: text("planning_stage"),
     startedAt: ts("started_at").notNull().defaultNow(),
     completedAt: ts("completed_at"),
-    // Liveness lease: bumped periodically while a turn runs. A run in an active
-    // status with a stale/null heartbeat is an orphan (its owner process died).
-    heartbeatAt: ts("heartbeat_at"),
-    // Detached run workers: identity of the transient worker scope/container that
-    // owns this run, the worker pid, and a cross-process cancel flag (1 = a
-    // redeploy-surviving worker should abort at the next heartbeat poll).
+    // Bookkeeping clocks — NOT liveness (liveness is the provider verdict, see
+    // lib/run-liveness). pending_since: start of the current pending episode,
+    // bounds the dispatch pump's max defer. claimed_at: when the current worker
+    // claim was taken; a claim age for sweeps and idle policy.
+    pendingSince: ts("pending_since"),
+    claimedAt: ts("claimed_at"),
+    // Detached run workers: identity of the worker scope/container that owns
+    // this run, and a cross-process cancel flag (1 = the worker should abort at
+    // its next cancel poll).
     workerScope: text("worker_scope"),
-    workerPid: integer("worker_pid"),
     cancelRequested: integer("cancel_requested"),
     // Final container state, captured by the worker monitor when the container
     // dies: the tail of its stdout/stderr (docker logs) and its exit code. This
@@ -316,9 +318,6 @@ export const agentSessions = pgTable(
     taskPrIdx: index("agent_runs_task_pr_idx")
       .on(t.taskId, t.id)
       .where(sql`pr_url IS NOT NULL`),
-    liveWorkerHeartbeatIdx: index("agent_runs_live_worker_heartbeat_idx")
-      .on(t.heartbeatAt)
-      .where(sql`worker_scope IS NOT NULL`),
   })
 );
 
@@ -329,9 +328,6 @@ export const runnerInstances = pgTable(
       .primaryKey()
       .references(() => agentSessions.id, { onDelete: "cascade" }),
     provider: text("provider").notNull().default("sprites"),
-    flyApp: text("fly_app"),
-    machineId: text("machine_id"),
-    volumeId: text("volume_id"),
     spriteName: text("sprite_name"),
     region: text("region"),
     // RunnerState: creating | starting | running | suspended | stopped | gone.
@@ -340,16 +336,6 @@ export const runnerInstances = pgTable(
     claudePath: text("claude_path").notNull().default("/mnt/session/claude"),
     createdAt: ts("created_at").notNull().defaultNow(),
     lastStartedAt: ts("last_started_at"),
-    lastSuspendedAt: ts("last_suspended_at"),
-    // Wake-intent lease: stamped immediately BEFORE the Fly start/create call that
-    // wakes this runner, cleared by the worker's first heartbeat (or superseded by
-    // age — TASK_ORCH_RUNNER_WAKE_GRACE_MS). Bridges the window between "machine
-    // told to start" and "worker writes its first heartbeat", during which the
-    // lifecycle sweep would otherwise see a running machine with no live claim and
-    // suspend it out from under the boot (incident: run 139 was suspended 64ms
-    // after its wake; the reaper then failed it for the heartbeat it never got to
-    // write).
-    wakeRequestedAt: ts("wake_requested_at"),
     archivedUri: text("archived_uri"),
     credentialsVersion: integer("credentials_version"),
     credentialsExpiresAt: ts("credentials_expires_at"),
@@ -359,16 +345,10 @@ export const runnerInstances = pgTable(
     channelEndpoint: text("channel_endpoint"),
     controllerEpoch: integer("controller_epoch").notNull().default(0),
     controllerId: text("controller_id"),
-    controllerLeaseExpiresAt: ts("controller_lease_expires_at"),
-    channelConnectedAt: ts("channel_connected_at"),
-    channelLastSeenAt: ts("channel_last_seen_at"),
     // Provider-observed identity of the process that completed channel.hello.
     workerIncarnation: text("worker_incarnation"),
   },
   (t) => ({
-    controllerLeaseExpiresIdx: index("runner_instances_controller_lease_expires_at_idx").on(
-      t.controllerLeaseExpiresAt
-    ),
     channelInstanceIdIdx: uniqueIndex("runner_instances_channel_instance_id_idx")
       .on(t.channelInstanceId)
       .where(sql`${t.channelInstanceId} IS NOT NULL`),

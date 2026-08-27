@@ -174,42 +174,36 @@ describe("worker.log", () => {
 // ── 14.2 run.phase (port: setStatus lease stamping) ───────────────────────────
 
 describe("run.phase", () => {
-  it("moves the run to running and stamps the heartbeat in the same write", async () => {
+  it("moves the run to running", async () => {
     const runId = await newRun();
-    expect((await db.select({ h: agentSessions.heartbeatAt }).from(agentSessions).where(eq(agentSessions.id, runId)))[0].h).toBeNull();
 
     await apply(makeFrame(runId, "run.phase", { phase: "running" }));
 
-    const row = (await db.select({ status: agentSessions.status, h: agentSessions.heartbeatAt }).from(agentSessions).where(eq(agentSessions.id, runId)))[0];
+    const row = (await db.select({ status: agentSessions.status }).from(agentSessions).where(eq(agentSessions.id, runId)))[0];
     expect(row.status).toBe("running");
-    expect(row.h).not.toBeNull();
     expect(await statusEvents(runId, "running")).toBe(1);
   });
 
   it("releases the worker claim when the chat drive lands idle", async () => {
     // The worker emits `idle` immediately before exiting. Leaving worker_scope
-    // and a fresh heartbeat behind makes isWorkerLive() true for another five
-    // minutes, and sendMessageToRun then skips dispatchRun for the next user
-    // message — which on sprites is never delivered, because the channel is
-    // closed at idle (run 181).
+    // behind keeps a claim on an exited worker, and sendMessageToRun then bridges
+    // the next user message into a channel that is closed at idle (run 181).
     const runId = await newRun();
     await db
       .update(agentSessions)
-      .set({ workerScope: "to-run-1", workerPid: 1, heartbeatAt: new Date() })
+      .set({ workerScope: "to-run-1"})
       .where(eq(agentSessions.id, runId));
 
     await apply(makeFrame(runId, "run.phase", { phase: "idle" }));
 
     const row = (
       await db
-        .select({ status: agentSessions.status, scope: agentSessions.workerScope, pid: agentSessions.workerPid, h: agentSessions.heartbeatAt })
+        .select({ status: agentSessions.status, scope: agentSessions.workerScope })
         .from(agentSessions)
         .where(eq(agentSessions.id, runId))
     )[0];
     expect(row.status).toBe("idle");
     expect(row.scope).toBeNull();
-    expect(row.pid).toBeNull();
-    expect(row.h).toBeNull();
   });
 
   it("never regresses a run that already landed a terminal outcome", async () => {
@@ -335,7 +329,7 @@ describe("run.cancelled", () => {
     const runId = await newRun();
     await db
       .update(agentSessions)
-      .set({ status: "running", workerScope: "scope-1", workerPid: 7, heartbeatAt: new Date() })
+      .set({ status: "running", workerScope: "scope-1"})
       .where(eq(agentSessions.id, runId));
 
     await apply(makeFrame(runId, "run.cancelled", { requestId: "req-1", reason: "user stop" }));
@@ -343,7 +337,6 @@ describe("run.cancelled", () => {
     const row = (await db.select().from(agentSessions).where(eq(agentSessions.id, runId)))[0];
     expect(row.status).toBe("cancelled");
     expect(row.workerScope).toBeNull();
-    expect(row.workerPid).toBeNull();
     expect(await statusEvents(runId, "cancelled")).toBe(1);
     const cmds = await commits(runId);
     expect(cmds[0].payload).toMatchObject({ status: "cancelled", accepted: true });

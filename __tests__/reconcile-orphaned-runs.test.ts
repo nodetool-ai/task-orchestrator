@@ -18,9 +18,11 @@ import { installFakeRunnerProvider, setFakeRunLiveness } from "./helpers/fake-ru
 const STALE = new Date(Date.now() - 10 * 60_000); // 10 min ago
 const FRESH = new Date(Date.now() - 5_000); // 5 s ago
 
-async function setRun(id: number, status: string, heartbeatAt: Date | null) {
+// `_at` is the legacy heartbeat age; liveness is now the provider verdict, so a
+// bare status transition is all the orphan fixtures need.
+async function setRun(id: number, status: string, _at: Date | null) {
   await db.update(agentSessions)
-    .set({ status, heartbeatAt })
+    .set({ status })
     .where(eq(agentSessions.id, id));
 }
 
@@ -148,7 +150,7 @@ describe("reconcileOrphanedRuns", () => {
     const run = await create({ goal: "<implement>", defer: true });
     // Make it look resumable: worktree run, has a session, worktree exists.
     await db.update(agentSessions)
-      .set({ status: "running", heartbeatAt: STALE, sdkSessionId: "sess-1", worktreePath: process.cwd() })
+      .set({ status: "running", sdkSessionId: "sess-1", worktreePath: process.cwd() })
       .where(eq(agentSessions.id, run.id));
 
     await reconcileOrphanedRuns();
@@ -171,7 +173,6 @@ describe("reconcileOrphanedRuns", () => {
       await db.update(agentSessions)
         .set({
           status: "running",
-          heartbeatAt: STALE,
           sdkSessionId: "sess-remote-1",
           branch: "claude/t-0001-1",
           worktreePath: "/mnt/session/repo", // runner Machine path; absent on the server
@@ -199,7 +200,7 @@ describe("reconcileOrphanedRuns", () => {
       const plan = await repo.createPlan({ title: "Orphaned Executor", date: "2026-07-10" });
       const run = await create({ goal: "<execute>", planId: plan.id, backend: "pi", defer: true });
       await db.update(agentSessions)
-        .set({ status: "running", heartbeatAt: STALE, workerScope: "server-dead" })
+        .set({ status: "running", workerScope: "server-dead" })
         .where(eq(agentSessions.id, run.id));
 
       await reconcileOrphanedRuns();
@@ -214,23 +215,26 @@ describe("reconcileOrphanedRuns", () => {
     }
   });
 
-  it("labels a genuine orphan with heartbeat forensics, not 'process restart'", async () => {
+  it("labels a genuine orphan with the observed verdict, not 'process restart'", async () => {
     const run = await create({ goal: "<implement>", defer: true });
     await setRun(run.id, "running", STALE);
+    // A dead worker still holding its claim: the provider verdict is what the
+    // failure label reports.
+    await setFakeRunLiveness(run.id, { status: "dead", detail: "exited with code 137" }, "w1");
 
     await reconcileOrphanedRuns();
 
     const after = await get(run.id);
     expect(after?.status).toBe("failed");
-    expect(after?.error).toMatch(/heartbeat lost/i);
-    expect(after?.error).toMatch(/\d+ min ago/);
+    expect(after?.error).toMatch(/worker gone/i);
+    expect(after?.error).toMatch(/exited with code 137/);
     expect(after?.error).not.toMatch(/process restart/i);
   });
 
   it("mentions the delivered PR in the failure label when the run has one", async () => {
     const run = await create({ goal: "<implement>", defer: true });
     await db.update(agentSessions)
-      .set({ status: "running", heartbeatAt: STALE, prUrl: "https://github.com/o/r/pull/7" })
+      .set({ status: "running", prUrl: "https://github.com/o/r/pull/7" })
       .where(eq(agentSessions.id, run.id));
 
     await reconcileOrphanedRuns();

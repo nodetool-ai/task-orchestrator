@@ -31,7 +31,7 @@ import { createLogger } from "./log";
 import { contentText } from "./protocol";
 import type {
   ApplyStatusOpts,
-  HeartbeatResult,
+  CancelPollResult,
   MessageRole,
   RunPatch,
   RunTransport,
@@ -171,17 +171,7 @@ export const dbTransport: RunTransport = {
       await this.applyStatus(runId, status, { guard: "not-terminal" });
       return;
     }
-    // Entering a lease status must stamp the heartbeat IN THE SAME WRITE.
-    // In-process turns (append/runReview/runExecute) open their lease via this
-    // transition — not via a dispatch claim — and their heartbeat interval's
-    // first beat lands only after this write. In that window a fresh run's
-    // heartbeat_at is NULL (and a resumed idle chat's is hours old), and
-    // reconcileOrphanedRuns grants a lease-status row without a fresh beat NO
-    // grace: a pump tick (here or on another web instance) would fail the live
-    // turn as "Worker heartbeat lost … (no heartbeat recorded; scope none)".
-    const set = LEASE_STATUSES.includes(status)
-      ? { status, heartbeatAt: new Date() }
-      : { status };
+    const set = { status };
     await db.update(agentSessions).set(set).where(eq(agentSessions.id, runId));
     // Best-effort non-terminal event mirror (legacy /sessions UI): a lost
     // mirror is harmless — the next transition re-establishes state.
@@ -208,22 +198,11 @@ export const dbTransport: RunTransport = {
     await db.update(agentSessions).set(set).where(eq(agentSessions.id, runId));
   },
 
-  async heartbeat(runId): Promise<HeartbeatResult> {
-    // One round-trip: bump the lease AND read back the cancel flag.
+  async pollCancel(runId): Promise<CancelPollResult> {
     const rows = await db
-      .update(agentSessions)
-      .set({ heartbeatAt: new Date() })
-      .where(eq(agentSessions.id, runId))
-      .returning({ c: agentSessions.cancelRequested });
-    // The worker is alive: the wake intent that protected its machine through
-    // boot (runner_instances.wake_requested_at, honored by the lifecycle sweep
-    // like a live claim) is superseded by this heartbeat — clear it so the
-    // sweep's cost policy is governed by the claim alone again. Guarded on
-    // IS NOT NULL so the steady-state heartbeat path stays a single write.
-    await db
-      .update(runnerInstances)
-      .set({ wakeRequestedAt: null })
-      .where(and(eq(runnerInstances.runId, runId), sql`${runnerInstances.wakeRequestedAt} IS NOT NULL`));
+      .select({ c: agentSessions.cancelRequested })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, runId));
     return { cancelRequested: rows[0]?.c === 1 };
   },
 
@@ -238,7 +217,7 @@ export const dbTransport: RunTransport = {
     // worker's healthy claim would strand it.
     await db
       .update(agentSessions)
-      .set({ workerScope: null, workerPid: null })
+      .set({ workerScope: null })
       .where(and(eq(agentSessions.id, runId), notInArray(agentSessions.status, LEASE_STATUSES)));
     const cur = await this.getRun(runId);
     if (!cur) return;

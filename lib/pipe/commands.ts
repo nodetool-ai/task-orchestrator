@@ -13,7 +13,8 @@
 import { consumeToken, verifyToken } from "@/lib/api-tokens";
 import * as chat from "@/lib/chat";
 import * as repo from "@/lib/repo";
-import { isLeaseLive } from "@/lib/run-liveness";
+import { resolveLiveness } from "@/lib/run-liveness";
+import { LEASE_STATUSES, type SessionStatus } from "@/lib/run-state";
 import * as runs from "@/lib/runs";
 import { getUserById } from "@/lib/users";
 
@@ -61,9 +62,11 @@ export const SLASH_COMMANDS: SlashCommandSpec[] = [
 // Postgres. The web turn is invisible to isLive/interrupt, so /status and /stop
 // also consult the DB liveness lease: an active status with a fresh heartbeat.
 
-/** True when the run holds a live DB lease (active status + fresh heartbeat). */
-function leaseLive(run: runs.RunRow | null): boolean {
-  return run != null && isLeaseLive(run);
+/** True when a provider-observed worker owns a turn on this run (in another process). */
+async function leaseLive(run: runs.RunRow | null): Promise<boolean> {
+  if (run == null) return false;
+  if (!LEASE_STATUSES.includes(run.status as SessionStatus)) return false;
+  return (await resolveLiveness(run.id)).verdict === "alive";
 }
 
 /**
@@ -197,7 +200,7 @@ async function dispatchCommand(
       // No local runner to abort. If the DB lease is live, the turn is owned by
       // another process (e.g. the web composer) — say so rather than claiming
       // nothing is running, which would be plainly wrong to the user.
-      if (leaseLive(await runs.getRun(id))) {
+      if (await leaseLive(await runs.getRun(id))) {
         return {
           handled: true,
           reply: `Run #${id} is working in another process (e.g. the web app). \`/stop\` can only interrupt turns started here — stop it from where it was started.`,
@@ -230,7 +233,7 @@ async function dispatchCommand(
       // that /stop won't reach it. Otherwise the run is idle.
       const here = runs.isLive(id)
         ? `⏳ This thread: working on run #${id} — \`/stop\` to interrupt.`
-        : leaseLive(run)
+        : (await leaseLive(run))
           ? `⏳ This thread: run #${id} is working in another process (e.g. the web app); \`/stop\` can't reach it.`
           : `⚪ This thread: run #${id} idle.`;
       // Folded into the digest's trailing line rather than added as its own, so

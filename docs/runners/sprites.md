@@ -42,10 +42,13 @@ token (`SPRITES_TOKEN`), a 30s request timeout, and errors surfaced as
 `deleteSprite` / `listSprites` with pagination), services (`getService` /
 `putService` / `startService` / `stopService`), checkpoints, and network policy.
 
-During the liveness-observation rollout, the controller reads worker service
-state at channel hello and records `started_at#pid` only when it matches the
-PID reported by the worker. These observations are diagnostic only; heartbeat
-and lease decisions remain unchanged.
+Liveness has no clock. `inspect(handle)` reads the sprite and its `worker`
+service and answers `alive` (with incarnation `started_at#pid`), `dead`
+(with the service's `error`), or `unknown`. At channel hello the controller
+records the incarnation only when it matches the PID the worker reports;
+`resolveLiveness(runId)` later compares the observed incarnation with the
+stored one — a different one means the process was replaced. `unknown` never
+authorises a destructive action. See `docs/plans/liveness-without-clocks.md`.
 
 `buildSpritesWorkerEnv` builds each worker service's environment — same
 allowlist as `buildFlyWorkerEnv` (GitHub token, agent credentials, model/backend
@@ -99,12 +102,14 @@ Every `TASK_ORCH_SPRITES_POLL_MS` the monitor lists sprites by prefix
 (`running→running`, `warm→starting`, `cold→suspended`, 404→`gone`), and
 decides a lifecycle action. **Suspension is automatic** — sprites hibernate
 themselves ~30s after activity ceases. The only decision left to us is
-**destroy**: `nextLifecycleAction` → `archive-and-destroy` once a terminal
-run is past `TASK_ORCH_RUNNER_TERMINAL_MS` (default 24h). A missing sprite → the
-row goes `gone` and, if the run was still active, the death policy runs. The
-sweep also reaps leaked prefix-owned sprites with no live row (after a grace
-window). A `cold` sprite with an active run is **not** a death — hibernation
-mid-turn is not failure; the heartbeat reaper covers hangs.
+**destroy**: `nextSpritesLifecycleAction` → `destroy` once a terminal run is
+past `TASK_ORCH_RUNNER_TERMINAL_MS` (default 24h), or an idle run past
+`TASK_ORCH_RUNNER_STOP_MS` (default 7d); a provider-observed live worker is
+never destroyed. A missing sprite → the row goes `gone` and, if the run was
+still active, the death policy runs. The sweep also reaps leaked prefix-owned
+sprites with no live row (after a grace window). A `cold` sprite with an active
+run is **not** a death — hibernation mid-turn is not failure. A wedged-but-alive
+worker is bounded only by the per-turn budget deadline.
 
 ### Lifecycle
 

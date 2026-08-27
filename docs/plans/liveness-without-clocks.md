@@ -1,6 +1,6 @@
 # Liveness without clocks
 
-Status: in progress (2026-08-27). Implemented step by step; each step is one commit and deploys alone.
+Status: complete (2026-08-27). Steps 0-3 landed as one commit each; migrations 0028-0030 must be applied before deploy.
 
 ## Problem
 

@@ -26,7 +26,6 @@ import {
   persistCommand,
   rebasePendingCommands,
   releaseControllerLease,
-  renewControllerLease,
   touchChannel,
   type CommandRow,
   type WorkerEventHandler,
@@ -199,7 +198,7 @@ export class ControllerConnection {
   async connect(): Promise<void> {
     if (this.stopped) throw new Error("controller connection is shut down");
     // Re-entrancy guard: a reconnect backoff timer (attemptReconnect) and
-    // reapStaleChannels/connectRun can all dial this same object concurrently.
+    // connectRun can all dial this same object concurrently.
     // Without a guard, whichever handshake resolves LAST overwrites this.socket /
     // this.epoch — possibly with the losing socket — and orphans the live one.
     // Subsequent callers await and share the one in-flight attempt.
@@ -650,12 +649,9 @@ export class ControllerConnection {
       }
       this.missedPongs += 1;
       socket.ping();
-      // Renew the lease only while the channel is still live (within the pong
-      // window) — never for a socket we are about to declare unhealthy.
-      this.enqueue(async () => {
-        const ok = await renewControllerLease(this.runId, this.controllerId, this.epoch, new Date());
-        if (!ok) throw new ControllerProtocolError("controller lease lost", CLOSE_CODE_STALE_CONTROLLER_EPOCH, false);
-      });
+      // Re-check the epoch fence each tick: another controller taking the run
+      // over is the only way this connection loses its lease.
+      this.enqueue(() => this.touch());
     }, heartbeatIntervalMs);
     this.pingTimer.unref?.();
   }

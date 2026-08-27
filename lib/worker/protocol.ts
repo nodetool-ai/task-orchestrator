@@ -11,8 +11,7 @@
 // guards) used by both the transport and the channel handlers.
 //
 // Design notes:
-//   • heartbeat() doubles as the cancel poll — one round-trip per beat instead
-//     of the old touchHeartbeat + isCancelRequested query pair.
+//   • pollCancel() is the cross-process cancel poll (no liveness write).
 //   • subscribeInput() abstracts "a new user message arrived" (Postgres LISTEN
 //     'run_input').
 //   • applyStatus() carries the CAS guard by NAME (WireStatusGuard), because a
@@ -96,7 +95,7 @@ export interface TaskTransitionInput {
   note?: string;
 }
 
-export interface HeartbeatResult {
+export interface CancelPollResult {
   /** True when a cross-process cancel was requested; the worker must abort its turn. */
   cancelRequested: boolean;
 }
@@ -162,7 +161,8 @@ export interface RunTransport {
 
   // liveness + control plane
   /** Bump the liveness lease AND read the cancel flag — one beat, one answer. */
-  heartbeat(runId: number): Promise<HeartbeatResult>;
+  /** Cross-process cancel poll: the worker learns `cancel_requested` flips here. */
+  pollCancel(runId: number): Promise<CancelPollResult>;
   /** Acknowledge the run.cancel_requested control event after aborting. */
   ackCancel(runId: number): Promise<void>;
   /**
@@ -250,7 +250,7 @@ export function contentText(content: SdkContentBlock[]): string {
  *  closed list: arbitrary `*At`-suffixed keys inside agent-authored jsonb
  *  (run.result, message content, tool payloads) must NOT be revived, or the
  *  http transport would hand callers different shapes than the db transport. */
-const DATE_KEYS = new Set(["createdAt", "updatedAt", "startedAt", "completedAt", "heartbeatAt"]);
+const DATE_KEYS = new Set(["createdAt", "updatedAt", "startedAt", "completedAt", "pendingSince", "claimedAt"]);
 
 /** Subtrees that carry agent/user-authored JSON — never descended into. */
 const OPAQUE_KEYS = new Set(["content", "result", "payload", "params", "outcome"]);

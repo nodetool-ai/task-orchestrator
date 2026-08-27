@@ -32,7 +32,6 @@ import {
 import {
   connectRun,
   disconnectRun,
-  reapStaleChannels,
   reconnectActiveChannels,
   sendCommand,
   shutdownAll,
@@ -92,7 +91,7 @@ async function provisionRun(status: string, goal = "<implement>") {
   const channel = await provisionLocalChannel(run.id);
   await db
     .update(agentSessions)
-    .set({ status, workerScope: `scope-${run.id}`, workerPid: 4242, heartbeatAt: new Date() })
+    .set({ status, workerScope: `scope-${run.id}`})
     .where(eq(agentSessions.id, run.id));
   return { runId: run.id, channel };
 }
@@ -193,12 +192,8 @@ describe("worker channel recovery (plan section 17)", () => {
     await server.close();
     await waitFor(() => getConnection(runId) === undefined, 4000);
 
-    // Channel activity stopped bumping the heartbeat; simulate the stale window
-    // having elapsed and run the shared orphan reaper. A chat run goes idle.
-    await db
-      .update(agentSessions)
-      .set({ heartbeatAt: new Date(Date.now() - 10 * 60_000) })
-      .where(eq(agentSessions.id, runId));
+    // The provider now observes the worker dead; run the shared orphan reaper.
+    // A chat run goes idle.
     const { reconcileOrphanedRuns } = await import("../lib/runs");
     await reconcileOrphanedRuns();
     expect((await db.select().from(agentSessions).where(eq(agentSessions.id, runId)))[0].status).toBe("idle");
@@ -219,21 +214,6 @@ describe("worker channel recovery (plan section 17)", () => {
     await waitFor(() => getConnection(runId)?.connected === true, 4000);
     await sendCommand(runId, "run.cancel", { reason: "post-reconnect", requestId: "r2", deadline: null });
     await waitFor(async () => (await commandRows(runId, "run.cancel")).every((r) => r.state === "acked"));
-  });
-
-  it("stale-channel detection reconnects a supervisor-less silent channel", async () => {
-    const { runId, channel } = await provisionRun("running");
-    await bootServer(runId, channel.instanceId, channel.listenEndpoint, await newRoot());
-    // No connectRun: no in-memory supervisor. Backdate channel_last_seen_at so the
-    // channel reads as stale off its own liveness clock.
-    await db
-      .update(runnerInstances)
-      .set({ channelLastSeenAt: new Date(Date.now() - 10 * 60_000) })
-      .where(eq(runnerInstances.runId, runId));
-
-    const recovered = await reapStaleChannels();
-    expect(recovered).toBeGreaterThanOrEqual(1);
-    expect(getConnection(runId)?.connected).toBe(true);
   });
 
   it("protocol mismatch replaces the worker with the current image", async () => {
@@ -283,7 +263,7 @@ describe("worker channel recovery (plan section 17)", () => {
     });
     await waitFor(async () => {
       const inst = (await db.select().from(runnerInstances).where(eq(runnerInstances.runId, runId)))[0];
-      return inst.controllerId === null && inst.controllerLeaseExpiresAt === null;
+      return inst.controllerId === null;
     });
   });
 
@@ -294,7 +274,7 @@ describe("worker channel recovery (plan section 17)", () => {
     runIds.push(run.id);
     await db
       .update(agentSessions)
-      .set({ status: "idle", workerScope: null, workerPid: null })
+      .set({ status: "idle", workerScope: null})
       .where(eq(agentSessions.id, run.id));
     await db.insert((await import("../db/schema")).agentMessages).values({
       runId: run.id,
@@ -318,8 +298,7 @@ describe("worker channel recovery (plan section 17)", () => {
     const b = await acquireControllerLease(runId, "replica-b", new Date("2026-07-16T00:01:00Z"));
     expect(b.epoch).toBeGreaterThan(a.epoch);
 
-    // The fenced replica's channel touch is rejected; the current one wins and its
-    // touch also advances the shared heartbeat.
+    // The fenced replica's channel touch is rejected; the current one passes.
     expect(await touchChannel(runId, channel.instanceId, "replica-a", a.epoch, new Date("2026-07-16T00:01:05Z"))).toBe(false);
     expect(await touchChannel(runId, channel.instanceId, "replica-b", b.epoch, new Date("2026-07-16T00:01:05Z"))).toBe(true);
   });
@@ -451,7 +430,7 @@ describe("worker channel recovery (plan section 17)", () => {
 
   // Fix 2 (CRITICAL): concurrent connect() must not build two sockets. The
   // in-flight guard makes later callers share the one attempt, so racing dials
-  // (attemptReconnect timer + connectRun/reapStaleChannels) can never orphan the
+  // (attemptReconnect timer + connectRun) can never orphan the
   // live socket with a losing one.
   it("collapses concurrent connect() calls into one live socket", async () => {
     const { runId, channel } = await provisionRun("running");

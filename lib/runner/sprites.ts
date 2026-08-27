@@ -68,16 +68,14 @@ export function spritesRunnerStateFromStatus(status: string | undefined): Runner
 }
 
 function lastActivityMs(row: {
-  heartbeatAt: Date | null;
+  claimedAt: Date | null;
   completedAt: Date | null;
-  lastSuspendedAt: Date | null;
   lastStartedAt: Date | null;
   createdAt: Date;
 }): number {
   return Math.max(
-    row.heartbeatAt?.getTime() ?? 0,
+    row.claimedAt?.getTime() ?? 0,
     row.completedAt?.getTime() ?? 0,
-    row.lastSuspendedAt?.getTime() ?? 0,
     row.lastStartedAt?.getTime() ?? 0,
     row.createdAt.getTime(),
   );
@@ -169,7 +167,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
   private async releaseRunClaimIfCurrent(runId: number, spriteName: string): Promise<void> {
     await db
       .update(agentSessions)
-      .set({ workerScope: null, workerPid: null, heartbeatAt: null })
+      .set({ workerScope: null })
       .where(and(eq(agentSessions.id, runId), eq(agentSessions.workerScope, spriteName)));
   }
 
@@ -386,13 +384,12 @@ export class SpritesRunnerProvider implements RunnerProvider {
         state: runnerInstances.state,
         createdAt: runnerInstances.createdAt,
         lastStartedAt: runnerInstances.lastStartedAt,
-        lastSuspendedAt: runnerInstances.lastSuspendedAt,
         archivedUri: runnerInstances.archivedUri,
         workerIncarnation: runnerInstances.workerIncarnation,
         runStatus: agentSessions.status,
         runGoal: agentSessions.goal,
         workerScope: agentSessions.workerScope,
-        heartbeatAt: agentSessions.heartbeatAt,
+        claimedAt: agentSessions.claimedAt,
         completedAt: agentSessions.completedAt,
       })
       .from(runnerInstances)
@@ -436,7 +433,6 @@ export class SpritesRunnerProvider implements RunnerProvider {
           await this.updateInstance(row.runId, {
             state: runnerState,
             ...(runnerState === "running" ? { lastStartedAt: new Date() } : {}),
-            ...(runnerState === "suspended" ? { lastSuspendedAt: new Date() } : {}),
           });
         }
 
@@ -487,10 +483,9 @@ export class SpritesRunnerProvider implements RunnerProvider {
       state: string;
       createdAt: Date;
       lastStartedAt: Date | null;
-      lastSuspendedAt: Date | null;
       archivedUri: string | null;
       workerScope: string | null;
-      heartbeatAt: Date | null;
+      claimedAt: Date | null;
       completedAt: Date | null;
       runGoal?: string | null;
     },
@@ -505,8 +500,6 @@ export class SpritesRunnerProvider implements RunnerProvider {
       runStatus,
       runnerState,
       idleMs,
-      workerScope: row.workerScope,
-      heartbeatAt: row.heartbeatAt,
       workerLive,
       goal: row.runGoal,
     });

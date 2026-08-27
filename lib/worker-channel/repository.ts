@@ -14,8 +14,6 @@ import type { WorkerEvent } from "./protocol";
  * accidentally acquire database access.
  */
 
-const HEARTBEAT_MS = 10_000;
-const LEASE_MS = HEARTBEAT_MS * 3;
 
 type RawRow = Record<string, unknown>;
 
@@ -52,7 +50,6 @@ export type ControllerLease = {
   epoch: number;
   /** Alias used by callers that use the protocol field name. */
   controllerEpoch: number;
-  expiresAt: Date;
   /** Stable for the lifetime of this controller/epoch pair. */
   leaseId: string;
 };
@@ -376,7 +373,6 @@ export type ChannelInstanceRow = {
   endpoint: string;
   status: string;
   workerScope: string | null;
-  channelLastSeenAt: Date | null;
 };
 
 function channelInstanceRow(row: RawRow): ChannelInstanceRow {
@@ -386,7 +382,6 @@ function channelInstanceRow(row: RawRow): ChannelInstanceRow {
     endpoint: String(row.channel_endpoint),
     status: String(row.status),
     workerScope: row.worker_scope == null ? null : String(row.worker_scope),
-    channelLastSeenAt: nullableDateValue(row.channel_last_seen_at, "channel_last_seen_at"),
   };
 }
 
@@ -404,37 +399,13 @@ export async function listReconnectableChannels(): Promise<ChannelInstanceRow[]>
     db,
     drizzleSql`
       SELECT ri.run_id, ri.channel_instance_id, ri.channel_endpoint,
-             ri.channel_last_seen_at, r.status, r.worker_scope
+             r.status, r.worker_scope
       FROM runner_instances ri
       JOIN agent_runs r ON r.id = ri.run_id
       WHERE ri.channel_instance_id IS NOT NULL
         AND ri.channel_endpoint IS NOT NULL
         AND ri.state NOT IN ('stopped', 'gone')
         AND r.status NOT IN ('completed', 'failed', 'cancelled', 'closed')
-    `
-  );
-  return result.map(channelInstanceRow);
-}
-
-/**
- * Channels whose worker has gone silent past `staleBefore`: a run in a lease
- * status (turn in flight) whose channel_last_seen_at is null or older than the
- * cutoff. Stale detection keys off channel_last_seen_at — the channel's own
- * liveness clock — not a worker-issued heartbeat request.
- */
-export async function listStaleChannelRuns(staleBefore: Date): Promise<ChannelInstanceRow[]> {
-  const at = asDate(staleBefore, "staleBefore");
-  const result = await queryRows(
-    db,
-    drizzleSql`
-      SELECT ri.run_id, ri.channel_instance_id, ri.channel_endpoint,
-             ri.channel_last_seen_at, r.status, r.worker_scope
-      FROM runner_instances ri
-      JOIN agent_runs r ON r.id = ri.run_id
-      WHERE ri.channel_instance_id IS NOT NULL
-        AND ri.channel_endpoint IS NOT NULL
-        AND r.status IN ('running', 'preparing')
-        AND (ri.channel_last_seen_at IS NULL OR ri.channel_last_seen_at < ${ts(at)})
     `
   );
   return result.map(channelInstanceRow);
@@ -452,16 +423,14 @@ export async function releaseChannelForReplacement(runId: number): Promise<void>
     await tx.execute(
       drizzleSql`
         UPDATE agent_runs
-        SET worker_scope = NULL, worker_pid = NULL, heartbeat_at = NULL
+        SET worker_scope = NULL
         WHERE id = ${runId}
       `
     );
     await tx.execute(
       drizzleSql`
         UPDATE runner_instances
-        SET channel_instance_id = NULL, channel_endpoint = NULL,
-            channel_connected_at = NULL, channel_last_seen_at = NULL,
-            controller_id = NULL, controller_lease_expires_at = NULL
+        SET channel_instance_id = NULL, channel_endpoint = NULL, controller_id = NULL
         WHERE run_id = ${runId}
       `
     );
@@ -475,14 +444,14 @@ export async function clearChannelClaim(runId: number): Promise<void> {
     await tx.execute(
       drizzleSql`
         UPDATE agent_runs
-        SET worker_scope = NULL, worker_pid = NULL
+        SET worker_scope = NULL
         WHERE id = ${runId}
       `
     );
     await tx.execute(
       drizzleSql`
         UPDATE runner_instances
-        SET controller_id = NULL, controller_lease_expires_at = NULL
+        SET controller_id = NULL
         WHERE run_id = ${runId}
       `
     );
@@ -499,7 +468,7 @@ export async function acquireControllerLease(
     const current = await queryRows(
       tx,
       drizzleSql`
-        SELECT controller_epoch, controller_id, controller_lease_expires_at
+        SELECT controller_epoch, controller_id
         FROM runner_instances
         WHERE run_id = ${runId}
         FOR UPDATE
@@ -510,17 +479,15 @@ export async function acquireControllerLease(
     const row = current[0];
     const currentEpoch = numberValue(row.controller_epoch ?? 0, "controller_epoch");
     const currentController = row.controller_id == null ? null : String(row.controller_id);
-    const expires = nullableDateValue(row.controller_lease_expires_at, "controller_lease_expires_at");
-    const sameLiveLease = currentController === controllerId && expires != null && expires.getTime() > at.getTime();
-    const epoch = sameLiveLease ? currentEpoch : currentEpoch + 1;
-    const expiresAt = new Date(at.getTime() + LEASE_MS);
+    // No expiry: the epoch IS the single-controller rule. The same controller
+    // re-dialing keeps its epoch (its persisted commands stay valid); any other
+    // controller bumps it, and the worker closes the older channel on accept.
+    const epoch = currentController === controllerId ? currentEpoch : currentEpoch + 1;
 
     await tx.execute(
       drizzleSql`
         UPDATE runner_instances
-        SET controller_epoch = ${epoch},
-            controller_id = ${controllerId},
-            controller_lease_expires_at = ${ts(expiresAt)}
+        SET controller_epoch = ${epoch}, controller_id = ${controllerId}
         WHERE run_id = ${runId}
       `
     );
@@ -530,33 +497,9 @@ export async function acquireControllerLease(
       controllerId,
       epoch,
       controllerEpoch: epoch,
-      expiresAt,
       leaseId: leaseId(runId, controllerId, epoch),
     };
   });
-}
-
-export async function renewControllerLease(
-  runId: number,
-  controllerId: string,
-  epoch: number,
-  now: Date
-): Promise<boolean> {
-  const at = asDate(now, "now");
-  const expiresAt = new Date(at.getTime() + LEASE_MS);
-  const updated = await queryRows(
-    db,
-    drizzleSql`
-      UPDATE runner_instances
-      SET controller_lease_expires_at = ${ts(expiresAt)}
-      WHERE run_id = ${runId}
-        AND controller_id = ${controllerId}
-        AND controller_epoch = ${epoch}
-        AND controller_lease_expires_at > ${ts(at)}
-      RETURNING run_id
-    `
-  );
-  return updated.length > 0;
 }
 
 export async function releaseControllerLease(runId: number, controllerId: string, epoch: number): Promise<void> {
@@ -564,7 +507,7 @@ export async function releaseControllerLease(runId: number, controllerId: string
     db,
     drizzleSql`
       UPDATE runner_instances
-      SET controller_id = NULL, controller_lease_expires_at = NULL
+      SET controller_id = NULL
       WHERE run_id = ${runId} AND controller_id = ${controllerId} AND controller_epoch = ${epoch}
       RETURNING run_id
     `
@@ -572,25 +515,14 @@ export async function releaseControllerLease(runId: number, controllerId: string
 }
 
 export async function markChannelConnected(runId: number, instanceId: string, now: Date): Promise<void> {
-  const at = asDate(now, "now");
-  // Channel activity is the sole liveness signal after the HTTP heartbeat is
-  // gone: bump both channel_last_seen_at (the channel-stale clock) and the run's
-  // heartbeat_at (the shared orphan-reaper clock) in ONE transaction so the two
-  // never diverge.
-  const updated = await db.transaction(async (tx) => {
-    const affected = await queryRows(
-      tx,
-      drizzleSql`
-        UPDATE runner_instances
-        SET channel_connected_at = ${ts(at)}, channel_last_seen_at = ${ts(at)}
-        WHERE run_id = ${runId} AND channel_instance_id = ${instanceId}
-        RETURNING run_id
-      `
-    );
-    if (affected.length) await stampRunHeartbeatTx(tx, runId, at);
-    return affected;
-  });
-  if (!updated.length) {
+  asDate(now, "now");
+  // Liveness is the provider's verdict (resolveLiveness), not a channel clock;
+  // this only proves the dialed instance is the one registered for the run.
+  const registered = await queryRows(
+    db,
+    drizzleSql`SELECT run_id FROM runner_instances WHERE run_id = ${runId} AND channel_instance_id = ${instanceId}`
+  );
+  if (!registered.length) {
     throw new WorkerChannelRepositoryError(
       `Worker instance ${instanceId} is not registered for run ${runId}`,
       "INSTANCE_SCOPE_MISMATCH",
@@ -635,6 +567,9 @@ export async function persistWorkerIncarnation(
   return updated.length > 0;
 }
 
+/** The controller-side epoch fence: true while this controller still owns the
+ * instance's current epoch. No clock — a fenced controller is one another
+ * controller replaced, not one that went quiet. */
 export async function touchChannel(
   runId: number,
   instanceId: string,
@@ -642,44 +577,18 @@ export async function touchChannel(
   epoch: number,
   now: Date
 ): Promise<boolean> {
-  const at = asDate(now, "now");
-  const expiresAt = new Date(at.getTime() + LEASE_MS);
-  // Renew the channel-stale clock, the controller lease, and the run heartbeat
-  // together. Both timestamps advance atomically so the reaper's channel-stale
-  // check (channel_last_seen_at) and the shared orphan reaper (heartbeat_at)
-  // agree about liveness.
-  return db.transaction(async (tx) => {
-    const updated = await queryRows(
-      tx,
-      drizzleSql`
-        UPDATE runner_instances
-        SET channel_last_seen_at = ${ts(at)}, controller_lease_expires_at = ${ts(expiresAt)}
-        WHERE run_id = ${runId}
-          AND channel_instance_id = ${instanceId}
-          AND controller_id = ${controllerId}
-          AND controller_epoch = ${epoch}
-          AND controller_lease_expires_at > ${ts(at)}
-        RETURNING run_id
-      `
-    );
-    if (!updated.length) return false;
-    await stampRunHeartbeatTx(tx, runId, at);
-    return true;
-  });
-}
-
-/** Advance a run's shared heartbeat_at from channel activity, but only while it
- * is still in a live (non-terminal) status — a terminal run's liveness must not
- * be resurrected by a late channel frame. */
-async function stampRunHeartbeatTx(tx: SqlExecutor, runId: number, at: Date): Promise<void> {
-  await tx.execute(
+  asDate(now, "now");
+  const rows = await queryRows(
+    db,
     drizzleSql`
-      UPDATE agent_runs
-      SET heartbeat_at = ${ts(at)}
-      WHERE id = ${runId}
-        AND status NOT IN ('completed', 'failed', 'cancelled', 'closed')
+      SELECT run_id FROM runner_instances
+      WHERE run_id = ${runId}
+        AND channel_instance_id = ${instanceId}
+        AND controller_id = ${controllerId}
+        AND controller_epoch = ${epoch}
     `
   );
+  return rows.length > 0;
 }
 
 /** Core command insert shared by the standalone and tx-scoped variants. The
