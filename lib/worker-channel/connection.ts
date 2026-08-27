@@ -18,9 +18,11 @@ import {
   acquireControllerLease,
   applyWorkerEvent,
   getCommand,
+  getWorkerObservationTarget,
   getLastAcceptedWorkerSeq,
   listPendingCommands,
   markChannelConnected,
+  persistWorkerIncarnation,
   persistCommand,
   rebasePendingCommands,
   releaseControllerLease,
@@ -54,6 +56,7 @@ import { executeToolInvoke, reserveToolInvoke, sweepOrphanedToolInvokes, type To
 import { config } from "../config";
 import { isSpritesDialEndpoint, parseSpritesDialEndpoint } from "./dispatch-env";
 import { openSpritesProxyTunnel } from "../runner/sprites-tunnel";
+import { getRunnerProvider } from "../runner/provider";
 
 export type { WorkerEventHandler };
 
@@ -235,6 +238,7 @@ export class ControllerConnection {
         socket.close(CLOSE_CODE_PROTOCOL_MISMATCH, "protocol mismatch");
         throw new ControllerProtocolError("worker does not support protocol v1", CLOSE_CODE_PROTOCOL_MISMATCH, false);
       }
+      await this.observeHelloIncarnation(hello);
       // Attach the persistent listeners BEFORE sending accept and the post-accept
       // DB awaits below. The worker replays its spooled events the instant it sees
       // channel.accept; a listener attached only after markChannelConnected /
@@ -403,6 +407,36 @@ export class ControllerConnection {
     const frame = decodeFrame(raw(data));
     if (frame.type !== "channel.hello") throw new ControllerProtocolError("worker did not send channel.hello", CLOSE_CODE_SCOPE_MISMATCH, false);
     return frame.payload as ChannelHello;
+  }
+
+  /**
+   * The worker cannot inspect its Sprite (it has no provider token). The
+   * provider-derived value is therefore authoritative: for the same process,
+   * provider.inspect().incarnation === stored incarnation.
+   */
+  private async observeHelloIncarnation(hello: ChannelHello): Promise<void> {
+    if (hello.pid == null) return; // compatibility with an older worker bundle
+    try {
+      const target = await getWorkerObservationTarget(this.runId, this.instanceId);
+      if (!target) return;
+      const provider = getRunnerProvider();
+      if (provider.kind !== target.provider) {
+        console.warn(`[worker-channel] liveness observation provider mismatch runId=${this.runId} row=${target.provider} configured=${provider.kind}`);
+        return;
+      }
+      const observed = await provider.inspect(target.handle);
+      if (observed.status !== "alive") return;
+      const observedPid = (observed as typeof observed & { pid?: number }).pid
+        ?? Number(observed.incarnation.slice(observed.incarnation.lastIndexOf("#") + 1));
+      if (observedPid !== hello.pid) {
+        console.warn(`[worker-channel] liveness observation pid mismatch runId=${this.runId} hello=${hello.pid} observed=${observed.incarnation}`);
+        return;
+      }
+      await persistWorkerIncarnation(this.runId, this.instanceId, observed.incarnation);
+    } catch (err) {
+      // Observation is deliberately non-blocking during this rollout.
+      console.warn(`[worker-channel] liveness observation failed runId=${this.runId}:`, err);
+    }
   }
 
   /** The transport seam handed to the tool-invoke handler. Reads `connected`

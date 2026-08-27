@@ -1,5 +1,5 @@
 // lib/run-dispatch.ts
-import { and, eq, inArray, isNull, notInArray } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, notInArray } from "drizzle-orm";
 import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { lstat, mkdir, readdir, unlink } from "node:fs/promises";
@@ -26,6 +26,7 @@ import { runNonce } from "./run-nonce";
 import { HARD_TERMINAL_STATUSES } from "./run-state";
 import {
   getRunnerProvider,
+  createRunnerProvider,
   runnerProviderKindFromEnv,
   insideWorker,
   nestedDispatchMode,
@@ -925,6 +926,13 @@ async function pumpTick(): Promise<void> {
   } catch {
     // best-effort
   }
+  // Step 1 rollout: compare identities only. The heartbeat reaper remains the
+  // sole liveness decision-maker until the next step.
+  try {
+    await observeWorkerIncarnations();
+  } catch {
+    // best-effort
+  }
   // Half 1: reap stale leases continuously (fixes the boot-only reconcile gap).
   try {
     await runs().reconcileOrphanedRuns();
@@ -1004,6 +1012,37 @@ async function pumpTick(): Promise<void> {
   }
 }
 
+/** Observe persisted provider identities without mutating run or runner state. */
+export async function observeWorkerIncarnations(): Promise<void> {
+  const rows = await db
+    .select({
+      runId: runnerInstances.runId,
+      provider: runnerInstances.provider,
+      spriteName: runnerInstances.spriteName,
+      workerIncarnation: runnerInstances.workerIncarnation,
+      workerScope: agentSessions.workerScope,
+    })
+    .from(runnerInstances)
+    .innerJoin(agentSessions, eq(runnerInstances.runId, agentSessions.id))
+    .where(isNotNull(runnerInstances.workerIncarnation));
+  for (const row of rows) {
+    const handle = row.spriteName ?? row.workerScope;
+    if (!handle) continue;
+    let observed: import("./runner/provider").RunnerObservation = { status: "unknown" };
+    try {
+      const provider = createRunnerProvider(row.provider as "local" | "sprites");
+      observed = await provider.inspect(handle);
+    } catch {
+      // A missing provider credential, for example, is an unknown observation.
+    }
+    const observedValue = observed.status === "alive" ? observed.incarnation : observed.status === "dead" ? observed.detail ?? "" : "";
+    const agree = observed.status === "alive" && observed.incarnation === row.workerIncarnation;
+    console.log(
+      `liveness-observe runId=${row.runId} stored=${row.workerIncarnation} observed=${observedValue} status=${observed.status} agree=${agree}`,
+    );
+  }
+}
+
 /** Start the periodic pump (idempotent). Runs wherever a database is configured
  *  (DATABASE_URL set); disabled only by TASK_ORCH_PENDING_PUMP_MS=0.
  *
@@ -1046,7 +1085,7 @@ export const defaultSpawn = async (
   scope: string,
   channelInstanceId?: string,
   channelEndpoint?: string
-): Promise<{ pid: number; channelEndpoint: string } | null> => {
+): Promise<{ pid: number; channelEndpoint: string; spawnedAt?: string } | null> => {
   if (config.deployment.workerImage) {
     if (!channelInstanceId) {
       throw new Error("Docker worker dispatch requires a provisioned channel instance id");
@@ -1058,7 +1097,7 @@ export const defaultSpawn = async (
   // `channelEndpoint` arrives in the LISTEN form (`unix:<path>`) for the worker
   // process env; the caller persists the RETURNED endpoint as what the
   // controller dials, so hand back the ws+unix dial form.
-  return { pid, channelEndpoint: localDialEndpoint(channelEndpoint.replace(/^unix:/, "")) };
+  return { pid, channelEndpoint: localDialEndpoint(channelEndpoint.replace(/^unix:/, "")), spawnedAt: new Date().toISOString() };
 };
 
 // One worker container per run, launched via the mounted Docker socket. The
@@ -1395,7 +1434,8 @@ export type DockerLike = {
   getContainer(ref: string): {
     logs(opts: unknown): Promise<Buffer | NodeJS.ReadableStream>;
     inspect(): Promise<{
-      State?: { ExitCode?: number; OOMKilled?: boolean };
+      Id?: string;
+      State?: { Running?: boolean; Pid?: number; StartedAt?: string; ExitCode?: number; OOMKilled?: boolean };
       NetworkSettings?: { IPAddress?: string; Networks?: Record<string, { IPAddress?: string }> };
     }>;
     remove(opts?: unknown): Promise<unknown>;
@@ -1404,7 +1444,7 @@ export type DockerLike = {
   getEvents(opts: unknown): Promise<NodeJS.ReadableStream>;
 };
 
-async function getDocker(): Promise<DockerLike> {
+export async function getDocker(): Promise<DockerLike> {
   const { default: Docker } = await import("dockerode");
   return new Docker() as unknown as DockerLike;
 }

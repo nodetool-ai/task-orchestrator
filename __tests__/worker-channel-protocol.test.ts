@@ -117,9 +117,11 @@ describe("worker channel protocol", () => {
         lastControllerEpoch: 2,
         lastAckedControlSeq: 4,
         nextWorkerSeq: 5,
+        pid: 1234,
       },
     }));
     expect(hello.type).toBe("channel.hello");
+    if (hello.type === "channel.hello") expect(hello.payload.pid).toBe(1234);
 
     const accept = decodeFrame(JSON.stringify({
       v: 1,

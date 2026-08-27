@@ -204,6 +204,13 @@
       "when": 1788000000000,
       "tag": "0028_provider_default_sprites",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1788003600000,
+      "tag": "0029_worker_incarnation",
+      "breakpoints": true
     }
   ]
 }

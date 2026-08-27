@@ -20,6 +20,12 @@ export type RunnerState =
   | "stopped"
   | "gone";
 
+/** A provider's best-effort observation of the worker process behind a handle. */
+export type RunnerObservation =
+  | { status: "alive"; incarnation: string }
+  | { status: "dead"; detail?: string }
+  | { status: "unknown" };
+
 export interface RunnerRef {
   /** Run id this runner serves. */
   runId: number;
@@ -61,6 +67,8 @@ export interface RunnerProvider {
   create(input: CreateRunnerInput): Promise<RunnerRef | null>;
   /** Best-effort hard stop (cancel fallback). No-op if already gone. */
   stop(handle: string): Promise<void>;
+  /** Observe only. Implementations must convert all failures to `unknown`. */
+  inspect(handle: string): Promise<RunnerObservation>;
   /** Reconcile DB run state against real runner state for this instance's runs. */
   sweep(): Promise<void>;
 }
@@ -104,16 +112,19 @@ export function getRunnerProvider(): RunnerProvider {
   const cached = g[PROVIDER_KEY] as ProviderCache | undefined;
   if (cached?.kind === kind) return cached.provider;
 
-  const provider: RunnerProvider = (() => {
-    switch (kind) {
-      case "local":
-        return new LocalRunnerProvider();
-      case "sprites":
-        return new SpritesRunnerProvider();
-    }
-  })();
+  const provider = createRunnerProvider(kind);
   g[PROVIDER_KEY] = { kind, provider } satisfies ProviderCache;
   return provider;
+}
+
+/** Build a provider for an already-persisted runner row (observation paths). */
+export function createRunnerProvider(kind: RunnerProviderKind): RunnerProvider {
+  switch (kind) {
+    case "local":
+      return new LocalRunnerProvider();
+    case "sprites":
+      return new SpritesRunnerProvider();
+  }
 }
 
 /** Test helper. */

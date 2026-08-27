@@ -20,6 +20,7 @@ import {
 } from "../lib/worker-channel/controller";
 import { provisionLocalChannel } from "../lib/run-dispatch";
 import { startWorkerServer, type WorkerServer } from "../lib/worker-channel/worker-server";
+import { __setLocalProcessForTests } from "../lib/runner/local";
 
 const instanceId = "wi_0123456789abcdef0123456789abcdef";
 
@@ -89,6 +90,8 @@ describe("local worker channel end-to-end (no driver)", () => {
     // "Dispatch": reserve the local channel identity + endpoints and boot the
     // real supervisor bound to the same Unix socket.
     const channel = await provisionLocalChannel(run.id);
+    await db.update(agentSessions).set({ workerScope: "hello-worker" }).where(eq(agentSessions.id, run.id));
+    __setLocalProcessForTests("hello-worker", { pid: process.pid, spawnedAt: "2026-08-27T10:00:00.000Z" });
     server = await startWorkerServer({
       runId: run.id,
       instanceId: channel.instanceId,
@@ -99,6 +102,8 @@ describe("local worker channel end-to-end (no driver)", () => {
     // Control plane dials the stored ws+unix endpoint and completes the handshake.
     const connection = await connectRun(run.id);
     expect(connection.connected).toBe(true);
+    const [instance] = await db.select({ workerIncarnation: runnerInstances.workerIncarnation }).from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(instance.workerIncarnation).toBe(`${process.pid}#2026-08-27T10:00:00.000Z`);
 
     // A persisted command is delivered and cumulatively acked by the worker.
     await sendCommand(run.id, "run.cancel", { reason: "stop", requestId: "req-1", deadline: null });

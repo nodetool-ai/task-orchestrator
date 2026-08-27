@@ -472,6 +472,7 @@ class WorkerServerImpl implements WorkerServer {
       lastControllerEpoch: state.lastControllerEpoch,
       lastAckedControlSeq: state.lastAckedControlSeq,
       nextWorkerSeq: state.nextWorkerSeq,
+      pid: process.pid,
     };
     await this.queueSend(connection, {
       v: WORKER_CHANNEL_PROTOCOL,

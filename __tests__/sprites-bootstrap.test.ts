@@ -7,6 +7,7 @@ function fakeClient(overrides: Partial<SpritesClient> = {}): SpritesClient {
   return {
     createSprite: vi.fn(async () => ({ name: "x", status: "running" })),
     getSprite: vi.fn(async () => ({ name: "x", status: "running" })),
+    getService: vi.fn(async () => null),
     deleteSprite: vi.fn(async () => {}),
     listSprites: vi.fn(async () => ({ sprites: [], continuationToken: undefined })),
     listAllSprites: vi.fn(async () => []),

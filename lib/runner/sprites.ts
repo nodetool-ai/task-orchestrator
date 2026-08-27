@@ -11,7 +11,7 @@ import type { SessionStatus } from "../types";
 import { nextSpritesLifecycleAction } from "./lifecycle";
 import { nestedDispatchMode } from "./provider";
 import { recordRunnerEvent, timeRunnerPhase } from "./telemetry";
-import type { CreateRunnerInput, RunnerProvider, RunnerRef, RunnerState } from "./provider";
+import type { CreateRunnerInput, RunnerObservation, RunnerProvider, RunnerRef, RunnerState } from "./provider";
 import { SpritesApiError, makeSpritesClient, type NetworkPolicy, type SpritesClient, type Sprite } from "./sprites-client";
 import { bootstrapSprite } from "./sprites-bootstrap";
 import { workerBundleId } from "../worker-bundle";
@@ -140,6 +140,22 @@ export class SpritesRunnerProvider implements RunnerProvider {
   readonly kind = "sprites" as const;
 
   constructor(private readonly spritesClient: SpritesClient = makeSpritesClient()) {}
+
+  async inspect(handle: string): Promise<RunnerObservation> {
+    try {
+      const sprite = await this.spritesClient.getSprite(handle);
+      if (!sprite) return { status: "dead", detail: "sprite gone" };
+      const service = await this.spritesClient.getService(handle, "worker");
+      if (!service) return { status: "dead", detail: "service absent" };
+      if (service.state.status !== "running") {
+        return { status: "dead", detail: service.state.error ?? service.state.status };
+      }
+      if (service.state.pid == null || !service.state.startedAt) return { status: "unknown" };
+      return { status: "alive", incarnation: `${service.state.startedAt}#${service.state.pid}`, pid: service.state.pid } as RunnerObservation & { pid?: number };
+    } catch {
+      return { status: "unknown" };
+    }
+  }
 
   private async getInstance(runId: number): Promise<typeof runnerInstances.$inferSelect | null> {
     const [row] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, runId));

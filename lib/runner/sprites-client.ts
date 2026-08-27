@@ -22,6 +22,16 @@ export interface SpriteServiceDef {
   http_port?: number;
 }
 
+export interface SpriteService {
+  name: string;
+  cmd: string;
+  args?: string[];
+  env?: Record<string, string>;
+  dir?: string;
+  needs?: string[];
+  state: { status: string; pid?: number; startedAt?: string; nextRestartAt?: string; error?: string };
+}
+
 export interface SpriteCheckpoint {
   id: string;
   createdAt?: Date;
@@ -49,6 +59,8 @@ export interface SpritesClientOptions {
 export interface SpritesClient {
   createSprite(input: { name: string; urlSettings?: { auth?: string } }): Promise<Sprite>;
   getSprite(name: string): Promise<Sprite | null>;
+  /** A missing service is a normal, typed result rather than an API error. */
+  getService(spriteName: string, serviceName: string): Promise<SpriteService | null>;
   deleteSprite(name: string): Promise<void>;
   listSprites(input?: { prefix?: string; maxResults?: number; continuationToken?: string }): Promise<{ sprites: Sprite[]; continuationToken?: string }>;
   /** List ALL sprites with prefix, paginating past the 50-item page cap internally. */
@@ -121,6 +133,34 @@ interface RawListSpritesJson {
   sprites: RawSpriteJson[];
   has_more: boolean;
   next_continuation_token?: string | null;
+}
+
+interface RawSpriteServiceJson {
+  name: string;
+  cmd: string;
+  args?: string[];
+  env?: Record<string, string>;
+  dir?: string;
+  needs?: string[];
+  state: { status: string; pid?: number; started_at?: string; next_restart_at?: string; error?: string };
+}
+
+function serviceFromJson(raw: RawSpriteServiceJson): SpriteService {
+  return {
+    name: String(raw.name),
+    cmd: String(raw.cmd),
+    args: raw.args?.map(String),
+    env: raw.env,
+    dir: raw.dir,
+    needs: raw.needs?.map(String),
+    state: {
+      status: String(raw.state?.status),
+      pid: raw.state?.pid == null ? undefined : Number(raw.state.pid),
+      startedAt: raw.state?.started_at,
+      nextRestartAt: raw.state?.next_restart_at,
+      error: raw.state?.error,
+    },
+  };
 }
 
 /**
@@ -278,6 +318,19 @@ export function makeSpritesClient(input?: SpritesClientOptions): SpritesClient {
       try {
         const result = await request<RawSpriteJson>("GET", `/sprites/${encodeURIComponent(name)}`);
         return result ? spriteFromJson(result) : null;
+      } catch (err) {
+        if (err instanceof SpritesApiError && err.status === 404) return null;
+        throw err;
+      }
+    },
+
+    async getService(spriteName: string, serviceName: string) {
+      try {
+        const result = await request<RawSpriteServiceJson>(
+          "GET",
+          `/sprites/${encodeURIComponent(spriteName)}/services/${encodeURIComponent(serviceName)}`,
+        );
+        return result ? serviceFromJson(result) : null;
       } catch (err) {
         if (err instanceof SpritesApiError && err.status === 404) return null;
         throw err;

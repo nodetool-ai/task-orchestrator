@@ -19,6 +19,11 @@ function fakeSpritesClient(overrides: Partial<SpritesClient> = {}): SpritesClien
       calls.push(`getSprite:${name}`);
       return { name, status: "running" };
     }),
+    getService: vi.fn(async (_spriteName: string, serviceName: string) => ({
+      name: serviceName,
+      cmd: "node",
+      state: { status: "running", pid: 1, startedAt: "2026-01-01T00:00:00Z" },
+    })),
     deleteSprite: vi.fn(async (name: string) => {
       calls.push(`deleteSprite:${name}`);
     }),
@@ -72,6 +77,20 @@ describe("spritesRunnerStateFromStatus", () => {
     expect(spritesRunnerStateFromStatus("cold")).toBe("suspended");
     expect(spritesRunnerStateFromStatus("destroyed")).toBe("gone");
     expect(spritesRunnerStateFromStatus("unknown_status_xyz")).toBe("starting");
+  });
+});
+
+describe("SpritesRunnerProvider.inspect", () => {
+  it("returns a stable service incarnation and never throws", async () => {
+    const provider = new SpritesRunnerProvider(fakeSpritesClient({
+      getService: vi.fn(async () => ({ name: "worker", cmd: "node", state: { status: "running", pid: 42, startedAt: "2026-08-27T10:00:00Z" } })),
+    }));
+    await expect(provider.inspect("to-run-1")).resolves.toEqual({ status: "alive", incarnation: "2026-08-27T10:00:00Z#42", pid: 42 });
+
+    const missing = new SpritesRunnerProvider(fakeSpritesClient({ getSprite: vi.fn(async () => null) }));
+    await expect(missing.inspect("to-run-1")).resolves.toEqual({ status: "dead", detail: "sprite gone" });
+    const broken = new SpritesRunnerProvider(fakeSpritesClient({ getSprite: vi.fn(async () => { throw new Error("down"); }) }));
+    await expect(broken.inspect("to-run-1")).resolves.toEqual({ status: "unknown" });
   });
 });
 

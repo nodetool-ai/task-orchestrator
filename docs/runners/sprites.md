@@ -39,8 +39,13 @@ interface (`kind = "sprites"`). It's built with a `SpritesClient` — a thin typ
 wrapper over the Sprites REST API (`lib/runner/sprites-client.ts`) with a bearer
 token (`SPRITES_TOKEN`), a 30s request timeout, and errors surfaced as
 `SpritesApiError`. The client covers sprites (`createSprite` / `getSprite` /
-`deleteSprite` / `listSprites` with pagination), services (`putService` /
-`startService` / `stopService`), checkpoints, and network policy.
+`deleteSprite` / `listSprites` with pagination), services (`getService` /
+`putService` / `startService` / `stopService`), checkpoints, and network policy.
+
+During the liveness-observation rollout, the controller reads worker service
+state at channel hello and records `started_at#pid` only when it matches the
+PID reported by the worker. These observations are diagnostic only; heartbeat
+and lease decisions remain unchanged.
 
 `buildSpritesWorkerEnv` builds each worker service's environment — same
 allowlist as `buildFlyWorkerEnv` (GitHub token, agent credentials, model/backend

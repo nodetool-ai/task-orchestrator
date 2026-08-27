@@ -48,6 +48,9 @@ export async function register(): Promise<void> {
       await providerMod.getRunnerProvider().sweep().catch((e) => {
         console.error("[instrumentation] boot runner sweep failed:", e);
       });
+      await dispatchMod.observeWorkerIncarnations().catch((e) => {
+        console.error("[instrumentation] boot liveness observation failed:", e);
+      });
       await runsMod.reconcileOrphanedRuns();
       // Start the pending-run pump: it re-dispatches runs the admission gate
       // deferred for lack of host memory AND reaps stale leases every tick (so an

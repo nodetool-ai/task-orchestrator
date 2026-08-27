@@ -599,6 +599,42 @@ export async function markChannelConnected(runId: number, instanceId: string, no
   }
 }
 
+/** Runner handle needed for the one-time controller-side hello observation. */
+export async function getWorkerObservationTarget(
+  runId: number,
+  instanceId: string,
+): Promise<{ provider: string; handle: string } | null> {
+  const result = await queryRows(
+    db,
+    drizzleSql`
+      SELECT ri.provider, COALESCE(ri.sprite_name, ar.worker_scope) AS handle
+      FROM runner_instances ri
+      JOIN agent_runs ar ON ar.id = ri.run_id
+      WHERE ri.run_id = ${runId} AND ri.channel_instance_id = ${instanceId}
+    `,
+  );
+  const row = result[0];
+  return row?.handle ? { provider: String(row.provider), handle: String(row.handle) } : null;
+}
+
+/** Store only an identity verified against this channel instance. */
+export async function persistWorkerIncarnation(
+  runId: number,
+  instanceId: string,
+  incarnation: string,
+): Promise<boolean> {
+  const updated = await queryRows(
+    db,
+    drizzleSql`
+      UPDATE runner_instances
+      SET worker_incarnation = ${incarnation}
+      WHERE run_id = ${runId} AND channel_instance_id = ${instanceId}
+      RETURNING run_id
+    `,
+  );
+  return updated.length > 0;
+}
+
 export async function touchChannel(
   runId: number,
   instanceId: string,

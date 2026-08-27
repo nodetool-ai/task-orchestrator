@@ -53,7 +53,7 @@ export async function resolveLiveness(runId: number): Promise<Liveness>;
    default → `"sprites"`. Keep `fly.toml` (control plane still runs on Fly). Keep the
    `fly_app/machine_id/volume_id` columns until step 3.
 1. Observe only: `inspect()` on both providers, `SpritesClient.getService`, migration
-   `0028` adds `runner_instances.worker_incarnation text`, `channel.hello` carries
+   `0029` adds `runner_instances.worker_incarnation text`, `channel.hello` carries
    `incarnation`, accept path stores it, boot reconcile logs disagreement. No consumer.
 2. `resolveLiveness` replaces both predicates (keep names as thin adapters first, then move
    call sites by question group). Add `ensureWorkerConnected` on every delivery path.
@@ -62,7 +62,7 @@ export async function resolveLiveness(runId: number): Promise<Liveness>;
    `wake_requested_at`, `controller_lease_expires_at`, `channel_connected_at`,
    `channel_last_seen_at`, repository `HEARTBEAT_MS/LEASE_MS`, lifecycle `suspend` action and
    `TASK_ORCH_RUNNER_SUSPEND_MS`. Worker enforces single controller (closes the older one on a
-   new accept). Migration `0029` drops those columns plus `fly_app/machine_id/volume_id`,
+   new accept). Migration `0030` drops those columns plus `fly_app/machine_id/volume_id`,
    `agent_runs.worker_pid`, `agent_runs.heartbeat_at`. Keep: per-turn deadline
    (`budget_max_seconds`) and destroy retention.
 

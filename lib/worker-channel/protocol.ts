@@ -270,6 +270,8 @@ export interface ChannelHello {
   lastControllerEpoch: number;
   lastAckedControlSeq: number;
   nextWorkerSeq: number;
+  /** Optional while older worker bundles remain deployable. */
+  pid?: number;
 }
 
 export interface ChannelAccept {
@@ -571,6 +573,7 @@ const handshakeFrameSchema = z.discriminatedUnion("type", [
       lastControllerEpoch: nonNegativeInt,
       lastAckedControlSeq: nonNegativeInt,
       nextWorkerSeq: positiveInt,
+      pid: positiveInt.optional(),
     }).passthrough(),
   }).strict(),
   z.object({

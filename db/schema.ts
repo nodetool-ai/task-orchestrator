@@ -362,6 +362,8 @@ export const runnerInstances = pgTable(
     controllerLeaseExpiresAt: ts("controller_lease_expires_at"),
     channelConnectedAt: ts("channel_connected_at"),
     channelLastSeenAt: ts("channel_last_seen_at"),
+    // Provider-observed identity of the process that completed channel.hello.
+    workerIncarnation: text("worker_incarnation"),
   },
   (t) => ({
     controllerLeaseExpiresIdx: index("runner_instances_controller_lease_expires_at_idx").on(
