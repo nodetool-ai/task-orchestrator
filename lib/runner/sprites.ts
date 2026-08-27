@@ -324,7 +324,19 @@ export class SpritesRunnerProvider implements RunnerProvider {
     // stopped and needs an explicit start. Both S1 outcomes are covered:
     // - if processes survive hibernate, start is idempotent (already running)
     // - if not, this restarts it before we dial
+    // Re-put the definition first so the worker picks up the current env
+    // (rotated credentials, new knobs) instead of the one from create().
     const now = new Date();
+    try {
+      await this.spritesClient.putService(spriteName, "worker", {
+        cmd: "node",
+        args: ["dist/run-worker.js", String(runId)],
+        env: await buildSpritesWorkerEnv(runId, { channelInstanceId, channelListenEndpoint: spritesListenEndpoint() }),
+        dir: "/home/user/worker",
+      });
+    } catch (err) {
+      console.warn(`[SpritesRunnerProvider] putService failed for ${spriteName}:`, err);
+    }
     try {
       await this.spritesClient.startService(spriteName, "worker");
     } catch (err) {
