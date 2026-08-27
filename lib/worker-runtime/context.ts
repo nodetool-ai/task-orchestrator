@@ -32,7 +32,7 @@ import type {
 } from "../worker-channel/protocol";
 import type { WorkerSessionCommand } from "../worker-channel/worker-session";
 import { getBackend } from "../agent-backend";
-import { validateCwd } from "../run-cwd";
+import { prepareWorkerCwd } from "./cwd";
 import type { RunTurnArgs } from "../agent-backend/types";
 import type { RunEnvelope } from "../pi-event-mapper";
 import { config } from "../config";
@@ -92,6 +92,9 @@ export interface WorkerRunContext {
    * (plan section 13.3).
    */
   transcript: MessageSnapshot[];
+  /** Branch/worktree the worker materialized itself; reported on checkpoints
+   *  so the control plane records them like ensureWorktreeBranch() would. */
+  checkpointMeta?: { branch?: string; worktreePath?: string };
 }
 
 /**
@@ -351,29 +354,15 @@ async function runModelTurn(
   const invoke = session.invokeTool
     ? buildWorkerToolInvoker(context.start, { invokeTool: (t, a, c) => session.invokeTool!(t, a, c) })
     : undefined;
-  // Turn cwd: the run's prepared checkout when one exists, else the resolved
-  // repository's working copy from the snapshot. Never fall back to
-  // process.cwd() — a local worker's cwd is the ORCHESTRATOR checkout, and an
-  // agent turned loose there is exploring the wrong codebase.
-  //
-  // GUARD: both snapshot paths are CONTROL-PLANE paths. On a remote worker
-  // (fly/docker) they may not exist here; spawning from a
-  // missing cwd surfaces as the SDK's misleading "native binary failed to
-  // launch / libc mismatch" error. Validate before any backend spawns so the
-  // run fails with the real cause instead.
-  const cwd = validateCwd(
-    (runField(run, "worktreePath") as string | undefined) ??
-      (typeof context.repository?.localPath === "string" ? context.repository.localPath : undefined) ??
-      process.cwd(),
-    {
-      runId: (runField(run, "id") as number) ?? 0,
-      repoId: (typeof context.repository?.id === "string" ? context.repository.id : null),
-      hint:
-        "This path came from the control-plane snapshot; on a remote worker the " +
-        "repository needs a checkout that exists inside the runner (a clonable " +
-        "remote). See docs/agent-caveats.md.",
-    }
-  );
+  // Turn cwd: an existing recorded checkout, the shared local path on a
+  // local worker, or — on a managed runner (sprite, container) — a clone of
+  // the repository made right here from the snapshot (lib/worker-runtime/cwd.ts).
+  // Never process.cwd(): that is the worker bundle, not the user's codebase.
+  const prepared = await prepareWorkerCwd(context.start);
+  const cwd = prepared.cwd;
+  context.checkpointMeta = prepared.branch || prepared.worktreePath
+    ? { ...(prepared.branch ? { branch: prepared.branch } : {}), ...(prepared.worktreePath ? { worktreePath: prepared.worktreePath } : {}) }
+    : undefined;
   const profileCtx = {
     runId: (runField(run, "id") as number) ?? 0,
     run: run as never,
@@ -432,7 +421,7 @@ async function runModelTurn(
 async function emitCheckpoint(context: WorkerRunContext, turn: TurnResult): Promise<void> {
   await context.session.emit("run.checkpoint", {
     sdkSessionId: turn.sdkSessionId,
-    metadata: { ...turn.usage },
+    metadata: { ...turn.usage, ...(context.checkpointMeta ?? {}) },
   });
 }
 

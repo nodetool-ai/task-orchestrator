@@ -50,6 +50,7 @@ import {
   parseReviewVerdict,
 } from "./run-templates";
 import { parsePrUrl, ownerRepoFromRemote } from "./gh-url";
+import { checkoutRepositoryAt } from "./repo-checkout";
 import { getOctokit } from "./github-client";
 import { assistantText, toolResults, type SdkContentBlock } from "./sdk-message";
 import type { AgentSessionFull, RepositoryRow } from "./types";
@@ -2345,82 +2346,20 @@ async function containerCheckoutAt(
   base?: string
 ): Promise<string> {
   const repoRow = await resolveRepo(run);
-  const parsed = ownerRepoFromRemote(repoRow?.remote ?? null);
-  if (!parsed) {
-    throw new Error(
-      `Run #${run.id}: repository '${run.repoId ?? "(default)"}' has no GitHub remote to clone for the worker.`
-    );
-  }
-  if (!process.env.GH_TOKEN) {
-    throw new Error(`Run #${run.id}: GH_TOKEN is required for in-runner checkout.`);
-  }
   const cache = process.env.REPO_CACHE_DIR;
-  const mirror = cache ? resolve(cache, `${parsed.owner}_${parsed.repo}.git`) : "";
-  const url = `https://github.com/${parsed.owner}/${parsed.repo}`;
-  await mkdir(dirname(work), { recursive: true });
-  if (!(await hasUsableGitCheckout(work))) {
-    // A configured runner repo path promises an already-selected checkout.
-    // Never delete and reclone it: a bad path should fail loudly, while a
-    // resumed runner may contain the only copy of uncommitted run work.
-    if (isConfiguredRunnerRepoPath(work)) {
-      throw new Error(
-        `Run #${run.id}: configured runner repository '${work}' is missing or is not a valid Git checkout. ` +
-          "Repair TASK_ORCH_RUNNER_REPO_PATH."
-      );
-    }
-    if (existsSync(work)) await rm(work, { recursive: true, force: true });
-    const reference = mirror && existsSync(mirror) ? ["--reference", mirror, "--dissociate"] : [];
-    // Blobless partial clone: history blobs are fetched on demand through the
-    // image's git credential helper; pairs with the image-baked blobless mirror
-    // so a cold clone moves only refs/commits/trees plus the checkout's blobs.
-    // gitCloneDepthArgs additionally caps the commit/tree history transferred.
-    const depth = gitCloneDepthArgs();
-    await timeRunnerPhase(
-      "git_clone",
-      () => sh(["git", "clone", "--filter=blob:none", ...depth, ...reference, url, work], "/"),
-      {
-        provider: runnerProviderLabel(),
-        fields: {
-          runId: run.id,
-          repoId: run.repoId,
-          reference: reference.length > 0,
-          shallow: depth.length > 0,
-        },
-      }
-    );
-  } else {
-    await sh(["git", "-C", work, "remote", "set-url", "origin", url], "/").catch(() => {});
-  }
-  await timeRunnerPhase(
-    "git_fetch",
-    () => sh(["git", "-C", work, "fetch", "--prune", "origin"], "/").catch(() => {}),
-    { provider: runnerProviderLabel(), fields: { runId: run.id, repoId: run.repoId } }
-  );
-  // Ensure semantics, existing-branch first: a task's branch is shared by every
-  // run on the task, so a previous run may already have pushed it. Prefer the
-  // branch's own remote state (`checkout -B <branch> origin/<branch>` — which
-  // also sets upstream tracking); only branch off `base` (or the repo default)
-  // when origin/<branch> doesn't exist yet. Resetting onto origin/<base> when
-  // the branch already exists would silently discard the earlier runs' commits.
-  try {
-    await timeRunnerPhase(
-      "git_fetch_branch",
-      () => sh(["git", "-C", work, "fetch", "origin", branch], "/"),
-      { provider: runnerProviderLabel(), fields: { runId: run.id, branch } }
-    );
-    await timeRunnerPhase(
-      "git_checkout",
-      () => sh(["git", "-C", work, "checkout", "-B", branch, `origin/${branch}`], "/"),
-      { provider: runnerProviderLabel(), fields: { runId: run.id, branch } }
-    );
-  } catch {
-    const fallback = base ?? (await repoDefaultBranch(run));
-    await timeRunnerPhase(
-      "git_checkout",
-      () => sh(["git", "-C", work, "checkout", "-B", branch, `origin/${fallback}`], "/"),
-      { provider: runnerProviderLabel(), fields: { runId: run.id, branch, base: fallback, fallback: true } }
-    );
-  }
+  const parsed = ownerRepoFromRemote(repoRow?.remote ?? null);
+  const mirror = cache && parsed ? resolve(cache, `${parsed.owner}_${parsed.repo}.git`) : null;
+  await checkoutRepositoryAt({
+    runId: run.id,
+    repoId: run.repoId,
+    remote: repoRow?.remote ?? null,
+    work,
+    branch,
+    base: base ?? (await repoDefaultBranch(run)),
+    mirrorDir: mirror,
+    configuredPath: config.worker.runnerRepoPath ?? null,
+    provider: runnerProviderLabel() as "local" | "sprites" | "unknown",
+  });
   // Link the image-baked node_modules tree (full `npm ci` + Playwright) into this
   // checkout when it is the prewarmed repo, so the agent starts with deps ready
   // instead of paying a cold install. No-op off Fly / for other repos. Best-effort.
