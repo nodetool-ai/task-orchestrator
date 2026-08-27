@@ -10,6 +10,7 @@ import { localSocketPath } from "../lib/worker-channel/dispatch-env";
 import {
   dispatchRun,
   provisionLocalChannel,
+  provisionSpritesChannel,
   unsupportedWsProviderMessage,
 } from "../lib/run-dispatch";
 
@@ -121,6 +122,29 @@ describe("provisionLocalChannel", () => {
     const first = await provisionLocalChannel(run.id);
     const second = await provisionLocalChannel(run.id, first.instanceId);
     expect(second.dialEndpoint).toBe(first.dialEndpoint);
+  });
+});
+
+describe("provisionSpritesChannel", () => {
+  it("seeds a pending placeholder on first dispatch", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    const channel = await provisionSpritesChannel(run.id);
+    const [row] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(row.channelEndpoint).toBe(`pending:sprites:${channel.instanceId}`);
+    expect(channel.listenEndpoint).toBe("tcp:[::]:8787");
+  });
+
+  it("keeps the real sprite:// endpoint on a redispatch (run 185 regression)", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    const first = await provisionSpritesChannel(run.id);
+    const real = `sprite://to-run-${run.id}:8787/worker/channel`;
+    await db.update(runnerInstances).set({ channelEndpoint: real }).where(eq(runnerInstances.runId, run.id));
+
+    const second = await provisionSpritesChannel(run.id);
+
+    expect(second.instanceId).toBe(first.instanceId);
+    const [row] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(row.channelEndpoint).toBe(real);
   });
 });
 

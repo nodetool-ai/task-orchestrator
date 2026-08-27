@@ -326,7 +326,11 @@ export class SpritesRunnerProvider implements RunnerProvider {
     if (!instance?.spriteName) return null;
     const spriteName = instance.spriteName;
     const channelInstanceId = instance.channelInstanceId ?? newChannelInstanceId();
-    const channelEndpoint = instance.channelEndpoint ?? spritesDialEndpoint(spriteName);
+    // The dial endpoint is a pure function of the sprite name. Never trust the
+    // stored value here: dispatch seeds the row with a `pending:sprites:` placeholder
+    // before it knows the name, and a redispatch can leave that placeholder in
+    // place (run 185, 2026-08-27 — every follow-up turn dialed "pending:…").
+    const channelEndpoint = spritesDialEndpoint(spriteName);
 
     // Fetch sprite — a 404 means we must recreate? But design says one sprite per run
     // bound for life; if it's gone, the transcript is lost and caller should create fresh.

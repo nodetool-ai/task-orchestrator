@@ -50,6 +50,7 @@ import {
   localListenEndpoint,
   localSocketPath,
   spritesDialEndpoint,
+  isSpritesDialEndpoint,
   spritesListenEndpoint,
   workerSocketDir,
   runStartCommandId,
@@ -738,7 +739,7 @@ export async function provisionSpritesChannel(
   runId: number,
 ): Promise<{ instanceId: string; listenEndpoint: string }> {
   const [existing] = await db
-    .select({ channelInstanceId: runnerInstances.channelInstanceId })
+    .select({ channelInstanceId: runnerInstances.channelInstanceId, channelEndpoint: runnerInstances.channelEndpoint })
     .from(runnerInstances)
     .where(eq(runnerInstances.runId, runId));
   const instanceId = existing?.channelInstanceId || newChannelInstanceId();
@@ -748,8 +749,13 @@ export async function provisionSpritesChannel(
     .values({ runId, provider: "sprites", state: "starting" })
     .onConflictDoNothing();
   // Concrete dial endpoint (sprite://<name>:8787) is computed by the provider
-  // after the sprite name is known, so we seed with a pending placeholder.
-  await reserveChannelIdentity(runId, instanceId, `pending:sprites:${instanceId}`);
+  // after the sprite name is known, so a first dispatch seeds a pending
+  // placeholder. A redispatch of an existing sprite must keep the real endpoint:
+  // overwriting it with the placeholder made every follow-up dial fail (run 185).
+  const dialEndpoint = isSpritesDialEndpoint(existing?.channelEndpoint ?? "")
+    ? existing!.channelEndpoint!
+    : `pending:sprites:${instanceId}`;
+  await reserveChannelIdentity(runId, instanceId, dialEndpoint);
   return { instanceId, listenEndpoint };
 }
 

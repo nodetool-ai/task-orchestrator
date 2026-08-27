@@ -216,6 +216,27 @@ describe("SpritesRunnerProvider.resume", () => {
     expect(row.state).toBe("starting");
   });
 
+  it("dials sprite://<name> even when the row still holds the dispatch placeholder (run 185)", async () => {
+    const client = fakeSpritesClient({ getSprite: vi.fn(async (name: string) => ({ name, status: "warm" })) });
+    const provider = new SpritesRunnerProvider(client);
+    const run = await create({ goal: "<implement>", defer: true });
+    const spriteName = spriteNameForRun(run.id);
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      provider: "sprites",
+      spriteName,
+      state: "running",
+      channelInstanceId: "wi_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      channelEndpoint: "pending:sprites:wi_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    });
+
+    const ref = await provider.resume(run.id);
+
+    expect(ref?.channelEndpoint).toBe(`sprite://${spriteName}:8787/worker/channel`);
+    const [row] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(row.channelEndpoint).toBe(`sprite://${spriteName}:8787/worker/channel`);
+  });
+
   it("when getSprite returns null marks row gone and returns null", async () => {
     const client = fakeSpritesClient({
       getSprite: vi.fn(async () => null),
