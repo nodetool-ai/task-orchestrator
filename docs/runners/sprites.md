@@ -202,6 +202,7 @@ service starts.
 | `TASK_ORCH_SPRITE_NET_ALLOW` | — | Extra egress domains (phase 6) |
 | `TASK_ORCH_SPRITES_WORKER_BUNDLE_URL` | `${TASK_ORCH_PUBLIC_URL}/api/worker-bundle` | Worker bundle URL; optional `{sha}` expands to the bundle id. |
 | `TASK_ORCH_RUNNER_TERMINAL_MS` | `24h` | Retention before destroy |
+| `TASK_ORCH_SPRITES_CLAUDE_BINARY` | `/home/sprite/.local/bin/claude` | Claude Code executable inside the sprite; passed to the worker as `TASK_ORCH_CLAUDE_BINARY` (the bundle has no native binary). |
 
 Credentials (`GH_TOKEN`, `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`,
 optional pi provider keys) are staged as secrets on the control plane and

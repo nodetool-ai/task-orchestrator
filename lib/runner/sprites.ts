@@ -107,6 +107,9 @@ async function clearSdkSession(runId: number): Promise<void> {
   }
 }
 
+/** Where the sprite base image installs Claude Code (symlink to the versioned ELF). */
+const SPRITE_CLAUDE_BINARY = "/home/sprite/.local/bin/claude";
+
 export async function buildSpritesWorkerEnv(
   runId: number,
   opts: { channelInstanceId?: string; channelListenEndpoint?: string } = {},
@@ -125,6 +128,9 @@ export async function buildSpritesWorkerEnv(
     TASK_ORCH_DETACHED_RUNS: "1",
     TASK_ORCH_INSIDE_WORKER: "1",
     TASK_ORCH_NESTED_DISPATCH: nestedDispatchMode(),
+    // The standalone bundle carries no native claude binary; the sprite base
+    // image installs Claude Code, so the SDK spawns that one.
+    TASK_ORCH_CLAUDE_BINARY: envValue("TASK_ORCH_SPRITES_CLAUDE_BINARY") ?? SPRITE_CLAUDE_BINARY,
     RUN_ID: String(runId),
     SESSION_ROOT: "/home/user/session",
     REPO_CACHE_DIR: envValue("TASK_ORCH_REPO_CACHE_DIR") ?? "/opt/repo-cache",
