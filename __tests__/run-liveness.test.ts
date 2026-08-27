@@ -48,6 +48,13 @@ describe("resolveLiveness — claims that cannot be observed are never unowned",
     expect(await resolveLiveness(run.id)).toMatchObject({ verdict: "dead", reason: "exited" });
   });
 
+  it("a claim on a retired provider is dead (runner gone), never unknown", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
+    await setFakeRunLiveness(run.id, { status: "alive", incarnation: "x" }, "x");
+    await db.update(runnerInstances).set({ provider: "fly" }).where(eq(runnerInstances.runId, run.id));
+    expect(await resolveLiveness(run.id)).toMatchObject({ verdict: "dead", reason: "runner-gone" });
+  });
+
   it("a server claim held by THIS process is alive", async () => {
     const run = await create({ goal: "<chat>", defer: true });
     const scope = serverClaimScope("nonce-1");

@@ -99,6 +99,11 @@ export async function resolveLiveness(runId: number): Promise<Liveness> {
   // A claim with no runner row at all: nothing to observe. This is NOT "no
   // owner" — a dispatch may be provisioning the runner right now.
   if (!row.provider) return { verdict: "unknown" };
+  // A runner from a retired provider (fly, box) has no machine any more and
+  // nothing left to observe it with: its worker is gone, not unknown.
+  if (row.provider !== "local" && row.provider !== "sprites") {
+    return { verdict: "dead", reason: "runner-gone", detail: `provider ${row.provider} retired` };
+  }
   const handle = row.spriteName ?? row.workerScope;
 
   // Prefer the process-wide provider (memoised, and injectable in tests); only
@@ -106,7 +111,7 @@ export async function resolveLiveness(runId: number): Promise<Liveness> {
   let observed: RunnerObservation;
   try {
     const active = getRunnerProvider();
-    const provider = active.kind === row.provider ? active : createRunnerProvider(row.provider as "local" | "sprites");
+    const provider = active.kind === row.provider ? active : createRunnerProvider(row.provider);
     observed = await provider.inspect(handle);
   } catch (err) {
     // No provider (missing credentials in this process) is "cannot observe", never "dead".

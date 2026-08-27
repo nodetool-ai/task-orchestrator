@@ -145,6 +145,11 @@ interface RawSpriteServiceJson {
   state: { status: string; pid?: number; started_at?: string; next_restart_at?: string; error?: string };
 }
 
+function normalizeRestartAt(value: unknown): string | undefined {
+  if (typeof value !== "string" || value === "" || value.startsWith("0001-01-01")) return undefined;
+  return value;
+}
+
 function serviceFromJson(raw: RawSpriteServiceJson): SpriteService {
   // A missing state is "cannot read", never a status of "undefined": throw so
   // inspect() reports unknown instead of a fabricated dead.
@@ -162,7 +167,8 @@ function serviceFromJson(raw: RawSpriteServiceJson): SpriteService {
       status: String(raw.state?.status),
       pid: raw.state?.pid == null ? undefined : Number(raw.state.pid),
       startedAt: raw.state?.started_at,
-      nextRestartAt: raw.state?.next_restart_at,
+      // Go zero time ("0001-01-01T00:00:00Z") means "no restart scheduled".
+      nextRestartAt: normalizeRestartAt(raw.state?.next_restart_at),
       error: raw.state?.error,
     },
   };

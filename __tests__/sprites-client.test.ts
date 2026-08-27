@@ -97,11 +97,13 @@ describe("SpritesClient", () => {
       expect(init.method).toBe("GET");
       return jsonResponse({
         name: "worker", cmd: "node", args: ["dist/run-worker.js"], env: { A: "b" }, dir: "/work", needs: [],
-        state: { status: "running", pid: 123, started_at: "2026-08-27T10:00:00Z", next_restart_at: null },
+        // The real API sends Go's zero time when no restart is scheduled.
+        state: { status: "running", pid: 123, started_at: "2026-08-27T10:00:00Z", next_restart_at: "0001-01-01T00:00:00Z" },
       });
     });
     const service = await makeSpritesClient({ fetchImpl, baseUrl: BASE_URL, token: TOKEN }).getService("to-run-1", "worker");
     expect(service).toMatchObject({ name: "worker", cmd: "node", state: { status: "running", pid: 123, startedAt: "2026-08-27T10:00:00Z" } });
+    expect(service?.state.nextRestartAt).toBeUndefined();
 
     const missing = makeSpritesClient({
       fetchImpl: makeFetchMock(async () => textResponse("not found", 404)), baseUrl: BASE_URL, token: TOKEN,
