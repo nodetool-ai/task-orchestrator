@@ -6,6 +6,7 @@ import { agentSessions, runnerInstances } from "../db/schema";
 import { create } from "../lib/runs";
 import { isRunSpriteName, SpritesRunnerProvider, spriteNameForRun, spritesRunnerStateFromStatus } from "../lib/runner/sprites";
 import { SpritesApiError } from "../lib/runner/sprites-client";
+import { workerBundleId } from "../lib/worker-bundle";
 import type { SpritesClient } from "../lib/runner/sprites-client";
 
 function fakeSpritesClient(overrides: Partial<SpritesClient> = {}): SpritesClient & { _calls: string[] } {
@@ -250,6 +251,7 @@ describe("SpritesRunnerProvider.resume", () => {
       })),
       putService: putSpy,
       stopService: stopSpy,
+      listCheckpoints: vi.fn(async () => [{ id: "cp", comment: `bootstrap ${await workerBundleId()}` }]),
     });
     const provider = new SpritesRunnerProvider(client);
     const run = await create({ goal: "<implement>", defer: true });
@@ -287,6 +289,7 @@ describe("SpritesRunnerProvider.resume", () => {
         state: { status: "running", pid: 7, startedAt: "2026-01-01T00:00:00Z" },
       })),
       putService: putSpy,
+      listCheckpoints: vi.fn(async () => [{ id: "cp", comment: `bootstrap ${await workerBundleId()}` }]),
     });
     const provider = new SpritesRunnerProvider(client);
     await db.insert(runnerInstances).values({ runId: run.id, provider: "sprites", spriteName, state: "running", channelInstanceId: instanceId });
@@ -294,6 +297,33 @@ describe("SpritesRunnerProvider.resume", () => {
     await provider.resume(run.id);
 
     expect(putSpy).not.toHaveBeenCalled();
+  });
+
+  it("re-bootstraps and redefines the service when the shipped bundle changed since the sprite was created", async () => {
+    const putSpy = vi.fn(async () => {});
+    const checkpointSpy = vi.fn(async () => ({ id: "cp2" }));
+    const run = await create({ goal: "<implement>", defer: true });
+    const spriteName = spriteNameForRun(run.id);
+    const instanceId = "wi_abababababababababababababababab";
+    const { mintChannelCredential } = await import("../lib/worker-channel/credential");
+    const client = fakeSpritesClient({
+      getService: vi.fn(async (_s: string, serviceName: string) => ({
+        name: serviceName,
+        cmd: "node",
+        env: { TASK_ORCH_WORKER_CHANNEL_CREDENTIAL: mintChannelCredential(run.id, instanceId) },
+        state: { status: "running", pid: 7, startedAt: "2026-01-01T00:00:00Z" },
+      })),
+      putService: putSpy,
+      checkpoint: checkpointSpy,
+      listCheckpoints: vi.fn(async () => [{ id: "old", comment: "bootstrap deadbeef" }]),
+    });
+    const provider = new SpritesRunnerProvider(client);
+    await db.insert(runnerInstances).values({ runId: run.id, provider: "sprites", spriteName, state: "running", channelInstanceId: instanceId });
+
+    await provider.resume(run.id);
+
+    expect(checkpointSpy).toHaveBeenCalledWith(spriteName, `bootstrap ${await workerBundleId()}`);
+    expect(putSpy).toHaveBeenCalledTimes(1);
   });
 
   it("when getSprite returns null marks row gone and returns null", async () => {

@@ -58,6 +58,8 @@ export interface WorkerHandshakeState {
   lastControllerEpoch: number;
   lastAckedControlSeq: number;
   nextWorkerSeq: number;
+  /** True once run.start was received by this process. */
+  started?: boolean;
 }
 
 export interface WorkerSessionOptions {
@@ -280,6 +282,7 @@ export class WorkerSession {
       lastControllerEpoch: this.controllerEpoch,
       lastAckedControlSeq: this.lastCommandSeq,
       nextWorkerSeq: this.outbox.nextSeq(),
+      started: this.start != null,
     };
   }
 

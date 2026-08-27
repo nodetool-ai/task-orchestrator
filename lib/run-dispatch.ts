@@ -863,44 +863,47 @@ export async function startChannelForRun(
   // runStartCommandId — so this lookup spans every epoch ever persisted for
   // this instance, not just the current one.
   let existing = await getLatestRunStartCommand(runId, instanceId);
-  let freshWorker = opts.freshWorker === true;
 
-  if (!freshWorker && connection.workerNeverAcked && existing && existing.controllerEpoch === connection.controllerEpoch) {
-    // The caller thought this was a re-adoption, but the process on the other
-    // end has never acked anything: it is a new generation (the sprite service
-    // restarted the worker after its previous turn) and the same-epoch
-    // run.start it would be handed was already consumed by its predecessor.
-    // Re-dial with a bumped epoch so a fresh run.start can be minted.
-    await connection.disconnect(false).catch(() => undefined);
-    connection = await connectWithBootBackoff(runId, { bumpEpoch: true });
-    existing = await getLatestRunStartCommand(runId, instanceId);
-    freshWorker = true;
+  // Does the process on the other end need a run.start? Its own hello is the
+  // authority (`started`); the caller's `freshWorker` and, for bundles that
+  // predate the field, a never-acked hello are the fallbacks. Persisted command
+  // history alone is NOT enough: the sprite service restarts the worker after
+  // an idle exit, and the new process inherits nothing (run 187 sat in
+  // 'preparing' for an hour behind a "re-adopted live worker" assumption).
+  const needsStart =
+    opts.freshWorker === true ||
+    connection.workerHasStart === false ||
+    (connection.workerHasStart === undefined && connection.workerNeverAcked);
+
+  if (!needsStart) {
+    // A live, started worker. A same-epoch row that is still unacked is
+    // replayed (boot-backoff retry); anything else is history.
+    if (existing && existing.controllerEpoch === connection.controllerEpoch && !existing.ackedAt) {
+      await connection.sendPersisted(existing);
+    }
+    return;
   }
 
   if (existing && existing.controllerEpoch === connection.controllerEpoch) {
-    // Same generation as this connection: replay verbatim (boot-backoff retry,
-    // a repeated call before the boot deadline). Never rebuild — that would
-    // change the payload under a stable id and trip COMMAND_ID_MISMATCH.
-    await connection.sendPersisted(existing);
-    return;
+    if (!existing.ackedAt) {
+      // Same generation, not yet delivered: replay verbatim. Never rebuild —
+      // that would change the payload under a stable id (COMMAND_ID_MISMATCH).
+      await connection.sendPersisted(existing);
+      return;
+    }
+    // The same-epoch run.start was consumed by a PREVIOUS process. Ids are
+    // per epoch, so re-dial with a bumped epoch before minting a new one.
+    await connection.disconnect(false).catch(() => undefined);
+    connection = await connectWithBootBackoff(runId, { bumpEpoch: true });
+    existing = await getLatestRunStartCommand(runId, instanceId);
+    if (existing && existing.controllerEpoch === connection.controllerEpoch && !existing.ackedAt) {
+      await connection.sendPersisted(existing);
+      return;
+    }
   }
 
-  if (existing && !freshWorker) {
-    // A stale-epoch command from a prior generation, but this call did NOT
-    // follow a provider create()/resume() — the worker may still be the same
-    // live process (e.g. a control-plane restart just re-adopting it).
-    // ControllerConnection.sendPersisted only ever delivers a command whose
-    // epoch matches its own, so this old row is unsendable regardless; a live
-    // worker needs no fresh kickoff, and connectWithBootBackoff's connect()
-    // already rebased/replayed any genuinely pending commands. Nothing to do.
-    return;
-  }
-
-  // No run.start has ever been persisted for this instance, OR this call
-  // follows a provider create()/resume() that just (re)launched the worker
-  // process for a brand-new generation (e.g. a checkpoint resume): mint a
-  // fresh command scoped to the current epoch. buildRunStart re-derives mode
-  // ("resume" once the run carries a backend session id) plus the latest
+  // Mint a fresh run.start scoped to the current epoch. buildRunStart re-derives
+  // mode ("resume" once the run carries a backend session id) plus the latest
   // pendingInput/inboxDigest, so a resumed worker gets current state, not the
   // run's original kickoff snapshot.
   const startId = runStartCommandId(instanceId, connection.controllerEpoch);
@@ -1082,7 +1085,9 @@ export async function observeWorkerIncarnations(): Promise<void> {
     const agree = observed.status === "alive" && observed.incarnation === row.workerIncarnation;
     // Only disagreement is worth a line: the agreeing case fired for every run
     // on every tick and pushed everything else out of Fly's 100-line log buffer.
-    if (!agree) {
+    // An idle run whose sprite service restarted its worker disagrees by
+    // design until the next hello; only a non-alive observation is news.
+    if (observed.status !== "alive") {
       console.log(
         `liveness-observe runId=${row.runId} stored=${row.workerIncarnation} observed=${observedValue} status=${observed.status} agree=${agree}`,
       );

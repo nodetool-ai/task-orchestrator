@@ -272,6 +272,10 @@ export interface ChannelHello {
   nextWorkerSeq: number;
   /** Optional while older worker bundles remain deployable. */
   pid?: number;
+  /** Whether this worker PROCESS already holds its run.start. Optional while
+   *  older bundles remain deployable; a control plane that sees `false` must
+   *  send a start whatever the persisted command history says. */
+  started?: boolean;
 }
 
 export interface ChannelAccept {

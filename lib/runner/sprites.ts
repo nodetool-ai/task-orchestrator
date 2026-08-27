@@ -363,8 +363,31 @@ export class SpritesRunnerProvider implements RunnerProvider {
       const current = await this.spritesClient.getService(spriteName, "worker").catch(() => null);
       const staleCredential =
         current?.env?.TASK_ORCH_WORKER_CHANNEL_CREDENTIAL !== desiredEnv.TASK_ORCH_WORKER_CHANNEL_CREDENTIAL;
-      if (staleCredential) {
-        console.warn(`[SpritesRunnerProvider] worker credential on ${spriteName} is stale; redefining the service`);
+      // A sprite outlives deploys; its worker bundle does not follow them on
+      // its own. bootstrapSprite is idempotent per bundle id (checkpoint
+      // comment), so when the shipped bundle changed since this sprite was
+      // created it fetches the new one, and the service is redefined so the
+      // next start runs the new code.
+      let staleBundle = false;
+      const bundleUrl = config.sprites.workerBundleUrl;
+      if (bundleUrl && config.sprites.token) {
+        const workerSha = await workerBundleId();
+        const checkpoints = await this.spritesClient.listCheckpoints(spriteName).catch(() => []);
+        staleBundle = !checkpoints.some((cp) => cp.comment === `bootstrap ${workerSha}`);
+        if (staleBundle) {
+          console.warn(`[SpritesRunnerProvider] worker bundle on ${spriteName} predates ${workerSha}; re-bootstrapping`);
+          await this.spritesClient.stopService(spriteName, "worker").catch(() => {});
+          await bootstrapSprite(this.spritesClient, spriteName, {
+            workerSha,
+            bundleUrl,
+            onStep: (step, status, durationMs) => {
+              void emitRunnerEvent(runId, "runner_bootstrap_step", { spriteName, step, status, durationMs });
+            },
+          });
+        }
+      }
+      if (staleCredential || staleBundle) {
+        console.warn(`[SpritesRunnerProvider] redefining the worker service on ${spriteName} (${staleBundle ? "new bundle" : "stale credential"})`);
         await this.spritesClient.stopService(spriteName, "worker").catch(() => {});
         await this.spritesClient.putService(spriteName, "worker", {
           cmd: "node",
@@ -372,7 +395,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
           env: desiredEnv,
           dir: "/home/user/worker",
         });
-        await emitRunnerEvent(runId, "runner_service_redefined", { spriteName, reason: "stale-credential" });
+        await emitRunnerEvent(runId, "runner_service_redefined", { spriteName, reason: staleBundle ? "new-bundle" : "stale-credential" });
       }
     } catch (err) {
       console.warn(`[SpritesRunnerProvider] service refresh failed for ${spriteName}:`, err);

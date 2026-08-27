@@ -473,6 +473,7 @@ class WorkerServerImpl implements WorkerServer {
       lastAckedControlSeq: state.lastAckedControlSeq,
       nextWorkerSeq: state.nextWorkerSeq,
       pid: process.pid,
+      ...(typeof state.started === "boolean" ? { started: state.started } : {}),
     };
     await this.queueSend(connection, {
       v: WORKER_CHANNEL_PROTOCOL,

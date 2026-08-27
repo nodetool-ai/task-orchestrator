@@ -197,6 +197,9 @@ export class ControllerConnection {
    * (`lastAckedControlSeq === 0`) is a fresh generation that still needs its
    * run.start, whatever the caller believes about it. */
   get workerNeverAcked(): boolean { return this.lastHello?.lastAckedControlSeq === 0; }
+  /** Whether the worker process holds a run.start, as reported in its hello.
+   *  `undefined` for bundles that predate the field. */
+  get workerHasStart(): boolean | undefined { return this.lastHello?.started; }
   private lastHello?: ChannelHello;
   /** True once disconnect()/abandon()/neutralize() ran: connect() refuses forever. */
   get shutDown(): boolean { return this.stopped; }
