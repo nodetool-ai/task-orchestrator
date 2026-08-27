@@ -324,10 +324,13 @@ export class SpritesRunnerProvider implements RunnerProvider {
     // stopped and needs an explicit start. Both S1 outcomes are covered:
     // - if processes survive hibernate, start is idempotent (already running)
     // - if not, this restarts it before we dial
-    // Re-put the definition first so the worker picks up the current env
+    // Replace the definition first so the worker picks up the current env
     // (rotated credentials, new knobs) instead of the one from create().
+    // PUT on an existing service is a no-op, so delete it first (verified
+    // against the API 2026-08-27).
     const now = new Date();
     try {
+      await this.spritesClient.deleteService(spriteName, "worker");
       await this.spritesClient.putService(spriteName, "worker", {
         cmd: "node",
         args: ["dist/run-worker.js", String(runId)],

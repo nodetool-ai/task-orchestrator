@@ -56,6 +56,8 @@ export interface SpritesClient {
   putService(spriteName: string, serviceName: string, def: SpriteServiceDef): Promise<void>;
   startService(spriteName: string, serviceName: string): Promise<void>;
   stopService(spriteName: string, serviceName: string): Promise<void>;
+  /** Remove a service definition. 404 is not an error. */
+  deleteService(spriteName: string, serviceName: string): Promise<void>;
   restartService(spriteName: string, serviceName: string): Promise<void>;
   getServiceLogs(spriteName: string, serviceName: string): Promise<string>;
   exec(
@@ -324,6 +326,15 @@ export function makeSpritesClient(input?: SpritesClientOptions): SpritesClient {
 
     async startService(spriteName: string, serviceName: string) {
       await requestNdjson("POST", `/sprites/${encodeURIComponent(spriteName)}/services/${encodeURIComponent(serviceName)}/start`);
+    },
+
+    async deleteService(spriteName: string, serviceName: string) {
+      try {
+        await request("DELETE", `/sprites/${encodeURIComponent(spriteName)}/services/${encodeURIComponent(serviceName)}`);
+      } catch (err) {
+        if (err instanceof SpritesApiError && err.status === 404) return;
+        throw err;
+      }
     },
 
     async stopService(spriteName: string, serviceName: string) {
