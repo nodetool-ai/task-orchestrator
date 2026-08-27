@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { and, asc, desc, eq, gt, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 
 import { db } from "@/db";
+import { isDispatchInFlight } from "@/lib/run-dispatch";
 import { agentEvents, agentSessions, runnerInstances } from "@/db/schema";
 import { autoLaunchEligibleTasks, autoLaunchEnabled, autoLaunchIntervalMs } from "./auto-launch";
 import { syncPrBackedTasks } from "./pr-task-state";
@@ -164,7 +165,7 @@ async function reapOrphans() {
     // implement run mid-turn would flip it to `failed` AND `git worktree remove
     // --force` the worktree the live agent is editing, destroying its work.
     // Mirror runs.reconcileOrphanedRuns(), which uses the same lease guard.
-    if (runs.isLive(orphan.id)) continue;
+    if (runs.isLive(orphan.id) || isDispatchInFlight(orphan.id)) continue;
     const storedIncarnation =
       (await db.select({ i: runnerInstances.workerIncarnation }).from(runnerInstances).where(eq(runnerInstances.runId, orphan.id)))[0]?.i ?? null;
     const liveness = await resolveLiveness(orphan.id);

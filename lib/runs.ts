@@ -4821,8 +4821,9 @@ export async function reconcileOrphanedRuns(): Promise<number> {
     .where(inArray(agentSessions.status, LEASE_STATUSES));
   let reaped = 0;
   for (const row of rows) {
-    // A turn driven by THIS process is live by definition; never consult the DB for it.
-    if (isLive(row.id)) continue;
+    // A turn driven by THIS process, or a worker THIS process is still
+    // provisioning, is live by definition; never consult the DB for it.
+    if (isLive(row.id) || runDispatch.isDispatchInFlight(row.id)) continue;
     const [instance] = await db
       .select({ workerIncarnation: runnerInstances.workerIncarnation })
       .from(runnerInstances)

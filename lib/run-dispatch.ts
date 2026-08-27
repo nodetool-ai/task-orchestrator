@@ -365,9 +365,29 @@ function logDeferredWake(runId: number): void {
   );
 }
 
+/** Runs this process is provisioning a worker for right now. A booting worker
+ *  has no settled identity yet, so no reaper may judge it; the dispatch itself
+ *  fails the run if the boot fails. */
+const dispatchesInFlight = new Set<number>();
+export function isDispatchInFlight(runId: number): boolean {
+  return dispatchesInFlight.has(runId);
+}
+
 export async function dispatchRun(
   runId: number,
   opts: { spawn?: SpawnFn; admit?: AdmitFn; providerAdmit?: ProviderAdmitFn } = {}
+): Promise<DispatchResult> {
+  dispatchesInFlight.add(runId);
+  try {
+    return await dispatchRunInner(runId, opts);
+  } finally {
+    dispatchesInFlight.delete(runId);
+  }
+}
+
+async function dispatchRunInner(
+  runId: number,
+  opts: { spawn?: SpawnFn; admit?: AdmitFn; providerAdmit?: ProviderAdmitFn }
 ): Promise<DispatchResult> {
   const provider = runnerProviderKindFromEnv();
   const dispatchStarted = process.hrtime.bigint();

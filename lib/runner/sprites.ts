@@ -151,16 +151,15 @@ export class SpritesRunnerProvider implements RunnerProvider {
       if (runnerState === "gone") return { status: "dead", detail: `sprite ${sprite.status}` };
       const service = await this.spritesClient.getService(handle, "worker");
       const s = service?.state;
-      // A hibernating (cold) or booting sprite is NOT a death: its worker is a
-      // frozen/starting process. Only the service's own verdict may say dead.
-      const settled = runnerState === "running";
-      if (!service) return settled ? { status: "dead", detail: "service absent" } : { status: "unknown" };
+      // Only two things prove a worker dead: the sprite is gone (above) or the
+      // service itself reports `failed`. Everything else — no service yet,
+      // defined-but-not-started, a hibernating (cold) sprite, restart backoff —
+      // is a boot or freeze window in which the process identity is not settled.
+      // Run 184 was reaped mid-bootstrap by calling one of those "dead".
+      if (!service) return { status: "unknown" };
       if (s!.status === "failed") return { status: "dead", detail: s!.error ?? "failed" };
-      if (s!.nextRestartAt) return { status: "unknown" }; // supervisor backoff: identity not settled
-      if (s!.status !== "running") {
-        return settled ? { status: "dead", detail: s!.error ?? s!.status } : { status: "unknown" };
-      }
-      if (s!.pid == null || !s!.startedAt) return { status: "unknown" };
+      if (s!.nextRestartAt) return { status: "unknown" };
+      if (s!.status !== "running" || s!.pid == null || !s!.startedAt) return { status: "unknown" };
       return { status: "alive", incarnation: `${s!.startedAt}#${s!.pid}`, pid: s!.pid };
     } catch {
       return { status: "unknown" };
