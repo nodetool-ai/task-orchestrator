@@ -73,12 +73,20 @@ async function main() {
     // Dead-worker backstop. A worker that binds but is never dialed (run 169:
     // the control plane's boot deadline expired mid image-pull) would otherwise
     // idle forever, holding a Fly Machine open at full price.
+    // The chat drive waits chatIdleMs for follow-ups with NO controller
+    // attached (the control plane closes the sprite tunnel at every idle so
+    // the sprite can hibernate). Both the session's disconnect grace and the
+    // process backstop must outlive that wait, or they kill a worker that is
+    // doing exactly what it should; the chat loop's own idle timeout is the
+    // clean exit. The backstop still covers "bound but never dialed" (run 169).
+    const waitMs = appConfig.agent.chatIdleMs + 60_000;
     supervisor = await startWorkerServer({
       runId,
       instanceId,
       credential,
       endpoint,
-      idleExitMs: appConfig.worker.idleExitMs,
+      disconnectGraceMs: waitMs,
+      idleExitMs: Math.max(appConfig.worker.idleExitMs, waitMs),
     });
 
     // Ship the tee'd runner.log over the CHANNEL, not the db. A worker holds no
@@ -103,8 +111,12 @@ async function main() {
     if (!session.waitForStart || !session.commands) {
       throw new Error("worker supervisor session does not expose the ws run-driver API");
     }
-    const start = await session.waitForStart();
-    await driveWorkerRun({ start, session: session as WorkerDriverSession });
+    // Hand the SESSION (not a pre-fetched start) to the driver: that selects the
+    // input-driven chat loop, which keeps serving follow-up `run.input` turns
+    // until chatIdleMs passes with none. Passing `start` selected the single
+    // drive, so the worker exited after every turn and the sprite service
+    // restarted it — a new worker generation per message (2026-08-27).
+    await driveWorkerRun({ session: session as WorkerDriverSession });
     log.info("worker finished", { runId });
   } catch (e) {
     log.error("worker fatal", { runId, error: e instanceof Error ? (e.stack ?? e.message) : String(e) });

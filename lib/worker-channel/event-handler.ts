@@ -186,15 +186,13 @@ async function handleRunPhase(tx: WorkerChannelTransaction, frame: WorkerEventFr
     return;
   }
   const set: Record<string, unknown> = { status: target };
-  // Clean chat exit: the worker emits `idle` immediately before it exits (see
-  // driveChatRun), so its claim must go in the same write — the legacy
-  // releaseClaim(..., idle) landing. Without it the run keeps a claim on a
-  // worker that has exited, so sendMessageToRun bridges the next user message
-  // into a channel that is already closed instead of dispatching a fresh worker. On sprites that channel is deliberately closed at idle, so the
-  // message was never delivered at all (run 181).
-  if (target === "idle") {
-    set.workerScope = null;
-  }
+  // 'idle' no longer releases the claim: the worker lands idle BETWEEN turns
+  // and keeps waiting chatIdleMs for the next `run.input` (driveChatRun). A
+  // kept claim is what makes sendMessageToRun re-dial the living worker instead
+  // of dispatching a second one (a second run.start is a protocol error). A
+  // worker that did exit is observed dead (exited / replaced) by resolveLiveness
+  // on the next message, and only then is the claim discarded — the run-181
+  // failure mode (bridging into a closed channel) is guarded there, not here.
   await tx
     .update(agentSessions)
     .set(set)

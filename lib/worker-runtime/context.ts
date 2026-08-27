@@ -586,16 +586,27 @@ async function driveChatRun(context: WorkerRunContext, inputDriven: boolean): Pr
     }
 
     if (inputDriven) {
-      // Wait (bounded by the chat idle timeout) for the first follow-up
-      // `run.input`, process it, then exit — the control plane redispatches a
-      // fresh worker for any later input, mirroring the legacy chat loop's
-      // release-and-redispatch on exit.
+      // Keep serving follow-up `run.input` turns until the chat idle timeout
+      // passes with none. Between turns the run is landed on 'idle' (the
+      // control plane may close the channel; the worker keeps waiting and is
+      // re-dialed for the next message). Only the idle timeout ends the
+      // process — the sprite service then restarts a fresh generation, which
+      // the control plane detects (dead: replaced) and re-dispatches.
       const idleMs = config.agent.chatIdleMs;
+      let landedIdle = false;
       for (;;) {
         if (session.abortSignal?.aborted) break;
         if (queue.hasPending()) {
+          if (landedIdle) {
+            void session.emit("run.phase", { phase: "running" }).catch(() => undefined);
+            landedIdle = false;
+          }
           await drainAndProcess(context, queue);
-          break;
+          continue;
+        }
+        if (!landedIdle) {
+          await landIdle(session);
+          landedIdle = true;
         }
         const woke = await waitForWake(idleMs, session.abortSignal, (resume) => {
           wake = resume;
@@ -627,9 +638,14 @@ async function driveChatRun(context: WorkerRunContext, inputDriven: boolean): Pr
     return;
   }
   // Clean chat exit: the run stays resumable — land it back on 'idle' exactly
-  // as the legacy releaseClaim(..., idle) chat-exit path did. Await the
-  // controller's ack so the landing is observable before the drive returns
-  // (emit alone is only spool-durable).
+  // as the legacy releaseClaim(..., idle) chat-exit path did. Idempotent: the
+  // input-driven loop already landed idle before its final wait.
+  await landIdle(session);
+}
+
+/** Land the run on 'idle' and await the controller's ack so the landing is
+ *  observable before continuing (emit alone is only spool-durable). */
+async function landIdle(session: WorkerDriverSession): Promise<void> {
   const idlePhase = (await session.emit("run.phase", { phase: "idle" })) as { id: string; seq?: number };
   if (session.waitForAck && typeof idlePhase.seq === "number") {
     await session.waitForAck(idlePhase.seq);

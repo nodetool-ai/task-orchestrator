@@ -129,6 +129,9 @@ describe("worker websocket e2e", () => {
     it("wakes on a follow-up input command and drains it into a second turn", async () => {
       const run = await create({ goal: "<chat>", defer: true });
       vi.spyOn(backend, "getBackend").mockResolvedValue(fakeChatBackend("first"));
+      // The worker keeps waiting for further follow-ups; a short idle window
+      // lets the drive return once the second turn is done.
+      process.env.TASK_ORCH_CHAT_IDLE_MS = "2500";
 
       const { server, connection } = await bootWorkerChannel(run.id);
       try {
@@ -160,6 +163,7 @@ describe("worker websocket e2e", () => {
         // the snapshot kickoff, one for the drained follow-up.
         expect(msgs.filter((m) => m.role === "agent").length).toBeGreaterThanOrEqual(2);
       } finally {
+        delete process.env.TASK_ORCH_CHAT_IDLE_MS;
         await disconnectRun(run.id);
         await server.close();
       }

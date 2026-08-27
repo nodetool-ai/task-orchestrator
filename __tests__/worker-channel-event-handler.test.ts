@@ -184,7 +184,7 @@ describe("run.phase", () => {
     expect(await statusEvents(runId, "running")).toBe(1);
   });
 
-  it("releases the worker claim when the chat drive lands idle", async () => {
+  it("keeps the worker claim when the chat drive lands idle (worker waits for follow-ups)", async () => {
     // The worker emits `idle` immediately before exiting. Leaving worker_scope
     // behind keeps a claim on an exited worker, and sendMessageToRun then bridges
     // the next user message into a channel that is closed at idle (run 181).
@@ -203,7 +203,9 @@ describe("run.phase", () => {
         .where(eq(agentSessions.id, runId))
     )[0];
     expect(row.status).toBe("idle");
-    expect(row.scope).toBeNull();
+    // The worker keeps waiting for follow-ups after landing idle: the claim
+    // stays until resolveLiveness observes the process gone.
+    expect(row.scope).toBe("to-run-1");
   });
 
   it("never regresses a run that already landed a terminal outcome", async () => {

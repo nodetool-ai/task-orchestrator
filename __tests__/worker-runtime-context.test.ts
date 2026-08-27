@@ -265,6 +265,44 @@ describe("driveWorkerRun", () => {
     expect(runTurn).not.toHaveBeenCalled();
   });
 
+  it("serves several follow-ups from ONE worker and lands idle between them", async () => {
+    vi.spyOn(backend, "getBackend").mockResolvedValue(fakeBackend("reply"));
+    const start = makeStart({
+      run: { id: 1, status: "idle", goal: "<chat>" },
+      transcript: [msg(1, "user", "hi"), msg(2, "agent", "hello")],
+      pendingInput: [],
+    });
+    const emitted: Array<{ type: string; payload: any }> = [];
+    const session: WorkerDriverSession = {
+      async waitForStart() {
+        return start;
+      },
+      async *commands() {
+        yield { messages: [msg(3, "user", "first follow up")] } as unknown as WorkerSessionCommand;
+        await new Promise((r) => setTimeout(r, 30));
+        yield { messages: [msg(4, "user", "second follow up")] } as unknown as WorkerSessionCommand;
+      },
+      async emit(type, payload) {
+        emitted.push({ type, payload });
+        return { id: `e${emitted.length}` };
+      },
+    };
+    const prevIdle = process.env.TASK_ORCH_CHAT_IDLE_MS;
+    process.env.TASK_ORCH_CHAT_IDLE_MS = "150";
+    try {
+      await driveWorkerRun({ session });
+    } finally {
+      if (prevIdle === undefined) delete process.env.TASK_ORCH_CHAT_IDLE_MS;
+      else process.env.TASK_ORCH_CHAT_IDLE_MS = prevIdle;
+    }
+    const agentAppends = emitted.filter((e) => e.type === "transcript.append" && e.payload.message.role === "agent");
+    // kickoff + two follow-ups, all in one process
+    expect(agentAppends).toHaveLength(3);
+    const phases = emitted.filter((e) => e.type === "run.phase").map((e) => e.payload.phase);
+    expect(phases[0]).toBe("running");
+    expect(phases[phases.length - 1]).toBe("idle");
+  });
+
   it("does NOT re-append a run.input user message the control plane already persisted", async () => {
     // Regression: a chat follow-up is durably appended by persistMessage (one
     // agent_messages row) and bridged to the worker as run.input carrying that
@@ -295,8 +333,19 @@ describe("driveWorkerRun", () => {
       },
     };
 
-    // No start snapshot in the call → input-driven drive (waits for run.input).
-    await driveWorkerRun({ session });
+    // No start snapshot in the call → input-driven drive: serves the follow-up,
+    // then waits chatIdleMs for more. A short idle window ends the drive here.
+    const prevIdle = process.env.TASK_ORCH_CHAT_IDLE_MS;
+    process.env.TASK_ORCH_CHAT_IDLE_MS = "100";
+    try {
+      await driveWorkerRun({ session });
+    } finally {
+      if (prevIdle === undefined) delete process.env.TASK_ORCH_CHAT_IDLE_MS;
+      else process.env.TASK_ORCH_CHAT_IDLE_MS = prevIdle;
+    }
+    // One idle landing per wait, plus the final clean-exit landing.
+    const idles = emitted.filter((e) => e.type === "run.phase" && e.payload.phase === "idle");
+    expect(idles.length).toBeGreaterThanOrEqual(1);
 
     // The worker never re-appends an already-persisted user message.
     const userAppends = emitted.filter(
