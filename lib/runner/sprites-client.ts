@@ -318,7 +318,8 @@ export function makeSpritesClient(input?: SpritesClientOptions): SpritesClient {
     },
 
     async putService(spriteName: string, serviceName: string, def: SpriteServiceDef) {
-      await request("PUT", `/sprites/${encodeURIComponent(spriteName)}/services/${encodeURIComponent(serviceName)}`, def);
+      // Answers an NDJSON event stream (started/complete) and starts the service.
+      await requestNdjson("PUT", `/sprites/${encodeURIComponent(spriteName)}/services/${encodeURIComponent(serviceName)}`, def);
     },
 
     async startService(spriteName: string, serviceName: string) {

@@ -338,3 +338,16 @@ describe("parseExecFrames", () => {
     expect(r).toEqual({ exitCode: 5, stdout: "a\nb\nnoline", stderr: "e\n" });
   });
 });
+
+describe("putService", () => {
+  it("accepts the NDJSON event stream the API answers with", async () => {
+    const ndjson = `{"type":"started","timestamp":1}\n{"type":"complete","log_files":{},"timestamp":2}\n`;
+    const fetchImpl = makeFetchMock(async (url, init) => {
+      expect(url).toBe(`${BASE_URL}/sprites/to-run-1/services/worker`);
+      expect(init.method).toBe("PUT");
+      return new Response(ndjson, { status: 200, headers: { "Content-Type": "application/x-ndjson" } });
+    });
+    const client = makeSpritesClient({ fetchImpl, baseUrl: BASE_URL, token: TOKEN });
+    await expect(client.putService("to-run-1", "worker", { cmd: "node", args: [], env: {}, dir: "/tmp" })).resolves.toBeUndefined();
+  });
+});
