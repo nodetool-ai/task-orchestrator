@@ -1,6 +1,5 @@
 import React from "react";
 import { Box, Text } from "ink";
-import type { ModelOption } from "../model/models.js";
 import { C, Hair, Keys, useGlyphs } from "../theme.js";
 import { fitKeys, layoutCompletions, layoutHelp, layoutPending, type KeyHint } from "./layout.js";
 
@@ -73,9 +72,9 @@ export function Prompt({
   /** How many help lines the screen has room for; the rest are dropped rather
    *  than pushing the transcript off the top. */
   maxHelp?: number;
-  /** `/model` suggestions. While non-empty they replace the command help and
+  /** Argument suggestions. While non-empty they replace the command help and
    *  `tab` completes the highlighted row instead of addressing an agent. */
-  completions?: ModelOption[];
+  completions?: readonly { value: string; label: string }[];
   completionIndex?: number;
 }) {
   const g = useGlyphs();

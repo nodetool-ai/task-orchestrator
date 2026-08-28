@@ -20,6 +20,7 @@ import {
   wordForward,
 } from "./model/composer.js";
 import { applyModelCompletion, matchModels } from "./model/models.js";
+import { applyPersonaCompletion, completePersona, matchPersonas } from "./model/personas.js";
 import { filterPalette } from "./model/palette.js";
 import { useOrch } from "./store.js";
 import { C, GlyphProvider, Hair, useGlyphs } from "./theme.js";
@@ -120,7 +121,7 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
   // its second keystroke. Both are cleared by `esc`, in that order.
   const [to, setTo] = useState<number | null>(null);
   const [confirm, setConfirm] = useState<{ id: number; kids: number } | null>(null);
-  // The highlighted `/model` suggestion. Reset by every input change, so it
+  // The highlighted argument suggestion. Reset by every input change, so it
   // can never point past a list that just shrank.
   const [compIx, setCompIx] = useState(0);
 
@@ -139,7 +140,10 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
   // The live line only exists while the open run is working, so it is part of
   // the same arithmetic as the command help: a row the transcript gives up.
   const live = view === "chat" && run !== null && isLive(run.status);
-  const comps = useMemo(() => matchModels(comp.line.text, s.models), [comp.line.text, s.models]);
+  const comps = useMemo(() => {
+    const models = matchModels(comp.line.text, s.models);
+    return models.length > 0 ? models : matchPersonas(comp.line.text, s.personas);
+  }, [comp.line.text, s.models, s.personas]);
   const screen = screenLayout(cols, rows, {
     rail,
     help: comps.length > 0 ? comps.length : matchCommands(comp.line.text).length,
@@ -437,7 +441,7 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
     // what it does.
     if (key.pageUp) return setScrollBack((n) => n + bodyH);
     if (key.pageDown) return setScrollBack((n) => Math.max(0, n - bodyH));
-    // While `/model` suggests, the arrows walk the suggestions; they had no
+    // While an argument suggests, the arrows walk the suggestions; they had no
     // job in the composer before (scrolling is pgup/pgdn). Otherwise ↓/↑ walk
     // the recall history, newest first.
     if (shownComps.length > 0 && key.upArrow) return setCompIx((i) => Math.max(0, i - 1));
@@ -448,11 +452,19 @@ function Cockpit({ client, initial, baseUrl, openUrl }: Omit<AppProps, "ascii" |
       // suggestions and then agent addressing get their turns.
       const cmd = completeCommand(comp.line.text);
       if (cmd !== null) return edit(ed.replaced(cmd));
+      const persona = completePersona(comp.line.text, s.personas);
+      if (persona !== null) return edit(ed.replaced(persona));
       // Mid-command the suggestions own `tab`: a leading slash routes to the
       // command switch, never to an agent, so there is no addressing to lose.
       if (comp.line.text.startsWith("/") && shownComps.length > 0) {
         const pick = shownComps[Math.min(compIx, shownComps.length - 1)];
-        return edit(ed.replaced(applyModelCompletion(comp.line.text, pick.value)));
+        return edit(
+          ed.replaced(
+            comp.line.text.startsWith("/new")
+              ? applyPersonaCompletion(comp.line.text, pick.value)
+              : applyModelCompletion(comp.line.text, pick.value),
+          ),
+        );
       }
       const w = s.actions.waiting();
       if (w.length === 0) return setNotice("nobody is waiting on you");

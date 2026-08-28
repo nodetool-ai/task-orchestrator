@@ -203,6 +203,17 @@ describe("the composer under keystrokes", () => {
     expect(promptLine(lines)).toContain("❯ /open ");
   });
 
+  it("suggests and completes the /new persona argument", async () => {
+    const lines = await screenshot(
+      80,
+      24,
+      ["/", "n", "e", "w", " ", "i", "m", "p", "\t"],
+      "❯ /new implementor ",
+    );
+    expect(lines.join("\n")).toContain("implementor");
+    expect(promptLine(lines)).toContain("❯ /new implementor ");
+  });
+
   it("sends to another run without leaving this one", async () => {
     // /say posts through the same door as the @#id chip: the optimistic
     // frame carries a `to` mark in the open transcript.
