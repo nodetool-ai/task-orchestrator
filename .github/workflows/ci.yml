@@ -57,6 +57,16 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # lib/worker-bundle.ts reads dist/run-worker.standalone.js at call time,
+      # and __tests__/sprites-provider.test.ts exercises the paths that call it
+      # (SpritesRunnerProvider.create/resume). dist/ is gitignored and the
+      # bundle is only produced by this script, which otherwise runs in the
+      # worker-bundle job *after* quality — so without this step the suite
+      # tests a checkout where the file cannot exist and five tests fail on
+      # ENOENT. It is ~2s of esbuild: the gate builds its own artifact.
+      - name: Build standalone worker bundle
+        run: npm run build:worker:standalone
+
       - name: Test
         run: npm test
 
