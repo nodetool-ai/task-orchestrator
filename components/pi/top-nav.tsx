@@ -143,7 +143,7 @@ export function TopNav({ email }: { email?: string }) {
           color: "var(--pi-muted)",
           fontSize: 12,
           fontWeight: 500,
-          minWidth: 220,
+          minWidth: 168,
           justifyContent: "space-between",
           cursor: "pointer",
           fontFamily: "inherit",
@@ -151,7 +151,7 @@ export function TopNav({ email }: { email?: string }) {
       >
         <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
           <Icon name="search" size={13} />
-          Jump to task, run, plan…
+          Search
         </span>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
           <kbd style={kbdStyle}>⌘</kbd>

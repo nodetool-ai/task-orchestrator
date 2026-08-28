@@ -127,9 +127,11 @@ export function LiveSidebar({ enabled }: { enabled: boolean }) {
     }
   }, [collapsed, hydrated]);
 
-  // Render nothing while we don't know the mobile state, to keep SSR/CSR stable.
-  // The layout reserves space via CSS so this won't cause layout shift on desktop.
-  const { items: rawItems, chats, error } = useLiveSessions(enabled && !isMobile);
+  // The live rail belongs to the runs pages — everywhere else it is noise, so
+  // neither the aside nor its 6s poll exists off /runs.
+  const onRuns = pathname === "/runs" || pathname.startsWith("/runs/");
+  const visible = enabled && !isMobile && onRuns;
+  const { items: rawItems, chats, error } = useLiveSessions(visible);
 
   // Optimistic dismissal: closing a run PATCHes it to `closed` (which drops it
   // from the next poll), but the poll is 6s away — track dismissed runs locally
@@ -161,7 +163,7 @@ export function LiveSidebar({ enabled }: { enabled: boolean }) {
 
   // ⌘J / Ctrl-J → cycle to next attention-needing run.
   React.useEffect(() => {
-    if (isMobile || !enabled) return;
+    if (!visible) return;
     function onKey(e: KeyboardEvent) {
       if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
       if (e.key.toLowerCase() !== "j") return;
@@ -178,11 +180,9 @@ export function LiveSidebar({ enabled }: { enabled: boolean }) {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [items, pathname, isMobile, enabled]);
+  }, [items, pathname, visible]);
 
-  if (isMobile || !enabled) return null;
-  // Hide on the Factory floor — the floor already surfaces review/stuck items.
-  if (pathname === "/") return null;
+  if (!visible) return null;
 
   const width = collapsed ? SIDEBAR_WIDTH_COLLAPSED : SIDEBAR_WIDTH_EXPANDED;
   const attentionCount = items.filter((i) => ATTENTION_BUCKETS.has(i.bucket)).length;
@@ -277,7 +277,6 @@ export function LiveSidebar({ enabled }: { enabled: boolean }) {
           </>
         )}
       </div>
-      {!collapsed && attentionCount > 0 && <SidebarFooter attention={attentionCount} />}
     </aside>
   );
 }
@@ -325,7 +324,7 @@ function SidebarHeader({
             {total}
           </span>
           {attention > 0 && (
-            <Tooltip content={`${attention} need attention`}>
+            <Tooltip content={`${attention} need attention — ⌘J to cycle`}>
               <span
                 className="pi-mono"
                 style={{
@@ -611,38 +610,3 @@ function ChatPip({ item, active }: { item: ChatSidebarItem; active: boolean }) {
     </Tooltip>
   );
 }
-
-function SidebarFooter({ attention }: { attention: number }) {
-  return (
-    <div
-      style={{
-        padding: "8px 12px",
-        borderTop: "1px solid var(--pi-hairline)",
-        display: "flex",
-        alignItems: "center",
-        gap: 6,
-        color: "var(--pi-muted)",
-        fontSize: 10,
-        flexShrink: 0,
-      }}
-    >
-      <span>
-        {attention} need{attention === 1 ? "s" : ""} attention
-      </span>
-      <span style={{ flex: 1 }} />
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
-        <kbd style={kbdStyle}>⌘</kbd>
-        <kbd style={kbdStyle}>J</kbd>
-      </span>
-    </div>
-  );
-}
-
-const kbdStyle: React.CSSProperties = {
-  font: "inherit",
-  color: "var(--pi-muted-2)",
-  padding: "1px 4px",
-  border: "1px solid var(--pi-hairline)",
-  borderRadius: 3,
-  fontSize: 9,
-};
