@@ -34,7 +34,7 @@ import {
   type RunKind,
   type RunTreeNode,
 } from "@/lib/run-index";
-import { formatDateTime, relativeDate, cn } from "@/lib/utils";
+import { relativeDate, cn } from "@/lib/utils";
 import { NewChatBox } from "@/components/new-chat-box";
 import { SessionStatusPill } from "@/components/session-status-pill";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -261,33 +261,25 @@ export function RunsIndex({
     return byGroup;
   }, [visible]);
 
-  const totalRuns = visible.reduce((n, t) => n + treeSize(t), 0);
   const activeRuns = grouped.get("active")!.reduce((n, t) => n + treeSize(t), 0);
   const hasFilter = Boolean(filterRepo || filterTask);
 
   return (
     <div className="mx-auto max-w-[1480px] px-3 py-4 pb-24 sm:px-5 sm:py-5 sm:pb-20 space-y-6">
       <header className="space-y-3">
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <div className="flex items-center gap-2.5">
           <h1 className="text-xl font-semibold tracking-tight">Runs</h1>
-          <p className="text-sm text-muted-foreground">
-            {totalRuns} total · chats and agent sessions, children under their parents.
-          </p>
-          <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-            {offline ? (
-              <span className="text-state-blocked">refresh offline</span>
-            ) : (
-              <>
-                <span
-                  className={cn(
-                    "size-1.5 rounded-full",
-                    activeRuns > 0 ? "bg-state-progress animate-pulse" : "bg-muted-foreground/50"
-                  )}
-                />
-                live
-              </>
+          <span
+            title={offline ? "Refresh offline" : activeRuns > 0 ? "Live · runs active" : "Live"}
+            className={cn(
+              "size-1.5 rounded-full",
+              offline
+                ? "bg-state-blocked"
+                : activeRuns > 0
+                  ? "bg-state-progress animate-pulse"
+                  : "bg-muted-foreground/40"
             )}
-          </span>
+          />
         </div>
         <NewChatBox defaultModel={defaultModel} repositories={repositories} />
         <div className="flex flex-wrap items-center gap-2">
@@ -413,10 +405,11 @@ function RootRow({ node }: { node: RunTreeNode }) {
       </div>
       <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-muted-foreground">
         <span>started {relativeDate(new Date(run.startedAt))}</span>
-        {run.completedAt && <span>· {formatDateTime(new Date(run.completedAt))}</span>}
         {run.model && <span className="font-mono">{run.model}</span>}
-        {run.repoName && <span>· {run.repoName}</span>}
-        {run.totalCostUsd !== null && <span>· ${run.totalCostUsd.toFixed(4)}</span>}
+        {run.repoName && <span>{run.repoName}</span>}
+        {run.totalCostUsd !== null && (
+          <span className="tabular-nums">${run.totalCostUsd.toFixed(4)}</span>
+        )}
         {run.error && <span className="text-state-blocked">{run.error}</span>}
       </div>
     </div>
@@ -438,9 +431,6 @@ function ChildRow({ node, depth }: { node: RunTreeNode; depth: number }) {
         href={`/runs/${run.id}`}
         className="flex flex-wrap items-center gap-x-3 gap-y-1 flex-1 min-w-0"
       >
-        <span className="text-muted-foreground/70 select-none" aria-hidden>
-          ↳
-        </span>
         <Icon className="size-3 text-muted-foreground" />
         <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
           #{run.id}

@@ -24,7 +24,7 @@ import {
 import { TypingDots } from "@/components/ui/typing-dots";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
-import { formatDateTime } from "@/lib/utils";
+import { formatDateTime, relativeDate } from "@/lib/utils";
 import { isTerminalStatus, type SessionStatus } from "@/lib/types";
 import type { RunRow, MessageRow } from "@/lib/runs";
 import type { SdkContentBlock, SdkMessageEnvelope } from "@/lib/sdk-message";
@@ -792,15 +792,13 @@ export function RunView({
           {run.goal && run.goal !== "<implement>" && run.goal !== "<chat>" && (
             <span className="truncate">{run.goal}</span>
           )}
-          {parent && (
-            <Tooltip content={parent.title}>
-              <Link
-                href={`/runs/${parent.id}`}
-                className="inline-flex items-center gap-1 hover:text-foreground"
-              >
-                ↳ spawned by Run #{parent.id}
-              </Link>
+          {run.startedAt && (
+            <Tooltip content={`Started ${formatDateTime(run.startedAt)}`}>
+              <span>{relativeDate(run.startedAt)}</span>
             </Tooltip>
+          )}
+          {run.totalCostUsd != null && (
+            <span className="tabular-nums">${run.totalCostUsd.toFixed(4)}</span>
           )}
         </div>
 
@@ -966,14 +964,6 @@ export function RunView({
                 <ComposerSendButton disabled={!input.trim() || composerDisabled} onClick={send} />
               )}
             </ComposerInputShell>
-            {(run.startedAt || run.totalCostUsd != null) && (
-              <p className="mt-1.5 text-[10px] text-muted-foreground/70 text-center tabular-nums">
-                {run.startedAt && `Started ${formatDateTime(run.startedAt)}`}
-                {run.totalCostUsd != null && (
-                  <> · ${run.totalCostUsd.toFixed(4)}</>
-                )}
-              </p>
-            )}
           </div>
         </div>
       )}

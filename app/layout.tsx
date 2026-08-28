@@ -49,6 +49,8 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         <DialogProvider>
           <TopNav email={email} />
           <div style={{ display: "flex", alignItems: "stretch", minHeight: "calc(100svh - 48px)" }}>
+            {/* Renders only on /runs — see LiveSidebar. Every other page is
+                full-bleed, so this row collapses to just <main>. */}
             <LiveSidebar enabled={Boolean(email)} />
             <main style={{ flex: 1, minWidth: 0 }}>{children}</main>
           </div>
