@@ -77,6 +77,18 @@ export async function agentCredentialEnv(): Promise<Record<string, string>> {
     const value = process.env[key];
     if (value != null) env[key] = value;
   }
+  // One claude.ai subscription, two names. The Claude backend resolves auth
+  // like the Claude Code CLI (CLAUDE_CODE_OAUTH_TOKEN from `claude
+  // setup-token`); pi's anthropic provider reads only ANTHROPIC_OAUTH_TOKEN /
+  // ANTHROPIC_API_KEY (pi-ai env-api-keys.js). A deployment that authenticates
+  // Anthropic the Claude Code way therefore starved every pi-backed run of a
+  // credential: prod run 190 died with "No API key found for anthropic" while
+  // the token sat in the same worker env under the other name. Alias it — pi
+  // recognises an `sk-ant-oat…` value as OAuth and sends it as a bearer token
+  // with the Claude Code identity headers, which is exactly what the CLI does.
+  if (env.ANTHROPIC_OAUTH_TOKEN == null && env.CLAUDE_CODE_OAUTH_TOKEN != null) {
+    env.ANTHROPIC_OAUTH_TOKEN = env.CLAUDE_CODE_OAUTH_TOKEN;
+  }
   if (env[CODEX_ACCESS_TOKEN_ENV] == null) {
     const token = await resolveCodexAccessToken();
     if (token) env[CODEX_ACCESS_TOKEN_ENV] = token;

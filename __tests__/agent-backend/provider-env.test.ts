@@ -54,6 +54,23 @@ describe("AGENT_CREDENTIAL_ENV_KEYS", () => {
     expect(UNSET_KEY in env).toBe(false);
   });
 
+  // A host authenticated the Claude Code way (CLAUDE_CODE_OAUTH_TOKEN) holds a
+  // credential pi's anthropic provider cannot see, because pi reads only
+  // ANTHROPIC_OAUTH_TOKEN / ANTHROPIC_API_KEY. Prod run 190 died on that gap.
+  it("agentCredentialEnv aliases the Claude Code token to ANTHROPIC_OAUTH_TOKEN", async () => {
+    vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test");
+    delete process.env.ANTHROPIC_OAUTH_TOKEN;
+    const env = await agentCredentialEnv();
+    expect(env.ANTHROPIC_OAUTH_TOKEN).toBe("sk-ant-oat01-test");
+  });
+
+  it("agentCredentialEnv keeps an explicit ANTHROPIC_OAUTH_TOKEN", async () => {
+    vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-claude-code");
+    vi.stubEnv("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat01-explicit");
+    const env = await agentCredentialEnv();
+    expect(env.ANTHROPIC_OAUTH_TOKEN).toBe("sk-ant-oat01-explicit");
+  });
+
   // The Codex credential is the one key that does NOT come from the server's
   // env: it lives in the codex_credentials table, and the control plane
   // resolves (and refreshes) it at dispatch time so the worker — which has no

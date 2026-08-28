@@ -27,6 +27,31 @@ import type { AgentBackend, AmbientSkill, RunTurnArgs, TurnOutcome } from "./typ
 
 const TAG = "pi:";
 
+/**
+ * Let a pi run use the deployment's claude.ai subscription.
+ *
+ * One credential, two names: the Claude backend resolves auth like the Claude
+ * Code CLI (CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`), while pi's
+ * anthropic provider reads only ANTHROPIC_OAUTH_TOKEN / ANTHROPIC_API_KEY. A
+ * host authenticated the Claude Code way therefore starved every pi-backed
+ * Anthropic run: prod run 190 failed with "No API key found for anthropic"
+ * while the token sat in the same process env under the other name.
+ *
+ * pi recognises an `sk-ant-oat…` value as OAuth and sends it as a bearer token
+ * with the Claude Code identity headers — the same request the CLI makes — so
+ * the token works verbatim.
+ *
+ * A runtime override outranks every other source in pi's AuthStorage, so this
+ * applies only when nothing else is configured: a stored `pi login` credential
+ * or a real ANTHROPIC_* env var still wins.
+ */
+export function applyClaudeCodeAnthropicFallback(authStorage: AuthStorage): void {
+  const token = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  if (!token) return;
+  if (authStorage.hasAuth("anthropic")) return;
+  authStorage.setRuntimeApiKey("anthropic", token);
+}
+
 /** Parse a stored resume token into a pi session-file path, or null if it isn't
  *  a pi token. Legacy untagged tokens (raw paths from before backend tagging)
  *  are accepted as pi paths. */
@@ -125,6 +150,7 @@ export class PiBackend implements AgentBackend {
     const authStorage = AuthStorage.create();
     const codexAccessToken = await resolveCodexAccessToken();
     if (codexAccessToken) authStorage.setRuntimeApiKey("openai-codex", codexAccessToken);
+    applyClaudeCodeAnthropicFallback(authStorage);
     const modelRegistry = ModelRegistry.create(authStorage);
     const agentDir = getAgentDir();
     const resourceLoader = new DefaultResourceLoader({
@@ -140,7 +166,7 @@ export class PiBackend implements AgentBackend {
     if (!piModel) {
       throw new Error(
         `Model '${model.provider}/${model.id}' was not found in the pi model registry. ` +
-          `Check the persona's provider/model ids, or set TASK_ORCH_AGENT_BACKEND=claude. ` +
+          `Check the run's provider/model ids, or set TASK_ORCH_AGENT_BACKEND=claude. ` +
           `Use listProviders()/@earendil-works/pi-ai to see the available provider/model ids.`
       );
     }
@@ -241,6 +267,7 @@ export class PiBackend implements AgentBackend {
 
   listProviders() {
     const authStorage = AuthStorage.create();
+    applyClaudeCodeAnthropicFallback(authStorage);
     const modelRegistry = ModelRegistry.create(authStorage);
     const providers = new Map<string, { id: string; models: { id: string; name: string }[] }>();
 
