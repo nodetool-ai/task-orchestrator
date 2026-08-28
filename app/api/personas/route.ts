@@ -17,11 +17,7 @@ function serialize(p: Awaited<ReturnType<typeof repo.listPersonas>>[number]) {
     name: p.name,
     description: p.description,
     systemPrompt: p.systemPrompt,
-    modelProvider: p.modelProvider,
-    modelId: p.modelId,
-    thinkingLevel: p.thinkingLevel,
     toolsProfile: p.toolsProfile,
-    backend: p.backend,
     budgetMaxTurns: p.budgetMaxTurns,
     budgetMaxSeconds: p.budgetMaxSeconds,
   };

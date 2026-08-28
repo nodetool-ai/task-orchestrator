@@ -206,7 +206,7 @@ export function DiscordSettings({ personas }: { personas: DiscordPersonaOption[]
     }
   }
 
-  // Eligibility (server-safe profile + pi backend) is decided on the server and
+  // Eligibility (a server-safe tools profile) is decided on the server and
   // passed in: lib/profiles.ts is server code and must not reach the browser.
   const wizardPersonas: WizardPersona[] = personas.map((p) => ({
     ...p,

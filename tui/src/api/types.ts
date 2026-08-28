@@ -251,16 +251,13 @@ export interface ProvidersResponse {
 }
 
 /** GET /api/personas → { personas }. The route also sends `systemPrompt`,
- *  which the cockpit never shows. */
+ *  which the cockpit never shows. A persona carries no model, engine or
+ *  reasoning level — those are per-run (`/model`, `/backend`). */
 export interface PersonaSummary {
   id: string;
   name: string;
   description: string | null;
-  modelProvider: string | null;
-  modelId: string | null;
-  thinkingLevel: string | null;
   toolsProfile: string | null;
-  backend: string | null;
   budgetMaxTurns: number | null;
   budgetMaxSeconds: number | null;
 }

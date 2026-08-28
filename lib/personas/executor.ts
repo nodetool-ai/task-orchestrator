@@ -117,7 +117,6 @@ Rules:
 - Always keep a watchdog armed while tasks are outstanding.
 
 ${VERIFICATION_BEFORE_COMPLETION_GUIDANCE}`,
-  thinkingLevel: "medium",
   toolsProfile: "orchestrator,spawn",
   budget: { maxTurns: 200 },
 };

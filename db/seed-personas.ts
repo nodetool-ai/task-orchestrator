@@ -21,14 +21,7 @@ export async function seedPersonas(opts: { force?: boolean } = {}): Promise<void
       name: p.name,
       description: p.description,
       systemPrompt: p.systemPrompt,
-      modelProvider: p.modelProvider ?? "anthropic",
-      modelId: p.modelId ?? "claude-opus-4-8",
-      thinkingLevel: p.thinkingLevel ?? null,
       toolsProfile: p.toolsProfile,
-      // Persona-pinned backend (concierge is 'pi': server-runtime Discord
-      // conversations run through the pi-only postgres-turn loop, and the pipe
-      // refuses to boot a bot whose persona resolves to 'claude').
-      backend: p.backend ?? null,
       skillPaths: [],
       budgetMaxTurns: p.budget?.maxTurns ?? null,
       budgetMaxSeconds: p.budget?.maxSeconds ?? null,

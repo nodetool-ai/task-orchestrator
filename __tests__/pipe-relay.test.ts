@@ -190,8 +190,8 @@ function fakeChannel() {
 async function makePersona(id: string, toolsProfile = "orchestrator,spawn"): Promise<void> {
   await db
     .insert(personasTable)
-    .values({ id, name: id.toUpperCase(), systemPrompt: "x", toolsProfile, backend: "pi" })
-    .onConflictDoUpdate({ target: personasTable.id, set: { toolsProfile, backend: "pi" } });
+    .values({ id, name: id.toUpperCase(), systemPrompt: "x", toolsProfile })
+    .onConflictDoUpdate({ target: personasTable.id, set: { toolsProfile } });
 }
 
 /** A persona conversation run + its channel_threads mapping. */

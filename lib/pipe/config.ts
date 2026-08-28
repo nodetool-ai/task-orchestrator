@@ -40,7 +40,6 @@
 //     which the Claude backend cannot drive. Same reasoning: boot error, not a
 //     per-message crash.
 
-import { resolveBackendId } from "@/lib/agent-backend";
 import { config } from "@/lib/config";
 import { listServerSafeProfiles, serverUnsafeProfiles } from "@/lib/profiles";
 import * as repo from "@/lib/repo";
@@ -290,24 +289,10 @@ async function validateBot(bot: PersonaBotConfig): Promise<void> {
     );
   }
 
-  let backend: string;
-  try {
-    backend = resolveBackendId(persona.backend);
-  } catch (err) {
-    throw new Error(
-      `Persona '${bot.personaId}' has an invalid backend — refusing to start: ` +
-        `${err instanceof Error ? err.message : String(err)}`
-    );
-  }
-  if (backend !== "pi") {
-    throw new Error(
-      `Persona '${bot.personaId}' resolves to the '${backend}' backend — refusing to start. ` +
-        "Discord persona conversations run in-process through the pi-only postgres-turn loop; " +
-        "the Claude backend rejects contextSource='postgres'. Set backend 'pi' on the persona, " +
-        "or change the deployment default (TASK_ORCH_AGENT_BACKEND)." +
-        fix
-    );
-  }
+  // No backend check any more: a persona carries no engine (migration 0031).
+  // The pipe pins backend 'pi' on every conversation run it creates
+  // (lib/pipe/session-store.ts), which is the only engine the in-process
+  // postgres-turn loop supports, so no deployment default can break a bot.
 }
 
 /**
@@ -343,22 +328,6 @@ export async function botProblems(bot: PersonaBotConfig): Promise<string[]> {
         `server-safe (${unsafe.join(", ")}). Discord persona conversations run inside the pipe ` +
         `process, so shell, filesystem and repo-write tools are unavailable there. Server-safe ` +
         `profiles: ${listServerSafeProfiles().join(", ")}.`
-    );
-  }
-
-  try {
-    const backend = resolveBackendId(persona.backend);
-    if (backend !== "pi") {
-      problems.push(
-        `Persona '${bot.personaId}' resolves to the '${backend}' backend. Discord persona ` +
-          "conversations run through the pi-only postgres-turn loop; set backend 'pi' on the " +
-          "persona."
-      );
-    }
-  } catch (err) {
-    problems.push(
-      `Persona '${bot.personaId}' has an invalid backend: ` +
-        `${err instanceof Error ? err.message : String(err)}`
     );
   }
 

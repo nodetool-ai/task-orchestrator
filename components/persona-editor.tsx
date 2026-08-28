@@ -4,29 +4,23 @@ import { useState } from "react";
 import { Check, RotateCcw, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Field } from "@/components/ui/field";
-import { Select } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ToolsPicker } from "@/components/pickers/tools-picker";
 import { PersonaLaurels } from "@/components/persona-laurels";
 import { ErrorText } from "@/components/ui/error-text";
-import {
-  ThinkingLevelPicker,
-  type ThinkingLevel,
-} from "@/components/pickers/thinking-level-picker";
-import { ProviderModelPicker, useProviderCatalog, firstModelForBackend } from "@/components/pickers/provider-model-picker";
 
+/** A persona is WHO an agent is, not which engine runs it: model, backend and
+ *  reasoning level are picked per run (migration 0031), so this editor has no
+ *  model, engine or reasoning field. Pick them in the run-agent dialog or a
+ *  chat composer instead. */
 export interface PersonaDto {
   id: string;
   name: string;
   description: string | null;
   systemPrompt: string;
-  modelProvider: string;
-  modelId: string;
-  thinkingLevel: string | null;
   toolsProfile: string;
-  backend: string | null;
   budgetMaxTurns: number | null;
   budgetMaxSeconds: number | null;
 }
@@ -38,7 +32,6 @@ interface Props {
 type SaveState = "idle" | "saving" | "saved" | "error";
 
 export function PersonaEditor({ persona }: Props) {
-  const catalog = useProviderCatalog();
   const [draft, setDraft] = useState<PersonaDto>(persona);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [resetState, setResetState] = useState<SaveState>("idle");
@@ -61,11 +54,7 @@ export function PersonaEditor({ persona }: Props) {
           name: draft.name,
           description: draft.description ?? "",
           systemPrompt: draft.systemPrompt,
-          modelProvider: draft.modelProvider,
-          modelId: draft.modelId,
-          thinkingLevel: draft.thinkingLevel || null,
           toolsProfile: draft.toolsProfile,
-          backend: draft.backend || null,
           budgetMaxTurns: draft.budgetMaxTurns ?? null,
           budgetMaxSeconds: draft.budgetMaxSeconds ?? null,
         }),
@@ -150,47 +139,6 @@ export function PersonaEditor({ persona }: Props) {
         />
       </Field>
 
-      <Field label="Engine">
-        <EnginePicker
-          value={draft.backend}
-          onChange={(next) => {
-            update("backend", next);
-            if (!next) return; // "Deployment default" — leave provider/model as-is.
-            // Snap provider/model to the new engine's first offering when the
-            // current pair isn't available there — e.g. switching to the
-            // claude backend, which only offers Anthropic models.
-            const snap = firstModelForBackend(catalog, next);
-            if (snap && (snap.provider !== draft.modelProvider || snap.model !== draft.modelId)) {
-              const providers = catalog?.byBackend.get(next) ?? [];
-              const stillOffered = providers
-                .find((p) => p.id === draft.modelProvider)
-                ?.models.some((m) => m.id === draft.modelId);
-              if (!stillOffered) {
-                update("modelProvider", snap.provider);
-                update("modelId", snap.model);
-              }
-            }
-          }}
-        />
-      </Field>
-
-      <ProviderModelPicker
-        provider={draft.modelProvider}
-        model={draft.modelId}
-        backend={draft.backend ?? undefined}
-        onChange={(next) => {
-          update("modelProvider", next.provider);
-          update("modelId", next.model);
-        }}
-      />
-
-      <Field label="Reasoning">
-        <ThinkingLevelPicker
-          value={draft.thinkingLevel as ThinkingLevel | null}
-          onChange={(v) => update("thinkingLevel", v)}
-        />
-      </Field>
-
       <Field label="Tools">
         <ToolsPicker
           value={draft.toolsProfile}
@@ -272,35 +220,3 @@ export function PersonaEditor({ persona }: Props) {
 }
 
 const fieldClass = "rounded-md px-2.5 text-sm";
-
-const ENGINE_OPTIONS = [
-  { value: "", label: "Deployment default" },
-  { value: "pi", label: "pi" },
-  { value: "claude", label: "claude" },
-] as const;
-
-/** Agent-backend ("engine") selector for persona defaults. An empty value
- *  means "inherit the deployment default (TASK_ORCH_AGENT_BACKEND)". */
-function EnginePicker({
-  value,
-  onChange,
-}: {
-  value: string | null;
-  onChange: (next: string | null) => void;
-}) {
-  return (
-    <Select
-      mono
-      uiSize="sm"
-      value={value ?? ""}
-      onChange={(e) => onChange(e.target.value || null)}
-      className={fieldClass}
-    >
-      {ENGINE_OPTIONS.map((o) => (
-        <option key={o.value} value={o.value}>
-          {o.label}
-        </option>
-      ))}
-    </Select>
-  );
-}

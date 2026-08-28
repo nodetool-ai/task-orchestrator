@@ -14,7 +14,6 @@ docs/specs/. Do not implement.
 ${REPO_GITHUB_CONTEXT_GUIDANCE}
 
 ${VERIFICATION_BEFORE_COMPLETION_GUIDANCE}`,
-  thinkingLevel: "medium",
   toolsProfile: "orchestrator,repo_write",
   budget: { maxTurns: 30 },
 };

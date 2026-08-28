@@ -20,7 +20,6 @@ import { and, desc, eq, isNull } from "drizzle-orm";
 
 import { db } from "@/db";
 import { agentSessions, channelThreads, type ChannelThread } from "@/db/schema";
-import { resolveBackendId } from "@/lib/agent-backend";
 import * as chat from "@/lib/chat";
 import * as repo from "@/lib/repo";
 import * as runs from "@/lib/runs";
@@ -159,9 +158,11 @@ export async function getOrCreateRun(
   // (lib/pipe/config.ts), so a rejection here means a persona changed under a
   // running process rather than a misconfiguration nobody has seen yet.
   //
-  // backend is resolved rather than left null: create() persists placement and
-  // backend as one decision and rejects a server run that resolves to claude —
-  // boot validation already proved this persona resolves to 'pi'.
+  // backend is pinned rather than left null: create() persists placement and
+  // backend as one decision and rejects a server run that resolves to claude.
+  // 'pi' is not a preference here but the only engine the in-process
+  // postgres-turn loop supports, so it does not follow the deployment default
+  // and it is no longer a persona's to choose (migration 0031).
   const created = await runs.create({
     goal: "<chat>",
     personaId,
@@ -169,7 +170,7 @@ export async function getOrCreateRun(
     runtime: "server",
     cwdStrategy: "none",
     toolsProfile: persona.toolsProfile,
-    backend: persona.backend ?? resolveBackendId(),
+    backend: "pi",
     model: opts.model,
     title: opts.title ?? "New chat",
   });

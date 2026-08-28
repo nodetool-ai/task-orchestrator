@@ -332,6 +332,17 @@ export const config = Object.freeze({
     get model(): string | undefined {
       return strEnv("TASK_ORCH_AGENT_MODEL");
     },
+    /** Deployment default reasoning level for runs created without one
+     *  (personas carry no reasoning level any more — migration 0031). An
+     *  unrecognised value is ignored rather than thrown: a typo here must not
+     *  stop every run from being created. Undefined leaves the model's own
+     *  default in place. */
+    get thinkingLevel(): "low" | "medium" | "high" | "xhigh" | undefined {
+      const value = strEnv("TASK_ORCH_THINKING_LEVEL");
+      return value === "low" || value === "medium" || value === "high" || value === "xhigh"
+        ? value
+        : undefined;
+    },
     get chatModel(): string | undefined {
       return strEnv("TASK_ORCH_CHAT_MODEL");
     },

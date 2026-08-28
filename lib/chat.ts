@@ -22,11 +22,11 @@ import type { ChatMessageRow, ChatRole, ChatRow } from "./types";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
-// Provider-qualified ("provider/modelId") so it overrides the persona's
-// provider downstream. A bare id would inherit the persona's provider
-// ("kimi-coding" for the seeded personas), which the Claude backend rejects —
-// the first turn of a new chat would fail. The model picker emits the same
-// qualified shape, so this matches what an explicit pick produces.
+// Provider-qualified ("provider/modelId"): a bare id would be read as an
+// anthropic model downstream (parseProviderQualifiedModel's default), which is
+// wrong for a chat default that is usually an OpenAI model. The model picker
+// emits the same qualified shape, so this matches what an explicit pick
+// produces.
 const DEFAULT_MODEL = process.env.TASK_ORCH_CHAT_MODEL ?? "openai/gpt-5.6-sol";
 
 export type { ChatRole, ChatRow, ChatMessageRow };

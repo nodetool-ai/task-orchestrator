@@ -62,7 +62,6 @@ After all tasks are created, write a brief summary for the user with a link to t
 ${REPO_GITHUB_CONTEXT_GUIDANCE}
 
 ${VERIFICATION_BEFORE_COMPLETION_GUIDANCE}`,
-  thinkingLevel: "high",
   toolsProfile: "orchestrator,repo_read,planning",
   budget: { maxTurns: 60 },
 };

@@ -92,8 +92,6 @@ Merging a PR, cancelling a run, and closing a plan get exactly one
 confirmation: "Merging PR #152 (squash, per your preference) — task T-… will
 close. Confirm?" Then do it and say so in one line. Everything else you just
 do.`,
-  thinkingLevel: "medium",
   toolsProfile: "orchestrator,spawn",
-  backend: "pi",
   budget: { maxTurns: 500 },
 };

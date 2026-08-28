@@ -157,6 +157,8 @@ runDispatch.__setRunsApi({
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
 const DEFAULT_MODEL = config.agent.model ?? "anthropic/claude-opus-4-8";
+/** Deployment default reasoning level; undefined leaves the model's own. */
+const DEFAULT_THINKING_LEVEL = config.agent.thinkingLevel;
 const KEEP_WORKTREES = config.features.keepWorktrees;
 
 function runnerProviderLabel(): RunnerProviderKind {
@@ -195,8 +197,8 @@ export interface CreateRunInput {
   /** Agent backend for this run ('pi'|'claude'). Omitted/null inherits the
    *  deployment default (TASK_ORCH_AGENT_BACKEND). */
   backend?: string | null;
-  /** Reasoning level for this run; overrides the persona's. Omitted/null
-   *  inherits the persona's level (which may itself be unset = model default). */
+  /** Reasoning level for this run. Omitted/null takes the deployment default
+   *  (TASK_ORCH_THINKING_LEVEL), which may itself be unset = model default. */
   thinkingLevel?: "low" | "medium" | "high" | "xhigh" | null;
   budget?: Budget | null;
   userId?: number | null;
@@ -754,8 +756,10 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
 
   // Resolve the effective model. The run-agent dialog / chat composers may
   // explicitly emit "provider/model-id"; model-id itself may contain slashes,
-  // e.g. OpenRouter ids. When omitted, use the persona's model default. We
-  // persist the resolved value so the UI shows what was used.
+  // e.g. OpenRouter ids. When omitted, the deployment default applies — the
+  // persona has no say (migration 0031): it describes WHO the agent is, not
+  // which engine runs it. We persist the resolved value so the UI shows what
+  // was used.
   const personaId = input.personaId ?? "implementor";
   const persona = await repo.getPersona(personaId);
   if (!persona) {
@@ -763,17 +767,15 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     // insert fail with an opaque "FOREIGN KEY constraint failed".
     throw new repo.RepoError(`Persona '${personaId}' not found`, 404);
   }
-  const personaModel = `${persona.modelProvider}/${persona.modelId}`;
-  const effectiveModel = input.model ?? personaModel ?? DEFAULT_MODEL;
+  const effectiveModel = input.model ?? DEFAULT_MODEL;
 
   // Per-run backend choice. Chat runs execute in the full worker harness now
   // (the lightweight in-process/postgres tier was retired), so they support
   // both backends just like every other run kind — no chat-specific pinning.
   // An explicit pick normalizes/validates eagerly; null falls through to the
-  // persona's backend default (if set), then the deployment default at turn
-  // time. An explicit or persona-inherited 'claude' selection is additionally
-  // checked against the model's provider — the Claude backend is Anthropic-only,
-  // and that combination can never run.
+  // deployment default at turn time. An explicit 'claude' selection is
+  // additionally checked against the model's provider — the Claude backend is
+  // Anthropic-only, and that combination can never run.
   let backend: "pi" | "claude" | null = null;
   const requestedBackend = input.backend;
   const validateClaudeProvider = () => {
@@ -789,16 +791,6 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   if (requestedBackend != null) {
     try {
       backend = resolveBackendId(requestedBackend);
-    } catch (err) {
-      throw new repo.RepoError(err instanceof Error ? err.message : String(err), 400);
-    }
-    validateClaudeProvider();
-  } else if (persona.backend) {
-    // No per-run pick: inherit the persona's engine default when set. Validate
-    // it the same way as an explicit pick so a misconfigured persona surfaces
-    // here rather than at turn time.
-    try {
-      backend = resolveBackendId(persona.backend);
     } catch (err) {
       throw new repo.RepoError(err instanceof Error ? err.message : String(err), 400);
     }
@@ -824,15 +816,15 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   // Server runtime implies the postgres context mode (runOneTurn), which is a
   // pi-only capability: claude-backend throws on contextSource='postgres' and the
   // Claude Agent SDK has no equivalent of the in-process loop. Fail HERE rather
-  // than at turn time — a persona whose backend resolves to claude would
-  // otherwise create fine, accept messages, and die on every single turn.
-  // resolveBackendId already folded in the persona's pick and the deployment
-  // default, so this catches "claude-default deployment, backend left null" too.
+  // than at turn time — a server run that resolves to claude would otherwise
+  // create fine, accept messages, and die on every single turn.
+  // resolveBackendId already folded in the deployment default, so this catches
+  // "claude-default deployment, backend left null" too.
   if (runtime === "server" && persistedBackend !== "pi") {
     throw new repo.RepoError(
       `runtime='server' requires the 'pi' backend (resolved '${persistedBackend}'): the in-process ` +
         `postgres-turn loop is pi-only — the Claude backend rejects contextSource='postgres'. ` +
-        `Set backend: 'pi' on the run or on persona '${personaId}'.`,
+        `Pass backend: 'pi' on the run.`,
       400
     );
   }
@@ -851,7 +843,10 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     runtime,
     model: effectiveModel,
     backend: persistedBackend,
-    thinkingLevel: input.thinkingLevel ?? null,
+    // Resolved at create, like model and backend, so the run row records the
+    // reasoning level it actually ran with. The persona no longer supplies one
+    // (migration 0031).
+    thinkingLevel: input.thinkingLevel ?? DEFAULT_THINKING_LEVEL ?? null,
     title: input.title ?? null,
     userId: input.userId ?? null,
     prUrl: input.prUrl ?? null,
@@ -3808,7 +3803,6 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     name: persona.name,
     description: persona.description ?? "",
     systemPrompt: persona.systemPrompt,
-    thinkingLevel: (persona.thinkingLevel ?? undefined) as "low" | "medium" | "high" | "xhigh" | undefined,
     toolsProfile: persona.toolsProfile,
     skillPaths: [] as string[],
   };
@@ -3978,9 +3972,9 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     cwd,
     contextSource,
     model: { provider: resolvedProvider, id: resolvedModelId },
-    // Per-run reasoning level overrides the persona's; fall back to the
-    // persona's (which may be unset, leaving the model default to apply).
-    thinkingLevel: (run.thinkingLevel ?? persona.thinkingLevel ?? undefined) as
+    // Reasoning is a per-run property (migration 0031). create() already folded
+    // in the deployment default; a null column leaves the model's own default.
+    thinkingLevel: (run.thinkingLevel ?? undefined) as
       | "low"
       | "medium"
       | "high"

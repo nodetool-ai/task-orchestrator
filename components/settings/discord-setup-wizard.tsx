@@ -18,7 +18,6 @@ export interface DiscordPersonaOption {
   id: string;
   name: string;
   toolsProfile: string;
-  backend: string | null;
   /** Why this persona cannot host a bot, or null when it qualifies. */
   blocked: string | null;
 }
@@ -215,9 +214,9 @@ export function DiscordSetupWizard({
       {step === 0 && (
         <div className="space-y-3">
           <p className="text-sm text-muted-foreground">
-            Each bot speaks as one persona. Only personas with a server-safe tools profile and
-            the <code>pi</code> backend qualify — a Discord conversation runs inside the pipe
-            process, so shell, filesystem and repo-write tools are not available to it.
+            Each bot speaks as one persona. Only personas with a server-safe tools profile
+            qualify — a Discord conversation runs inside the pipe process, so shell, filesystem
+            and repo-write tools are not available to it.
           </p>
           <div className="divide-y divide-border/60 rounded-md border border-border/60">
             {personas.map((p) => (
@@ -242,7 +241,7 @@ export function DiscordSetupWizard({
                   )}
                 </div>
                 <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">
-                  {p.toolsProfile} · backend {p.backend ?? "default"}
+                  {p.toolsProfile}
                 </div>
                 {p.blocked && (
                   <div className="mt-1 text-[11px] text-state-blocked">{p.blocked}</div>

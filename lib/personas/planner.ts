@@ -55,7 +55,6 @@ planning work or ask for approval to refine the plan first.
 ${REPO_GITHUB_CONTEXT_GUIDANCE}
 
 ${VERIFICATION_BEFORE_COMPLETION_GUIDANCE}`,
-  thinkingLevel: "medium",
   toolsProfile: "orchestrator,repo_read",
   budget: { maxTurns: 40 },
 };

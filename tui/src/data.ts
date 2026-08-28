@@ -281,11 +281,7 @@ export const personaSummaries: PersonaSummary[] = personas.map((id) => ({
   id,
   name: PERSONA_NAMES[id] ?? id,
   description: `the ${id} persona`,
-  modelProvider: "anthropic",
-  modelId: "claude-opus-5",
-  thinkingLevel: id === "planner" ? "high" : "medium",
   toolsProfile: "default",
-  backend: "claude",
   budgetMaxTurns: 40,
   budgetMaxSeconds: 1800,
 }));

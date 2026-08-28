@@ -15,7 +15,7 @@ async function seedReviewer() {
     id: "reviewer",
     name: "Reviewer",
     description: "Reviews PRs",
-    systemPrompt: "You review code.",    thinkingLevel: "high",
+    systemPrompt: "You review code.",
     toolsProfile: "repo_read,gh_pr",
     skillPaths: "[]",
   });

@@ -218,6 +218,13 @@
       "when": 1788007200000,
       "tag": "0030_drop_clocks",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1788010800000,
+      "tag": "0031_persona_engine_detach",
+      "breakpoints": true
     }
   ]
 }

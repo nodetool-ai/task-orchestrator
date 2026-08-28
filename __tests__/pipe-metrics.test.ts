@@ -130,7 +130,6 @@ beforeEach(async () => {
       name: "Aria",
       systemPrompt: "x",
       toolsProfile: "orchestrator,spawn",
-      backend: "pi",
     })
     .onConflictDoNothing();
   await db.delete(channelThreads);

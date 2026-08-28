@@ -54,9 +54,9 @@ terminals. No onboarding for strangers. Keyboard first. Dense.
 7. **Rail.** Optional right column with the compact live tree. Auto on at
    ≥110 columns, `^b` toggles.
 8. **New agent.** `/new <persona> <goal>` and `orch "<goal>"` start a
-   top-level run with the persona's defaults (engine, model, reasoning,
-   repo). No pickers before the first message; `/model` and `/budget`
-   change them later.
+   top-level run with the persona's prompt and tools, on the deployment
+   default engine and model. No pickers before the first message; `/model`
+   and `/budget` change them later.
 9. **CLI verbs**: `floor`, `inbox`, `say`, `tail`, `new`, `spawn`,
    `cancel`, `open`, plus the existing `task` verbs from `cli.ts` unchanged.
 10. **Remote.** The TUI talks to the server over REST + SSE with an API

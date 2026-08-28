@@ -34,31 +34,26 @@ export default async function SettingsPage({
     name: p.name,
     description: p.description,
     systemPrompt: p.systemPrompt,
-    modelProvider: p.modelProvider,
-    modelId: p.modelId,
-    thinkingLevel: p.thinkingLevel,
     toolsProfile: p.toolsProfile,
-    backend: p.backend,
     budgetMaxTurns: p.budgetMaxTurns,
     budgetMaxSeconds: p.budgetMaxSeconds,
   }));
 
   // Which personas can host a Discord bot. Decided here because it needs
   // lib/profiles.ts, which is server code — the browser only sees the verdict.
+  // The backend is no longer part of this verdict: the pipe pins 'pi' on every
+  // conversation run it creates (migration 0031), so only the tools profile can
+  // disqualify a persona.
   const discordPersonas: DiscordPersonaOption[] = personaRows.map((p) => {
     const unsafe = serverUnsafeProfiles(p.toolsProfile);
-    const backend = p.backend ?? "pi";
     return {
       id: p.id,
       name: p.name,
       toolsProfile: p.toolsProfile,
-      backend: p.backend,
       blocked:
         unsafe.length > 0
           ? `Tools profile is not server-safe (${unsafe.join(", ")}).`
-          : backend !== "pi"
-            ? `Backend is '${backend}'; Discord conversations need 'pi'.`
-            : null,
+          : null,
     };
   });
 
@@ -128,8 +123,10 @@ export default async function SettingsPage({
               <h2 className="text-base font-semibold tracking-tight">Personas</h2>
               <p className="text-sm text-muted-foreground">
                 Each persona bundles a system prompt, tools profile, and budget
-                defaults. The model is a persona default and can still be
-                overridden per-run when you launch the agent.
+                defaults. It carries no model or engine: pick those per run when
+                you launch the agent, or set the deployment defaults with
+                <code>TASK_ORCH_AGENT_MODEL</code> and
+                <code>TASK_ORCH_AGENT_BACKEND</code>.
                 Skills are loaded automatically from the project
                 (<code>.pi/skills/</code>, <code>.agents/skills/</code>) — no
                 per-persona setup needed. Edits saved here override the seed in{" "}

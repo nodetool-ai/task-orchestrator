@@ -24,12 +24,8 @@ beforeEach(async () => {
     name: "Implementor",
     description: null,
     systemPrompt: PERSONA_PROMPT,
-    modelProvider: "anthropic",
-    modelId: "claude-sonnet-4-6",
-    thinkingLevel: null,
     toolsProfile: "orchestrator",
     skillPaths: [],
-    backend: null,
     budgetMaxTurns: null,
     budgetMaxSeconds: null,
   });
@@ -49,7 +45,6 @@ async function composedPromptFor(goal: "<chat>" | "<execute>"): Promise<string> 
     name: "Implementor",
     description: "",
     systemPrompt: PERSONA_PROMPT,
-    thinkingLevel: undefined,
     toolsProfile: "orchestrator",
     skillPaths: [] as string[],
   };

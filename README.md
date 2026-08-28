@@ -464,8 +464,7 @@ and [PRD](docs/superpowers/specs/2026-07-31-discord-personas-messaging-prd.md).
 ### Configure bots in Settings (preferred)
 
 **Settings → Discord** is the supported way to add a persona bot: a guided
-wizard picks the persona (flagging any whose tools profile or backend does not
-qualify), links out to the Discord developer portal, **verifies the pasted bot
+wizard picks the persona (flagging any whose tools profile does not qualify), links out to the Discord developer portal, **verifies the pasted bot
 token server-side**, generates the OAuth2 invite URL with the right permission
 bits, and stores the bot in the `discord_bots` table. Tokens are never returned
 to the browser — the UI only ever sees the last four characters.

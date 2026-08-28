@@ -16,12 +16,8 @@ beforeEach(async () => {
     name: "Implementor",
     description: null,
     systemPrompt: PERSONA_PROMPT,
-    modelProvider: "anthropic",
-    modelId: "claude-sonnet-4-6",
-    thinkingLevel: null,
     toolsProfile: "orchestrator,planning,spawn",
     skillPaths: [],
-    backend: null,
     budgetMaxTurns: null,
     budgetMaxSeconds: null,
   });
@@ -37,9 +33,10 @@ describe("buildRunStart", () => {
     expect(start.task).toBeNull();
     expect(start.plan).toBeNull();
     expect(start.persona.id).toBe("implementor");
-    // Provider-qualified model/persona survive into the snapshot.
-    expect(start.persona.modelProvider).toBe("anthropic");
-    expect(start.persona.modelId).toBe("claude-sonnet-4-6");
+    // The persona snapshot is prompt + tools + budget; the engine travels on
+    // the run, not the persona (migration 0031).
+    expect(start.persona).not.toHaveProperty("modelProvider");
+    expect(start.run.model).toBe("anthropic/claude-opus-4-8");
     expect(start.repository).toBeTruthy();
     expect(Array.isArray(start.transcript)).toBe(true);
     expect(typeof start.memoryContext).toBe("string");

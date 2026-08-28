@@ -57,7 +57,7 @@ export interface StoreActions {
    *  user frame first, and settles a matching unanswered question frame when
    *  `to` is given. Resolves after the POST settles; never throws. */
   send(text: string, to?: number | null): Promise<void>;
-  /** POST /api/runs with the persona's defaults; selects the new run.
+  /** POST /api/runs with the deployment defaults; selects the new run.
    *  Resolves to the new run id, or null when the create failed. */
   newRun(persona: string, goal: string): Promise<number | null>;
   /** PATCH cancel. Never throws. */

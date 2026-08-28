@@ -12,7 +12,7 @@ export type ThinkingLevel = "low" | "medium" | "high" | "xhigh";
 export interface AgentConfig {
   personaId: string;
   backend: BackendId | null;
-  /** Qualified `provider/modelId`; null → the persona / server default. */
+  /** Qualified `provider/modelId`; null → the deployment default. */
   model: string | null;
   thinkingLevel: ThinkingLevel | null;
 }
@@ -187,7 +187,7 @@ export function AgentPicker({
             <View style={{ marginTop: 8 }}>
               <ModelRow
                 label="Default"
-                sub="persona / server default"
+                sub="deployment default"
                 on={value.model == null}
                 onPress={() => {
                   set({ model: null });

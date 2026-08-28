@@ -135,14 +135,17 @@ personas                 persona registry (seeded from lib/personas/*.ts)
   name                TEXT  NOT NULL        display name
   description         TEXT
   system_prompt       TEXT  NOT NULL
-  model_provider      TEXT  NOT NULL        default provider for new runs
-  model_id            TEXT  NOT NULL        default model for new runs
-  thinking_level      TEXT                  'low' | 'medium' | 'high' | NULL
   tools_profile       TEXT  NOT NULL        composed profile keys
   skill_paths         TEXT  NOT NULL        JSON array of repo-relative paths
   budget_max_turns    INTEGER
   budget_max_seconds  INTEGER
   created_at, updated_at
+
+A persona is WHO an agent is, never WHICH engine runs it: migration 0031
+dropped model_provider, model_id, backend and thinking_level. Those are per-run
+columns on agent_runs, resolved at create from the request and then the
+deployment defaults (TASK_ORCH_AGENT_MODEL, TASK_ORCH_AGENT_BACKEND,
+TASK_ORCH_THINKING_LEVEL).
 
 persona_memories         per-persona cross-session notes
   id          INTEGER  AUTOINC PK

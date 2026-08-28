@@ -119,25 +119,20 @@ describe("start_session userId propagation", () => {
   });
 });
 
-describe("start_session persona model inheritance", () => {
-  it("uses the implementor persona's model when start_session omits model", async () => {
-    // Reproduces run 123: an executor spawns a child implementor via
-    // start_session without passing `model`. The child must inherit the
-    // implementor persona's modelProvider/modelId (as set in Settings →
-    // Personas), NOT the deployment DEFAULT_MODEL. startSession used to
-    // pre-fill `model: input.model ?? DEFAULT_MODEL`, shadowing runs.create's
-    // own persona fallback (which only fires when input.model is null).
+describe("start_session model resolution", () => {
+  // A persona carries no model (migration 0031), so start_session passes none
+  // and lets runs.create apply the deployment default. It used to pre-fill its
+  // own bare-id DEFAULT_MODEL here, which shadowed that resolution.
+  it("passes no model when start_session omits one", async () => {
     await repo.upsertPersona({
       id: "implementor",
       name: "Implementor",
       description: "",
       systemPrompt: "x",
-      modelProvider: "openai",
-      modelId: "gpt-5-codex",
       toolsProfile: "orchestrator,repo_write,gh_pr,gh_ci",
       skillPaths: [],
     });
-    const plan = await repo.createPlan({ title: "Model inheritance", date: "2026-07-04" });
+    const plan = await repo.createPlan({ title: "Model resolution", date: "2026-07-04" });
     const task = await repo.createTask({ planId: plan.id, title: "Task", date: "2026-07-04" });
     const spawnerId = await insertRun({ goal: "<execute>", planId: plan.id });
     createSpy.mockResolvedValue(fakeRunRow({ id: 5001, taskId: task.id }));
@@ -148,19 +143,15 @@ describe("start_session persona model inheritance", () => {
     );
 
     expect(createSpy).toHaveBeenCalledTimes(1);
-    expect(createSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ model: "openai/gpt-5-codex" })
-    );
+    expect(createSpy).toHaveBeenCalledWith(expect.objectContaining({ model: undefined }));
   });
 
-  it("still honors an explicit model passed to start_session over the persona", async () => {
+  it("still honors an explicit model passed to start_session", async () => {
     await repo.upsertPersona({
       id: "implementor",
       name: "Implementor",
       description: "",
       systemPrompt: "x",
-      modelProvider: "openai",
-      modelId: "gpt-5-codex",
       toolsProfile: "orchestrator,repo_write,gh_pr,gh_ci",
       skillPaths: [],
     });

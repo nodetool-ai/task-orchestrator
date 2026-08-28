@@ -28,7 +28,6 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
-const DEFAULT_MODEL = process.env.TASK_ORCH_AGENT_MODEL ?? "claude-opus-4-8";
 
 // ──────────────────────────────────────────────────────────
 // Background tasks (orphan reaper, PR → task-state sync).
@@ -277,18 +276,12 @@ export async function startSession(input: StartSessionInput): Promise<AgentSessi
     backend = backend ?? prior.backend;
   }
 
+  // The persona is read for its budget only: it carries no model, backend or
+  // reasoning level any more (migration 0031). `model` is left undefined when
+  // the caller gives none, so runs.create() applies the deployment default —
+  // this used to pre-fill its own bare-id DEFAULT_MODEL, which shadowed that
+  // resolution and produced provider-less model strings.
   const persona = await repo.getPersona("implementor");
-  // Mirror runs.create()'s model resolution: an explicit per-call model wins,
-  // otherwise fall back to the implementor persona's modelProvider/modelId
-  // (as selected in Settings → Personas), then the deployment default.
-  // Pre-filling with DEFAULT_MODEL here would shadow runs.create()'s own
-  // persona fallback (it only fires when input.model is null/undefined),
-  // so executor-spawned children used to land on TASK_ORCH_AGENT_MODEL /
-  // "claude-sonnet-4-6" regardless of the persona model picked in settings.
-  const personaModel =
-    persona && persona.modelProvider && persona.modelId
-      ? `${persona.modelProvider}/${persona.modelId}`
-      : null;
   const created = await runs.create({
     goal: "<implement>",
     cwdStrategy: "worktree",
@@ -297,7 +290,7 @@ export async function startSession(input: StartSessionInput): Promise<AgentSessi
     toolsProfile: "orchestrator,repo_write,gh_pr,gh_ci",
     taskId: input.taskId,
     repoId: task.repoId ?? null,
-    model: input.model ?? personaModel ?? DEFAULT_MODEL,
+    model: input.model ?? undefined,
     backend,
     thinkingLevel: input.thinkingLevel ?? null,
     baseBranch: input.baseBranch ?? "main",

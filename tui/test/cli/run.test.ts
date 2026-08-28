@@ -358,11 +358,7 @@ function persona(id: string): PersonaSummary {
     id,
     name: id,
     description: null,
-    modelProvider: null,
-    modelId: null,
-    thinkingLevel: null,
     toolsProfile: null,
-    backend: null,
     budgetMaxTurns: null,
     budgetMaxSeconds: null,
   };

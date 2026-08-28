@@ -162,8 +162,8 @@ export class ClaudeBackend implements AgentBackend {
     if (model.provider && model.provider !== "anthropic") {
       throw new Error(
         `The Claude agent backend only supports the 'anthropic' provider, but the ` +
-          `persona is configured with provider '${model.provider}' (model '${model.id}'). ` +
-          `Switch the persona to an Anthropic model or set TASK_ORCH_AGENT_BACKEND=pi.`
+          `run is configured with provider '${model.provider}' (model '${model.id}'). ` +
+          `Pick an anthropic/* model for the run or set TASK_ORCH_AGENT_BACKEND=pi.`
       );
     }
 
@@ -289,7 +289,7 @@ export class ClaudeBackend implements AgentBackend {
             ? { pathToClaudeCodeExecutable: this.externalClaudeBinary }
             : {}),
           model: model.id,
-          // Persona thinkingLevel maps onto the SDK's effort levels
+          // The run's thinkingLevel maps onto the SDK's effort levels
           // ('low' | 'medium' | 'high'); omitted lets the model default apply.
           // 'xhigh' is not an SDK effort value, so it clamps to 'high' (the
           // pi backend, which does support 'xhigh', keeps the raw value).

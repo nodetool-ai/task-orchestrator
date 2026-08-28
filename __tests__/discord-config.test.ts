@@ -23,17 +23,14 @@ import * as repo from "../lib/repo";
 const ARIA = "aria"; // orchestrator,spawn — server-safe
 const REX = "rex"; // orchestrator — server-safe
 const HANDS = "hands"; // orchestrator,repo_write — NOT server-safe
-const CLAUDIA = "claudia"; // server-safe profile, pinned to the claude backend
 
-async function makePersona(
-  id: string,
-  toolsProfile: string,
-  backend: string | null = null
-): Promise<void> {
+// A persona carries no engine (migration 0031), so the tools profile is the
+// only thing that can disqualify it from hosting a bot.
+async function makePersona(id: string, toolsProfile: string): Promise<void> {
   await db
     .insert(personasTable)
-    .values({ id, name: id.toUpperCase(), systemPrompt: "x", toolsProfile, backend })
-    .onConflictDoUpdate({ target: personasTable.id, set: { toolsProfile, backend } });
+    .values({ id, name: id.toUpperCase(), systemPrompt: "x", toolsProfile })
+    .onConflictDoUpdate({ target: personasTable.id, set: { toolsProfile } });
 }
 
 /** Link a Discord id the way Settings → Discord does: one row per person. */
@@ -50,7 +47,6 @@ beforeEach(async () => {
   await makePersona(ARIA, "orchestrator,spawn");
   await makePersona(REX, "orchestrator");
   await makePersona(HANDS, "orchestrator,repo_write");
-  await makePersona(CLAUDIA, "orchestrator", "claude");
 });
 
 describe("loadPipeConfig with DB-configured bots", () => {
@@ -177,7 +173,7 @@ describe("validation posture: DB bots are skipped, env bots refuse boot", () => 
   it("refuses to boot when every DB bot fails validation", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await link("u1");
-    await repo.upsertDiscordBot({ personaId: CLAUDIA, token: "claude-backend" });
+    await repo.upsertDiscordBot({ personaId: HANDS, token: "unsafe-profile" });
 
     await expect(loadPipeConfig({})).rejects.toThrow(/failed validation/);
     warn.mockRestore();
@@ -198,7 +194,7 @@ describe("botProblems", () => {
     ).toEqual([]);
   });
 
-  it("names the empty allowlist, the unsafe profile and the wrong backend", async () => {
+  it("names the empty allowlist and the unsafe profile", async () => {
     const empty = await botProblems({
       personaId: ARIA,
       token: "t",
@@ -214,14 +210,6 @@ describe("botProblems", () => {
       allowedChannels: [],
     });
     expect(unsafe.join(" ")).toMatch(/not server-safe \(repo_write\)/);
-
-    const backend = await botProblems({
-      personaId: CLAUDIA,
-      token: "t",
-      allowedUsers: ["u1"],
-      allowedChannels: [],
-    });
-    expect(backend.join(" ")).toMatch(/'claude' backend/);
   });
 
   it("reports a persona that no longer exists", async () => {

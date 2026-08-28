@@ -17,9 +17,13 @@ describe("GET /api/personas", () => {
     expect(body.personas.length).toBe(7);
     const r = body.personas.find((p: any) => p.id === "implementor");
     expect(r).toMatchObject({ id: "implementor", name: "Implementor" });
-    expect(r.modelProvider).toBe("anthropic");
-    expect(typeof r.modelId).toBe("string");
     expect(typeof r.systemPrompt).toBe("string");
     expect(typeof r.toolsProfile).toBe("string");
+    // A persona carries no engine (migration 0031) — model, backend and
+    // reasoning level are per-run.
+    expect(r).not.toHaveProperty("modelProvider");
+    expect(r).not.toHaveProperty("modelId");
+    expect(r).not.toHaveProperty("backend");
+    expect(r).not.toHaveProperty("thinkingLevel");
   });
 });

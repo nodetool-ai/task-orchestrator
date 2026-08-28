@@ -51,18 +51,15 @@ import type { Channel, InboundMessage, OutboundDraft, PipeConfig } from "../lib/
 const ARIA = "aria"; // orchestrator,spawn — server-safe
 const REX = "rex"; // orchestrator — server-safe
 const HANDS = "hands"; // orchestrator,repo_write — NOT server-safe
-const CLAUDIA = "claudia"; // server-safe profile but pinned to the claude backend
 const DEEP = "deep-thought"; // dashed id → DEEP_THOUGHT env suffix
 
-async function makePersona(
-  id: string,
-  toolsProfile: string,
-  backend: string | null = null
-): Promise<void> {
+// A persona carries no engine (migration 0031): the tools profile is the only
+// thing boot validation can reject it for.
+async function makePersona(id: string, toolsProfile: string): Promise<void> {
   await db
     .insert(personasTable)
-    .values({ id, name: id.toUpperCase(), systemPrompt: "x", toolsProfile, backend })
-    .onConflictDoUpdate({ target: personasTable.id, set: { toolsProfile, backend } });
+    .values({ id, name: id.toUpperCase(), systemPrompt: "x", toolsProfile })
+    .onConflictDoUpdate({ target: personasTable.id, set: { toolsProfile } });
 }
 
 const config: PipeConfig = {
@@ -130,7 +127,6 @@ beforeEach(async () => {
   await makePersona(ARIA, "orchestrator,spawn");
   await makePersona(REX, "orchestrator");
   await makePersona(HANDS, "orchestrator,repo_write");
-  await makePersona(CLAUDIA, "orchestrator", "claude");
   await makePersona(DEEP, "orchestrator");
   await db.delete(channelThreads);
   await db.delete(channelIdentities);
@@ -249,12 +245,6 @@ describe("loadPipeConfig boot validation", () => {
     ).rejects.toThrow(/not\s+server-safe \(repo_write\)/);
   });
 
-  it("refuses a persona that resolves to the claude backend", async () => {
-    await expect(
-      loadPipeConfig({ DISCORD_BOT_TOKEN_CLAUDIA: "t", DISCORD_ALLOWED_USERS: "u1" })
-    ).rejects.toThrow(/resolves to the 'claude' backend/);
-  });
-
   it("names DISCORD_DEFAULT_PERSONA when a LEGACY token lands on an unsafe persona", async () => {
     // The real upgrade path for a pre-M4 deployment: DISCORD_BOT_TOKEN with no
     // DISCORD_DEFAULT_PERSONA defaults to the seeded 'implementor', whose
@@ -318,6 +308,8 @@ describe("two bots in one Discord channel", () => {
     expect(aria.cwdStrategy).toBe("none");
     expect(aria.toolsProfile).toBe("orchestrator,spawn");
     expect(rex.toolsProfile).toBe("orchestrator");
+    // 'pi' is pinned by the pipe itself, not inherited from the persona: the
+    // in-process postgres-turn loop is pi-only (migration 0031).
     expect(aria.backend).toBe("pi");
   });
 

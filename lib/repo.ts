@@ -1509,11 +1509,7 @@ export interface PersonaUpsert {
   name: string;
   description?: string | null;
   systemPrompt: string;
-  modelProvider?: string;
-  modelId?: string;
-  thinkingLevel?: string | null;
   toolsProfile: string;
-  backend?: "pi" | "claude" | null;
   skillPaths: string[];
   budgetMaxTurns?: number | null;
   budgetMaxSeconds?: number | null;
@@ -1544,11 +1540,7 @@ export async function upsertPersona(p: PersonaUpsert): Promise<void> {
       name: p.name,
       description: p.description ?? null,
       systemPrompt: p.systemPrompt,
-      modelProvider: p.modelProvider ?? "anthropic",
-      modelId: p.modelId ?? "claude-opus-4-8",
-      thinkingLevel: p.thinkingLevel ?? null,
       toolsProfile: p.toolsProfile,
-      backend: p.backend ?? null,
       skillPaths: JSON.stringify(p.skillPaths),
       budgetMaxTurns: p.budgetMaxTurns ?? null,
       budgetMaxSeconds: p.budgetMaxSeconds ?? null,
@@ -1561,11 +1553,7 @@ export async function upsertPersona(p: PersonaUpsert): Promise<void> {
         name: p.name,
         description: p.description ?? null,
         systemPrompt: p.systemPrompt,
-        modelProvider: p.modelProvider ?? "anthropic",
-        modelId: p.modelId ?? "claude-opus-4-8",
-        thinkingLevel: p.thinkingLevel ?? null,
         toolsProfile: p.toolsProfile,
-        backend: p.backend ?? null,
         skillPaths: JSON.stringify(p.skillPaths),
         budgetMaxTurns: p.budgetMaxTurns ?? null,
         budgetMaxSeconds: p.budgetMaxSeconds ?? null,
