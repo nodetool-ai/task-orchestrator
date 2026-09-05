@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Self-contained SQLite-backed task orchestrator with Next.js UI, CLI, REST API, and Claude Agent SDK sessions.",
+  "description": "Self-contained Postgres-backed task orchestrator with Next.js UI, CLI, REST API, and pluggable agent backends (pi, Claude Agent SDK, Codex SDK).",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -80,6 +80,7 @@
     "vitest": "^2.1.5"
   },
   "optionalDependencies": {
+    "@openai/codex-sdk": "0.153.4",
     "better-sqlite3": "^11.5.0"
   }
 }

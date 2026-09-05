@@ -75,16 +75,29 @@ describe("AGENT_CREDENTIAL_ENV_KEYS", () => {
   // env: it lives in the codex_credentials table, and the control plane
   // resolves (and refreshes) it at dispatch time so the worker — which has no
   // DB access — receives a live token.
-  it("agentCredentialEnv forwards the stored Codex token when no env token is set", async () => {
+  it("agentCredentialEnv forwards the whole stored Codex token set when no env token is set", async () => {
+    // The Codex *backend* needs more than the bearer: it materializes the CLI's
+    // auth.json on the worker, which wants the id/refresh tokens and account id
+    // too (lib/agent-backend/codex-auth.ts).
     delete process.env.CODEX_ACCESS_TOKEN;
     vi.doMock("../../lib/codex-oauth-store", () => ({
-      resolveStoredAccessToken: async () => "codex-oauth-token",
+      resolveStoredCredential: async () => ({
+        accessToken: "codex-oauth-token",
+        idToken: "codex-id-token",
+        refreshToken: "codex-refresh-token",
+        accountId: "acct_1",
+      }),
     }));
     const { agentCredentialEnv: resolveEnv } = await import(
       "../../lib/agent-backend/provider-env"
     );
 
-    expect((await resolveEnv()).CODEX_ACCESS_TOKEN).toBe("codex-oauth-token");
+    expect(await resolveEnv()).toMatchObject({
+      CODEX_ACCESS_TOKEN: "codex-oauth-token",
+      CODEX_ID_TOKEN: "codex-id-token",
+      CODEX_REFRESH_TOKEN: "codex-refresh-token",
+      CODEX_ACCOUNT_ID: "acct_1",
+    });
     vi.doUnmock("../../lib/codex-oauth-store");
     vi.resetModules();
   });

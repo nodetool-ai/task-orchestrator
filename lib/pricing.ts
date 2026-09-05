@@ -2,9 +2,9 @@
 //
 // Approximate per-model token pricing, used ONLY to estimate a run's dollar
 // spend when the agent backend does not self-report a cost. The Claude backend
-// reports `total_cost_usd` directly (authoritative); the pi backend reports
-// token *usage* but no priced cost, which used to leave budgetMaxUsd unenforced
-// on pi. checkBudget() (lib/runs.ts) falls back to estimateCostUsd() so the
+// reports `total_cost_usd` directly (authoritative); the pi and codex backends
+// report token *usage* but no priced cost, which used to leave budgetMaxUsd
+// unenforced on pi. checkBudget() (lib/runs.ts) falls back to estimateCostUsd() so the
 // dollar cap is a real backstop on every backend.
 //
 // These are LIST prices in USD per 1,000,000 tokens (per-MTok), matching the

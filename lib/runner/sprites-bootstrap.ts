@@ -11,6 +11,14 @@
 
 import type { SpritesClient } from "./sprites-client";
 
+// The standalone worker bundle cannot carry the Codex SDK's platform package:
+// it is a native ELF and is intentionally excluded by build-worker-standalone.
+// Keep this pinned to the @openai/codex version brought in by the matching
+// @openai/codex-sdk dependency in package.json.
+export const SPRITE_CODEX_VERSION = "0.153.4";
+export const SPRITE_CODEX_BINARY = "/home/user/worker/.codex/bin/codex";
+const SPRITE_CODEX_ROOT = "/home/user/worker/.codex";
+
 export class SpritesBootstrapError extends Error {
   constructor(
     readonly step: string,
@@ -25,7 +33,13 @@ export interface BootstrapOptions {
   /** Bundle identity (sha1 of the shipped bundle); keys the checkpoint. */
   workerSha: string;
   bundleUrl: string;
+  /** Operator-provided executable already present in the Sprite. */
+  codexBinary?: string;
   onStep?: (name: string, status: "running" | "success" | "error", durationMs: number) => void;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 // `{sha}` is optional: the default control-plane route needs none.
@@ -46,6 +60,8 @@ export async function bootstrapSprite(
   opts: BootstrapOptions,
 ): Promise<void> {
   const { workerSha, bundleUrl: bundleUrlTemplate, onStep } = opts;
+  const codexBinary = opts.codexBinary || SPRITE_CODEX_BINARY;
+  const installCodex = !opts.codexBinary;
   const bundleUrl = expandBundleUrl(bundleUrlTemplate, workerSha);
   const expectedComment = `bootstrap ${workerSha}`;
 
@@ -56,6 +72,7 @@ export async function bootstrapSprite(
     const checkpoints = await client.listCheckpoints(spriteName);
     if (checkpoints.some((cp) => cp.comment === expectedComment)) {
       onStep?.("fetch-worker", "success", 0);
+      if (installCodex) onStep?.("install-codex", "success", 0);
       onStep?.("verify-worker", "success", 0);
       onStep?.("checkpoint", "success", 0);
       return;
@@ -80,11 +97,40 @@ export async function bootstrapSprite(
     onStep?.("fetch-worker", "success", durationMs);
   }
 
-  // Step 2: verify-worker
+  // Step 2: install-codex. A custom binary is useful for operators running a
+  // pre-provisioned image and must not be overwritten by bootstrap.
+  if (installCodex) {
+    const start = Date.now();
+    onStep?.("install-codex", "running", 0);
+    // Installing @openai/codex pulls the platform-specific optional package
+    // for the Sprite's architecture. Resolve its target triple at runtime,
+    // then expose a stable path to the worker so it never relies on the
+    // SDK's package-resolution search inside the one-file bundle.
+    const cmd = [
+      "set -eu",
+      `mkdir -p ${SPRITE_CODEX_ROOT}/bin`,
+      `npm install --prefix ${shellQuote(SPRITE_CODEX_ROOT)} --no-save --no-package-lock --ignore-scripts --include=optional --no-audit --no-fund @openai/codex@${SPRITE_CODEX_VERSION}`,
+      `native=$(find ${SPRITE_CODEX_ROOT}/node_modules -type f -path '*/vendor/*/bin/codex' -perm -u+x -print -quit)`,
+      'test -n "$native"',
+      `ln -sfn "$native" ${shellQuote(codexBinary)}`,
+    ].join(" && ");
+    const result = await client.exec(spriteName, { cmd, timeoutMs: 10 * 60_000 });
+    const durationMs = Date.now() - start;
+    if (result.exitCode !== 0) {
+      onStep?.("install-codex", "error", durationMs);
+      const stderrTail = tailKb(result.stderr || result.stdout || "");
+      throw new SpritesBootstrapError("install-codex", `install-codex failed with exit ${result.exitCode}: ${stderrTail}`);
+    }
+    onStep?.("install-codex", "success", durationMs);
+  }
+
+  // Step 3: verify-worker
   {
     const start = Date.now();
     onStep?.("verify-worker", "running", 0);
-    const result = await client.exec(spriteName, { cmd: "test -f /home/user/worker/dist/run-worker.js" });
+    const result = await client.exec(spriteName, {
+      cmd: `test -f /home/user/worker/dist/run-worker.js && test -x ${shellQuote(codexBinary)} && ${shellQuote(codexBinary)} --version >/dev/null`,
+    });
     const durationMs = Date.now() - start;
     if (result.exitCode !== 0) {
       onStep?.("verify-worker", "error", durationMs);
@@ -94,7 +140,7 @@ export async function bootstrapSprite(
     onStep?.("verify-worker", "success", durationMs);
   }
 
-  // Step 3: checkpoint
+  // Step 4: checkpoint
   {
     const start = Date.now();
     onStep?.("checkpoint", "running", 0);

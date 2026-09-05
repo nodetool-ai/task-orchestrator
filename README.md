@@ -406,6 +406,48 @@ Each tool call hits the same `lib/repo.ts` the web UI uses, so
 progress is visible live. Every run's `total_cost_usd` and token
 counts are captured and surfaced on the session detail page.
 
+### Agent backends
+
+A run executes on one of three agent backends, behind the neutral seam in
+`lib/agent-backend/` (register tools, transform the system prompt, intercept
+tool calls, contribute an ambient skill):
+
+| id | SDK | notes |
+| --- | --- | --- |
+| `pi` | `@earendil-works/pi-coding-agent` | default; in-process, multi-provider, and the only backend that can run the lightweight postgres-context loop |
+| `claude` | `@anthropic-ai/claude-agent-sdk` | drives the `claude` CLI; Anthropic models only |
+| `codex` | `@openai/codex-sdk` | drives the `codex` CLI; OpenAI/Codex models only |
+
+`TASK_ORCH_AGENT_BACKEND` sets the deployment default; every run can override it
+(the composers' backend picker, a POST body's `backend`, or
+`--backend=pi|claude|codex`). A resume stays on its run's backend, because the
+resume token is backend-tagged (`pi:<path>` / `claude:<id>` / `codex:<thread-id>`).
+
+The Codex backend is worth two extra notes, because the `codex` CLI is a child
+process with no in-process tool seam:
+
+- **Tools.** The run's orchestrator tools are served to the CLI over a
+  loopback-only Streamable-HTTP MCP server on an ephemeral port, gated on a
+  per-run bearer token passed through the environment
+  (`lib/agent-backend/codex-mcp-bridge.ts`). The tool-call interceptor chain runs
+  inside that bridge, so the planning-stage gates hold. Codex's own shell and
+  apply_patch tools do not pass through it: writes are confined by Codex's
+  sandbox instead (`TASK_ORCH_CODEX_SANDBOX`, default `workspace-write`), and
+  secrets are absent from the CLI's environment rather than unset per command.
+- **Auth.** A non-empty `CODEX_API_KEY` takes precedence, followed by a
+  non-empty `OPENAI_API_KEY`; the selected API key is passed to the SDK's
+  `apiKey` option so the pinned CLI receives it as `CODEX_API_KEY`. Otherwise the ChatGPT
+  credential this deployment already stores for pi's `openai-codex` provider
+  (Settings → Codex) is materialized as the CLI's `auth.json` — so one ChatGPT
+  subscription serves both. Runs use a dedicated `CODEX_HOME`
+  (`~/.task-orchestrator/codex`, or `TASK_ORCH_CODEX_HOME`) so this never
+  clobbers a developer's own `codex login` and no ambient `config.toml` MCP
+  server can capture the run's orchestrator writes.
+
+`@openai/codex-sdk` is an **optional** dependency: its platform CLI is ~300MB, so
+an image built with `npm ci --omit=optional` simply won't offer the backend, and
+selecting it there fails with an actionable message.
+
 Requires:
 - Agent-backend auth. The `claude` backend resolves it like the Claude Code CLI:
   `ANTHROPIC_API_KEY` when set, otherwise the claude.ai subscription (`claude login`,
@@ -428,6 +470,14 @@ Requires:
   server is forwarded into the run container, so either backend works there —
   see `lib/agent-backend/provider-env.ts` for the
   list.
+
+On Sprites, bootstrap installs the pinned `@openai/codex` 0.153.4 native
+package (including optional platform dependencies) and exposes its executable
+at `/home/user/worker/.codex/bin/codex`. Set
+`TASK_ORCH_SPRITES_CODEX_BINARY` when the Sprite image already provides a
+compatible executable; bootstrap then verifies that path without installing a
+second copy. The install can take several minutes on a cold Sprite.
+
 - `gh` CLI installed and authenticated for PR creation
 - A `main` branch on `origin` (override per-session via `baseBranch`)
 
@@ -680,6 +730,6 @@ gating, dependency validation, sequential task-ID minting, plan progress.
 - **Next.js 15** (App Router, dynamic SSR)
 - **Drizzle ORM** + **Postgres** (`postgres-js` driver)
 - **Zod** request validation
-- **Claude Agent SDK** for autonomous task execution
+- **pi-coding-agent** / **Claude Agent SDK** / **Codex SDK** for autonomous task execution
 - **Vitest** for the repo-layer test suite
 - **shadcn-style** UI (no Radix dep) + Tailwind v3 + Linear-style status glyphs

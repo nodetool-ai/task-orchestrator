@@ -12,7 +12,7 @@ export * from "./types";
 
 const cached = new Map<BackendId, AgentBackend>();
 
-export const BACKEND_IDS: readonly BackendId[] = ["pi", "claude"];
+export const BACKEND_IDS: readonly BackendId[] = ["pi", "claude", "codex"];
 
 /** Normalize + validate a backend id. `raw` may be a per-run value; when
  *  null/undefined the deployment default (TASK_ORCH_AGENT_BACKEND) applies. */
@@ -20,8 +20,10 @@ export function resolveBackendId(
   raw: string | null | undefined = config.agent.backend
 ): BackendId {
   const id = (raw ?? config.agent.backend ?? "pi").trim().toLowerCase();
-  if (id === "pi" || id === "claude") return id;
-  throw new Error(`Unknown agent backend '${raw}'. Expected 'pi' or 'claude'.`);
+  if (id === "pi" || id === "claude" || id === "codex") return id;
+  throw new Error(
+    `Unknown agent backend '${raw}'. Expected one of ${BACKEND_IDS.join(", ")}.`
+  );
 }
 
 /** The adapter for `id`; omitted/null falls back to the deployment default. */
@@ -33,6 +35,9 @@ export async function getBackend(id?: string | null): Promise<AgentBackend> {
   if (resolved === "claude") {
     const { ClaudeBackend } = await import("./claude-backend");
     backend = new ClaudeBackend();
+  } else if (resolved === "codex") {
+    const { CodexBackend } = await import("./codex-backend");
+    backend = new CodexBackend();
   } else {
     const { PiBackend } = await import("./pi-backend");
     backend = new PiBackend();

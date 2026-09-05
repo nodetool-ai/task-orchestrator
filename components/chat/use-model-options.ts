@@ -5,7 +5,7 @@ import type { ModelOption } from "@/components/chat/model-picker";
 
 export const DEFAULT_CHAT_MODEL = "openai/gpt-5.6-sol";
 
-export type BackendId = "pi" | "claude";
+export type BackendId = "pi" | "claude" | "codex";
 
 interface ProviderCatalog {
   id: string;

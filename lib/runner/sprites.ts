@@ -13,7 +13,7 @@ import { nestedDispatchMode } from "./provider";
 import { recordRunnerEvent, timeRunnerPhase } from "./telemetry";
 import type { CreateRunnerInput, RunnerObservation, RunnerProvider, RunnerRef, RunnerState } from "./provider";
 import { SpritesApiError, makeSpritesClient, type NetworkPolicy, type SpritesClient, type Sprite } from "./sprites-client";
-import { bootstrapSprite } from "./sprites-bootstrap";
+import { bootstrapSprite, SPRITE_CODEX_BINARY } from "./sprites-bootstrap";
 import { workerBundleId } from "../worker-bundle";
 import { newChannelInstanceId } from "../worker-channel/credential";
 import { spritesDialEndpoint, spritesListenEndpoint, workerChannelDispatchEnv } from "../worker-channel/dispatch-env";
@@ -131,6 +131,10 @@ export async function buildSpritesWorkerEnv(
     // The standalone bundle carries no native claude binary; the sprite base
     // image installs Claude Code, so the SDK spawns that one.
     TASK_ORCH_CLAUDE_BINARY: envValue("TASK_ORCH_SPRITES_CLAUDE_BINARY") ?? SPRITE_CLAUDE_BINARY,
+    // bootstrapSprite installs the pinned Codex native package and links its
+    // architecture-specific binary to this stable path. An override is useful
+    // for a custom Sprite image that already provisions Codex elsewhere.
+    TASK_ORCH_CODEX_BINARY: envValue("TASK_ORCH_SPRITES_CODEX_BINARY") ?? SPRITE_CODEX_BINARY,
     RUN_ID: String(runId),
     SESSION_ROOT: "/home/user/session",
     REPO_CACHE_DIR: envValue("TASK_ORCH_REPO_CACHE_DIR") ?? "/opt/repo-cache",
@@ -230,12 +234,14 @@ export class SpritesRunnerProvider implements RunnerProvider {
         throw new Error("Set TASK_ORCH_PUBLIC_URL (or TASK_ORCH_SPRITES_WORKER_BUNDLE_URL) when TASK_ORCH_RUNNER=sprites");
       }
       const workerSha = await workerBundleId();
+      const codexBinary = envValue("TASK_ORCH_SPRITES_CODEX_BINARY");
       await timeRunnerPhase(
         "sprites_bootstrap",
         () =>
           bootstrapSprite(this.spritesClient, spriteName, {
             workerSha,
             bundleUrl,
+            ...(codexBinary ? { codexBinary } : {}),
             onStep: (step, status, durationMs) => {
               void emitRunnerEvent(input.runId, "runner_bootstrap_step", { spriteName, step, status, durationMs });
             },
@@ -380,6 +386,9 @@ export class SpritesRunnerProvider implements RunnerProvider {
           await bootstrapSprite(this.spritesClient, spriteName, {
             workerSha,
             bundleUrl,
+            ...(envValue("TASK_ORCH_SPRITES_CODEX_BINARY")
+              ? { codexBinary: envValue("TASK_ORCH_SPRITES_CODEX_BINARY") }
+              : {}),
             onStep: (step, status, durationMs) => {
               void emitRunnerEvent(runId, "runner_bootstrap_step", { spriteName, step, status, durationMs });
             },

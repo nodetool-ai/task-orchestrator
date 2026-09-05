@@ -88,6 +88,28 @@ export async function refreshCodexTokens(refreshToken: string): Promise<Refreshe
   };
 }
 
+/** The whole stored token set, as the `codex` CLI's auth.json wants it. */
+export interface CodexCredential {
+  accessToken: string;
+  refreshToken?: string;
+  idToken?: string;
+  accountId?: string;
+}
+
+/**
+ * Resolve the full Codex credential from the DB, refreshing it when near expiry.
+ * Env-only processes (workers) have no DB and get undefined; they receive the
+ * already-resolved token set as env instead (lib/agent-backend/provider-env.ts).
+ */
+export async function resolveCodexCredential(): Promise<CodexCredential | undefined> {
+  try {
+    const store = await import("./codex-oauth-store");
+    return await store.resolveStoredCredential();
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Resolve the Codex bearer, refreshing the stored credential if it is at or
  * near expiry. Returns undefined when there is no credential at all — callers
