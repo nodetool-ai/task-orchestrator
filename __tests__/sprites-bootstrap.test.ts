@@ -30,7 +30,7 @@ function fakeClient(overrides: Partial<SpritesClient> = {}): SpritesClient {
 }
 
 describe("bootstrapSprite", () => {
-  it("happy path calls exec twice then checkpoint", async () => {
+  it("happy path installs the pinned CLI, verifies it, then checkpoints", async () => {
     const exec = vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" }));
     const checkpoint = vi.fn(async () => ({ id: "v1" }));
     const listCheckpoints = vi.fn(async () => []);
@@ -43,17 +43,50 @@ describe("bootstrapSprite", () => {
       onStep,
     });
 
-    expect(exec).toHaveBeenCalledTimes(2);
+    expect(exec).toHaveBeenCalledTimes(3);
     const firstCall = exec.mock.calls[0] as unknown as [string, { cmd: string }];
-    const secondCall = exec.mock.calls[1] as unknown as [string, { cmd: string }];
+    const secondCall = exec.mock.calls[1] as unknown as [string, { cmd: string; timeoutMs?: number }];
+    const thirdCall = exec.mock.calls[2] as unknown as [string, { cmd: string }];
     expect(firstCall[1].cmd).toContain("mkdir -p /home/user/worker");
     expect(firstCall[1].cmd).toContain("https://example.com/worker-" + "a".repeat(40) + ".tar.gz");
-    expect(secondCall[1].cmd).toBe("test -f /home/user/worker/dist/run-worker.js");
+    expect(secondCall[1].cmd).toContain("@openai/codex@0.153.4");
+    expect(secondCall[1].timeoutMs).toBe(600_000);
+    expect(thirdCall[1].cmd).toContain("'/home/user/worker/.codex/bin/codex' --version");
     expect(checkpoint).toHaveBeenCalledTimes(1);
     expect(checkpoint).toHaveBeenCalledWith("to-run-1", "bootstrap " + "a".repeat(40));
     expect(onStep).toHaveBeenCalledWith("fetch-worker", "success", expect.any(Number));
     expect(onStep).toHaveBeenCalledWith("verify-worker", "success", expect.any(Number));
     expect(onStep).toHaveBeenCalledWith("checkpoint", "success", expect.any(Number));
+  });
+
+  it("uses an explicit binary without installing Codex", async () => {
+    const exec = vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" }));
+    const client = fakeClient({ exec, listCheckpoints: vi.fn(async () => []) });
+    await bootstrapSprite(client, "to-run-1", {
+      workerSha: "e".repeat(40),
+      bundleUrl: "https://example.com/worker.tar.gz",
+      codexBinary: "/opt/codex/bin/codex",
+    });
+    expect(exec).toHaveBeenCalledTimes(2);
+    expect((exec.mock.calls[1] as any)[1].cmd).toContain("'/opt/codex/bin/codex' --version");
+    expect((exec.mock.calls[0] as any)[1].cmd).not.toContain("npm install");
+  });
+
+  it("does not checkpoint when native CLI installation fails", async () => {
+    const exec = vi.fn(async (_sprite: string, input: { cmd: string }) =>
+      input.cmd.includes("npm install")
+        ? { exitCode: 1, stdout: "", stderr: "registry timeout" }
+        : { exitCode: 0, stdout: "", stderr: "" },
+    );
+    const checkpoint = vi.fn(async () => ({ id: "v1" }));
+    const client = fakeClient({ exec, checkpoint, listCheckpoints: vi.fn(async () => []) });
+    await expect(
+      bootstrapSprite(client, "to-run-1", {
+        workerSha: "f".repeat(40),
+        bundleUrl: "https://example.com/worker.tar.gz",
+      }),
+    ).rejects.toMatchObject({ step: "install-codex" });
+    expect(checkpoint).not.toHaveBeenCalled();
   });
 
   it("failing verify-worker raises SpritesBootstrapError with step verify-worker", async () => {

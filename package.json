@@ -80,7 +80,7 @@
     "vitest": "^2.1.5"
   },
   "optionalDependencies": {
-    "@openai/codex-sdk": "^0.153.4",
+    "@openai/codex-sdk": "0.153.4",
     "better-sqlite3": "^11.5.0"
   }
 }

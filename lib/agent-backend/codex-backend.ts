@@ -117,6 +117,11 @@ function definedEnv(env: Record<string, string | undefined>): Record<string, str
   return out;
 }
 
+function nonEmpty(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed || undefined;
+}
+
 export class CodexBackend implements AgentBackend {
   readonly id = "codex" as const;
 
@@ -168,16 +173,23 @@ export class CodexBackend implements AgentBackend {
       for (const fn of collected.agentStartFns) fn({ abort: () => abort.abort() });
 
       const auth = resolveCodexAuth({ ...process.env, ...args.env });
+      // The Codex SDK does not translate OPENAI_API_KEY itself. Its `apiKey`
+      // option is the supported handoff to the CLI, which then sets
+      // CODEX_API_KEY for the child process. Prefer the Codex-specific name
+      // when both are configured so an explicit Codex credential wins.
+      const mergedEnv = { ...process.env, ...args.env };
+      const apiKey = nonEmpty(mergedEnv.CODEX_API_KEY) ?? nonEmpty(mergedEnv.OPENAI_API_KEY);
       // The CLI's env REPLACES the child environment, so start from the merged
       // process env, layer the caller's, then scrub — a caller-supplied entry is
       // respected but still subject to the scrub.
       const cliEnv = definedEnv({
-        ...scrubCodexCliEnv({ ...process.env, ...args.env }),
+        ...scrubCodexCliEnv(mergedEnv),
         CODEX_HOME: auth.codexHome,
         ...(bridge ? { [bridge.tokenEnvVar]: bridge.token } : {}),
       });
 
       const codex = newCodexClient(Codex, {
+        ...(apiKey ? { apiKey } : {}),
         ...(config.agent.codexBinary ? { codexPathOverride: config.agent.codexBinary } : {}),
         env: cliEnv,
         config: {

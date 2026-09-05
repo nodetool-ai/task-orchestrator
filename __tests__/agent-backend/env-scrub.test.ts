@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  scrubCodexCliEnv,
   SECRET_ENV_DENYLIST,
   bashUnsetPrefix,
   scrubClaudeCliEnv,
@@ -157,5 +158,24 @@ describe("scrubClaudeCliEnv", () => {
     const result = scrubClaudeCliEnv(merged);
     expect(result.CUSTOM_FLAG).toBe("from-caller");
     expect(result.DATABASE_URL).toBeUndefined();
+  });
+});
+
+describe("scrubCodexCliEnv", () => {
+  it("removes the ChatGPT bearer so auth.json controls Codex authentication", () => {
+    const result = scrubCodexCliEnv({
+      CODEX_ACCESS_TOKEN: "chatgpt-oauth-jwt",
+      CODEX_ID_TOKEN: "id-token",
+      CODEX_REFRESH_TOKEN: "refresh-token",
+      CODEX_ACCOUNT_ID: "acct_1",
+      OPENAI_API_KEY: "sk-openai",
+      PATH: "/usr/bin",
+    });
+    expect(result.CODEX_ACCESS_TOKEN).toBeUndefined();
+    expect(result.CODEX_ID_TOKEN).toBe("id-token");
+    expect(result.CODEX_REFRESH_TOKEN).toBe("refresh-token");
+    expect(result.CODEX_ACCOUNT_ID).toBe("acct_1");
+    expect(result.OPENAI_API_KEY).toBe("sk-openai");
+    expect(result.PATH).toBe("/usr/bin");
   });
 });

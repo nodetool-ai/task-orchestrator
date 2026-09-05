@@ -214,6 +214,7 @@ service starts.
 | `TASK_ORCH_SPRITES_WORKER_BUNDLE_URL` | `${TASK_ORCH_PUBLIC_URL}/api/worker-bundle` | Worker bundle URL; optional `{sha}` expands to the bundle id. |
 | `TASK_ORCH_RUNNER_TERMINAL_MS` | `24h` | Retention before destroy |
 | `TASK_ORCH_SPRITES_CLAUDE_BINARY` | `/home/sprite/.local/bin/claude` | Claude Code executable inside the sprite; passed to the worker as `TASK_ORCH_CLAUDE_BINARY` (the bundle has no native binary). |
+| `TASK_ORCH_SPRITES_CODEX_BINARY` | `/home/user/worker/.codex/bin/codex` | Optional pre-provisioned Codex executable. When unset, bootstrap installs pinned `@openai/codex` 0.153.4 with optional platform dependencies. |
 
 Credentials (`GH_TOKEN`, `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`,
 optional pi provider keys) are staged as secrets on the control plane and

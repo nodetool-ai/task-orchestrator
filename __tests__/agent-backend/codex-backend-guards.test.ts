@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { CodexBackend, __test } from "../../lib/agent-backend/codex-backend";
 import type { RunTurnArgs } from "../../lib/agent-backend/types";
 
@@ -123,6 +126,7 @@ describe("CodexBackend.runTurn CLI configuration", () => {
     await new CodexBackend().runTurn(makeArgs());
     expect(sdk.ctorOptions.env.DATABASE_URL).toBeUndefined();
     expect(sdk.ctorOptions.env.OPENAI_API_KEY).toBe("sk-test");
+    expect(sdk.ctorOptions.apiKey).toBe("sk-test");
     expect(sdk.ctorOptions.env.CODEX_HOME).toBeTruthy();
     // …and those same credentials are withheld from the shell tool's children.
     const policy = sdk.ctorOptions.config.shell_environment_policy;
@@ -132,6 +136,31 @@ describe("CodexBackend.runTurn CLI configuration", () => {
     // its PR. Our own list replaces them.
     expect(policy.ignore_default_excludes).toBe(true);
     expect(policy.exclude).not.toContain("GH_TOKEN");
+  });
+
+  it("prefers CODEX_API_KEY when both SDK API-key names are configured", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "sk-openai");
+    vi.stubEnv("CODEX_API_KEY", "sk-codex");
+    sdk.scripts = [[started("th_1"), completed]];
+    await new CodexBackend().runTurn(makeArgs());
+    expect(sdk.ctorOptions.apiKey).toBe("sk-codex");
+  });
+
+  it("consumes the ChatGPT bearer after materializing auth.json", async () => {
+    const codexHome = mkdtempSync(path.join(tmpdir(), "task-orch-codex-test-"));
+    vi.stubEnv("TASK_ORCH_CODEX_HOME", codexHome);
+    vi.stubEnv("OPENAI_API_KEY", "   ");
+    vi.stubEnv("CODEX_API_KEY", "   ");
+    vi.stubEnv("CODEX_ACCESS_TOKEN", "chatgpt-oauth-jwt");
+    sdk.scripts = [[started("th_1"), completed]];
+    try {
+      await new CodexBackend().runTurn(makeArgs());
+      expect(sdk.ctorOptions.env.CODEX_ACCESS_TOKEN).toBeUndefined();
+      expect(existsSync(path.join(codexHome, "auth.json"))).toBe(true);
+      expect(readFileSync(path.join(codexHome, "auth.json"), "utf8")).toContain("chatgpt-oauth-jwt");
+    } finally {
+      rmSync(codexHome, { recursive: true, force: true });
+    }
   });
 
   it("puts the caller's run-scoped env in the CLI env, where shell commands inherit it", async () => {

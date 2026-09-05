@@ -131,11 +131,13 @@ export function scrubClaudeCliEnv(
   return out;
 }
 
-// OpenAI/Codex auth keys the `codex` CLI resolves auth from (codex-auth.ts):
-// an explicit API key, or the ChatGPT token set this deployment forwards from
-// codex_credentials. Same bargain as CLAUDE_CLI_AUTH_KEYS — the CLI keeps its
-// own credentials, and the Codex backend additionally keeps them out of the
-// shell tool's environment via `shell_environment_policy.exclude`.
+// OpenAI/Codex auth keys used while constructing the `codex` CLI environment.
+// An explicit API key is passed through the SDK's `apiKey` option. The
+// ChatGPT token is consumed by codex-auth.ts to materialize auth.json, and
+// must not remain in the child environment: Codex interprets CODEX_ACCESS_TOKEN
+// as a personal/agent token before it reads the persistent ChatGPT credential.
+// The remaining token metadata is retained for auth.json construction and is
+// excluded from shell children by the Codex backend's shell policy.
 export const CODEX_CLI_AUTH_KEYS: readonly string[] = [
   "OPENAI_API_KEY",
   "CODEX_API_KEY",
@@ -163,5 +165,9 @@ export function scrubCodexCliEnv(
     if (CODEX_CLI_AUTH_KEY_SET.has(key)) continue;
     delete out[key];
   }
+  // This bearer is for the application's pi provider. The Codex CLI gives it
+  // different semantics from the ChatGPT OAuth token in auth.json, so once
+  // codex-auth.ts has materialized the file, never expose it to the CLI.
+  delete out[CODEX_ACCESS_TOKEN_ENV];
   return out;
 }

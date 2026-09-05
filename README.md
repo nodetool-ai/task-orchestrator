@@ -434,7 +434,9 @@ process with no in-process tool seam:
   apply_patch tools do not pass through it: writes are confined by Codex's
   sandbox instead (`TASK_ORCH_CODEX_SANDBOX`, default `workspace-write`), and
   secrets are absent from the CLI's environment rather than unset per command.
-- **Auth.** `OPENAI_API_KEY` / `CODEX_API_KEY` when set; otherwise the ChatGPT
+- **Auth.** A non-empty `CODEX_API_KEY` takes precedence, followed by a
+  non-empty `OPENAI_API_KEY`; the selected API key is passed to the SDK's
+  `apiKey` option so the pinned CLI receives it as `CODEX_API_KEY`. Otherwise the ChatGPT
   credential this deployment already stores for pi's `openai-codex` provider
   (Settings → Codex) is materialized as the CLI's `auth.json` — so one ChatGPT
   subscription serves both. Runs use a dedicated `CODEX_HOME`
@@ -468,6 +470,14 @@ Requires:
   server is forwarded into the run container, so either backend works there —
   see `lib/agent-backend/provider-env.ts` for the
   list.
+
+On Sprites, bootstrap installs the pinned `@openai/codex` 0.153.4 native
+package (including optional platform dependencies) and exposes its executable
+at `/home/user/worker/.codex/bin/codex`. Set
+`TASK_ORCH_SPRITES_CODEX_BINARY` when the Sprite image already provides a
+compatible executable; bootstrap then verifies that path without installing a
+second copy. The install can take several minutes on a cold Sprite.
+
 - `gh` CLI installed and authenticated for PR creation
 - A `main` branch on `origin` (override per-session via `baseBranch`)
 
