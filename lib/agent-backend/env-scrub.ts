@@ -15,6 +15,12 @@
 // everything safe.
 
 import { AGENT_CREDENTIAL_ENV_KEYS } from "./provider-env";
+import {
+  CODEX_ACCOUNT_ID_ENV,
+  CODEX_ID_TOKEN_ENV,
+  CODEX_REFRESH_TOKEN_ENV,
+} from "./codex-auth";
+import { CODEX_ACCESS_TOKEN_ENV } from "../codex-oauth-token";
 
 // Names kept in bash/tool subprocess env despite being credential-shaped,
 // because the git credential helper baked into the worker image
@@ -120,6 +126,41 @@ export function scrubClaudeCliEnv(
   const out = { ...env };
   for (const key of SECRET_ENV_DENYLIST) {
     if (CLAUDE_CLI_AUTH_KEYS.has(key)) continue;
+    delete out[key];
+  }
+  return out;
+}
+
+// OpenAI/Codex auth keys the `codex` CLI resolves auth from (codex-auth.ts):
+// an explicit API key, or the ChatGPT token set this deployment forwards from
+// codex_credentials. Same bargain as CLAUDE_CLI_AUTH_KEYS — the CLI keeps its
+// own credentials, and the Codex backend additionally keeps them out of the
+// shell tool's environment via `shell_environment_policy.exclude`.
+export const CODEX_CLI_AUTH_KEYS: readonly string[] = [
+  "OPENAI_API_KEY",
+  "CODEX_API_KEY",
+  CODEX_ACCESS_TOKEN_ENV,
+  CODEX_ID_TOKEN_ENV,
+  CODEX_REFRESH_TOKEN_ENV,
+  CODEX_ACCOUNT_ID_ENV,
+];
+
+const CODEX_CLI_AUTH_KEY_SET = new Set(CODEX_CLI_AUTH_KEYS);
+
+/**
+ * Scrub the env handed to the `codex` CLI subprocess (the Codex SDK's
+ * `CodexOptions.env` REPLACES the child environment, so this must be applied to
+ * the fully-merged `{ ...process.env, ...args.env }`).
+ *
+ * Removes SECRET_ENV_DENYLIST except the OpenAI/Codex auth keys the CLI needs
+ * to authenticate itself.
+ */
+export function scrubCodexCliEnv(
+  env: Record<string, string | undefined>
+): Record<string, string | undefined> {
+  const out = { ...env };
+  for (const key of SECRET_ENV_DENYLIST) {
+    if (CODEX_CLI_AUTH_KEY_SET.has(key)) continue;
     delete out[key];
   }
   return out;

@@ -91,7 +91,7 @@ export async function createChat(
   // Chat runs execute in the full worker harness and support either backend.
   // This convenience creator defaults to pi (matching DEFAULT_MODEL, a pi
   // model); callers wanting claude must pass it alongside an Anthropic model.
-  backend: "pi" | "claude" = "pi",
+  backend: "pi" | "claude" | "codex" = "pi",
   model: string = DEFAULT_MODEL
 ): Promise<ChatRow> {
   if (repoId === undefined) repoId = await repo.defaultRepoId();
@@ -319,7 +319,7 @@ function hydrateChat(row: typeof agentSessions.$inferSelect): ChatRow {
     title: row.title ?? "New chat",
     cwdStrategy: row.cwdStrategy as CwdStrategy,
     model: row.model,
-    backend: row.backend as "pi" | "claude" | null,
+    backend: row.backend as "pi" | "claude" | "codex" | null,
     sdkSessionId: row.sdkSessionId,
     totalCostUsd: row.totalCostUsd,
     inputTokens: row.inputTokens,

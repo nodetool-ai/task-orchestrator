@@ -157,6 +157,12 @@ runDispatch.__setRunsApi({
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ORCHESTRATOR_ROOT = resolve(__dirname, "..");
 const DEFAULT_MODEL = config.agent.model ?? "anthropic/claude-opus-4-8";
+
+/** Provider ids the Codex backend can serve (pi spells the OAuth flavour
+ *  `openai-codex`). Mirrors SUPPORTED_PROVIDERS in
+ *  lib/agent-backend/codex-backend.ts, which is the runtime guard this
+ *  creation-time check front-runs. */
+const CODEX_PROVIDERS = new Set(["openai", "openai-codex", "codex"]);
 /** Deployment default reasoning level; undefined leaves the model's own. */
 const DEFAULT_THINKING_LEVEL = config.agent.thinkingLevel;
 const KEEP_WORKTREES = config.features.keepWorktrees;
@@ -194,7 +200,7 @@ export interface CreateRunInput {
   prUrl?: string | null;
   parentRunId?: number | null;
   model?: string | null;
-  /** Agent backend for this run ('pi'|'claude'). Omitted/null inherits the
+  /** Agent backend for this run ('pi'|'claude'|'codex'). Omitted/null inherits the
    *  deployment default (TASK_ORCH_AGENT_BACKEND). */
   backend?: string | null;
   /** Reasoning level for this run. Omitted/null takes the deployment default
@@ -261,9 +267,9 @@ export interface RunRow {
    *  unsandboxed, unscrubbed in-process path. */
   runtime: "server" | "worker";
   model: string | null;
-  /** Agent backend this run executes on ('pi'|'claude'), or null for the
+  /** Agent backend this run executes on ('pi'|'claude'|'codex'), or null for the
    *  deployment default (TASK_ORCH_AGENT_BACKEND). */
-  backend: "pi" | "claude" | null;
+  backend: "pi" | "claude" | "codex" | null;
   /** Per-run reasoning level (low|medium|high|xhigh), or null to inherit the persona. */
   thinkingLevel: "low" | "medium" | "high" | "xhigh" | null;
   branch: string | null;
@@ -773,17 +779,26 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   // (the lightweight in-process/postgres tier was retired), so they support
   // both backends just like every other run kind — no chat-specific pinning.
   // An explicit pick normalizes/validates eagerly; null falls through to the
-  // deployment default at turn time. An explicit 'claude' selection is
+  // deployment default at turn time. An explicit single-vendor selection is
   // additionally checked against the model's provider — the Claude backend is
-  // Anthropic-only, and that combination can never run.
-  let backend: "pi" | "claude" | null = null;
+  // Anthropic-only and the Codex backend is OpenAI-only, and either mismatch can
+  // never run, so it is a 400 at creation rather than a run that dies on its
+  // first turn.
+  let backend: "pi" | "claude" | "codex" | null = null;
   const requestedBackend = input.backend;
-  const validateClaudeProvider = () => {
+  const validateBackendProvider = () => {
     const { provider } = parseProviderQualifiedModel(effectiveModel);
     if (backend === "claude" && provider !== "anthropic") {
       throw new repo.RepoError(
         `The 'claude' backend only supports Anthropic models, but the run's model is '${effectiveModel}'. ` +
           `Pick an anthropic/* model or the 'pi' backend.`,
+        400
+      );
+    }
+    if (backend === "codex" && !CODEX_PROVIDERS.has(provider)) {
+      throw new repo.RepoError(
+        `The 'codex' backend only supports OpenAI/Codex models, but the run's model is '${effectiveModel}'. ` +
+          `Pick an openai/* model or the 'pi' backend.`,
         400
       );
     }
@@ -794,7 +809,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     } catch (err) {
       throw new repo.RepoError(err instanceof Error ? err.message : String(err), 400);
     }
-    validateClaudeProvider();
+    validateBackendProvider();
   }
 
   // Tree limits (Decision 2): reject BEFORE inserting, same reasoning as the
@@ -3458,7 +3473,7 @@ async function* yieldDispatchFailure(runId: number): AsyncGenerator<AppendStream
  */
 export async function resumeExecutorRun(
   priorId: number,
-  overrides: { model?: string | null; backend?: "pi" | "claude" | null } = {}
+  overrides: { model?: string | null; backend?: "pi" | "claude" | "codex" | null } = {}
 ): Promise<RunRow> {
   const prior = await get(priorId);
   if (!prior) throw new repo.RepoError(`Run ${priorId} not found`, 404);
@@ -4080,8 +4095,8 @@ function isMissingSessionError(err: unknown): boolean {
 
 function checkBudget(run: RunRow, result: TurnResult): boolean {
   // Note: `turns` is counted per-backend (pi: turn_end events; Claude: the
-  // result's num_turns), so a given budgetMaxTurns may behave slightly
-  // differently across backends.
+  // result's num_turns; codex: turn.completed/turn.failed events), so a given
+  // budgetMaxTurns may behave slightly differently across backends.
   if (run.budgetMaxTurns != null && result.turns >= run.budgetMaxTurns) return true;
   // Wall-clock cap: exhaust the run once the elapsed time since it started meets
   // or exceeds the configured budget. Checked at turn end (same cadence as
@@ -4096,8 +4111,8 @@ function checkBudget(run: RunRow, result: TurnResult): boolean {
   // Dollar cap. The budgetMaxUsd backstop must hold regardless of backend:
   //   - Claude backend: reports a cumulative total_cost_usd per session, which is
   //     authoritative — compare it directly (unchanged behavior).
-  //   - pi backend: reports token *usage* but no priced cost (totalCostUsd is null
-  //     or 0). Previously this left pi runs effectively uncapped on dollars — a
+  //   - pi and codex backends: report token *usage* but no priced cost (totalCostUsd is
+  //     null or 0). Previously this left pi runs effectively uncapped on dollars — a
   //     resume/autofix loop could spend unbounded $. We now ESTIMATE the cost from
   //     this turn's token usage via a per-model pricing table (lib/pricing.ts) and
   //     enforce the same cap against the estimate.
@@ -5418,7 +5433,7 @@ export function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     cwdStrategy: row.cwdStrategy as CwdStrategy,
     runtime: (row.runtime as "server" | "worker" | null) ?? "worker",
     model: row.model,
-    backend: (row.backend as "pi" | "claude" | null) ?? null,
+    backend: (row.backend as "pi" | "claude" | "codex" | null) ?? null,
     thinkingLevel: (row.thinkingLevel as "low" | "medium" | "high" | "xhigh" | null) ?? null,
     branch: row.branch,
     worktreePath: row.worktreePath,

@@ -1,8 +1,9 @@
 // lib/agent-backend/types.ts
 //
 // Neutral agent-backend interface. The task-orchestrator drives an agent SDK
-// through this seam so the concrete SDK (pi-coding-agent or the Claude Agent
-// SDK) can be swapped via the TASK_ORCH_AGENT_BACKEND env var.
+// through this seam so the concrete SDK (pi-coding-agent, the Claude Agent SDK,
+// or the Codex SDK) can be swapped via the TASK_ORCH_AGENT_BACKEND env var or
+// the per-run agent_runs.backend column.
 //
 // The surface here is deliberately the *intersection* of what the extensions in
 // lib/extensions/*.ts actually use against an SDK: register tools, transform the
@@ -40,7 +41,9 @@ export interface NeutralTool {
  *   - write / edit  → input.path
  *   - bash          → input.command
  * (pi already uses these names; the Claude adapter maps Write/Edit/Bash and
- *  file_path → path.)
+ *  file_path → path. The Codex adapter runs interceptors only for its MCP
+ *  tools — see the "Interceptor coverage" note in codex-backend.ts for how the
+ *  built-in shell/patch invariants are met there instead.)
  */
 export interface ToolCallEvent {
   toolName: string;
@@ -58,7 +61,8 @@ export type ToolCallInterceptor = (
 ) => ToolCallDecision | Promise<ToolCallDecision>;
 
 /** An ambient skill (model-discoverable note). pi writes it to .pi/skills/; the
- *  Claude adapter folds it into the system prompt. */
+ *  Claude adapter folds it into the system prompt; the Codex adapter folds it
+ *  into a preamble on the first prompt of a thread. */
 export interface AmbientSkill {
   name: string;
   description: string;
@@ -134,9 +138,10 @@ export interface RunTurnArgs {
   model: { provider: string; id: string };
   thinkingLevel?: "low" | "medium" | "high" | "xhigh";
   extensions: Extension[];
-  /** Backend-tagged resume token from a prior turn ("pi:<path>" / "claude:<id>"),
-   *  or null for a fresh session. An adapter ignores a token that isn't its own.
-   *  Ignored entirely when contextSource is 'postgres'. */
+  /** Backend-tagged resume token from a prior turn ("pi:<path>" / "claude:<id>"
+   *  / "codex:<thread-id>"), or null for a fresh session. An adapter ignores a
+   *  token that isn't its own. Ignored entirely when contextSource is
+   *  'postgres'. */
   resumeToken: string | null;
   /** Where conversation context comes from; defaults to 'sdk-session'. */
   contextSource?: ContextSource;
@@ -162,7 +167,7 @@ export interface TurnOutcome {
   turns: number;
 }
 
-export type BackendId = "pi" | "claude";
+export type BackendId = "pi" | "claude" | "codex";
 
 export interface AgentBackend {
   readonly id: BackendId;

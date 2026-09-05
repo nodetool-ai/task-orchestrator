@@ -30,7 +30,7 @@ export type PlanState = "draft" | "proposed" | "accepted" | "done" | "cancelled"
 
 // Agent execution backend (a.k.a. "engine"). Matches the server's
 // lib/agent-backend BACKEND_IDS. Runs may pick one at spawn/resume time.
-export type BackendId = "pi" | "claude";
+export type BackendId = "pi" | "claude" | "codex";
 
 // /api/providers → catalog of backends + their providers, plus the
 // deployment default a run with no explicit pick executes on.

@@ -175,8 +175,8 @@ export interface AgentSessionFull {
   taskId: string;
   status: SessionStatus;
   model: string | null;
-  /** Agent backend ('pi'|'claude'), or null = deployment default. */
-  backend: "pi" | "claude" | null;
+  /** Agent backend ('pi'|'claude'|'codex'), or null = deployment default. */
+  backend: "pi" | "claude" | "codex" | null;
   branch: string | null;
   worktreePath: string | null;
   prUrl: string | null;
@@ -207,7 +207,7 @@ export interface ChatRow {
   title: string;
   cwdStrategy: CwdStrategy;
   model: string | null;
-  backend: "pi" | "claude" | null;
+  backend: "pi" | "claude" | "codex" | null;
   sdkSessionId: string | null;
   totalCostUsd: number | null;
   inputTokens: number | null;

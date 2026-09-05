@@ -37,6 +37,10 @@ RUN npm ci
 # The Claude Agent SDK spawns the `claude` CLI; install it globally. Only the
 # claude backend needs it — the pi backend runs in-process from node_modules —
 # but the image carries both so TASK_ORCH_AGENT_BACKEND picks at dispatch time.
+# The codex backend's CLI needs no step here: @openai/codex-sdk is an optional
+# dependency, so the `npm ci` above already pulled it and its platform binary
+# (~300MB — drop it with `npm ci --omit=optional` if this image never runs the
+# codex backend, and better-sqlite3 is not needed either).
 RUN npm install -g @anthropic-ai/claude-code
 
 # Python tooling for document/media workflows, isolated in a venv on PATH:

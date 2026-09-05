@@ -231,10 +231,10 @@ async function reapOrphans() {
 export interface StartSessionInput {
   taskId: string;
   model?: string;
-  /** Agent backend ('pi'|'claude'). Omitted: a resume inherits the prior
+  /** Agent backend ('pi'|'claude'|'codex'). Omitted: a resume inherits the prior
    *  session's backend (its resume token is backend-tagged); a fresh session
    *  uses the deployment default. */
-  backend?: "pi" | "claude" | null;
+  backend?: "pi" | "claude" | "codex" | null;
   thinkingLevel?: "low" | "medium" | "high" | "xhigh" | null;
   baseBranch?: string;
   resumeOf?: number;

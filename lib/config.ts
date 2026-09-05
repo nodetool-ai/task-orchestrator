@@ -318,8 +318,8 @@ export const config = Object.freeze({
 
   /** Agent backend + model defaults. */
   agent: Object.freeze({
-    /** Deployment default backend ("pi"/"claude") when a run has no per-run
-     *  choice. Normalized/validated by resolveBackendId. */
+    /** Deployment default backend ("pi"/"claude"/"codex") when a run has no
+     *  per-run choice. Normalized/validated by resolveBackendId. */
     get backend(): string | undefined {
       return strEnv("TASK_ORCH_AGENT_BACKEND");
     },
@@ -328,6 +328,24 @@ export const config = Object.freeze({
      *  Explicit-only — never probed from PATH. */
     get claudeBinary(): string | undefined {
       return strEnv("TASK_ORCH_CLAUDE_BINARY");
+    },
+    /** Absolute path to an external `codex` executable for the Codex backend to
+     *  drive instead of the one @openai/codex ships. Explicit-only. */
+    get codexBinary(): string | undefined {
+      return strEnv("TASK_ORCH_CODEX_BINARY");
+    },
+    /** Sandbox policy for the Codex backend's own shell/patch tools. Defaults
+     *  to `workspace-write`, which confines writes to the run's working
+     *  directory at the OS level — the invariant lib/extensions/sandbox.ts
+     *  enforces on the other two backends by checking tool arguments. A
+     *  deployment whose runs are already isolated (the worker-container model)
+     *  can widen it to `danger-full-access`. An unrecognised value falls back
+     *  to the default rather than failing every codex run. */
+    get codexSandbox(): "read-only" | "workspace-write" | "danger-full-access" {
+      const value = strEnv("TASK_ORCH_CODEX_SANDBOX");
+      return value === "read-only" || value === "danger-full-access" || value === "workspace-write"
+        ? value
+        : "workspace-write";
     },
     get model(): string | undefined {
       return strEnv("TASK_ORCH_AGENT_MODEL");

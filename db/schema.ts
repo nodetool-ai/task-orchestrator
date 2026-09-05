@@ -217,7 +217,7 @@ export const agentSessions = pgTable(
     planId: text("plan_id").references(() => plans.id, { onDelete: "set null" }),
     status: text("status").notNull().default("pending"),
     model: text("model"),
-    // Agent backend for this run: 'pi' | 'claude'. NULL inherits the deployment
+    // Agent backend for this run: 'pi' | 'claude' | 'codex'. NULL inherits the deployment
     // default (TASK_ORCH_AGENT_BACKEND). Chosen at run creation; resumes stay on
     // the run's backend so its backend-tagged sdk_session_id remains usable.
     backend: text("backend"),

@@ -120,8 +120,8 @@ The rules, all enforced in code:
   `runs.create` rejects a `'server'` run whose profile resolves any shell,
   filesystem or repo-write capability (`serverSafe` in `lib/profiles.ts`). The
   pipe additionally checks this once at boot, per bot, and refuses to start.
-- **pi backend only.** A server run drives the postgres-turn loop, which the
-  claude backend cannot; `runOneTurn` rejects the combination.
+- **pi backend only.** A server run drives the postgres-turn loop, which neither
+  the claude nor the codex backend can; `runOneTurn` rejects the combination.
 - **Excluded from dispatch.** The pending-run pump and reconciliation in
   `lib/run-dispatch.ts` skip `runtime = 'server'` rows — nothing may dispatch
   them to a worker — and wakes for a MAPPED conversation are deferred to the

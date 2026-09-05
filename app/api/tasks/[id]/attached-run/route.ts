@@ -18,7 +18,7 @@ const bodySchema = z
     // Honored only when the run is first created (the chat box pickers).
     personaId: z.string().min(1).optional(),
     model: z.string().min(1).optional(),
-    backend: z.enum(["pi", "claude"]).nullable().optional(),
+    backend: z.enum(["pi", "claude", "codex"]).nullable().optional(),
     thinkingLevel: z.enum(["low", "medium", "high", "xhigh"]).nullable().optional(),
   })
   .optional();

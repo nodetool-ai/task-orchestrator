@@ -268,7 +268,7 @@ export interface CreateRunInput {
   personaId?: string;
   model?: string | null;
   thinkingLevel?: "low" | "medium" | "high" | "xhigh" | null;
-  backend?: "pi" | "claude" | null;
+  backend?: "pi" | "claude" | "codex" | null;
   title?: string | null;
   taskId?: string | null;
   cwdStrategy?: "worktree" | "worktree_at_pr" | "repo" | "none";

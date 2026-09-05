@@ -9,11 +9,17 @@
 //
 // The pi entries mirror @earendil-works/pi-ai's env-api-keys map (AuthStorage
 // falls back to these when ~/.pi/agent/auth.json has no entry for a provider),
-// plus CODEX_ACCESS_TOKEN for pi's OAuth-only openai-codex provider. A unit
-// test (__tests__/agent-backend/provider-env.test.ts) asserts this list covers
+// plus the CODEX_* token set for pi's OAuth-only openai-codex provider and the
+// Codex backend's auth.json. A unit test
+// (__tests__/agent-backend/provider-env.test.ts) asserts this list covers
 // every provider key pi-ai knows, so a pi upgrade that adds a provider fails
 // the suite instead of silently starving containers of the new key.
-import { CODEX_ACCESS_TOKEN_ENV, resolveCodexAccessToken } from "../codex-oauth-token";
+import { CODEX_ACCESS_TOKEN_ENV, resolveCodexCredential } from "../codex-oauth-token";
+import {
+  CODEX_ACCOUNT_ID_ENV,
+  CODEX_ID_TOKEN_ENV,
+  CODEX_REFRESH_TOKEN_ENV,
+} from "./codex-auth";
 
 export const AGENT_CREDENTIAL_ENV_KEYS: readonly string[] = [
   // Claude backend (resolved like the Claude Code CLI) + pi's anthropic provider.
@@ -23,6 +29,13 @@ export const AGENT_CREDENTIAL_ENV_KEYS: readonly string[] = [
   // pi multi-provider API keys.
   "OPENAI_API_KEY",
   "CODEX_ACCESS_TOKEN",
+  // The rest of the ChatGPT token set. pi's openai-codex provider needs only
+  // the bearer; the Codex backend materializes the CLI's auth.json, which wants
+  // the whole set (lib/agent-backend/codex-auth.ts).
+  "CODEX_ID_TOKEN",
+  "CODEX_REFRESH_TOKEN",
+  "CODEX_ACCOUNT_ID",
+  "CODEX_API_KEY",
   "GEMINI_API_KEY",
   "GOOGLE_CLOUD_API_KEY",
   "GROQ_API_KEY",
@@ -90,8 +103,13 @@ export async function agentCredentialEnv(): Promise<Record<string, string>> {
     env.ANTHROPIC_OAUTH_TOKEN = env.CLAUDE_CODE_OAUTH_TOKEN;
   }
   if (env[CODEX_ACCESS_TOKEN_ENV] == null) {
-    const token = await resolveCodexAccessToken();
-    if (token) env[CODEX_ACCESS_TOKEN_ENV] = token;
+    const cred = await resolveCodexCredential();
+    if (cred) {
+      env[CODEX_ACCESS_TOKEN_ENV] = cred.accessToken;
+      if (cred.idToken) env[CODEX_ID_TOKEN_ENV] = cred.idToken;
+      if (cred.refreshToken) env[CODEX_REFRESH_TOKEN_ENV] = cred.refreshToken;
+      if (cred.accountId) env[CODEX_ACCOUNT_ID_ENV] = cred.accountId;
+    }
   }
   return env;
 }

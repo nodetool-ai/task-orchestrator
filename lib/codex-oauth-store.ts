@@ -145,6 +145,52 @@ export async function resolveStoredAccessToken(): Promise<string | undefined> {
   return refreshed.access_token;
 }
 
+/**
+ * The full stored token set, refreshed in place if it is at or near expiry.
+ * `resolveStoredAccessToken` is the access-token-only view of this — the Codex
+ * *backend* (lib/agent-backend/codex-auth.ts) needs the rest too, because the
+ * `codex` CLI authenticates from an auth.json carrying the whole set rather
+ * than from a bare bearer.
+ */
+export async function resolveStoredCredential(): Promise<StoredCodexCredential | undefined> {
+  const [cred] = await db.select().from(codexCredentials).limit(1);
+  if (!cred?.accessToken) return undefined;
+  if (!isNearlyExpired(cred.expiresAt) || !cred.refreshToken) return toStored(cred);
+
+  const refreshed = await refreshCodexTokens(cred.refreshToken);
+  if (!refreshed) return toStored(cred);
+
+  const next = {
+    accessToken: refreshed.access_token,
+    refreshToken: refreshed.refresh_token ?? cred.refreshToken,
+    expiresAt: jwtExpiry(refreshed.access_token),
+    updatedAt: new Date(),
+  };
+  await db.update(codexCredentials).set(next).where(eq(codexCredentials.id, cred.id));
+  return toStored({ ...cred, ...next });
+}
+
+export interface StoredCodexCredential {
+  accessToken: string;
+  refreshToken?: string;
+  idToken?: string;
+  accountId?: string;
+}
+
+function toStored(cred: {
+  accessToken: string;
+  refreshToken: string | null;
+  idToken: string | null;
+  accountId: string | null;
+}): StoredCodexCredential {
+  return {
+    accessToken: cred.accessToken,
+    refreshToken: cred.refreshToken ?? undefined,
+    idToken: cred.idToken ?? undefined,
+    accountId: cred.accountId ?? undefined,
+  };
+}
+
 /** Snapshot of the stored credential + whether a login is outstanding. */
 export async function codexAuthStatus(): Promise<CodexAuthStatus> {
   const [cred] = await db.select().from(codexCredentials).limit(1);

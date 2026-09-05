@@ -8,19 +8,26 @@
 // straight into repo.* mutations. This module reuses the same converter so
 // every caller enforces the same input contract.
 //
-// Callers: app/api/mcp/route.ts. Anything else executing an OrchestratorTool
-// with untrusted params should validate through here too.
+// Callers: app/api/mcp/route.ts and lib/agent-backend/codex-mcp-bridge.ts.
+// Anything else executing a tool with untrusted params should validate through
+// here too.
 
 import { z } from "zod";
-import type { OrchestratorTool } from "./orchestrator-tools";
+import type { TSchema } from "typebox";
 import { toZodRawShape } from "./agent-backend/typebox-to-zod";
+
+/** Anything carrying a TypeBox parameter schema: an OrchestratorTool, or a
+ *  NeutralTool served over the Codex backend's loopback MCP bridge. */
+export interface SchemaBearingTool {
+  parameters: TSchema;
+}
 
 // Cache converted schemas per tool so repeat tools/call requests don't
 // re-walk the TypeBox schema each time. Keyed by tool identity (not name) so
 // it works correctly even if a test constructs an ad-hoc tool object.
-const schemaCache = new WeakMap<OrchestratorTool<any>, z.ZodObject<any>>();
+const schemaCache = new WeakMap<SchemaBearingTool, z.ZodObject<any>>();
 
-function schemaFor(tool: OrchestratorTool<any>): z.ZodObject<any> {
+function schemaFor(tool: SchemaBearingTool): z.ZodObject<any> {
   let schema = schemaCache.get(tool);
   if (!schema) {
     schema = z.object(toZodRawShape(tool.parameters));
@@ -45,7 +52,7 @@ export type ToolArgsResult<T> =
  *  TypeBox schema, converted to Zod. Returns either the parsed args or a
  *  structured error — never throws. */
 export function validateToolArgs<T = any>(
-  tool: OrchestratorTool<any>,
+  tool: SchemaBearingTool,
   args: unknown
 ): ToolArgsResult<T> {
   const schema = schemaFor(tool);

@@ -19,7 +19,7 @@ const createRunSchema = z.object({
   prUrl: z.string().nullable().optional(),
   parentRunId: z.number().int().positive().nullable().optional(),
   model: z.string().nullable().optional(),
-  backend: z.enum(["pi", "claude"]).nullable().optional(),
+  backend: z.enum(["pi", "claude", "codex"]).nullable().optional(),
   thinkingLevel: z.enum(["low", "medium", "high", "xhigh"]).nullable().optional(),
   title: z.string().nullable().optional(),
   baseBranch: z.string().optional(),

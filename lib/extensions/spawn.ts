@@ -386,7 +386,7 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
           })
         ),
         backend: Type.Optional(
-          Type.Union([Type.Literal("pi"), Type.Literal("claude")], {
+          Type.Union([Type.Literal("pi"), Type.Literal("claude"), Type.Literal("codex")], {
             description:
               "Agent engine/backend for the child run. Omit to use the deployment default.",
           })
