@@ -39,6 +39,11 @@ describe("prepareWorkerCwd on a managed runner", () => {
     writeFileSync(join(src, "README.md"), "hello\n");
     git(["add", "."], src);
     git(["commit", "-q", "-m", "init"], src);
+    git(["checkout", "-q", "-b", "release"], src);
+    writeFileSync(join(src, "RELEASE.md"), "release\n");
+    git(["add", "."], src);
+    git(["commit", "-q", "-m", "release base"], src);
+    git(["checkout", "-q", "main"], src);
     remote = join(dir, "remote.git");
     git(["clone", "-q", "--bare", src, remote], dir);
     for (const k of ["SESSION_ROOT", "REPO_CACHE_DIR", "TASK_ORCH_RUNNER_REPO_PATH", "TASK_ORCH_GIT_CLONE_DEPTH"]) savedEnv[k] = process.env[k];
@@ -74,6 +79,12 @@ describe("prepareWorkerCwd on a managed runner", () => {
     expect(prepared.branch).toBe("claude/t-9");
     expect(prepared.worktreePath).toBe(prepared.cwd);
     expect(git(["rev-parse", "--abbrev-ref", "HEAD"], prepared.cwd).trim()).toBe("claude/t-9");
+  });
+
+  it("uses the persisted base branch when creating a detached task checkout", async () => {
+    const start = makeStart({ run: { cwdStrategy: "worktree", taskId: "T-10", baseBranch: "release" }, task: { id: "T-10" } as never, repository: { remote } });
+    const prepared = await prepareWorkerCwd(start);
+    expect(git(["rev-parse", "HEAD"], prepared.cwd).trim()).toBe(git(["rev-parse", "release"], join(dir, "src")).trim());
   });
 
   it("fails with a clear error when the repository has no clonable remote", async () => {

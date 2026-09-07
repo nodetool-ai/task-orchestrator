@@ -68,7 +68,7 @@ export interface TaskFull {
   id: string;
   title: string;
   state: TaskState;
-  planId: string;
+  planId: string | null;
   assignee: string | null;
   body: string;
   estimate: string | null;

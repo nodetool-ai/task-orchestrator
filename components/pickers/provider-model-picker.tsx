@@ -21,6 +21,9 @@ interface Props {
   className?: string;
   /** Merged over the base Select styling. */
   selectClassName?: string;
+  /** Include an empty choice for forms whose omitted model inherits defaults. */
+  allowEmpty?: boolean;
+  emptyLabel?: string;
 }
 
 interface ProvidersResponse {
@@ -110,6 +113,8 @@ export function ProviderModelPicker({
   layout = "row",
   className = "",
   selectClassName = "w-full",
+  allowEmpty = false,
+  emptyLabel = "Inherited",
 }: Props) {
   const catalog = useProviderCatalog();
 
@@ -120,9 +125,9 @@ export function ProviderModelPicker({
 
   const providerOptions = useMemo(() => {
     const ids = providers.map((p) => p.id);
-    if (provider && !ids.includes(provider)) return [provider, ...ids];
-    return ids;
-  }, [providers, provider]);
+    const resolved = provider && !ids.includes(provider) ? [provider, ...ids] : ids;
+    return allowEmpty ? ["", ...resolved] : resolved;
+  }, [providers, provider, allowEmpty]);
 
   const modelOptions = useMemo(() => {
     const cat = providers.find((p) => p.id === provider);
@@ -134,9 +139,12 @@ export function ProviderModelPicker({
   }, [providers, provider, model]);
 
   function changeProvider(nextProvider: string) {
+    if (!nextProvider && allowEmpty) {
+      onChange({ provider: "", model: "" });
+      return;
+    }
     const cat = providers.find((p) => p.id === nextProvider);
-    const nextModel =
-      cat && cat.models.length > 0 ? cat.models[0].id : model;
+    const nextModel = cat && cat.models.length > 0 ? cat.models[0].id : model;
     onChange({ provider: nextProvider, model: nextModel });
   }
 
@@ -154,8 +162,8 @@ export function ProviderModelPicker({
           className={selectClassName}
         >
           {providerOptions.map((id) => (
-            <option key={id} value={id}>
-              {id}
+            <option key={id || "inherited"} value={id}>
+              {id || emptyLabel}
             </option>
           ))}
         </Select>
@@ -167,8 +175,10 @@ export function ProviderModelPicker({
           value={model}
           onChange={(e) => onChange({ provider, model: e.target.value })}
           className={`${selectClassName} text-xs`}
+          disabled={!provider}
         >
-          {modelOptions.length === 0 && (
+          {!provider && <option value="">{emptyLabel}</option>}
+          {provider && modelOptions.length === 0 && (
             <option value="">(no models for this provider)</option>
           )}
           {modelOptions.map((m) => (

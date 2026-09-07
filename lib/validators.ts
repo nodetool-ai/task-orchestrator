@@ -51,7 +51,7 @@ export const updateRepositorySchema = z.object({
 
 export const createTaskSchema = z.object({
   id: z.string().regex(idTaskRe).optional(),
-  plan: z.string().min(1),
+  plan: z.string().min(1).nullable().optional(),
   title: z.string().min(1).max(200),
   assignee: z.string().nullable().optional(),
   body: z.string().optional().default(""),
@@ -61,6 +61,10 @@ export const createTaskSchema = z.object({
   criteria: z.array(z.string()).optional().default([]),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   repoId: z.string().regex(idRepoRe).nullable().optional(),
+}).superRefine((input, ctx) => {
+  if (input.plan == null && !input.repoId) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["repoId"], message: "Standalone tasks require repoId" });
+  }
 });
 
 export const updateTaskSchema = z.object({
@@ -102,4 +106,56 @@ export const startSessionSchema = z.object({
   backend: z.enum(["pi", "claude", "codex"]).nullable().optional(),
   baseBranch: z.string().optional(),
   resumeOf: z.number().int().positive().optional(),
+});
+
+const finiteDate = z.date().refine((date) => Number.isFinite(date.getTime()), "Must be a finite date");
+const nullableOverride = z.string().min(1).nullable().optional();
+
+/** Runtime contract shared by schedule service callers (not just TypeScript). */
+export const scheduleInputSchema = z.object({
+  name: z.string().trim().min(1).max(200),
+  prompt: z.string().min(1),
+  repoId: z.string().regex(idRepoRe),
+  baseBranch: nullableOverride,
+  kind: z.enum(["once", "interval", "cron"]),
+  runAt: finiteDate.optional(),
+  startAt: finiteDate.optional(),
+  intervalSeconds: z.number().int().positive().optional(),
+  cronExpression: z.string().min(1).optional(),
+  timezone: z.string().min(1).max(100).optional(),
+  personaId: nullableOverride,
+  model: nullableOverride,
+  toolsProfile: nullableOverride,
+  autoMerge: z.boolean().optional(),
+  budgetMaxTurns: z.number().int().positive().nullable().optional(),
+  budgetMaxUsd: z.number().finite().positive().nullable().optional(),
+  budgetMaxSeconds: z.number().int().positive().nullable().optional(),
+  userId: z.number().int().positive().nullable().optional(),
+});
+
+/** Patches intentionally permit null so nullable overrides can return to inheritance. */
+export const schedulePatchSchema = scheduleInputSchema.partial().omit({ repoId: true }).extend({
+  repoId: z.string().regex(idRepoRe).optional(),
+  runAt: finiteDate.nullable().optional(),
+  intervalSeconds: z.number().int().positive().nullable().optional(),
+  cronExpression: z.string().min(1).nullable().optional(),
+});
+
+// Wire-format schemas used by REST callers. Dates arrive as ISO strings while
+// the service intentionally deals in Date objects. Keeping this conversion in
+// the shared validator prevents route and CLI implementations drifting apart.
+const apiDate = z.coerce.date().refine((date) => Number.isFinite(date.getTime()), "Must be a finite date");
+export const scheduleApiInputSchema = z.object({
+  name: z.string().trim().min(1).max(200), prompt: z.string().min(1), repoId: z.string().regex(idRepoRe),
+  baseBranch: z.string().min(1).nullable().optional(), kind: z.enum(["once", "interval", "cron"]),
+  runAt: apiDate.optional(), startAt: apiDate.optional(), intervalSeconds: z.number().int().positive().optional(),
+  cronExpression: z.string().min(1).optional(), timezone: z.string().min(1).max(100).optional(),
+  personaId: z.string().min(1).nullable().optional(), model: z.string().min(1).nullable().optional(),
+  toolsProfile: z.string().min(1).nullable().optional(), autoMerge: z.boolean().optional(),
+  budgetMaxTurns: z.number().int().positive().nullable().optional(), budgetMaxUsd: z.number().finite().positive().nullable().optional(),
+  budgetMaxSeconds: z.number().int().positive().nullable().optional(),
+});
+export const scheduleApiPatchSchema = scheduleApiInputSchema.partial().extend({
+  runAt: apiDate.nullable().optional(), intervalSeconds: z.number().int().positive().nullable().optional(),
+  cronExpression: z.string().min(1).nullable().optional(),
 });

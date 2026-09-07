@@ -85,9 +85,9 @@ export const tasks = pgTable(
     id: text("id").primaryKey(),
     title: text("title").notNull(),
     state: text("state").notNull().default("todo"),
-    planId: text("plan_id")
-      .notNull()
-      .references(() => plans.id, { onDelete: "cascade" }),
+    // NULL deliberately denotes a standalone task; non-null rows retain the
+    // historical plan FK/cascade behavior.
+    planId: text("plan_id").references(() => plans.id, { onDelete: "cascade" }),
     assignee: text("assignee"),
     body: text("body").notNull().default(""),
     estimate: text("estimate"),
@@ -107,6 +107,9 @@ export const tasks = pgTable(
     // is created and reused by every later run on the task, so all agent work
     // on a task lands on ONE branch (and therefore one PR).
     branch: text("branch"),
+    // Durable schedule idempotency link. The FK is installed in migration 0032
+    // after scheduleOccurrences exists, avoiding a schema declaration cycle.
+    scheduleOccurrenceId: integer("schedule_occurrence_id"),
     createdAt: ts("created_at").notNull().defaultNow(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
   },
@@ -123,6 +126,9 @@ export const tasks = pgTable(
     // The webhook matcher and the ~20s PR-sync poller look tasks up by pr_url;
     // index it so those stay indexed equality lookups, not table scans.
     prUrlIdx: index("tasks_pr_url_idx").on(t.prUrl),
+    scheduleOccurrenceIdx: uniqueIndex("tasks_schedule_occurrence_id_idx")
+      .on(t.scheduleOccurrenceId)
+      .where(sql`${t.scheduleOccurrenceId} IS NOT NULL`),
   })
 );
 
@@ -256,6 +262,13 @@ export const agentSessions = pgTable(
     // Null for ordinary runs. Non-null for planning-agent runs:
     // gathering | spec_review | building_plan | plan_review | committing | done
     planningStage: text("planning_stage"),
+    // Existing/manual run compatibility is opt-out: true unless explicitly
+    // overridden (schedules pass false by default).
+    autoMerge: boolean("auto_merge").notNull().default(true),
+    scheduleOccurrenceId: integer("schedule_occurrence_id"),
+    // Resolved at creation so detached workers and later follow-ups use the
+    // same checkout/PR base rather than re-resolving a changed repo default.
+    baseBranch: text("base_branch"),
     startedAt: ts("started_at").notNull().defaultNow(),
     completedAt: ts("completed_at"),
     // Bookkeeping clocks — NOT liveness (liveness is the provider verdict, see
@@ -318,7 +331,41 @@ export const agentSessions = pgTable(
     taskPrIdx: index("agent_runs_task_pr_idx")
       .on(t.taskId, t.id)
       .where(sql`pr_url IS NOT NULL`),
+    scheduleOccurrenceIdx: uniqueIndex("agent_runs_schedule_occurrence_id_idx")
+      .on(t.scheduleOccurrenceId)
+      .where(sql`${t.scheduleOccurrenceId} IS NOT NULL`),
   })
+);
+
+export const runSchedules = pgTable(
+  "run_schedules",
+  {
+    id: serial("id").primaryKey(),
+    name: text("name").notNull(), prompt: text("prompt").notNull(),
+    repoId: text("repo_id").notNull().references(() => repositories.id, { onDelete: "restrict" }),
+    baseBranch: text("base_branch"), kind: text("kind").notNull(), runAt: ts("run_at"),
+    intervalSeconds: integer("interval_seconds"), cronExpression: text("cron_expression"),
+    timezone: text("timezone").notNull().default("UTC"), enabled: boolean("enabled").notNull().default(true),
+    nextRunAt: ts("next_run_at"), lastScheduledAt: ts("last_scheduled_at"),
+    personaId: text("persona_id").references(() => personas.id, { onDelete: "set null" }),
+    model: text("model"), toolsProfile: text("tools_profile"), autoMerge: boolean("auto_merge").notNull().default(false),
+    budgetMaxTurns: integer("budget_max_turns"), budgetMaxUsd: real("budget_max_usd"), budgetMaxSeconds: integer("budget_max_seconds"),
+    userId: integer("user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: ts("created_at").notNull().defaultNow(), updatedAt: ts("updated_at").notNull().defaultNow(), deletedAt: ts("deleted_at"),
+  },
+  (t) => ({ dueIdx: index("run_schedules_due_idx").on(t.enabled, t.nextRunAt).where(sql`${t.deletedAt} IS NULL`), repoIdx: index("run_schedules_repo_idx").on(t.repoId) })
+);
+
+export const scheduleOccurrences = pgTable(
+  "schedule_occurrences",
+  {
+    id: serial("id").primaryKey(), scheduleId: integer("schedule_id").notNull().references(() => runSchedules.id, { onDelete: "restrict" }),
+    scheduledFor: ts("scheduled_for").notNull(), status: text("status").notNull().default("pending"), error: text("error"),
+    // Durable ownership fence for slow canonical launch outside the reservation transaction.
+    launchToken: text("launch_token"), launchClaimedAt: ts("launch_claimed_at"),
+    createdAt: ts("created_at").notNull().defaultNow(), updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({ scheduleTime: uniqueIndex("schedule_occurrences_schedule_time_idx").on(t.scheduleId, t.scheduledFor), activeIdx: index("schedule_occurrences_active_idx").on(t.scheduleId, t.status) })
 );
 
 export const runnerInstances = pgTable(

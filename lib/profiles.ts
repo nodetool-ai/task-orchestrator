@@ -153,7 +153,7 @@ const PROFILES: Record<string, ProfileDef> = {
     factories: async (ctx) => {
       const { ghPrExtension } = await import("./extensions/gh-pr");
       const remote = await resolveRemote(ctx);
-      return [ghPrExtension({ cwd: ctx.cwd, remote, runId: ctx.runId })];
+      return [ghPrExtension({ cwd: ctx.cwd, remote, runId: ctx.runId, autoMerge: ctx.run.autoMerge })];
     },
     serverSafe: false,
   },

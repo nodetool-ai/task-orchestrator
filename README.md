@@ -285,6 +285,21 @@ npm run task -- attach rm <attachment-id>
 
 The CLI imports `lib/repo.ts` directly — no HTTP server required.
 
+Standalone tasks can be created without a plan by supplying a repository:
+`npm run task -- new task --repo=R-... --title="..."`.
+Schedules use the same validation and persistence services:
+
+```bash
+npm run task -- schedule list
+npm run task -- schedule create --name="Nightly cleanup" --prompt="Review and fix..." --repo=R-... --kind=cron --cron="0 2 * * *" --timezone=UTC
+npm run task -- schedule show 1
+npm run task -- schedule update 1 --interval-seconds=3600
+npm run task -- schedule pause 1
+npm run task -- schedule resume 1
+npm run task -- schedule run 1
+npm run task -- schedule delete 1
+```
+
 ## REST
 
 The same operations, exposed for external clients such as agents:
@@ -319,6 +334,15 @@ GET    /api/sessions[?active=true]
 GET    /api/sessions/:id           # → session + full event log
 GET    /api/sessions/:id/events    # SSE, ?since=<eventId> to resume
 POST   /api/sessions/:id/cancel
+
+GET    /api/schedules                 # recent occurrence/run/PR state included
+POST   /api/schedules                 # authenticated; ISO dates in request JSON
+GET    /api/schedules/:id
+PATCH  /api/schedules/:id
+DELETE /api/schedules/:id             # soft delete, history remains
+POST   /api/schedules/:id/run
+POST   /api/schedules/:id/pause
+POST   /api/schedules/:id/resume
 ```
 
 ## MCP server (remote clients)

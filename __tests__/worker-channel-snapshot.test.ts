@@ -55,6 +55,23 @@ describe("buildRunStart", () => {
     expect(start.plan?.id).toBe(plan.id);
   });
 
+  it("carries disabled auto-merge policy into the worker implement prompt", async () => {
+    const task = await repo.createTask({ planId: null, title: "No merge", repoId: "R-default" });
+    const run = await create({ goal: "<implement>", taskId: task.id, repoId: "R-default", autoMerge: false, defer: true });
+    const start = await buildRunStart(run.id);
+    expect(start.kickoffPrompt).toContain("Auto-merge is disabled for this run");
+    expect(run.baseBranch).toBe("main");
+    expect(start.run.baseBranch).toBe("main");
+  });
+
+  it("carries a persisted base branch into the detached worker snapshot", async () => {
+    const task = await repo.createTask({ planId: null, title: "Release branch", repoId: "R-default" });
+    const run = await create({ goal: "<implement>", taskId: task.id, repoId: "R-default", baseBranch: "release", defer: true });
+    const start = await buildRunStart(run.id);
+    expect(run.baseBranch).toBe("release");
+    expect(start.run.baseBranch).toBe("release");
+  });
+
   it("orders the transcript and splits trailing user input into pendingInput", async () => {
     const run = await create({ goal: "<chat>", defer: true });
     // user, agent, user, user — everything after the last agent turn is pending.

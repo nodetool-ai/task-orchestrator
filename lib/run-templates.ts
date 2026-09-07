@@ -98,7 +98,7 @@ export function buildExecutePrompt(plan: PlanFull, tasks: TaskFull[]): string {
  * the runner (lib/runs.ts) call into here so what the user sees in the
  * modal is exactly what the agent receives.
  */
-export async function buildImplementPrompt(task: TaskFull): Promise<string> {
+export async function buildImplementPrompt(task: TaskFull, options: { autoMerge?: boolean } = {}): Promise<string> {
   const lines: string[] = [];
   lines.push(`You are an autonomous coding agent working on task ${task.id}.`);
   lines.push("");
@@ -132,13 +132,9 @@ export async function buildImplementPrompt(task: TaskFull): Promise<string> {
 
   lines.push(...attachmentSection(task.attachments));
 
-  // Parent plan context: the broader goal this task belongs to, plus a
-  // snapshot of sibling tasks so the agent knows what's already shipped
-  // and what's still open. The agent can fetch more detail via
-  // mcp__task_orch__get_plan / get_task; this is proactive lookahead.
-  // Via the transport: buildImplementPrompt also runs inside dispatched
-  // workers (dispatchTurnPrompt), which in HTTP mode have no DB access.
-  const plan = await (await runTransport()).getPlan(task.planId);
+  // Standalone tasks deliberately have no parent-plan or sibling context.
+  // Via the transport: buildImplementPrompt also runs inside dispatched workers.
+  const plan = task.planId ? await (await runTransport()).getPlan(task.planId) : null;
   if (plan) {
     lines.push("");
     lines.push(`# Parent plan: ${plan.id} — ${plan.title}`);
@@ -188,6 +184,12 @@ export async function buildImplementPrompt(task: TaskFull): Promise<string> {
   }
 
   lines.push("");
+  if (options.autoMerge === false) {
+    lines.push("");
+    lines.push("## Merge policy");
+    lines.push("Auto-merge is disabled for this run. Open the PR normally, but do not call gh_pr__pr_merge with auto=true.");
+  }
+
   lines.push("# How to work");
   lines.push("1. Inspect the relevant files and existing patterns before editing.");
   lines.push("2. Implement the task end to end in this run's checkout.");

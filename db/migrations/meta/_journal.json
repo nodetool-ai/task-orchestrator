@@ -225,6 +225,27 @@
       "when": 1788010800000,
       "tag": "0031_persona_engine_detach",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1788014400000,
+      "tag": "0032_scheduled_runs",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1788018000000,
+      "tag": "0033_schedule_launch_reservation",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1788021600000,
+      "tag": "0034_run_base_branch",
+      "breakpoints": true
     }
   ]
 }

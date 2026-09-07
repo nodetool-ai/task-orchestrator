@@ -244,6 +244,13 @@ export interface StartSessionInput {
   /** User the session is attributed to; spawned children inherit the
    *  spawner's userId so attribution survives across the run tree. */
   userId?: number | null;
+  personaId?: string | null;
+  toolsProfile?: string | null;
+  budget?: runs.Budget | null;
+  autoMerge?: boolean;
+  scheduleOccurrenceId?: number | null;
+  /** Internal test/recovery seam; public start endpoints always launch normally. */
+  defer?: boolean;
 }
 
 export async function startSession(input: StartSessionInput): Promise<AgentSessionFull> {
@@ -276,31 +283,36 @@ export async function startSession(input: StartSessionInput): Promise<AgentSessi
     backend = backend ?? prior.backend;
   }
 
-  // The persona is read for its budget only: it carries no model, backend or
-  // reasoning level any more (migration 0031). `model` is left undefined when
-  // the caller gives none, so runs.create() applies the deployment default —
-  // this used to pre-fill its own bare-id DEFAULT_MODEL, which shadowed that
-  // resolution and produced provider-less model strings.
-  const persona = await repo.getPersona("implementor");
+  // Resolve the selected persona once. Model/backend remain deployment-level,
+  // while permissions and budgets inherit fieldwise from this persona.
+  const personaId = input.personaId ?? "implementor";
+  const persona = await repo.getPersona(personaId);
+  if (!persona) throw new repo.RepoError(`Persona ${personaId} not found`, 404);
   const created = await runs.create({
     goal: "<implement>",
     cwdStrategy: "worktree",
     // gh_pr/gh_ci let the agent inspect its own PR and fetch CI results
     // (e.g. when reacting to webhook-driven CI failures).
-    toolsProfile: "orchestrator,repo_write,gh_pr,gh_ci",
+    toolsProfile: input.toolsProfile ?? persona.toolsProfile,
     taskId: input.taskId,
+    scheduleOccurrenceId: input.scheduleOccurrenceId ?? null,
+    autoMerge: input.autoMerge ?? true,
     repoId: task.repoId ?? null,
     model: input.model ?? undefined,
     backend,
     thinkingLevel: input.thinkingLevel ?? null,
-    baseBranch: input.baseBranch ?? "main",
+    // Undefined deliberately reaches ensureWorktreeBranch(), which resolves the
+    // registered repository default branch instead of assuming `main`.
+    baseBranch: input.baseBranch,
     parentRunId: input.resumeOf ?? input.parentRunId ?? null,
     userId: input.userId ?? null,
-    personaId: "implementor",
+    personaId,
     budget: {
-      maxTurns: persona?.budgetMaxTurns ?? undefined,
-      maxSeconds: persona?.budgetMaxSeconds ?? undefined,
+      maxTurns: input.budget?.maxTurns ?? persona.budgetMaxTurns ?? undefined,
+      maxUsd: input.budget?.maxUsd ?? undefined,
+      maxSeconds: input.budget?.maxSeconds ?? persona.budgetMaxSeconds ?? undefined,
     },
+    defer: input.defer,
   });
 
   return runs.toAgentSessionFull(created);

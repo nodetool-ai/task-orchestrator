@@ -195,6 +195,10 @@ export interface CreateRunInput {
   cwdStrategy?: CwdStrategy;
   repoId?: string | null;
   taskId?: string | null;
+  /** Durable schedule occurrence idempotency link (control-plane only). */
+  scheduleOccurrenceId?: number | null;
+  /** Defaults true for existing/manual run compatibility. */
+  autoMerge?: boolean;
   /** Plan a chat is scoped to (no effect on implement/review runs). */
   planId?: string | null;
   prUrl?: string | null;
@@ -273,6 +277,8 @@ export interface RunRow {
   /** Per-run reasoning level (low|medium|high|xhigh), or null to inherit the persona. */
   thinkingLevel: "low" | "medium" | "high" | "xhigh" | null;
   branch: string | null;
+  /** Durable checkout and PR base selected when this run was created. */
+  baseBranch?: string | null;
   worktreePath: string | null;
   prUrl: string | null;
   error: string | null;
@@ -309,6 +315,8 @@ export interface RunRow {
   parkReason: string | null;
   /** Why a 'pending' run is pending: the admission defer reason, or null. */
   pendingReason: string | null;
+  autoMerge?: boolean;
+  scheduleOccurrenceId?: number | null;
 }
 
 export interface MessageRow {
@@ -728,9 +736,14 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     repoId = await repo.defaultRepoId();
   }
 
-  if (repoId && !(await repo.getRepository(repoId))) {
+  const resolvedRepository = repoId ? await repo.getRepository(repoId) : null;
+  if (repoId && !resolvedRepository) {
     throw new repo.RepoError(`Repository ${repoId} not found`, 404);
   }
+  // Branch selection is a create-time decision. Persist the repository default
+  // as well as explicit overrides so a detached recovery/follow-up never
+  // silently changes its checkout or PR base after repository settings change.
+  const effectiveBaseBranch = input.baseBranch?.trim() || resolvedRepository?.defaultBranch || null;
   if (input.taskId && !(await repo.getTask(input.taskId))) {
     throw new repo.RepoError(`Task ${input.taskId} not found`, 404);
   }
@@ -848,6 +861,11 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     goal,
     taskId: input.taskId ?? null,
     planId: input.planId ?? null,
+    scheduleOccurrenceId: input.scheduleOccurrenceId ?? null,
+    // Detached workers and later follow-ups do not retain create()'s transient
+    // input object, so persist both explicit overrides and manual defaults.
+    baseBranch: effectiveBaseBranch,
+    autoMerge: input.autoMerge ?? true,
     repoId,
     parentRunId: input.parentRunId ?? null,
     toolsProfile,
@@ -934,7 +952,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   if (!input.defer && goal !== "<chat>" && cwdStrategy === "worktree") {
     // taskId presence validated before the insert above.
     const task = (await repo.getTask(input.taskId!))!;
-    const prompt = input.initialPrompt ?? await buildImplementPrompt(task);
+    const prompt = input.initialPrompt ?? await buildImplementPrompt(task, { autoMerge: run.autoMerge });
     void (async () => {
       const { detachedRunsEnabled } = await import("./run-dispatch");
       // FIX 7 (M20): the detached worker rebuilds its own prompt via
@@ -1351,7 +1369,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       const runForBranch = run;
       run = await timeRunnerPhase(
         "worktree_branch",
-        () => ensureWorktreeBranch(runForBranch, input.baseBranch),
+        () => ensureWorktreeBranch(runForBranch, input.baseBranch ?? runForBranch.baseBranch ?? undefined),
         { provider: runnerProviderLabel(), fields: { runId: runForBranch.id, cwdStrategy: runForBranch.cwdStrategy } }
       );
       const runForPrepare = run;
@@ -1475,7 +1493,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       // for chat-only turns (no commits) and for non-worktree runs.
       if (isImplementWorktree(run)) {
         try {
-          prUrlUpdate = await gitSyncAfterTurn(run, cwd, result.summary, input.baseBranch);
+          prUrlUpdate = await gitSyncAfterTurn(run, cwd, result.summary, input.baseBranch ?? run.baseBranch ?? undefined);
         } catch (err) {
           await persistMessage(run.id, "system", [
             { type: "text", text: `Push/PR sync failed: ${describe(err)}` },
@@ -1524,7 +1542,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
         const claimedDone = turnEnd.result != null && !isFailedResult(turnEnd.result);
         if (claimedDone || capHit) {
           try {
-            const salvaged = await gitSyncAfterTurn(run, cwd, result.summary, input.baseBranch, {
+            const salvaged = await gitSyncAfterTurn(run, cwd, result.summary, input.baseBranch ?? run.baseBranch ?? undefined, {
               commitLeftovers: true,
             });
             if (salvaged) {
@@ -2685,14 +2703,14 @@ async function gitSyncAfterTurn(
         await transport.addTaskNote(run.taskId, "claude-agent", `Could not transition to testing: ${describe(err)}`);
       }
     }
-    const armed = await armAutoMerge(prUrl, cwd);
-    await transport.addTaskNote(
-      run.taskId,
-      "claude-agent",
-      armed
+    if (run.autoMerge !== false) {
+      const armed = await armAutoMerge(prUrl, cwd);
+      await transport.addTaskNote(run.taskId, "claude-agent", armed
         ? `Fallback PR sync armed auto-merge for ${prUrl}.`
-        : `Opened PR ${prUrl}, but could not arm GitHub auto-merge automatically.`
-    );
+        : `Opened PR ${prUrl}, but could not arm GitHub auto-merge automatically.`);
+    } else {
+      await transport.addTaskNote(run.taskId, "claude-agent", `Opened PR ${prUrl}; auto-merge is disabled for this run.`);
+    }
   }
   return prUrl ?? run.prUrl;
 }
@@ -5436,6 +5454,7 @@ export function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     backend: (row.backend as "pi" | "claude" | "codex" | null) ?? null,
     thinkingLevel: (row.thinkingLevel as "low" | "medium" | "high" | "xhigh" | null) ?? null,
     branch: row.branch,
+    baseBranch: row.baseBranch ?? null,
     worktreePath: row.worktreePath,
     prUrl: row.prUrl,
     error: row.error,
@@ -5462,6 +5481,8 @@ export function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     result: row.result ?? null,
     parkReason: row.parkReason ?? null,
     pendingReason: row.pendingReason ?? null,
+    autoMerge: row.autoMerge ?? true,
+    scheduleOccurrenceId: row.scheduleOccurrenceId ?? null,
   };
 }
 

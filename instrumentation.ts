@@ -52,6 +52,10 @@ export async function register(): Promise<void> {
         console.error("[instrumentation] boot liveness observation failed:", e);
       });
       await runsMod.reconcileOrphanedRuns();
+      const schedulesMod = await import("./lib/schedules");
+      await schedulesMod.reconcileScheduleOccurrences().catch((e) => {
+        console.error("[instrumentation] schedule recovery failed:", e);
+      });
       // Start the pending-run pump: it re-dispatches runs the admission gate
       // deferred for lack of host memory AND reaps stale leases every tick (so an
       // OOM-killed worker's run recovers without waiting for a restart — the

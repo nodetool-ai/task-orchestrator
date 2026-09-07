@@ -24,7 +24,8 @@ export async function GET(req: NextRequest) {
       filters.state = parsed.data;
     }
     const plan = sp.get("plan");
-    if (plan) filters.planId = plan;
+    if (plan === "null") filters.planId = null;
+    else if (plan) filters.planId = plan;
     const assignee = sp.get("assignee");
     if (assignee) filters.assignee = assignee;
     return NextResponse.json(await repo.listTasks(filters));
@@ -41,7 +42,7 @@ export async function POST(req: NextRequest) {
     const input = createTaskSchema.parse(await req.json());
     const task = await repo.createTask({
       id: input.id,
-      planId: input.plan,
+      planId: input.plan ?? null,
       title: input.title,
       assignee: input.assignee ?? null,
       body: input.body,

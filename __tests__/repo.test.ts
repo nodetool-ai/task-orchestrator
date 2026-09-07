@@ -90,6 +90,27 @@ describe("tasks", () => {
     await expect(repo.createTask({ planId: "P-nope", title: "X" })).rejects.toThrow(/not found/);
   });
 
+  it("creates, filters, and updates a standalone task against a registered repository", async () => {
+    const task = await repo.createTask({ planId: null, title: "Standalone", repoId: "R-default" });
+    expect(task.planId).toBeNull();
+    expect((await repo.listTasks({ planId: null })).map((t) => t.id)).toContain(task.id);
+    await expect(repo.updateTask(task.id, { repoId: "R-nope" })).rejects.toThrow(/not found/);
+  });
+
+  it("requires a repository for standalone tasks", async () => {
+    await expect(repo.createTask({ planId: null, title: "Standalone" })).rejects.toThrow(/require a repository/);
+  });
+
+  it("keeps standalone tasks through plan deletion and permits registered-repository updates", async () => {
+    const standalone = await repo.createTask({ planId: null, title: "Standalone", repoId: "R-default" });
+    await repo.createTask({ planId: "P-test", title: "Planned" });
+    await repo.deletePlan("P-test");
+    expect(await repo.getTask(standalone.id)).toMatchObject({ planId: null, repoId: "R-default" });
+    const updated = await repo.updateTask(standalone.id, { title: "Updated", repoId: "R-default" });
+    expect(updated.title).toBe("Updated");
+    expect(await repo.listTasks({ planId: null })).toEqual(expect.arrayContaining([expect.objectContaining({ id: standalone.id })]));
+  });
+
   it("rejects unknown dependency", async () => {
     await expect(
       repo.createTask({

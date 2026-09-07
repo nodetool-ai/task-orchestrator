@@ -17,6 +17,8 @@ interface Props {
   /** Render compact (small text, slim padding) for inline composer use. */
   size?: "default" | "compact";
   title?: string;
+  /** Optional empty choice for forms where no persona means inherited. */
+  emptyLabel?: string;
 }
 
 /**
@@ -31,6 +33,7 @@ export function PersonaPicker({
   className,
   size = "default",
   title,
+  emptyLabel,
 }: Props) {
   if (personas.length === 0) return null;
   return (
@@ -41,6 +44,7 @@ export function PersonaPicker({
         onChange={(e) => onChange(e.target.value)}
         className={className ?? (size === "default" ? "w-full" : undefined)}
       >
+        {emptyLabel !== undefined && <option value="">{emptyLabel}</option>}
         {personas.map((p) => (
           <option key={p.id} value={p.id}>
             {p.name}

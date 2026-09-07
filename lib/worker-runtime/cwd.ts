@@ -74,6 +74,10 @@ export async function prepareWorkerCwd(start: RunStart): Promise<PreparedCwd> {
   const localPath = field<string>(start.repository, "localPath");
   const remote = field<string>(start.repository, "remote") ?? null;
   const defaultBranch = field<string>(start.repository, "defaultBranch") ?? "main";
+  // This is selected and persisted when the run is created. It must travel in
+  // the run.start snapshot: a worker cannot safely infer it from a control-plane
+  // repository default that may have changed before recovery or follow-up.
+  const baseBranch = field<string>(run, "baseBranch")?.trim() || defaultBranch;
   const hint =
     "This path came from the control-plane snapshot; on a remote worker the " +
     "repository needs a checkout that exists inside the runner (a clonable " +
@@ -96,7 +100,7 @@ export async function prepareWorkerCwd(start: RunStart): Promise<PreparedCwd> {
     remote,
     work,
     branch,
-    base: defaultBranch,
+    base: baseBranch,
     mirrorDir: process.env.REPO_CACHE_DIR ? undefined : null,
     configuredPath: config.worker.runnerRepoPath ?? null,
     provider: insideWorker() ? "sprites" : "local",

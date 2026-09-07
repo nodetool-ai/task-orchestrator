@@ -84,6 +84,19 @@ describe("validateToolArgs (TypeBox → Zod)", () => {
   });
 });
 
+describe("create_task standalone contract", () => {
+  it("accepts explicit null plan_id and does not inherit the scoped plan", async () => {
+    const plan = await repo.createPlan({ title: "Scoped", date: "2026-07-04" });
+    expect(validateToolArgs(tool("create_task"), { plan_id: null, title: "Standalone", repo_id: "R-default" }).ok).toBe(true);
+    const result = await tool("create_task").execute(
+      { plan_id: null, title: "Standalone", repo_id: "R-default" },
+      { ...ctx, defaultPlanId: plan.id },
+    );
+    expect(result.isError).toBeFalsy();
+    expect((await repo.listTasks({ planId: null })).map((task) => task.title)).toContain("Standalone");
+  });
+});
+
 describe("create_plan initial-state restriction", () => {
   it("schema admits only 'draft' and 'proposed' as an initial state", () => {
     const t = tool("create_plan");

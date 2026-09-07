@@ -35,7 +35,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   const task = await repo.getTask(id);
   if (!task) notFound();
 
-  const plan = await repo.getPlan(task.planId);
+  const plan = task.planId ? await repo.getPlan(task.planId) : null;
   const deps = (await Promise.all(task.dependencies.map((depId) => repo.getTask(depId)))).filter(
     (t): t is NonNullable<typeof t> => Boolean(t)
   );

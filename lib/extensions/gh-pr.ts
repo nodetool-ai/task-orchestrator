@@ -50,6 +50,8 @@ export interface GhPrExtensionOptions {
   acquirePrLock?: PrLockFn;
   /** Repo-remote lookup seam (plan section 15); defaults to the legacy transport. */
   listRepoRemotes?: RepoRemotesFn;
+  /** False prevents this run from arming GitHub auto-merge. */
+  autoMerge?: boolean;
 }
 
 interface OwnerRepo {
@@ -575,7 +577,8 @@ function registerMergeTool(
   cwd: string | undefined,
   gate: Gate,
   runId: number | undefined,
-  acquirePrLock: PrLockFn
+  acquirePrLock: PrLockFn,
+  autoMergeAllowed = true
 ) {
   reg.registerTool({
     name: "gh_pr__pr_merge",
@@ -598,6 +601,7 @@ function registerMergeTool(
       ),
     }),
     execute: async (_id, { url, method, delete_branch, auto }) => {
+      if (auto && !autoMergeAllowed) return errResult("Auto-merge is disabled for this run.");
       const g = await gate(url);
       if (!g.ok) return g.result;
       const lock = await checkAndAcquirePrLock(g.parsed.canonical, runId, acquirePrLock);
@@ -666,7 +670,7 @@ export const ghPrExtension =
     registerReadTools(reg, cwd, gate, { repoFullName: fullName });
     registerReviewTool(reg, cwd, gate, { allowApprove: true, runId: opts.runId, acquirePrLock });
     registerCommentTool(reg, cwd, gate);
-    registerMergeTool(reg, cwd, gate, opts.runId, acquirePrLock);
+    registerMergeTool(reg, cwd, gate, opts.runId, acquirePrLock, opts.autoMerge !== false);
   };
 
 // Read-only tool set: view, diff, review (no 'approve'), comment. No

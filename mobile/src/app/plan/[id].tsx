@@ -190,7 +190,7 @@ function QueuedRow({
   onRun: (q: {
     id: string;
     title: string;
-    planId: string;
+    planId: string | null;
     planTitle: string;
     criteria: number;
     tags: string[];

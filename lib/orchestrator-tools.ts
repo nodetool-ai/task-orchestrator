@@ -593,9 +593,9 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "create_task",
     label: "Create Task",
     description:
-      "Create a new task under a plan. plan_id defaults to the chat's plan when scoped to one. The task targets one of the plan's repositories: if the plan has exactly one repo it's inherited, otherwise repo_id is required and must be in the plan's set.",
+      "Create a planned task (plan_id defaults to the scoped plan) or a standalone task. Standalone tasks require repo_id; planned tasks retain plan repository membership rules.",
     parameters: Type.Object({
-      plan_id: Type.Optional(Type.String()),
+      plan_id: Type.Optional(Type.Union([Type.String(), Type.Null()])),
       title: Type.String({ minLength: 1 }),
       body: Type.Optional(Type.String()),
       assignee: Type.Optional(Type.String()),
@@ -606,11 +606,12 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       repo_id: Type.Optional(Type.String()),
     }),
     execute: async (input, ctx) => {
-      const planId = resolvePlanId(input.plan_id, ctx);
-      if (!planId) return errResult("Error: plan_id required (no default plan in this session)");
+      // Explicit null opts out of a plan-scoped default; omission retains it.
+      const planId = input.plan_id === null ? null : resolvePlanId(input.plan_id, ctx);
+      if (!planId && !input.repo_id) return errResult("Error: standalone tasks require repo_id");
       const result = await safe(() =>
         repo.createTask({
-          planId,
+          planId: planId ?? null,
           title: input.title,
           body: input.body,
           assignee: input.assignee ?? undefined,
@@ -632,7 +633,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "update_task",
     label: "Update Task",
     description:
-      "Patch a task's fields (title, body, assignee, estimate, tags, dependencies, repo_id). The new repo_id must be one of the plan's repositories. Use transition_task to change state.",
+      "Patch a task's fields (title, body, assignee, estimate, tags, dependencies, repo_id). The new repo_id must be one of the plan's repositories, or any registered repository for a standalone task. Use transition_task to change state.",
     parameters: Type.Object({
       id: Type.Optional(Type.String()),
       title: Type.Optional(Type.String()),

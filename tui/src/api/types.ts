@@ -190,7 +190,7 @@ export interface TaskSummary {
   id: string;
   title: string;
   state: string;
-  planId: string;
+  planId: string | null;
   prUrl: string | null;
 }
 

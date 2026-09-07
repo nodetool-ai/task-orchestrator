@@ -126,7 +126,7 @@ export interface ShippedVM {
 export interface QueueVM {
   id: string;
   title: string;
-  planId: string;
+  planId: string | null;
   planTitle: string;
   criteria: number;
   tags: string[];
@@ -237,6 +237,7 @@ export function buildPlanCards(plans: PlanFull[], tasks: TaskFull[]): PlanCardVM
   const counts = new Map<string, { done: number; total: number }>();
   for (const t of tasks) {
     if (t.state === "cancelled") continue;
+    if (!t.planId) continue;
     const c = counts.get(t.planId) || { done: 0, total: 0 };
     c.total += 1;
     if (t.state === "merged") c.done += 1;

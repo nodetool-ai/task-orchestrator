@@ -305,6 +305,9 @@ A session never moves backwards. Terminal states (`completed`, `failed`,
 
 ## REST surface
 
-See [README.md](README.md#rest). Each route is a thin wrapper around a
-function in [`lib/repo.ts`](lib/repo.ts); the CLI calls the same functions
-directly.
+See [README.md](README.md#rest). Schedule routes live under `/api/schedules` and
+share `lib/schedules.ts` with the CLI (`schedule list|show|create|update|pause|
+resume|run|delete`). Schedule mutations are authenticated and retain the
+owning user when available. Each route is a thin wrapper around a shared
+service; the CLI calls the same functions directly. Standalone tasks use a
+null plan and a required repository (`new task --repo=R-...`).

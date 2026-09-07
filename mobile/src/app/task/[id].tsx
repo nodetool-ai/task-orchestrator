@@ -59,7 +59,7 @@ export default function TaskDetailScreen() {
     [sessions, taskId]
   );
   const planTitle = useMemo(
-    () => (task ? plans.find((p) => p.id === task.planId)?.title || task.planId : ""),
+    () => (task?.planId ? plans.find((p) => p.id === task.planId)?.title || task.planId : "Standalone"),
     [task, plans]
   );
   const prNum = prNumber(runs.find((r) => r.prUrl)?.prUrl ?? null);
@@ -148,13 +148,13 @@ export default function TaskDetailScreen() {
             <StatePill state={glyph} label={STATE_LABEL[task.state]} size="xs" />
           </MetaChip>
           {task.assignee ? <MetaChip label="Assignee">{<Mono style={{ fontSize: 12, color: c.fg }}>{task.assignee}</Mono>}</MetaChip> : null}
-          {planTitle ? (
+          {task.planId ? (
             <MetaChip label="Plan" onPress={() => router.push(`/plan/${task.planId}`)}>
               <Text numberOfLines={1} style={{ fontSize: 12.5, color: c.sReview }}>
                 {planTitle}
               </Text>
             </MetaChip>
-          ) : null}
+          ) : <MetaChip label="Plan"><Text style={{ fontSize: 12.5, color: c.muted }}>Standalone</Text></MetaChip>}
           {task.repoId ? <MetaChip label="Repo">{<Mono style={{ fontSize: 11.5, color: c.fg }}>{task.repoId}</Mono>}</MetaChip> : null}
         </View>
 

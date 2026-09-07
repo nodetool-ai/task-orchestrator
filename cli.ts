@@ -7,6 +7,8 @@ config({ path: ".env.local" });
 import { readFileSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
 import * as repo from "./lib/repo";
+import * as schedules from "./lib/schedules";
+import { formatScheduleShow, parseScheduleDate, parseScheduleKind } from "./lib/schedule-cli";
 import * as users from "./lib/users";
 import { createMagicToken } from "./lib/magic-link";
 import { closeDb } from "./db";
@@ -195,10 +197,12 @@ async function cmdNewPlan(args: Args) {
 async function cmdNewTask(args: Args) {
   const title = asString(args.title);
   const plan = asString(args.plan);
+  const repoId = asString(args.repo);
   if (!title) throw new Error("--title is required");
-  if (!plan) throw new Error("--plan is required");
+  if (!plan && !repoId) throw new Error("--plan or --repo is required");
   const task = await repo.createTask({
-    planId: plan,
+    planId: plan ?? null,
+    repoId: repoId ?? undefined,
     title,
     id: asString(args.id),
     assignee: asString(args.assignee) ?? null,
@@ -358,6 +362,86 @@ async function cmdPlanTransition(args: Args) {
     state: state as Parameters<typeof repo.updatePlan>[1]["state"],
   });
   console.log(`${id}: ${before.state} → ${after.state}`);
+  return 0;
+}
+
+function dateFlag(args: Args, name: string): Date | undefined {
+  return parseScheduleDate(asString(args[name]), name);
+}
+
+function numberFlag(args: Args, name: string): number | undefined {
+  const raw = asString(args[name]);
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) throw new Error(`Invalid --${name}: ${raw}`);
+  return value;
+}
+
+function nullableStringFlag(args: Args, name: string): string | null | undefined {
+  const raw = asString(args[name]);
+  return raw === "null" ? null : raw;
+}
+
+function nullableNumberFlag(args: Args, name: string): number | null | undefined {
+  const raw = asString(args[name]);
+  return raw === "null" ? null : numberFlag(args, name);
+}
+
+export function scheduleText(s: Awaited<ReturnType<typeof schedules.listScheduleSurfaces>>[number]): string {
+  const trigger = s.kind === "once" ? `once ${s.runAt?.toISOString() ?? ""}` : s.kind === "interval" ? `every ${s.intervalSeconds}s` : s.cronExpression ?? "cron";
+  const recentRun = s.recentRun as { status: string } | null;
+  const recent = recentRun ? `${recentRun.status}${s.prUrl ? ` ${s.prUrl}` : ""}` : (s.recentOccurrence?.status ?? "never");
+  return `${pad(String(s.id), 4)} ${pad(s.enabled ? "enabled" : "paused", 9)} ${pad(s.name, 28)} ${pad(trigger, 28)} ${pad(s.repository?.name ?? s.repoId, 20)} next=${s.nextRunAt?.toISOString() ?? "-"} last=${recent}`;
+}
+
+async function cmdSchedule(args: Args): Promise<number> {
+  const sub = args._.shift();
+  if (sub === "list") {
+    const rows = await schedules.listScheduleSurfaces();
+    if (args.json) { console.log(JSON.stringify(rows, null, 2)); return 0; }
+    if (!rows.length) { console.log("(no schedules)"); return 0; }
+    for (const row of rows) console.log(scheduleText(row));
+    return 0;
+  }
+  const idArg = args._[0];
+  const id = idArg ? Number(idArg) : NaN;
+  if (sub === "show") {
+    if (!Number.isInteger(id) || id < 1) throw new Error("Usage: schedule show <id> [--json]");
+    const row = await schedules.getScheduleSurface(id);
+    if (!row) throw new Error(`Schedule not found: ${id}`);
+    if (args.json) console.log(JSON.stringify(row, null, 2)); else console.log(formatScheduleShow(scheduleText(row), row.prompt, row.timezone));
+    return 0;
+  }
+  if (sub === "create") {
+    const name = asString(args.name), prompt = asString(args.prompt), repoId = asString(args.repo);
+    const kind = parseScheduleKind(asString(args.kind));
+    if (!name || !prompt || !repoId) throw new Error("Usage: schedule create --name=... --prompt=... --repo=R-... --kind=once|interval|cron");
+    const schedule = await schedules.createSchedule({
+      name, prompt, repoId, kind, baseBranch: nullableStringFlag(args, "base-branch"), timezone: asString(args.timezone),
+      runAt: dateFlag(args, "run-at"), startAt: dateFlag(args, "start-at"), intervalSeconds: numberFlag(args, "interval-seconds"), cronExpression: asString(args.cron),
+      personaId: nullableStringFlag(args, "persona"), model: nullableStringFlag(args, "model"), toolsProfile: nullableStringFlag(args, "tools-profile"), autoMerge: args["auto-merge"] === true || asString(args["auto-merge"]) === "true",
+      budgetMaxTurns: numberFlag(args, "max-turns"), budgetMaxUsd: numberFlag(args, "max-usd"), budgetMaxSeconds: numberFlag(args, "max-seconds"),
+      userId: numberFlag(args, "user-id"),
+    });
+    if (args.json) console.log(JSON.stringify(schedule, null, 2)); else console.log(`Created schedule #${schedule.id}`);
+    return 0;
+  }
+  if (!["update", "pause", "resume", "run", "delete"].includes(sub ?? "")) throw new Error("Usage: schedule <list|show|create|update|pause|resume|run|delete> ...");
+  if (!Number.isInteger(id) || id < 1) throw new Error(`Usage: schedule ${sub} <id>`);
+  let result: unknown;
+  if (sub === "update") {
+    const patch: Parameters<typeof schedules.updateSchedule>[1] = {};
+    const set = <K extends keyof typeof patch>(key: K, value: (typeof patch)[K], flag = String(key).replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`)) => { if (Object.prototype.hasOwnProperty.call(args, flag)) patch[key] = value; };
+    set("name", asString(args.name)); set("prompt", asString(args.prompt)); set("repoId", asString(args.repo)); set("baseBranch", nullableStringFlag(args, "base-branch"));
+    set("kind", asString(args.kind) as schedules.ScheduleKind); set("timezone", asString(args.timezone)); set("runAt", dateFlag(args, "run-at") ?? null); set("startAt", dateFlag(args, "start-at")); set("intervalSeconds", numberFlag(args, "interval-seconds") ?? null); set("cronExpression", asString(args.cron) ?? null, "cron");
+    set("personaId", nullableStringFlag(args, "persona")); set("model", nullableStringFlag(args, "model")); set("toolsProfile", nullableStringFlag(args, "tools-profile")); set("autoMerge", args["auto-merge"] === true || asString(args["auto-merge"]) === "true");
+    set("budgetMaxTurns", nullableNumberFlag(args, "max-turns")); set("budgetMaxUsd", nullableNumberFlag(args, "max-usd")); set("budgetMaxSeconds", nullableNumberFlag(args, "max-seconds"));
+    result = await schedules.updateSchedule(id, patch);
+  } else if (sub === "pause") result = await schedules.pauseSchedule(id);
+  else if (sub === "resume") result = await schedules.resumeSchedule(id);
+  else if (sub === "run") result = { occurrenceId: await schedules.runScheduleNow(id) };
+  else result = await schedules.deleteSchedule(id);
+  if (args.json) console.log(JSON.stringify(result, null, 2)); else console.log(`Schedule #${id}: ${sub === "run" ? `occurrence ${(result as { occurrenceId: number }).occurrenceId}` : sub}`);
   return 0;
 }
 
@@ -652,8 +736,8 @@ Commands:
   show <id>                         Show task or plan detail. --json
 
   new plan --title="..."            Create plan. --owner=X --tags=a,b --body=... --date=YYYY-MM-DD
-  new task --plan=P-... --title=... Create task. --assignee=X --tags=a,b --dependencies=T-...,T-...
-                                    --criteria="text1,text2" --estimate=2h --body=... --date=...
+  new task --plan=P-... --title=... Create planned task; use --repo=R-... without --plan for standalone.
+                                    --assignee=X --tags=a,b --dependencies=T-... --criteria="text1,text2" --estimate=2h --body=... --date=...
 
   transition <T-...> <state>        Move task. --assignee=X --note="..."
   plan-state <P-...> <state>        Move plan.
@@ -690,6 +774,15 @@ Commands:
   codex login                       Sign in with ChatGPT (Codex OAuth) and write ~/.codex/auth.json.
   codex logout                      Revoke the Codex token and remove ~/.codex/auth.json.
   codex status                      Report whether a Codex login is present.
+
+  schedule list [--json]            List schedules and recent run/PR state.
+  schedule show <id> [--json]      Show schedule details.
+  schedule create --name=... --prompt=... --repo=R-... --kind=once|interval|cron
+                                    Trigger: --run-at=ISO, --interval-seconds=N, or --cron='*/15 * * * *'.
+                                    Options: --timezone=UTC --base-branch=main --persona=ID --model=ID
+                                    --tools-profile=... --auto-merge --max-turns=N --max-usd=N --max-seconds=N.
+  schedule update <id> ...          Update schedule fields (use empty/null JSON via API to clear overrides).
+  schedule pause|resume|run|delete <id>
 
 States:
   Tasks: ${TASK_STATES.join(", ")}
@@ -738,6 +831,9 @@ async function main(): Promise<void> {
         break;
       case "attach":
         code = await cmdAttach(args);
+        break;
+      case "schedule":
+        code = await cmdSchedule(args);
         break;
       case "agent":
         code = await cmdAgent(args);

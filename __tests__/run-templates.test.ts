@@ -106,6 +106,17 @@ describe("buildImplementPrompt", () => {
     expect(prompt).toContain("loopback");
   });
 
+  it("omits parent-plan and sibling context for a standalone task", async () => {
+    const getPlan = vi.fn();
+    const listTasks = vi.fn();
+    vi.spyOn(worker, "runTransport").mockResolvedValue({ getPlan, listTasks } as never);
+    const prompt = await buildImplementPrompt(fakeTask({ planId: null }));
+    expect(getPlan).not.toHaveBeenCalled();
+    expect(listTasks).not.toHaveBeenCalled();
+    expect(prompt).not.toContain("# Parent plan:");
+    vi.restoreAllMocks();
+  });
+
   // Regression (#98 fleet outage): buildImplementPrompt runs INSIDE a dispatched
   // worker, which under the HTTP-worker architecture has no DB access — every
   // direct repo/db call throws the "Direct database access inside a run worker"

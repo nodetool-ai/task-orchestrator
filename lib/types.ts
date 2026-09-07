@@ -110,7 +110,8 @@ export interface TaskFull {
   id: string;
   title: string;
   state: TaskState;
-  planId: string;
+  /** Null denotes a deliberately standalone task. */
+  planId: string | null;
   assignee: string | null;
   body: string;
   estimate: string | null;

@@ -1000,6 +1000,14 @@ async function pumpTick(): Promise<void> {
   } catch {
     // best-effort
   }
+  // Schedule firing is isolated from run dispatch: a bad cadence/launch must
+  // never strand the existing pending-run queue.
+  try {
+    const schedules = await import("./schedules");
+    await schedules.fireDueSchedules();
+  } catch {
+    // best-effort; durable pending/launching occurrences recover next tick/boot
+  }
   // Half 2: drain the deferred queue, oldest first. Stop at the first defer (the
   // host is full); the next tick retries.
   let ids: number[];

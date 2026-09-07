@@ -72,6 +72,10 @@ async function allowedTools(profile: string): Promise<string[]> {
   for (const tool of [...events.EVENT_TOOLS, ...memory.MEMORY_TOOLS]) {
     if (tool.name !== "memory__load") names.add(tool.name);
   }
+  // This internal lifecycle tool is called by the worker driver directly after
+  // it has pushed an implementation branch. It is not mounted in an agent
+  // profile, but must be in the persisted channel policy for tool.invoke.
+  names.add("worker__open_terminal_pr");
   const profiles = new Set(profile.split(",").map((value) => value.trim()).filter(Boolean));
   if (profiles.has("orchestrator")) for (const tool of orchestrator.ORCHESTRATOR_TOOLS) names.add(tool.name);
   if (profiles.has("planning")) for (const tool of planning.PLANNING_TOOLS) names.add(tool.name);
@@ -130,7 +134,7 @@ export async function buildRunStart(
       kickoffPrompt = buildExecutePrompt(plan, await dbTransport.listTasks({ planId: plan.id }));
     } else if (goal === "<implement>" && task) {
       const { buildImplementPrompt } = await import("../run-templates");
-      kickoffPrompt = await buildImplementPrompt(task);
+      kickoffPrompt = await buildImplementPrompt(task, { autoMerge: run.autoMerge !== false });
     } else if (goal && !goal.startsWith("<")) {
       kickoffPrompt = goal;
     }

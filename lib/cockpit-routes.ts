@@ -8,7 +8,8 @@
 // does not verify it.
 
 const COCKPIT_ROUTES: RegExp[] = [
-  /^\/api\/(inbox|tasks|plans|personas)$/,
+  /^\/api\/(inbox|tasks|plans|personas|schedules)$/,
+  /^\/api\/schedules\/\d+(\/(run|pause|resume))?$/,
   /^\/api\/runs$/,
   /^\/api\/runs\/overview(\/events)?$/,
   /^\/api\/runs\/\d+(\/(events|messages|inbox))?$/,

@@ -62,13 +62,13 @@ async function loadRunsByGroup(): Promise<{
   const allRuns = await runsLib.listTaskRunSummaries();
   const taskIds = Array.from(new Set(allRuns.map((r) => r.taskId)));
   const taskById = new Map((await repo.listTasks({ ids: taskIds })).map((t) => [t.id, t]));
-  const planIds = Array.from(new Set(Array.from(taskById.values(), (t) => t.planId)));
+  const planIds = Array.from(new Set(Array.from(taskById.values(), (t) => t.planId).filter((id): id is string => id !== null)));
   const planTitleById = await repo.planTitlesByIds(planIds);
 
   const groups = { running: [] as RunWithTask[], review: [] as RunWithTask[], blocked: [] as RunWithTask[], shipped: [] as RunWithTask[] };
   for (const run of allRuns) {
     const task = taskById.get(run.taskId) ?? null;
-    const planTitle = task ? planTitleById.get(task.planId) ?? null : null;
+    const planTitle = task?.planId ? planTitleById.get(task.planId) ?? null : null;
     const wrapped = { run, task, planTitle };
     const cat = classifyRun(run.status, run.prUrl, task?.state);
     if (cat === "running") groups.running.push(wrapped);
@@ -159,7 +159,7 @@ export async function loadFloorData(): Promise<{
   const queue: QueueRow[] = todoTasks.map((t) => ({
     id: t.id,
     title: t.title,
-    plan: planTitleById.get(t.planId) ?? null,
+    plan: t.planId ? planTitleById.get(t.planId) ?? null : null,
     criteria: t.criteria.length,
     tags: t.tags,
     persona: t.assignee,
@@ -212,6 +212,7 @@ export async function loadPlansIndexData(): Promise<PlanCardData[]> {
   for (const p of plans) progress.set(p.id, { done: 0, total: 0 });
   const queuedByPlan = new Map<string, number>();
   for (const t of taskSummaries) {
+    if (!t.planId) continue;
     if (t.state === "todo") queuedByPlan.set(t.planId, (queuedByPlan.get(t.planId) ?? 0) + 1);
     if (t.state === "cancelled") continue;
     const prog = progress.get(t.planId);
@@ -308,7 +309,7 @@ export async function loadTasksIndexData(): Promise<{
   const rows: TaskRowData[] = tasks.map((t) => ({
     id: t.id,
     title: t.title,
-    plan: planTitleById.get(t.planId) ?? null,
+    plan: t.planId ? planTitleById.get(t.planId) ?? null : null,
     planId: t.planId,
     state: TASK_STATE_TO_PI[t.state],
     runDbId: liveRunByTask.get(t.id) ?? null,
@@ -355,7 +356,7 @@ export async function loadPaletteItems(): Promise<PaletteItem[]> {
     kind: "Task",
     id: t.id,
     title: t.title,
-    sub: planTitleById.get(t.planId) || "",
+    sub: t.planId ? planTitleById.get(t.planId) || "" : "Standalone",
     state: TASK_STATE_TO_PI[t.state],
     href: `/tasks/${t.id}`,
   }));

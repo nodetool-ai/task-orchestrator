@@ -389,6 +389,7 @@ export async function planProgressBatch(planIds: string[]): Promise<Map<string, 
   // First pass: accumulate totals and done.
   for (const r of rows) {
     if (r.state === "cancelled") continue;
+    if (!r.planId) continue;
     const p = out.get(r.planId)!;
     p.total += Number(r.n);
     if (r.state === "merged") p.done += Number(r.n);
@@ -418,7 +419,8 @@ export async function planTitlesByIds(ids: string[]): Promise<Map<string, string
 
 export interface TaskFilters {
   state?: TaskState;
-  planId?: string;
+  /** undefined = all tasks, null = standalone tasks only. */
+  planId?: string | null;
   assignee?: string;
   /** Restrict to these task ids — batch hydration for read paths that would
    *  otherwise call getTask() per id. */
@@ -429,7 +431,8 @@ export async function listTasks(filters: TaskFilters = {}): Promise<TaskFull[]> 
   if (filters.ids && filters.ids.length === 0) return [];
   const wheres = [];
   if (filters.state) wheres.push(eq(tasks.state, filters.state));
-  if (filters.planId) wheres.push(eq(tasks.planId, filters.planId));
+  if (filters.planId === null) wheres.push(sql`${tasks.planId} IS NULL`);
+  else if (filters.planId !== undefined) wheres.push(eq(tasks.planId, filters.planId));
   if (filters.assignee) wheres.push(eq(tasks.assignee, filters.assignee));
   if (filters.ids) wheres.push(inArray(tasks.id, filters.ids));
   const where = wheres.length ? and(...wheres) : undefined;
@@ -484,7 +487,7 @@ export async function listTasks(filters: TaskFilters = {}): Promise<TaskFull[]> 
 export interface TaskSummaryRow {
   id: string;
   title: string;
-  planId: string;
+  planId: string | null;
   state: TaskState;
 }
 
@@ -821,7 +824,8 @@ export async function deletePlan(id: string) {
 
 export interface CreateTaskInput {
   id?: string;
-  planId: string;
+  /** Omitted/null creates a standalone task. */
+  planId?: string | null;
   title: string;
   assignee?: string | null;
   body?: string;
@@ -836,12 +840,17 @@ export interface CreateTaskInput {
    * otherwise required.
    */
   repoId?: string | null;
+  /** Internal durable idempotency link for a schedule occurrence. */
+  scheduleOccurrenceId?: number | null;
 }
 
 export async function createTask(input: CreateTaskInput): Promise<TaskFull> {
-  const plan = await getPlan(input.planId);
-  if (!plan) {
+  const plan = input.planId ? await getPlan(input.planId) : null;
+  if (input.planId && !plan) {
     throw new RepoError(`Plan ${input.planId} not found`, 404);
+  }
+  if (!plan && !input.repoId) {
+    throw new RepoError("Standalone tasks require a repository via repo_id", 400);
   }
   const date = input.date ?? today();
   let id = input.id ?? await nextTaskId(date);
@@ -849,25 +858,24 @@ export async function createTask(input: CreateTaskInput): Promise<TaskFull> {
     throw new RepoError(`Task ${id} already exists`, 409);
   }
 
-  // Resolve the task's repo: explicit → must be one of the plan's repos.
-  // Implicit → only allowed if the plan has exactly one repo.
+  // Planned tasks keep membership/inheritance rules. Standalone tasks pin an
+  // explicitly registered repository, independent of plan membership.
   let resolvedRepoId: string | null = null;
-  if (input.repoId !== undefined && input.repoId !== null) {
+  if (!plan) {
+    if (!(await getRepository(input.repoId!))) {
+      throw new RepoError(`Repository ${input.repoId} not found`, 404);
+    }
+    resolvedRepoId = input.repoId!;
+  } else if (input.repoId !== undefined && input.repoId !== null) {
     const planRepoIds = plan.repos.map((r) => r.id);
     if (!planRepoIds.includes(input.repoId)) {
-      throw new RepoError(
-        `Repository ${input.repoId} is not attached to plan ${plan.id}. Attach it first or pick from: ${planRepoIds.join(", ") || "(none)"}`,
-        400
-      );
+      throw new RepoError(`Repository ${input.repoId} is not attached to plan ${plan.id}. Attach it first or pick from: ${planRepoIds.join(", ") || "(none)"}`, 400);
     }
     resolvedRepoId = input.repoId;
   } else if (plan.repos.length === 1) {
     resolvedRepoId = plan.repos[0].id;
   } else if (plan.repos.length > 1) {
-    throw new RepoError(
-      `Plan ${plan.id} has ${plan.repos.length} repositories; specify which one this task targets via repo_id`,
-      400
-    );
+    throw new RepoError(`Plan ${plan.id} has ${plan.repos.length} repositories; specify which one this task targets via repo_id`, 400);
   }
   // plan.repos.length === 0 → resolvedRepoId stays null; the agent will
   // refuse to start a session, surfacing a clear escalation.
@@ -897,12 +905,13 @@ export async function createTask(input: CreateTaskInput): Promise<TaskFull> {
             id,
             title: input.title,
             state: "todo",
-            planId: input.planId,
+            planId: input.planId ?? null,
             assignee: input.assignee ?? null,
             body: input.body ?? "",
             estimate: input.estimate ?? null,
             tags: JSON.stringify(input.tags ?? []),
             repoId: resolvedRepoId,
+            scheduleOccurrenceId: input.scheduleOccurrenceId ?? null,
             createdAt: now,
             updatedAt: now,
           });
@@ -951,14 +960,18 @@ export async function updateTask(
 ): Promise<TaskFull> {
   const existing = await getTask(id);
   if (!existing) throw new RepoError(`Task ${id} not found`, 404);
+  if (existing.planId === null && patch.repoId === null) {
+    throw new RepoError("Standalone tasks require a repository", 400);
+  }
   if (patch.repoId !== undefined && patch.repoId !== null) {
-    const plan = await getPlan(existing.planId);
-    const planRepoIds = plan?.repos.map((r) => r.id) ?? [];
-    if (!planRepoIds.includes(patch.repoId)) {
-      throw new RepoError(
-        `Repository ${patch.repoId} is not attached to plan ${existing.planId}. Attach it first or pick from: ${planRepoIds.join(", ") || "(none)"}`,
-        400
-      );
+    if (existing.planId === null) {
+      if (!(await getRepository(patch.repoId))) throw new RepoError(`Repository ${patch.repoId} not found`, 404);
+    } else {
+      const plan = await getPlan(existing.planId);
+      const planRepoIds = plan?.repos.map((r) => r.id) ?? [];
+      if (!planRepoIds.includes(patch.repoId)) {
+        throw new RepoError(`Repository ${patch.repoId} is not attached to plan ${existing.planId}. Attach it first or pick from: ${planRepoIds.join(", ") || "(none)"}`, 400);
+      }
     }
   }
   // Validate dependencies up front (createTask does; updateTask historically did
