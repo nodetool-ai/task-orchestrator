@@ -26,7 +26,8 @@ afterEach(() => {
 
 describe("codexAuthMode", () => {
   it("prefers an explicit API key over a forwarded ChatGPT token", () => {
-    expect(codexAuthMode({ OPENAI_API_KEY: "sk-x", CODEX_ACCESS_TOKEN: "tok" })).toBe("api-key");
+    expect(codexAuthMode({ OPENAI_API_KEY: "sk-x", CODEX_ACCESS_TOKEN: "tok" })).toBe("chatgpt");
+    expect(codexAuthMode({ CODEX_API_KEY: "sk-codex", CODEX_ACCESS_TOKEN: "tok" })).toBe("api-key");
     expect(codexAuthMode({ CODEX_API_KEY: "sk-x" })).toBe("api-key");
   });
 

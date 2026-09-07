@@ -178,7 +178,10 @@ export class CodexBackend implements AgentBackend {
       // CODEX_API_KEY for the child process. Prefer the Codex-specific name
       // when both are configured so an explicit Codex credential wins.
       const mergedEnv = { ...process.env, ...args.env };
-      const apiKey = nonEmpty(mergedEnv.CODEX_API_KEY) ?? nonEmpty(mergedEnv.OPENAI_API_KEY);
+      const apiKey =
+        auth.mode === "api-key"
+          ? nonEmpty(mergedEnv.CODEX_API_KEY) ?? nonEmpty(mergedEnv.OPENAI_API_KEY)
+          : undefined;
       // The CLI's env REPLACES the child environment, so start from the merged
       // process env, layer the caller's, then scrub — a caller-supplied entry is
       // respected but still subject to the scrub.

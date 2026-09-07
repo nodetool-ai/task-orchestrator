@@ -82,14 +82,16 @@ export function chatGptAuthJson(tokens: {
 }
 
 /**
- * Which credential the CLI will use, decided from the environment alone. An
- * explicit API key wins (it is the unambiguous signal an operator configured
- * one); otherwise a forwarded ChatGPT token; otherwise whatever the machine
- * already has. Exported for tests — the backend calls `resolveCodexAuth`.
+ * Which credential the CLI will use, decided from the environment alone. A
+ * Codex-specific API key is an explicit override; otherwise a forwarded
+ * ChatGPT token wins over the generic OPENAI_API_KEY, which may be present for
+ * unrelated OpenAI-provider workloads. Exported for tests — the backend calls
+ * `resolveCodexAuth`.
  */
 export function codexAuthMode(env: EnvLike): CodexAuthMode {
-  if (nonEmpty(env.CODEX_API_KEY) || nonEmpty(env.OPENAI_API_KEY)) return "api-key";
+  if (nonEmpty(env.CODEX_API_KEY)) return "api-key";
   if (nonEmpty(env.CODEX_ACCESS_TOKEN)) return "chatgpt";
+  if (nonEmpty(env.OPENAI_API_KEY)) return "api-key";
   return "ambient";
 }
 
