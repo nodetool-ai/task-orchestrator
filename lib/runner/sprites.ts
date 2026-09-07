@@ -31,6 +31,13 @@ function compactEnv(entries: Record<string, string | undefined>): Record<string,
   return env;
 }
 
+function sameEnv(a: Record<string, string> | undefined, b: Record<string, string>): boolean {
+  if (!a) return false;
+  const aKeys = Object.keys(a).sort();
+  const bKeys = Object.keys(b).sort();
+  return aKeys.length === bKeys.length && aKeys.every((key, i) => key === bKeys[i] && a[key] === b[key]);
+}
+
 export function spriteNameForRun(runId: number): string {
   const prefix = config.sprites.prefix || "to-run-";
   return `${prefix}${runId}`;
@@ -367,8 +374,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
     try {
       const desiredEnv = await buildSpritesWorkerEnv(runId, { channelInstanceId, channelListenEndpoint: spritesListenEndpoint() });
       const current = await this.spritesClient.getService(spriteName, "worker").catch(() => null);
-      const staleCredential =
-        current?.env?.TASK_ORCH_WORKER_CHANNEL_CREDENTIAL !== desiredEnv.TASK_ORCH_WORKER_CHANNEL_CREDENTIAL;
+      const staleEnv = !sameEnv(current?.env, desiredEnv);
       // A sprite outlives deploys; its worker bundle does not follow them on
       // its own. bootstrapSprite is idempotent per bundle id (checkpoint
       // comment), so when the shipped bundle changed since this sprite was
@@ -395,8 +401,8 @@ export class SpritesRunnerProvider implements RunnerProvider {
           });
         }
       }
-      if (staleCredential || staleBundle) {
-        console.warn(`[SpritesRunnerProvider] redefining the worker service on ${spriteName} (${staleBundle ? "new bundle" : "stale credential"})`);
+      if (staleEnv || staleBundle) {
+        console.warn(`[SpritesRunnerProvider] redefining the worker service on ${spriteName} (${staleBundle ? "new bundle" : "worker env changed"})`);
         await this.spritesClient.stopService(spriteName, "worker").catch(() => {});
         await this.spritesClient.putService(spriteName, "worker", {
           cmd: "node",
@@ -404,7 +410,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
           env: desiredEnv,
           dir: "/home/user/worker",
         });
-        await emitRunnerEvent(runId, "runner_service_redefined", { spriteName, reason: staleBundle ? "new-bundle" : "stale-credential" });
+        await emitRunnerEvent(runId, "runner_service_redefined", { spriteName, reason: staleBundle ? "new-bundle" : "worker-env-changed" });
       }
     } catch (err) {
       console.warn(`[SpritesRunnerProvider] service refresh failed for ${spriteName}:`, err);

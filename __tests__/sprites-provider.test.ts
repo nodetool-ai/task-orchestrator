@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { db } from "../db";
 import { agentSessions, runnerInstances } from "../db/schema";
 import { create } from "../lib/runs";
-import { isRunSpriteName, SpritesRunnerProvider, spriteNameForRun, spritesRunnerStateFromStatus } from "../lib/runner/sprites";
+import { buildSpritesWorkerEnv, isRunSpriteName, SpritesRunnerProvider, spriteNameForRun, spritesRunnerStateFromStatus } from "../lib/runner/sprites";
 import { SpritesApiError } from "../lib/runner/sprites-client";
 import { workerBundleId } from "../lib/worker-bundle";
 import type { SpritesClient } from "../lib/runner/sprites-client";
@@ -279,13 +279,15 @@ describe("SpritesRunnerProvider.resume", () => {
     const run = await create({ goal: "<implement>", defer: true });
     const spriteName = spriteNameForRun(run.id);
     const instanceId = "wi_dddddddddddddddddddddddddddddddd";
-    const { mintChannelCredential } = await import("../lib/worker-channel/credential");
-    const cred = mintChannelCredential(run.id, instanceId);
+    const currentEnv = await buildSpritesWorkerEnv(run.id, {
+      channelInstanceId: instanceId,
+      channelListenEndpoint: "tcp:[::]:8787",
+    });
     const client = fakeSpritesClient({
       getService: vi.fn(async (_s: string, serviceName: string) => ({
         name: serviceName,
         cmd: "node",
-        env: { TASK_ORCH_WORKER_CHANNEL_CREDENTIAL: cred },
+        env: currentEnv,
         state: { status: "running", pid: 7, startedAt: "2026-01-01T00:00:00Z" },
       })),
       putService: putSpy,
