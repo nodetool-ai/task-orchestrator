@@ -246,6 +246,13 @@
       "when": 1788021600000,
       "tag": "0034_run_base_branch",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1788025200000,
+      "tag": "0035_codex_device_code",
+      "breakpoints": true
     }
   ]
 }

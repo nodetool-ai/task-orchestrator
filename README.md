@@ -480,12 +480,13 @@ Requires:
   `OPENAI_API_KEY`, `GEMINI_API_KEY`, …), `~/.pi/agent/auth.json`, and — for
   `openai-codex` models — the Codex credential stored in the orchestrator
   database. Sign in under **Settings → Codex** ("Sign in with ChatGPT"): this
-  runs OpenAI's device-code OAuth flow (PKCE, redirecting to
-  `https://auth.openai.com/deviceauth/callback`), which shows you an
-  authorization code to paste back. Because nothing has to listen on a loopback
-  port, it works when the server and your browser are on different machines — a
-  hosted deployment included. `npm run task -- codex login` does the same from
-  the CLI; `codex status` reports whether a login is present and `codex logout`
+  runs OpenAI's device-code OAuth flow: it displays a one-time device code to
+  enter at `https://auth.openai.com/codex/device`, then polls for approval and
+  completes the server-issued PKCE exchange automatically. Because nothing has
+  to listen on a loopback port, it works when the server and your browser are on
+  different machines, including a hosted deployment. `npm run task -- codex
+  login` does the same from the CLI; `codex status` reports whether a login is
+  present and `codex logout`
   revokes the token and clears the row. The external OpenAI Codex CLI is not
   required, and `~/.codex/auth.json` is no longer read. `CODEX_ACCESS_TOKEN` is
   accepted as an explicit override and is how the control plane hands the token

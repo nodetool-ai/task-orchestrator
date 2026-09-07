@@ -14,8 +14,8 @@ async function authorized(): Promise<boolean> {
 const unauthorized = () => NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
 function failure(err: unknown) {
-  // A CodexLoginError is the user's problem to fix (expired sign-in, bad
-  // paste), so it reports as 400 with its stable code; anything else is ours.
+  // A CodexLoginError is actionable by the user (expired or denied sign-in),
+  // so it reports as 400 with its stable code; anything else is ours.
   if (err instanceof CodexLoginError) {
     return NextResponse.json({ error: err.message, code: err.code }, { status: 400 });
   }
@@ -31,27 +31,27 @@ export async function GET() {
   return NextResponse.json(await codexAuthStatus());
 }
 
-// Start a device-code login. Returns the authorization URL for the browser to
-// open; the user then pastes the code back through PUT.
+// Start a device-code login. The UI opens verificationUrl, shows userCode,
+// then polls PUT at the server-provided interval.
 export async function POST() {
   if (!(await authorized())) return unauthorized();
   try {
-    const { authorizationUrl } = await startCodexLogin();
-    return NextResponse.json({ authorizationUrl, status: await codexAuthStatus() });
+    const deviceCode = await startCodexLogin();
+    return NextResponse.json({ ...deviceCode, status: await codexAuthStatus() });
   } catch (err) {
     return failure(err);
   }
 }
 
-// Redeem the pasted authorization code (or full callback URL) for tokens.
+// Poll OpenAI once for authorization and exchange the code when ready.
 export async function PUT(req: Request) {
   if (!(await authorized())) return unauthorized();
   try {
-    const body = (await req.json().catch(() => ({}))) as { code?: unknown };
-    if (typeof body.code !== "string") {
-      return NextResponse.json({ error: "Expected a `code` string." }, { status: 400 });
+    const body = (await req.json().catch(() => ({}))) as { deviceAuthId?: unknown };
+    if (typeof body.deviceAuthId !== "string") {
+      return NextResponse.json({ error: "Expected a `deviceAuthId` string." }, { status: 400 });
     }
-    return NextResponse.json(await completeCodexLogin(body.code));
+    return NextResponse.json(await completeCodexLogin(body.deviceAuthId));
   } catch (err) {
     return failure(err);
   }

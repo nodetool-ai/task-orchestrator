@@ -233,12 +233,15 @@ codex_credentials       The Codex (ChatGPT) OAuth credential. Singleton row.
   expires_at         TIMESTAMPTZ  decoded from the access token's exp claim
   updated_at         TIMESTAMPTZ
 
-codex_login_attempts    Device-code logins in flight (PKCE verifiers).
-  state              TEXT     PK, the OAuth state echoed back on the callback
-  verifier           TEXT     NOT NULL
+codex_login_attempts    Device-code logins in flight.
+  device_auth_id     TEXT     PK, opaque OpenAI device authorization id
+  user_code          TEXT     NOT NULL, one-time code shown to the user
+  interval_seconds   INTEGER  NOT NULL default 5, minimum polling interval
   created_at         TIMESTAMPTZ  swept after 15 minutes
 
 Written by the device-code login in Settings → Codex (lib/codex-oauth-store.ts).
+The server polls OpenAI after the user enters `user_code`; OpenAI returns the
+PKCE verifier with the authorization code, so no callback paste is needed.
 This is the control plane's only source for the Codex bearer — ~/.codex/auth.json
 is not read, and CODEX_ACCESS_TOKEN is not a deploy secret. Dispatch resolves and
 refreshes the token here, then forwards it to workers as CODEX_ACCESS_TOKEN,

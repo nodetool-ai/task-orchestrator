@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Check, ExternalLink, LogOut, MessageSquare } from "lucide-react";
+import { Check, ClipboardCopy, ExternalLink, LogOut, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { ErrorText } from "@/components/ui/error-text";
@@ -15,6 +15,13 @@ interface CodexAuthStatus {
   updatedAt?: string;
 }
 
+interface DeviceLogin {
+  deviceAuthId: string;
+  userCode: string;
+  verificationUrl: string;
+  intervalSeconds: number;
+}
+
 export function CodexLoginPanel() {
   const confirm = useConfirm();
   const [status, setStatus] = React.useState<CodexAuthStatus | null>(null);
@@ -22,9 +29,8 @@ export function CodexLoginPanel() {
   const [starting, setStarting] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  // Set once a login is started; holds the URL so the user can reopen the tab.
-  const [authorizationUrl, setAuthorizationUrl] = React.useState<string | null>(null);
-  const [code, setCode] = React.useState("");
+  const [login, setLogin] = React.useState<DeviceLogin | null>(null);
+  const [copied, setCopied] = React.useState(false);
 
   const fetchStatus = React.useCallback(async () => {
     const res = await fetch("/api/codex");
@@ -57,37 +63,51 @@ export function CodexLoginPanel() {
         setError(await readError(res));
         return;
       }
-      const body = (await res.json()) as { authorizationUrl: string; status: CodexAuthStatus };
+      const body = (await res.json()) as DeviceLogin & { status: CodexAuthStatus };
       setStatus(body.status);
-      setAuthorizationUrl(body.authorizationUrl);
-      setCode("");
-      window.open(body.authorizationUrl, "_blank", "noopener,noreferrer");
+      setLogin(body);
+      setCopied(false);
+      window.open(body.verificationUrl, "_blank", "noopener,noreferrer");
     } finally {
       setStarting(false);
     }
   }
 
-  async function submitCode() {
-    if (submitting || !code.trim()) return;
-    setSubmitting(true);
-    setError(null);
-    try {
+  React.useEffect(() => {
+    if (!login) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+
+    async function poll() {
+      setSubmitting(true);
       const res = await fetch("/api/codex", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ code }),
+        body: JSON.stringify({ deviceAuthId: login?.deviceAuthId }),
       });
+      if (cancelled) return;
       if (!res.ok) {
         setError(await readError(res));
+        setSubmitting(false);
+        setLogin(null);
         return;
       }
-      setStatus((await res.json()) as CodexAuthStatus);
-      setAuthorizationUrl(null);
-      setCode("");
-    } finally {
-      setSubmitting(false);
+      const next = (await res.json()) as CodexAuthStatus;
+      setStatus(next);
+      if (next.signedIn) {
+        setSubmitting(false);
+        setLogin(null);
+        return;
+      }
+      timer = setTimeout(poll, Math.max(login?.intervalSeconds ?? 5, 1) * 1000);
     }
-  }
+
+    timer = setTimeout(poll, Math.max(login.intervalSeconds, 1) * 1000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [login]);
 
   async function signOut() {
     if (
@@ -105,7 +125,7 @@ export function CodexLoginPanel() {
       return;
     }
     setStatus((await res.json()) as CodexAuthStatus);
-    setAuthorizationUrl(null);
+    setLogin(null);
   }
 
   return (
@@ -142,37 +162,44 @@ export function CodexLoginPanel() {
                 ) : (
                   <MessageSquare className="size-3.5" />
                 )}
-                {authorizationUrl ? "Restart sign-in" : "Sign in with ChatGPT"}
+                {login ? "Restart sign-in" : "Sign in with ChatGPT"}
               </Button>
             </div>
 
-            {authorizationUrl && (
-              <div className="space-y-2 border-t border-border/60 pt-4">
+            {login && (
+              <div className="space-y-3 border-t border-border/60 pt-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <label htmlFor="codex-code" className="text-sm font-medium">
-                    Paste the code from the ChatGPT page
-                  </label>
+                  <div>
+                    <div className="text-sm font-medium">Enter this one-time code</div>
+                    <div className="text-xs text-muted-foreground">Expires in 15 minutes</div>
+                  </div>
                   <a
-                    href={authorizationUrl}
+                    href={login.verificationUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
                   >
-                    <ExternalLink className="size-3.5" /> Reopen sign-in
+                    <ExternalLink className="size-3.5" /> Open sign-in page
                   </a>
                 </div>
-                <textarea
-                  id="codex-code"
-                  value={code}
-                  onChange={(e) => setCode(e.target.value)}
-                  rows={3}
-                  spellCheck={false}
-                  placeholder="ac_… — or paste the whole https://auth.openai.com/deviceauth/callback?… URL"
-                  className="w-full rounded-md border border-border/60 bg-background p-2 font-mono text-xs"
-                />
-                <Button onClick={submitCode} disabled={submitting || !code.trim()}>
-                  {submitting && <Spinner className="size-3.5" />} Complete sign-in
-                </Button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <code className="rounded-md border border-border/60 bg-background px-3 py-2 text-sm font-semibold tracking-[0.16em]">
+                    {login.userCode}
+                  </code>
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      void navigator.clipboard.writeText(login.userCode);
+                      setCopied(true);
+                    }}
+                  >
+                    <ClipboardCopy className="size-3.5" /> {copied ? "Copied" : "Copy code"}
+                  </Button>
+                </div>
+                <div className="flex items-center gap-2 text-xs text-muted-foreground" role="status">
+                  {submitting && <Spinner className="size-3.5" />}
+                  Waiting for authorization. This page will update automatically.
+                </div>
               </div>
             )}
           </div>
@@ -182,12 +209,11 @@ export function CodexLoginPanel() {
       </div>
 
       <p className="text-xs text-muted-foreground">
-        This uses OpenAI&apos;s device-code flow: sign-in opens in a new tab, and OpenAI redirects
-        to a page showing an authorization code. Copy that code (or the whole callback URL) back
-        here. Unlike a loopback login, this works when the server and your browser are on different
-        machines — a hosted deployment included. Credentials are stored in the orchestrator database
-        and refreshed automatically. The <code>npm run task -- codex login</code> CLI command does
-        the same thing.
+        This uses OpenAI&apos;s device-code flow. Open the sign-in page, enter the one-time code,
+        and keep this page open while authorization completes. Unlike a loopback login, this works
+        when the server and browser are on different machines. Credentials are stored in the
+        orchestrator database and refreshed automatically. The <code>npm run task -- codex login</code>
+        CLI command uses the same flow.
       </p>
     </div>
   );

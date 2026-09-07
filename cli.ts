@@ -682,22 +682,19 @@ async function cmdCodex(args: Args): Promise<number> {
   const sub = args._.shift();
   if (sub === "login") {
     const { startCodexLogin, completeCodexLogin } = await import("./lib/codex-oauth-store");
-    const { authorizationUrl } = await startCodexLogin();
+    const device = await startCodexLogin();
     console.log(
-      "Open this URL, approve the sign-in, then paste the code (or the whole\n" +
-        "callback URL) from the page you land on:\n\n  " +
-        authorizationUrl +
-        "\n"
+      "Open this URL and enter the one-time device code:\n\n  " +
+        device.verificationUrl +
+        "\n\n  Code: " +
+        device.userCode +
+        "\n\nWaiting for authorization…"
     );
-    const { createInterface } = await import("node:readline/promises");
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-    let code: string;
-    try {
-      code = await rl.question("Code: ");
-    } finally {
-      rl.close();
-    }
-    const status = await completeCodexLogin(code);
+    let status;
+    do {
+      await new Promise((resolve) => setTimeout(resolve, device.intervalSeconds * 1000));
+      status = await completeCodexLogin(device.deviceAuthId);
+    } while (!status.signedIn);
     console.log(
       "Signed in; credentials stored in the database" +
         (status.accountId ? ` (account ${status.accountId}).` : ".")

@@ -817,14 +817,15 @@ export const codexCredentials = pgTable("codex_credentials", {
   updatedAt: ts("updated_at").notNull().defaultNow(),
 });
 
-// A device-code login in flight. The PKCE verifier has to survive between "user
-// clicked sign in" and "user pasted the code back" — minutes later, possibly
-// across a redeploy — so it is persisted rather than held in module scope.
+// A device-code login in flight. OpenAI returns the device auth id, user code,
+// and polling interval before the browser step; they must survive requests and
+// deploys while the control plane waits for authorization.
 export const codexLoginAttempts = pgTable(
   "codex_login_attempts",
   {
-    state: text("state").primaryKey(),
-    verifier: text("verifier").notNull(),
+    deviceAuthId: text("device_auth_id").primaryKey(),
+    userCode: text("user_code").notNull(),
+    intervalSeconds: integer("interval_seconds").notNull().default(5),
     createdAt: ts("created_at").notNull().defaultNow(),
   },
   (t) => ({

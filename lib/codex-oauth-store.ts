@@ -11,13 +11,11 @@ import { eq, lt } from "drizzle-orm";
 import { db } from "@/db";
 import { codexCredentials, codexLoginAttempts } from "@/db/schema";
 import {
-  buildAuthorizationUrl,
   CodexLoginError,
   extractAccountId,
   exchangeAuthorizationCode,
-  generatePkce,
-  generateState,
-  parseDeviceCallbackInput,
+  pollDeviceAuthorization,
+  requestDeviceCode,
   revokeToken,
   type CodexTokens,
 } from "./codex-oauth-login";
@@ -55,66 +53,52 @@ export async function saveCodexTokens(tokens: CodexTokens): Promise<CodexAuthSta
   return codexAuthStatus();
 }
 
-/**
- * Begin a device-code login: mint PKCE + state, persist the verifier, and hand
- * back the URL for the user's browser. The exchange happens later, when the
- * user pastes the code into {@link completeCodexLogin}.
- */
-export async function startCodexLogin(): Promise<{ authorizationUrl: string; state: string }> {
+/** Start a device-code login and persist the values needed for server polling. */
+export async function startCodexLogin() {
   await sweepExpiredAttempts();
-  const { verifier, challenge } = generatePkce();
-  const state = generateState();
-  await db.insert(codexLoginAttempts).values({ state, verifier, createdAt: new Date() });
-  return { authorizationUrl: buildAuthorizationUrl({ challenge, state }), state };
+  const deviceCode = await requestDeviceCode();
+  // The orchestrator stores one Codex credential, so a restarted sign-in
+  // atomically supersedes any older attempt. A failed network request above
+  // leaves the still-valid prior attempt intact.
+  await db.transaction(async (tx) => {
+    await tx.delete(codexLoginAttempts);
+    await tx.insert(codexLoginAttempts).values({
+      deviceAuthId: deviceCode.deviceAuthId,
+      userCode: deviceCode.userCode,
+      intervalSeconds: deviceCode.intervalSeconds,
+      createdAt: new Date(),
+    });
+  });
+  return deviceCode;
 }
 
-/**
- * Finish the login from whatever the user pasted (bare code or full callback
- * URL). When the paste carries a state we verify it against the stored attempt;
- * a bare code has no state to check, so it redeems the single outstanding
- * attempt and is rejected outright if more than one is in flight.
- */
-export async function completeCodexLogin(input: string): Promise<CodexAuthStatus> {
+/** Poll OpenAI once and complete the token exchange when the user has approved. */
+export async function completeCodexLogin(deviceAuthId: string): Promise<CodexAuthStatus> {
   await sweepExpiredAttempts();
-  const { code, state } = parseDeviceCallbackInput(input);
-
-  const attempt = state ? await attemptByState(state) : await soleAttempt();
-  // Single-use: burn the verifier before the exchange so a replayed paste
-  // cannot re-run it, and a failed exchange forces a clean restart rather than
-  // leaving a half-consumed attempt around.
-  await db.delete(codexLoginAttempts).where(eq(codexLoginAttempts.state, attempt.state));
-
-  const tokens = await exchangeAuthorizationCode(code, attempt.verifier);
-  return saveCodexTokens(tokens);
-}
-
-async function attemptByState(state: string) {
-  const [row] = await db
+  const [attempt] = await db
     .select()
     .from(codexLoginAttempts)
-    .where(eq(codexLoginAttempts.state, state))
+    .where(eq(codexLoginAttempts.deviceAuthId, deviceAuthId))
     .limit(1);
-  if (!row) {
+  if (!attempt) {
     throw new CodexLoginError(
-      "STATE_MISMATCH",
+      "NO_ATTEMPT",
       "That sign-in has expired or was already used. Start a new one."
     );
   }
-  return row;
-}
 
-async function soleAttempt() {
-  const rows = await db.select().from(codexLoginAttempts).limit(2);
-  if (rows.length === 0) {
-    throw new CodexLoginError("NO_ATTEMPT", "No sign-in is in progress. Start one first.");
-  }
-  if (rows.length > 1) {
-    throw new CodexLoginError(
-      "AMBIGUOUS_ATTEMPT",
-      "More than one sign-in is in progress. Paste the full callback URL so it can be matched, or start over."
-    );
-  }
-  return rows[0];
+  const result = await pollDeviceAuthorization(attempt.deviceAuthId, attempt.userCode);
+  if (result.status === "pending") return codexAuthStatus();
+
+  // Burn the attempt before exchanging the single-use authorization code.
+  await db
+    .delete(codexLoginAttempts)
+    .where(eq(codexLoginAttempts.deviceAuthId, attempt.deviceAuthId));
+  const tokens = await exchangeAuthorizationCode(
+    result.authorizationCode,
+    result.codeVerifier
+  );
+  return saveCodexTokens(tokens);
 }
 
 /**
@@ -195,7 +179,7 @@ function toStored(cred: {
 export async function codexAuthStatus(): Promise<CodexAuthStatus> {
   const [cred] = await db.select().from(codexCredentials).limit(1);
   const [attempt] = await db
-    .select({ state: codexLoginAttempts.state })
+    .select({ deviceAuthId: codexLoginAttempts.deviceAuthId })
     .from(codexLoginAttempts)
     .limit(1);
   return {

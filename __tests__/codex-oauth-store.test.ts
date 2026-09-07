@@ -1,6 +1,3 @@
-// The DB-backed Codex credential store. This is what replaced ~/.codex/auth.json
-// and the CODEX_ACCESS_TOKEN deploy secret: a device-code login in the UI lands
-// here, and dispatch reads (and refreshes) it from here.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db";
 import { codexCredentials, codexLoginAttempts } from "../db/schema";
@@ -12,13 +9,21 @@ import {
   saveCodexTokens,
   startCodexLogin,
 } from "../lib/codex-oauth-store";
-import { CODEX_DEVICE_REDIRECT_URI } from "../lib/codex-oauth-login";
+import { CODEX_DEVICE_VERIFICATION_URL } from "../lib/codex-oauth-login";
 
 function jwt(claims: Record<string, unknown>): string {
   return `header.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.sig`;
 }
 
 const expiringIn = (seconds: number) => jwt({ exp: Math.floor(Date.now() / 1000) + seconds });
+
+function deviceCodeResponse(id = "device-123", code = "ABCD-EFGH", interval = "2") {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ device_auth_id: id, user_code: code, interval }),
+  };
+}
 
 beforeEach(async () => {
   await db.delete(codexCredentials);
@@ -39,7 +44,6 @@ describe("saveCodexTokens", () => {
     expect(status).toMatchObject({ signedIn: true, accountId: "acct-1" });
     expect(status.expiresAt).toEqual(expect.any(String));
 
-    // A second login replaces the row rather than violating the singleton.
     await saveCodexTokens({ access_token: jwt({ sub: "acct-2" }), refresh_token: "ref2" });
     const rows = await db.select().from(codexCredentials);
     expect(rows).toHaveLength(1);
@@ -49,71 +53,90 @@ describe("saveCodexTokens", () => {
 });
 
 describe("startCodexLogin", () => {
-  it("returns a device-redirect authorize URL and persists the verifier", async () => {
-    const { authorizationUrl, state } = await startCodexLogin();
-    const url = new URL(authorizationUrl);
-    expect(url.searchParams.get("redirect_uri")).toBe(CODEX_DEVICE_REDIRECT_URI);
-    expect(url.searchParams.get("state")).toBe(state);
+  it("returns and persists the OpenAI device code", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => deviceCodeResponse()));
+    const device = await startCodexLogin();
+    expect(device).toEqual({
+      deviceAuthId: "device-123",
+      userCode: "ABCD-EFGH",
+      verificationUrl: CODEX_DEVICE_VERIFICATION_URL,
+      intervalSeconds: 2,
+    });
 
     const [attempt] = await db.select().from(codexLoginAttempts);
-    expect(attempt.state).toBe(state);
-    expect(attempt.verifier).toEqual(expect.any(String));
+    expect(attempt).toMatchObject({
+      deviceAuthId: "device-123",
+      userCode: "ABCD-EFGH",
+      intervalSeconds: 2,
+    });
+  });
+
+  it("replaces an older pending attempt", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(deviceCodeResponse("old", "OLD"))
+      .mockResolvedValueOnce(deviceCodeResponse("new", "NEW"));
+    vi.stubGlobal("fetch", fetchMock);
+    await startCodexLogin();
+    await startCodexLogin();
+    expect(await db.select().from(codexLoginAttempts)).toMatchObject([
+      { deviceAuthId: "new", userCode: "NEW" },
+    ]);
   });
 });
 
 describe("completeCodexLogin", () => {
-  function stubExchange() {
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({ access_token: expiringIn(3600), refresh_token: "ref" }),
-    }));
+  it("keeps the attempt while authorization is pending", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(deviceCodeResponse())
+      .mockResolvedValueOnce({ ok: false, status: 404 });
     vi.stubGlobal("fetch", fetchMock);
-    return fetchMock;
-  }
+    const device = await startCodexLogin();
 
-  it("redeems a pasted callback URL, matching it to the attempt by state", async () => {
-    const { state } = await startCodexLogin();
-    const fetchMock = stubExchange();
-
-    const status = await completeCodexLogin(
-      `${CODEX_DEVICE_REDIRECT_URI}?code=ac_paste&scope=openid&state=${state}`
-    );
-    expect(status.signedIn).toBe(true);
-
-    const body = new URLSearchParams(
-      (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string
-    );
-    expect(body.get("code")).toBe("ac_paste");
-    expect(body.get("redirect_uri")).toBe(CODEX_DEVICE_REDIRECT_URI);
+    await expect(completeCodexLogin(device.deviceAuthId)).resolves.toMatchObject({
+      signedIn: false,
+      pending: true,
+    });
+    expect(await db.select().from(codexLoginAttempts)).toHaveLength(1);
   });
 
-  it("redeems a bare code against the single outstanding attempt", async () => {
-    await startCodexLogin();
-    stubExchange();
-    await expect(completeCodexLogin("ac_bare")).resolves.toMatchObject({ signedIn: true });
-  });
+  it("exchanges an approved device authorization and burns the attempt", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(deviceCodeResponse())
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          authorization_code: "auth-code",
+          code_challenge: "challenge",
+          code_verifier: "server-verifier",
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ access_token: expiringIn(3600), refresh_token: "ref" }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+    const device = await startCodexLogin();
 
-  it("burns the attempt so a replayed paste cannot be redeemed twice", async () => {
-    const { state } = await startCodexLogin();
-    stubExchange();
-    const paste = `${CODEX_DEVICE_REDIRECT_URI}?code=ac_once&state=${state}`;
-
-    await completeCodexLogin(paste);
+    await expect(completeCodexLogin(device.deviceAuthId)).resolves.toMatchObject({
+      signedIn: true,
+      pending: false,
+    });
     expect(await db.select().from(codexLoginAttempts)).toHaveLength(0);
-    await expect(completeCodexLogin(paste)).rejects.toThrow(/expired or was already used/);
+
+    const tokenBody = new URLSearchParams(
+      (fetchMock.mock.calls[2] as unknown as [string, RequestInit])[1].body as string
+    );
+    expect(tokenBody.get("code")).toBe("auth-code");
+    expect(tokenBody.get("code_verifier")).toBe("server-verifier");
   });
 
-  it("refuses a bare code when more than one login is in flight", async () => {
-    await startCodexLogin();
-    await startCodexLogin();
-    await expect(completeCodexLogin("ac_ambiguous")).rejects.toThrow(/More than one sign-in/);
-  });
-
-  it("rejects a state that matches no attempt", async () => {
-    await startCodexLogin();
-    await expect(
-      completeCodexLogin(`${CODEX_DEVICE_REDIRECT_URI}?code=ac_x&state=not-the-state`)
-    ).rejects.toThrow(/expired or was already used/);
+  it("rejects an unknown or consumed device auth id", async () => {
+    await expect(completeCodexLogin("missing")).rejects.toThrow(/expired or was already used/);
   });
 });
 
@@ -121,25 +144,17 @@ describe("resolveStoredAccessToken", () => {
   it("returns a live token untouched", async () => {
     const access = expiringIn(3600);
     await saveCodexTokens({ access_token: access, refresh_token: "ref" });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        throw new Error("should not refresh a live token");
-      })
-    );
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("should not refresh"); }));
     await expect(resolveStoredAccessToken()).resolves.toBe(access);
   });
 
   it("refreshes a near-expiry token and writes the rotated pair back", async () => {
     await saveCodexTokens({ access_token: expiringIn(30), refresh_token: "old-ref" });
     const rotated = expiringIn(3600);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => ({
-        ok: true,
-        json: async () => ({ access_token: rotated, refresh_token: "new-ref" }),
-      }))
-    );
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ access_token: rotated, refresh_token: "new-ref" }),
+    })));
 
     await expect(resolveStoredAccessToken()).resolves.toBe(rotated);
     const [row] = await db.select().from(codexCredentials);
@@ -147,11 +162,10 @@ describe("resolveStoredAccessToken", () => {
     expect(row.refreshToken).toBe("new-ref");
   });
 
-  it("falls back to the stale token when the refresh fails, rather than failing the run", async () => {
+  it("falls back to the stale token when refresh fails", async () => {
     const stale = expiringIn(30);
     await saveCodexTokens({ access_token: stale, refresh_token: "old-ref" });
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 401, text: async () => "" })));
-
     await expect(resolveStoredAccessToken()).resolves.toBe(stale);
   });
 
@@ -163,6 +177,7 @@ describe("resolveStoredAccessToken", () => {
 describe("codexLogout", () => {
   it("revokes, clears the credential, and drops outstanding attempts", async () => {
     await saveCodexTokens({ access_token: expiringIn(3600), refresh_token: "ref" });
+    vi.stubGlobal("fetch", vi.fn(async () => deviceCodeResponse()));
     await startCodexLogin();
     const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({}) }));
     vi.stubGlobal("fetch", fetchMock);
@@ -177,8 +192,9 @@ describe("codexLogout", () => {
 });
 
 describe("codexAuthStatus", () => {
-  it("reports pending while an attempt is outstanding and signed-out with no credential", async () => {
+  it("reports pending while an attempt is outstanding", async () => {
     await expect(codexAuthStatus()).resolves.toMatchObject({ signedIn: false, pending: false });
+    vi.stubGlobal("fetch", vi.fn(async () => deviceCodeResponse()));
     await startCodexLogin();
     await expect(codexAuthStatus()).resolves.toMatchObject({ signedIn: false, pending: true });
   });
