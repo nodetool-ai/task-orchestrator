@@ -19,11 +19,9 @@ import {
   Sparkline,
   Badge,
   piButtons,
-  piWrap,
-  piWrapMobile,
   type PiState,
 } from "./primitives";
-import { useIsMobile } from "./use-is-mobile";
+import { useIsCompact, useIsMobile } from "./use-is-mobile";
 
 export type FloorRun = {
   id: string;
@@ -93,15 +91,16 @@ export function FactoryFloor({
   );
 
   const isMobile = useIsMobile();
+  const isCompact = useIsCompact();
   const pairGrid: React.CSSProperties = isMobile
     ? { display: "flex", flexDirection: "column", gap: 24 }
     : { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 };
-  const queueGrid: React.CSSProperties = isMobile
+  const queueGrid: React.CSSProperties = isMobile || isCompact
     ? { display: "flex", flexDirection: "column", gap: 24 }
-    : { display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 24 };
+    : { display: "grid", gridTemplateColumns: "minmax(0, 1.8fr) minmax(280px, 0.8fr)", gap: 24 };
 
   return (
-    <div style={isMobile ? piWrapMobile : piWrap}>
+    <div className="pi-page-shell">
       <FloorHeader
         running={running.length}
         review={review.length}
@@ -120,16 +119,27 @@ export function FactoryFloor({
       <Section
         glyph={<Icon name="live-dot" size={12} />}
         glyphColor="var(--s-progress)"
-        title="On the floor"
+        title="Running"
         count={running.length}
         meta={
           running.length > 0 ? (
-            <CyclingText items={["streaming tokens", "tools in flight", "live agents"]} />
+            <CyclingText items={["streaming tokens", "tools in flight", "running agents"]} />
           ) : null
         }
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {running.length === 0 && <Empty>No live agents. Spawn one to start the line.</Empty>}
+          {running.length === 0 && (
+            <Empty
+              title="No running agents"
+              action={(
+                <Link href="/tasks" style={{ ...piButtons.primaryInline(), textDecoration: "none" }}>
+                  View queued tasks
+                </Link>
+              )}
+            >
+              Start an agent from a queued task when you are ready.
+            </Empty>
+          )}
           {running.map((r) => (
             <RunRow key={r.id} run={r} isMobile={isMobile} />
           ))}
@@ -141,27 +151,27 @@ export function FactoryFloor({
       <div style={pairGrid}>
         <Section
           glyph={<StateIcon state="review" size={13} />}
-          title="Needs your review"
+          title="Review"
           count={review.length}
         >
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {review.map((r) => (
               <ReviewRow key={r.id} run={r} />
             ))}
-            {review.length === 0 && <Empty>No PRs waiting.</Empty>}
+            {review.length === 0 && <Empty>Nothing needs review.</Empty>}
           </div>
         </Section>
 
         <Section
           glyph={<StateIcon state="blocked" size={13} />}
-          title="Stuck"
+          title="Blocked"
           count={blocked.length}
         >
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {blocked.map((r) => (
               <BlockedRow key={r.id} run={r} />
             ))}
-            {blocked.length === 0 && <Empty>Nothing stuck.</Empty>}
+            {blocked.length === 0 && <Empty>No blocked runs.</Empty>}
           </div>
         </Section>
       </div>
@@ -171,10 +181,10 @@ export function FactoryFloor({
       <div style={queueGrid}>
         <Section
           glyph={<StateIcon state="todo" size={13} />}
-          title="Queue"
+          title="Queued tasks"
           count={queue.length}
           right={
-            <Link href="/tasks?state=todo" style={{ ...piButtons.ghost(), textDecoration: "none" }}>
+            <Link href="/tasks" style={{ ...piButtons.ghost(), textDecoration: "none" }}>
               <Icon name="filter" size={12} />
               All
             </Link>
@@ -185,11 +195,11 @@ export function FactoryFloor({
 
         <Section
           glyph={<StateIcon state="done" size={13} />}
-          title="Shipped recently"
+          title="Recently completed"
           count={shipped.length}
         >
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {shipped.length === 0 && <Empty>Nothing shipped yet.</Empty>}
+            {shipped.length === 0 && <Empty>No completed work yet.</Empty>}
             {shipped.map((s) => (
               <ShippedRowView key={s.id} run={s} isMobile={isMobile} />
             ))}
@@ -226,9 +236,9 @@ function FloorHeader({
   const cells: { state: PiState; label: string; n: number; live?: boolean }[] = [
     { state: "in_progress", label: "Running", n: running, live: running > 0 },
     { state: "review", label: "Review", n: review },
-    { state: "blocked", label: "Stuck", n: blocked },
-    { state: "todo", label: "Queue", n: queue },
-    { state: "done", label: "Shipped", n: shipped },
+    { state: "blocked", label: "Blocked", n: blocked },
+    { state: "todo", label: "Queued", n: queue },
+    { state: "done", label: "Completed", n: shipped },
   ];
 
   return (
@@ -245,7 +255,7 @@ function FloorHeader({
       >
         <div>
           <h1 style={{ margin: 0, fontSize: isMobile ? 18 : 20, fontWeight: 600, letterSpacing: "-0.01em", color: "var(--pi-fg)" }}>
-            Factory floor
+            Operations overview
           </h1>
           <div
             style={{
@@ -260,16 +270,16 @@ function FloorHeader({
           >
             <span
               style={{
-                color: "var(--s-progress)",
+                color: running > 0 ? "var(--s-progress)" : "var(--pi-muted)",
                 display: "inline-flex",
                 alignItems: "center",
                 gap: 4,
               }}
             >
-              <Icon name="live-dot" size={10} /> live
+              <Icon name={running > 0 ? "live-dot" : "circle"} size={10} /> {running > 0 ? "Running" : "Connected"}
             </span>
             <span>·</span>
-            <span>{personasActive} personas active</span>
+            <span>{personasActive} active {personasActive === 1 ? "agent" : "agents"}</span>
           </div>
         </div>
         <div
@@ -326,7 +336,7 @@ function FloorHeader({
                   letterSpacing: "-0.02em",
                 }}
               >
-                {String(c.n).padStart(2, "0")}
+                {c.n}
               </span>
             </div>
           );
@@ -373,7 +383,7 @@ function RunRow({ run, isMobile }: { run: FloorRun; isMobile: boolean }) {
   const subLabel =
     ({ editing: "Editing", tool: "Tool", thinking: "Thinking", starting: "Starting" } as Record<string, string>)[
       run.sub || ""
-    ] || "Active";
+    ] || "Running";
 
   if (isMobile) {
     return (
@@ -727,10 +737,10 @@ function ReviewRow({ run }: { run: FloorRun }) {
         {run.task.title}
       </div>
       <div style={{ height: 10 }} />
-      <div style={{ display: "flex", alignItems: "center", gap: 12, color: "var(--pi-muted-2)" }}>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, color: "var(--pi-muted-2)", minWidth: 0 }}>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 4, minWidth: 0, overflow: "hidden" }}>
           <Icon name="branch" size={11} />
-          <span className="pi-mono" style={{ fontSize: 11 }}>
+          <span className="pi-mono" style={{ fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {run.branch || "—"}
           </span>
         </span>
@@ -770,7 +780,7 @@ function BlockedRow({ run }: { run: FloorRun }) {
         ["--s-attn" as string]: "var(--s-blocked)",
       } as React.CSSProperties}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
         <StatePill state="blocked" label={run.sub === "budget" ? "Budget" : "Criteria"} size="xs" />
         <MonoTag>{run.id}</MonoTag>
         <span style={{ flex: 1 }} />
@@ -811,10 +821,12 @@ function BlockedRow({ run }: { run: FloorRun }) {
             alignItems: "center",
             gap: 4,
             color: "var(--pi-muted-2)",
+            minWidth: 0,
+            overflow: "hidden",
           }}
         >
           <Icon name="branch" size={11} />
-          <span className="pi-mono" style={{ fontSize: 11 }}>
+          <span className="pi-mono" style={{ fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {run.branch || "—"}
           </span>
         </span>
@@ -825,7 +837,18 @@ function BlockedRow({ run }: { run: FloorRun }) {
 
 function QueueTable({ queue, isMobile }: { queue: QueueRow[]; isMobile: boolean }) {
   if (queue.length === 0) {
-    return <Empty>Queue empty.</Empty>;
+    return (
+      <Empty
+        title="No queued tasks"
+        action={(
+          <Link href="/tasks" style={{ ...piButtons.ghostSm(), textDecoration: "none" }}>
+            View tasks
+          </Link>
+        )}
+      >
+        Create or move a task into the queue to make it ready for an agent.
+      </Empty>
+    );
   }
   if (isMobile) {
     return (
@@ -922,8 +945,8 @@ function QueueTable({ queue, isMobile }: { queue: QueueRow[]; isMobile: boolean 
           href={`/tasks/${t.id}`}
           style={{
             display: "grid",
-            gridTemplateColumns: "auto 130px 1fr auto auto auto auto",
-            gap: 14,
+            gridTemplateColumns: "auto 126px minmax(220px, 1fr) auto auto minmax(90px, auto) auto",
+            gap: 12,
             alignItems: "center",
             padding: "10px 14px",
             borderTop: i === 0 ? "none" : "1px solid var(--pi-hairline)",
@@ -946,7 +969,7 @@ function QueueTable({ queue, isMobile }: { queue: QueueRow[]; isMobile: boolean 
           >
             {t.title}
           </span>
-          <span className="pi-mono" style={{ fontSize: 11, color: "var(--pi-muted)" }}>
+          <span className="pi-mono" style={{ fontSize: 12, color: "var(--pi-muted)" }}>
             {t.criteria} criteria
           </span>
           <span style={{ display: "inline-flex", gap: 4 }}>
@@ -956,7 +979,7 @@ function QueueTable({ queue, isMobile }: { queue: QueueRow[]; isMobile: boolean 
               </Badge>
             ))}
           </span>
-          <span style={{ minWidth: 130 }}>
+          <span style={{ minWidth: 100 }}>
             {t.persona ? (
               <PersonaChip id={t.persona} />
             ) : (

@@ -9,7 +9,7 @@ import { SignOutButton } from "@/components/sign-out-button";
 import { useIsMobile } from "./use-is-mobile";
 
 const NAV: { id: string; href: string; label: string; icon: React.ComponentProps<typeof Icon>["name"] }[] = [
-  { id: "floor", href: "/", label: "Floor", icon: "factory" },
+  { id: "floor", href: "/", label: "Overview", icon: "factory" },
   { id: "plans", href: "/plans", label: "Plans", icon: "plans" },
   { id: "tasks", href: "/tasks", label: "Tasks", icon: "tasks" },
   { id: "runs", href: "/runs", label: "Runs", icon: "chat" },
@@ -94,7 +94,7 @@ export function TopNav({ email }: { email?: string }) {
         >
           <Icon name="pi" size={14} stroke={2} />
         </span>
-        <span>Pi Factory</span>
+        <span>Task Orchestrator</span>
       </Link>
 
       <div style={{ width: 12 }} />
@@ -106,6 +106,7 @@ export function TopNav({ email }: { email?: string }) {
             <Link
               key={n.id}
               href={n.href}
+              className={n.id === "schedules" || n.id === "settings" ? "pi-top-nav-secondary" : undefined}
               style={{
                 display: "inline-flex",
                 alignItems: "center",
@@ -123,7 +124,7 @@ export function TopNav({ email }: { email?: string }) {
               }}
             >
               <Icon name={n.icon} size={14} />
-              <span>{n.label}</span>
+              <span className="pi-top-nav-label">{n.label}</span>
             </Link>
           );
         })}
@@ -132,6 +133,7 @@ export function TopNav({ email }: { email?: string }) {
       <div style={{ flex: 1 }} />
 
       <button
+        className="pi-top-nav-search"
         onClick={openPalette}
         style={{
           display: "inline-flex",
@@ -166,7 +168,7 @@ export function TopNav({ email }: { email?: string }) {
           className="pi-mono"
           style={{ fontSize: 11, color: "var(--pi-muted)", display: "inline-flex", alignItems: "center", gap: 8 }}
         >
-          {email}
+          <span className="pi-top-nav-email-address">{email}</span>
           <SignOutButton />
         </span>
       )}
@@ -246,7 +248,7 @@ function TopNavMobile({ pathname, email }: { pathname: string; email?: string })
           >
             <Icon name="pi" size={14} stroke={2} />
           </span>
-          <span>Pi Factory</span>
+          <span>Task Orchestrator</span>
         </Link>
 
         <div style={{ flex: 1 }} />

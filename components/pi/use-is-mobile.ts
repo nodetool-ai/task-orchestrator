@@ -15,3 +15,15 @@ export function useIsMobile(): boolean {
   }, []);
   return isMobile;
 }
+
+export function useIsCompact(): boolean {
+  const [isCompact, setIsCompact] = React.useState(false);
+  React.useEffect(() => {
+    const mql = window.matchMedia("(max-width: 1100px)");
+    const update = () => setIsCompact(mql.matches);
+    update();
+    mql.addEventListener("change", update);
+    return () => mql.removeEventListener("change", update);
+  }, []);
+  return isCompact;
+}

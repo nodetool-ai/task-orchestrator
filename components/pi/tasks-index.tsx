@@ -2,7 +2,9 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
+  Empty,
   Hairline,
   Icon,
   MonoTag,
@@ -13,13 +15,11 @@ import {
   STATE_COLOR,
   STATE_LABEL,
   piButtons,
-  piWrap,
-  piWrapMobile,
   type PiState,
 } from "./primitives";
 import { openSpawn } from "./overlay-store";
-import { useIsMobile } from "./use-is-mobile";
-import { prShortLabel } from "@/lib/utils";
+import { useIsCompact, useIsMobile } from "./use-is-mobile";
+import { describe, prShortLabel } from "@/lib/utils";
 import { Tooltip } from "@/components/ui/tooltip";
 
 export type TaskRowData = {
@@ -45,16 +45,18 @@ export function TasksIndex({
   rows: TaskRowData[];
   plans: { id: string; title: string }[];
 }) {
+  const router = useRouter();
   const [q, setQ] = React.useState("");
   const [stateFilter, setStateFilter] = React.useState<StateFilter>("open");
   const [groupBy, setGroupBy] = React.useState<GroupBy>("state");
   const [planFilter, setPlanFilter] = React.useState<string>("");
+  const [newTask, setNewTask] = React.useState(false);
 
   const counts = {
     total: rows.length,
-    live: rows.filter((r) => r.state === "in_progress").length,
-    queued: rows.filter((r) => r.state === "todo").length,
-    done: rows.filter((r) => r.state === "done").length,
+    open: rows.filter((r) => r.state !== "done" && r.state !== "cancelled").length,
+    completed: rows.filter((r) => r.state === "done").length,
+    cancelled: rows.filter((r) => r.state === "cancelled").length,
   };
 
   const filtered = React.useMemo(
@@ -99,9 +101,17 @@ export function TasksIndex({
   }, [filtered, groupBy]);
 
   const isMobile = useIsMobile();
+  const isCompact = useIsCompact();
+  const beginNewTask = () => {
+    if (plans.length === 0) {
+      router.push("/plans");
+      return;
+    }
+    setNewTask(true);
+  };
 
   return (
-    <div style={isMobile ? piWrapMobile : piWrap}>
+    <div className="pi-page-shell">
       <div
         style={{
           display: "flex",
@@ -116,21 +126,24 @@ export function TasksIndex({
           <h1 style={{ margin: 0, fontSize: isMobile ? 18 : 20, fontWeight: 600, letterSpacing: "-0.01em", color: "var(--pi-fg)" }}>
             Tasks
           </h1>
-          <div style={{ marginTop: 4, color: "var(--pi-muted-2)", fontSize: 12 }}>
-            {counts.total} total · {counts.live} live · {counts.queued} queued · {counts.done} shipped
+          <div style={{ marginTop: 4, color: "var(--pi-muted)", fontSize: 12 }}>
+            {counts.total} total · {counts.open} open · {counts.completed} completed · {counts.cancelled} cancelled
           </div>
         </div>
         <div style={{ display: "inline-flex", gap: 8 }}>
-          <button style={{ ...piButtons.ghostSm(), flex: isMobile ? 1 : undefined, justifyContent: "center" }}>
+          <button
+            onClick={beginNewTask}
+            style={{ ...piButtons.primaryInline(), flex: isMobile ? 1 : undefined, justifyContent: "center" }}
+          >
             <Icon name="plus" size={12} />
             New task
           </button>
           <button
             onClick={openSpawn}
-            style={{ ...piButtons.primaryInline(), flex: isMobile ? 1 : undefined, justifyContent: "center" }}
+            style={{ ...piButtons.ghostSm(), flex: isMobile ? 1 : undefined, justifyContent: "center" }}
           >
             <Icon name="spark" size={12} />
-            Spawn agent
+            Start agent
           </button>
         </div>
       </div>
@@ -195,8 +208,8 @@ export function TasksIndex({
               { value: "open", label: "Open" },
               { value: "in_progress", label: "Running" },
               { value: "review", label: "Review" },
-              { value: "blocked", label: "Stuck" },
-              { value: "todo", label: "Queue" },
+              { value: "blocked", label: "Blocked" },
+              { value: "todo", label: "Queued" },
               { value: "all", label: "All" },
             ]}
           />
@@ -267,10 +280,6 @@ export function TasksIndex({
                   background: "hsla(240 4% 11% / 0.6)",
                   borderTop: gi === 0 ? "none" : "1px solid var(--pi-hairline)",
                   borderBottom: "1px solid var(--pi-hairline)",
-                  position: "sticky",
-                  top: 48,
-                  zIndex: 5,
-                  backdropFilter: "blur(8px)",
                 }}
               >
                 {groupBy === "state" ? (
@@ -295,33 +304,188 @@ export function TasksIndex({
                   </>
                 )}
                 <span className="pi-mono" style={{ fontSize: 11, color: "var(--pi-muted-2)" }}>
-                  {String(list.length).padStart(2, "0")}
+                  {list.length}
                 </span>
               </div>
             )}
             {list.map((row) => (
-              <TaskRow key={row.id} row={row} isMobile={isMobile} />
+              <TaskRow key={row.id} row={row} isMobile={isMobile || isCompact} />
             ))}
           </React.Fragment>
         ))}
         {filtered.length === 0 && (
-          <div style={{ padding: 32, textAlign: "center", color: "var(--pi-muted-2)", fontSize: 12 }}>
-            No tasks match.
-          </div>
+          rows.length === 0 ? (
+            <div style={{ padding: 12 }}>
+              <Empty
+                title={plans.length === 0 ? "Create a plan first" : "Create your first task"}
+                action={(
+                  <button onClick={beginNewTask} style={piButtons.primaryInline()}>
+                    <Icon name="plus" size={12} />
+                    {plans.length === 0 ? "Create a plan" : "New task"}
+                  </button>
+                )}
+              >
+                {plans.length === 0
+                  ? "Tasks belong to plans. Create a plan first, then add concrete units of work."
+                  : "Capture a concrete unit of work, then start an agent when it is ready."}
+              </Empty>
+            </div>
+          ) : (
+            <div style={{ padding: 12 }}>
+              <Empty
+                title="No matching tasks"
+                action={(
+                  <button
+                    onClick={() => { setQ(""); setStateFilter("open"); setPlanFilter(""); }}
+                    style={piButtons.ghostSm()}
+                  >
+                    Clear filters
+                  </button>
+                )}
+              >
+                Try a different search or broaden the selected filters.
+              </Empty>
+            </div>
+          )
         )}
       </div>
+      {newTask && <NewTaskDialog plans={plans} onClose={() => setNewTask(false)} />}
+    </div>
+  );
+}
+
+function NewTaskDialog({ plans, onClose }: { plans: { id: string; title: string }[]; onClose: () => void }) {
+  const router = useRouter();
+  const [title, setTitle] = React.useState("");
+  const [planId, setPlanId] = React.useState(plans[0]?.id ?? "");
+  const [criteria, setCriteria] = React.useState("");
+  const [pending, startTransition] = React.useTransition();
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    const onKey = (event: KeyboardEvent) => event.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!title.trim()) return;
+    setError(null);
+    startTransition(async () => {
+      try {
+        const response = await fetch("/api/tasks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: title.trim(),
+            plan: planId || undefined,
+            criteria: criteria.split("\n").map((item) => item.trim()).filter(Boolean),
+          }),
+        });
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          setError(body.error ?? `HTTP ${response.status}`);
+          return;
+        }
+        onClose();
+        router.refresh();
+      } catch (caught) {
+        setError(describe(caught));
+      }
+    });
+  };
+
+  const inputStyle: React.CSSProperties = {
+    width: "100%",
+    border: "1px solid var(--pi-hairline)",
+    borderRadius: 6,
+    background: "var(--pi-bg)",
+    color: "var(--pi-fg)",
+    padding: "9px 10px",
+    fontFamily: "inherit",
+    fontSize: 13,
+    outline: "none",
+  };
+  const labelStyle: React.CSSProperties = {
+    display: "block",
+    marginBottom: 6,
+    color: "var(--pi-muted)",
+    fontSize: 11,
+    fontWeight: 600,
+  };
+
+  return (
+    <div
+      role="presentation"
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, zIndex: 100, display: "grid", placeItems: "center",
+        padding: 12, background: "hsla(240 6% 4% / 0.75)", backdropFilter: "blur(6px)",
+      }}
+    >
+      <form
+        onSubmit={submit}
+        onClick={(event) => event.stopPropagation()}
+        style={{
+          width: 520, maxWidth: "100%", padding: 20, borderRadius: 10,
+          border: "1px solid var(--pi-hairline-strong)", background: "var(--pi-surface)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 18 }}>
+          <h2 style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>New task</h2>
+          <span style={{ flex: 1 }} />
+          <button type="button" onClick={onClose} aria-label="Close" style={{ ...piButtons.ghost(), padding: 5 }}>
+            <Icon name="x" size={13} />
+          </button>
+        </div>
+        <label style={{ display: "block", marginBottom: 14 }}>
+          <span style={labelStyle}>Title</span>
+          <input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="What needs to be done?" style={inputStyle} />
+        </label>
+        <label style={{ display: "block", marginBottom: 14 }}>
+          <span style={labelStyle}>Plan</span>
+          <select required value={planId} onChange={(event) => setPlanId(event.target.value)} style={inputStyle}>
+            {plans.map((plan) => <option key={plan.id} value={plan.id}>{plan.title}</option>)}
+          </select>
+        </label>
+        <label style={{ display: "block", marginBottom: 14 }}>
+          <span style={labelStyle}>Acceptance criteria <span style={{ color: "var(--pi-muted-2)", fontWeight: 400 }}>(one per line)</span></span>
+          <textarea value={criteria} onChange={(event) => setCriteria(event.target.value)} rows={4} placeholder="Describe the completion criteria" style={{ ...inputStyle, resize: "vertical" }} />
+        </label>
+        {error && <div style={{ color: "var(--s-blocked)", fontSize: 12, marginBottom: 12 }}>{error}</div>}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, paddingTop: 14, borderTop: "1px solid var(--pi-hairline)" }}>
+          <button type="button" onClick={onClose} disabled={pending} style={piButtons.ghostSm()}>Cancel</button>
+          <button type="submit" disabled={pending || !title.trim()} style={{ ...piButtons.primaryInline(), opacity: pending || !title.trim() ? 0.4 : 1 }}>
+            <Icon name="plus" size={12} />
+            {pending ? "Creating…" : "Create task"}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
 
 function TaskRow({ row, isMobile }: { row: TaskRowData; isMobile: boolean }) {
+  const router = useRouter();
   const href = row.runDbId != null ? `/runs/${row.runDbId}` : `/tasks/${row.id}`;
   const isLive = row.state === "in_progress";
+  const openRow = () => router.push(href);
+  const onRowKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      openRow();
+    }
+  };
 
   if (isMobile) {
     return (
-      <Link
-        href={href}
+      <div
+        role="link"
+        tabIndex={0}
+        aria-label={`Open ${row.title}`}
+        onClick={openRow}
+        onKeyDown={onRowKeyDown}
         style={{
           display: "flex",
           flexDirection: "column",
@@ -330,6 +494,7 @@ function TaskRow({ row, isMobile }: { row: TaskRowData; isMobile: boolean }) {
           borderTop: "1px solid var(--pi-hairline)",
           textDecoration: "none",
           color: "var(--pi-fg)",
+          cursor: "pointer",
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
@@ -371,7 +536,7 @@ function TaskRow({ row, isMobile }: { row: TaskRowData; isMobile: boolean }) {
             gap: 10,
             flexWrap: "wrap",
             color: "var(--pi-muted-2)",
-            fontSize: 11,
+            fontSize: 12,
           }}
         >
           {row.criteria && (
@@ -392,7 +557,7 @@ function TaskRow({ row, isMobile }: { row: TaskRowData; isMobile: boolean }) {
           {row.planId && row.plan ? (
             <Link
               href={`/plans/${row.planId}`}
-              onClick={(e) => e.stopPropagation()}
+              onClick={(event) => event.stopPropagation()}
               style={{
                 color: "var(--pi-muted)",
                 fontSize: 11,
@@ -414,23 +579,29 @@ function TaskRow({ row, isMobile }: { row: TaskRowData; isMobile: boolean }) {
             <span style={{ fontSize: 11 }}>unassigned</span>
           )}
         </div>
-      </Link>
+      </div>
     );
   }
 
   return (
-    <Link
-      href={href}
+    <div
+      role="link"
+      tabIndex={0}
+      aria-label={`Open ${row.title}`}
+      onClick={openRow}
+      onKeyDown={onRowKeyDown}
       style={{
         display: "grid",
         gridTemplateColumns: "28px 130px 1fr 220px auto auto auto",
         gap: 14,
         alignItems: "center",
+        minHeight: 49,
         padding: "10px 14px",
         borderTop: "1px solid var(--pi-hairline)",
         textDecoration: "none",
         color: "var(--pi-fg)",
         transition: "background 120ms",
+        cursor: "pointer",
       }}
       onMouseEnter={(e) => (e.currentTarget.style.background = "var(--pi-surface-2)")}
       onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
@@ -455,14 +626,15 @@ function TaskRow({ row, isMobile }: { row: TaskRowData; isMobile: boolean }) {
       {row.planId ? (
         <Link
           href={`/plans/${row.planId}`}
-          onClick={(e) => e.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
           style={{
             color: "var(--pi-muted)",
-            fontSize: 11,
+            fontSize: 12,
             textDecoration: "none",
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
+            minWidth: 0,
           }}
         >
           {row.plan || "—"}
@@ -473,7 +645,7 @@ function TaskRow({ row, isMobile }: { row: TaskRowData; isMobile: boolean }) {
 
       {row.criteria ? (
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          <span className="pi-mono" style={{ fontSize: 11, color: "var(--pi-fg)" }}>
+          <span className="pi-mono" style={{ fontSize: 12, color: "var(--pi-fg)" }}>
             {row.criteria.done}/{row.criteria.total}
           </span>
           <div style={{ width: 48 }}>
@@ -519,7 +691,7 @@ function TaskRow({ row, isMobile }: { row: TaskRowData; isMobile: boolean }) {
           </span>
         )}
       </span>
-    </Link>
+    </div>
   );
 }
 

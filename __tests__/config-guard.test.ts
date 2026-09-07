@@ -43,7 +43,6 @@ const ALLOWLIST = new Set([
   "lib/worker/log.ts",
   "lib/worktree-gc.ts",
   "scripts/reset.ts",
-  "scripts/seed.ts",
   // Dev CLI harness (npm run chat): reads a few TASK_ORCH_* tunables to launch
   // a worker/chat locally. A script, not runtime code — same category as the
   // other scripts/*.ts entries above.

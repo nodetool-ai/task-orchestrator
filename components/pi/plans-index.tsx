@@ -14,8 +14,6 @@ import {
   StateIcon,
   StatePill,
   piButtons,
-  piWrap,
-  piWrapMobile,
   type PiState,
 } from "./primitives";
 import { openSpawn } from "./overlay-store";
@@ -69,14 +67,14 @@ export function PlansIndex({ plans, repos = [] }: { plans: PlanCardData[]; repos
 
   const counts = {
     total: plans.length,
-    active: plans.filter((p) => p.state === "in_progress").length,
+    open: plans.filter((p) => p.state !== "done" && p.state !== "cancelled").length,
     done: plans.filter((p) => p.state === "done").length,
   };
 
   const isMobile = useIsMobile();
 
   return (
-    <div style={isMobile ? piWrapMobile : piWrap}>
+    <div className="pi-page-shell">
       <div
         style={{
           display: "flex",
@@ -91,24 +89,24 @@ export function PlansIndex({ plans, repos = [] }: { plans: PlanCardData[]; repos
           <h1 style={{ margin: 0, fontSize: isMobile ? 18 : 20, fontWeight: 600, letterSpacing: "-0.01em", color: "var(--pi-fg)" }}>
             Plans
           </h1>
-          <div style={{ marginTop: 4, color: "var(--pi-muted-2)", fontSize: 12 }}>
-            {counts.total} total · {counts.active} active · {counts.done} shipped
+          <div style={{ marginTop: 4, color: "var(--pi-muted)", fontSize: 12 }}>
+            {counts.total} total · {counts.open} open · {counts.done} completed
           </div>
         </div>
         <div style={{ display: "inline-flex", gap: 8 }}>
           <button
             onClick={() => setNewPlan(true)}
-            style={{ ...piButtons.ghostSm(), flex: isMobile ? 1 : undefined, justifyContent: "center" }}
+            style={{ ...piButtons.primaryInline(), flex: isMobile ? 1 : undefined, justifyContent: "center" }}
           >
             <Icon name="plus" size={12} />
             New plan
           </button>
           <button
             onClick={openSpawn}
-            style={{ ...piButtons.primaryInline(), flex: isMobile ? 1 : undefined, justifyContent: "center" }}
+            style={{ ...piButtons.ghostSm(), flex: isMobile ? 1 : undefined, justifyContent: "center" }}
           >
             <Icon name="spark" size={12} />
-            Spawn agent
+            Start agent
           </button>
         </div>
       </div>
@@ -150,8 +148,8 @@ export function PlansIndex({ plans, repos = [] }: { plans: PlanCardData[]; repos
           onChange={setFilter}
           options={[
             { value: "all", label: "All" },
-            { value: "active", label: "Active" },
-            { value: "done", label: "Done" },
+            { value: "active", label: "Open" },
+            { value: "done", label: "Completed" },
           ]}
         />
       </div>
@@ -160,7 +158,32 @@ export function PlansIndex({ plans, repos = [] }: { plans: PlanCardData[]; repos
         {filtered.map((p) => (
           <PlanCard key={p.id} plan={p} isMobile={isMobile} />
         ))}
-        {filtered.length === 0 && <Empty>No plans match.</Empty>}
+        {filtered.length === 0 && (
+          plans.length === 0 ? (
+            <Empty
+              title="Create your first plan"
+              action={(
+                <button onClick={() => setNewPlan(true)} style={piButtons.primaryInline()}>
+                  <Icon name="plus" size={12} />
+                  New plan
+                </button>
+              )}
+            >
+              Define an outcome, then break it into tasks for agents to execute.
+            </Empty>
+          ) : (
+            <Empty
+              title="No matching plans"
+              action={(
+                <button onClick={() => { setQ(""); setFilter("all"); }} style={piButtons.ghostSm()}>
+                  Clear filters
+                </button>
+              )}
+            >
+              Try a different search or show all plan states.
+            </Empty>
+          )
+        )}
       </div>
 
       {newPlan && <NewPlanDialog repos={repos} onClose={() => setNewPlan(false)} />}
@@ -469,7 +492,7 @@ function PlanCard({ plan, isMobile }: { plan: PlanCardData; isMobile: boolean })
             <span className="pi-mono" style={{ fontSize: 13, color: "var(--pi-muted-2)" }}>
               / {plan.total}
             </span>
-            <span style={{ color: "var(--pi-muted-2)", marginLeft: 2, fontSize: 12 }}>done</span>
+            <span style={{ color: "var(--pi-muted)", marginLeft: 2, fontSize: 12 }}>tasks completed</span>
           </div>
           <div style={{ flex: isMobile ? 1 : undefined, width: isMobile ? undefined : 160 }}>
             <ProgressBar
@@ -479,7 +502,7 @@ function PlanCard({ plan, isMobile }: { plan: PlanCardData; isMobile: boolean })
               height={3}
             />
           </div>
-          <div className="pi-mono" style={{ fontSize: 10, color: "var(--pi-muted-2)" }}>
+          <div className="pi-mono" style={{ fontSize: 11, color: "var(--pi-muted)" }}>
             {Math.round(pct * 100)}%
           </div>
         </div>
@@ -494,31 +517,31 @@ function PlanCard({ plan, isMobile }: { plan: PlanCardData; isMobile: boolean })
           glyph={<Icon name="live-dot" size={11} />}
           glyphColor="var(--s-progress)"
           value={plan.liveRuns}
-          label="running"
+          label="Running"
           muted={plan.liveRuns === 0}
         />
         <StatChip
           glyph={<StateIcon state="review" size={11} />}
           value={plan.reviewRuns}
-          label="review"
+          label="Review"
           muted={plan.reviewRuns === 0}
         />
         <StatChip
           glyph={<StateIcon state="blocked" size={11} />}
           value={plan.blockedRuns}
-          label="stuck"
+          label="Blocked"
           muted={plan.blockedRuns === 0}
         />
         <StatChip
           glyph={<StateIcon state="todo" size={11} />}
           value={plan.queueCount}
-          label="queued"
+          label="Queued"
           muted={plan.queueCount === 0}
         />
         <StatChip
           glyph={<StateIcon state="done" size={11} />}
-          value={plan.done + plan.shippedCount}
-          label="shipped"
+          value={plan.shippedCount}
+          label="Completed runs"
           muted
         />
 
@@ -526,7 +549,7 @@ function PlanCard({ plan, isMobile }: { plan: PlanCardData; isMobile: boolean })
 
         {plan.activePersonas.length > 0 && (
           <div style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-            <span style={{ color: "var(--pi-muted-2)", fontSize: 12 }}>agents:</span>
+            <span style={{ color: "var(--pi-muted)", fontSize: 12 }}>running agents:</span>
             <span style={{ display: "inline-flex", gap: 6, flexWrap: "wrap" }}>
               {plan.activePersonas.map((p) => (
                 <PersonaChip key={p} id={p} />
@@ -563,9 +586,9 @@ function StatChip({
     >
       <span style={{ color: glyphColor || (muted ? "var(--pi-muted-2)" : "var(--pi-muted)") }}>{glyph}</span>
       <span className="pi-mono" style={{ fontSize: 12, fontWeight: 500 }}>
-        {String(value).padStart(2, "0")}
+        {value}
       </span>
-      <span style={{ fontSize: 11, color: "var(--pi-muted-2)" }}>{label}</span>
+      <span style={{ fontSize: 12, color: "var(--pi-muted)" }}>{label}</span>
     </span>
   );
 }

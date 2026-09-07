@@ -14,11 +14,11 @@ export const STATE_COLOR: Record<PiState, string> = {
 };
 
 export const STATE_LABEL: Record<PiState, string> = {
-  todo: "Todo",
+  todo: "Queued",
   in_progress: "Running",
   review: "Review",
   blocked: "Blocked",
-  done: "Done",
+  done: "Completed",
   cancelled: "Cancelled",
 };
 
@@ -532,7 +532,7 @@ export function Section({
         <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600, letterSpacing: "-0.01em" }}>{title}</h2>
         {typeof count === "number" && (
           <span className="pi-mono" style={{ fontSize: 11, color: "var(--pi-muted-2)" }}>
-            {String(count).padStart(2, "0")}
+            {count}
           </span>
         )}
         {meta && (
@@ -548,13 +548,21 @@ export function Section({
   );
 }
 
-export function Empty({ children }: { children: React.ReactNode }) {
+export function Empty({
+  children,
+  title,
+  action,
+}: {
+  children?: React.ReactNode;
+  title?: string;
+  action?: React.ReactNode;
+}) {
   return (
     <div
       style={{
-        padding: "20px 16px",
+        padding: "28px 18px",
         textAlign: "center",
-        color: "var(--pi-muted-2)",
+        color: "var(--pi-muted)",
         fontSize: 12,
         fontWeight: 500,
         border: "1px dashed var(--pi-hairline)",
@@ -562,7 +570,13 @@ export function Empty({ children }: { children: React.ReactNode }) {
         background: "hsla(240 4% 10% / 0.3)",
       }}
     >
-      {children}
+      {title && (
+        <div style={{ color: "var(--pi-fg)", fontSize: 13, fontWeight: 600, marginBottom: children ? 5 : 0 }}>
+          {title}
+        </div>
+      )}
+      {children && <div style={{ lineHeight: 1.55 }}>{children}</div>}
+      {action && <div style={{ display: "flex", justifyContent: "center", marginTop: 14 }}>{action}</div>}
     </div>
   );
 }
@@ -694,12 +708,14 @@ export const piButtons = {
 };
 
 export const piWrap: React.CSSProperties = {
+  width: "100%",
   padding: "20px 20px 80px",
   maxWidth: 1480,
   margin: "0 auto",
 };
 
 export const piWrapMobile: React.CSSProperties = {
+  width: "100%",
   padding: "14px 12px 96px",
   maxWidth: "100%",
   margin: 0,

@@ -91,11 +91,11 @@
     --pi-surface-2: hsl(240 5% 10%);
     --pi-raised: hsl(240 4% 14%);
     --pi-raised-2: hsl(240 4% 18%);
-    --pi-hairline: hsla(240 4% 30% / 0.5);
-    --pi-hairline-strong: hsla(240 4% 38% / 0.7);
+    --pi-hairline: hsla(240 4% 34% / 0.62);
+    --pi-hairline-strong: hsla(240 4% 44% / 0.78);
     --pi-fg: hsl(240 6% 98%);
     --pi-muted: hsl(240 5% 64%);
-    --pi-muted-2: hsl(240 4% 46%);
+    --pi-muted-2: hsl(240 4% 58%);
     --s-todo: hsl(240 4% 60%);
     --s-progress: hsl(38 92% 50%);
     --s-review: hsl(270 76% 65%);
@@ -129,6 +129,34 @@
 }
 
 @layer components {
+  .pi-page-shell {
+    width: 100%;
+    max-width: 1480px;
+    margin-inline: auto;
+    padding: 20px 20px 80px;
+  }
+
+  .pi-top-nav-secondary { display: inline-flex; }
+  .pi-top-nav-email-address { display: inline; }
+
+  @media (max-width: 1180px) {
+    .pi-top-nav-secondary { display: none !important; }
+    .pi-top-nav-email-address { display: none; }
+  }
+
+  @media (max-width: 920px) {
+    .pi-top-nav-search { min-width: 132px !important; }
+    .pi-top-nav-label { display: none; }
+  }
+
+  @media (max-width: 767px) {
+    .pi-page-shell {
+      max-width: none;
+      margin: 0;
+      padding: 14px 12px 96px;
+    }
+  }
+
   /* Timeline type scale. Three sizes carry every event row — body (message
      prose), meta (system rows, tool toggles, card chrome), micro (timestamps,
      ids, counts) — plus a caps label and a code-block treatment. Kept as named
