@@ -55,6 +55,10 @@ allowlist as `buildFlyWorkerEnv` (GitHub token, agent credentials, model/backend
 settings, `TASK_ORCH_INSIDE_WORKER=1`, channel identity, etc.) but no
 `PREWARM_DIR`.
 
+Because each Sprite worker is isolated to one run, its Codex sandbox defaults to
+`danger-full-access`. Set `TASK_ORCH_CODEX_SANDBOX` to override that value for
+Sprite workers; the local runner keeps Codex's `workspace-write` default.
+
 ---
 
 ## Runner lifecycle & sequence

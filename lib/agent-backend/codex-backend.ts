@@ -41,7 +41,7 @@
 // The SDK is imported dynamically so neither it nor the ~300MB platform CLI it
 // depends on loads under the pi or Claude backends.
 
-import { mapCodexEvent } from "./codex-event-mapper";
+import { codexErrorMessage, mapCodexEvent } from "./codex-event-mapper";
 import { collectExtensions, composeSystemPrompt } from "./collect";
 import { createUsageAccumulator } from "./usage";
 import { startCodexMcpBridge, type CodexMcpBridge } from "./codex-mcp-bridge";
@@ -291,6 +291,9 @@ export class CodexBackend implements AgentBackend {
         lastAgentMessage = null;
         turns = 0;
         observedThreadId = null;
+        let terminalEvent: "completed" | "failed" | null = null;
+        let terminalFailureMessage: string | null = null;
+        let lastStreamError: string | null = null;
 
         // A resumed thread already carries the preamble in its history; only a
         // fresh one needs it. The context-loss note rides along on the retry.
@@ -311,7 +314,20 @@ export class CodexBackend implements AgentBackend {
           for await (const ev of events) {
             if (abort.signal.aborted) break;
             if (ev.type === "thread.started" && ev.thread_id) observedThreadId = ev.thread_id;
-            if (ev.type === "turn.completed" || ev.type === "turn.failed") turns += 1;
+            if (!terminalEvent && ev.type === "turn.completed") {
+              terminalEvent = "completed";
+              turns += 1;
+            } else if (!terminalEvent && ev.type === "turn.failed") {
+              terminalEvent = "failed";
+              terminalFailureMessage = codexErrorMessage(ev.error, "Turn failed");
+              turns += 1;
+            } else if (ev.type === "error") {
+              // The CLI can report a recoverable stream error (including a
+              // reconnect) and continue with the same turn. Keep the latest
+              // diagnostic for an eventual unexpected EOF, but do not close
+              // the turn here.
+              lastStreamError = codexErrorMessage(ev.message, "Codex stream error");
+            }
 
             for (const env of mapCodexEvent(ev, { lastAgentMessage })) {
               const isInit = env.type === "system" && env.subtype === "init";
@@ -346,9 +362,25 @@ export class CodexBackend implements AgentBackend {
                 });
               }
             }
+            // turn.failed is terminal. Stop consuming the SDK iterator after
+            // its mapped result has been handed to onEvent; otherwise a broken
+            // CLI could leave this turn waiting on a stream that never closes.
+            if (terminalEvent === "failed") {
+              throw new Error(`Codex turn failed: ${terminalFailureMessage ?? "Turn failed"}`);
+            }
+          }
+          if (!terminalEvent && !abort.signal.aborted) {
+            const detail = lastStreamError ? ` Last stream error: ${lastStreamError}` : "";
+            throw new Error(
+              `Codex stream ended before a terminal turn event (turn.completed or turn.failed).${detail}`
+            );
           }
           observedThreadId = observedThreadId ?? thread.id ?? null;
         } catch (err) {
+          // A terminal SDK failure is an agent-turn failure, never a resume or
+          // CLI-launch retry, even if its diagnostic happens to contain words
+          // such as "spawn" or "not found".
+          if (terminalEvent === "failed") throw err;
           const message = err instanceof Error ? err.message : String(err);
           if (!resumeLostRetried && threadId && !abort.signal.aborted && RESUME_LOST_RE.test(message)) {
             console.error(

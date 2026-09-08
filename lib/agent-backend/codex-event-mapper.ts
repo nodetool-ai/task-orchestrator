@@ -37,6 +37,20 @@ export interface CodexMapContext {
  *  opening lines and its (usually decisive) tail survive. */
 const MAX_OUTPUT_CHARS = 32_000;
 
+/** Extract a useful diagnostic from the SDK's error-shaped event fields. */
+export function codexErrorMessage(error: unknown, fallback: string): string {
+  if (typeof error === "string" && error.trim()) return error.trim();
+  if (error && typeof error === "object") {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message.trim();
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string" || typeof code === "number") {
+      return `${fallback} (code ${code})`;
+    }
+  }
+  return fallback;
+}
+
 export function truncateOutput(text: string, max = MAX_OUTPUT_CHARS): string {
   if (text.length <= max) return text;
   const head = Math.floor(max * 0.6);
@@ -192,7 +206,7 @@ export function mapCodexEvent(ev: any, ctx: CodexMapContext = {}): RunEnvelope[]
       return [
         {
           type: "result",
-          result: ev.error?.message ?? "Turn failed",
+          result: codexErrorMessage(ev.error, "Turn failed"),
           is_error: true,
           total_cost_usd: null,
         },
@@ -202,7 +216,7 @@ export function mapCodexEvent(ev: any, ctx: CodexMapContext = {}): RunEnvelope[]
       return [
         {
           type: "result",
-          result: typeof ev.message === "string" ? ev.message : "Codex stream error",
+          result: codexErrorMessage(ev.message, "Codex stream error"),
           is_error: true,
           total_cost_usd: null,
         },

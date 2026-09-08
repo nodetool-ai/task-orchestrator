@@ -76,6 +76,23 @@ already cost real time once.
   auto-mode classifier blocks an agent from copying that secret to an
   external machine; the user must run the copy (or `claude login` there).
 
+## Codex on Sprite
+
+- MCP initialization and MCP execution need separate checks. A required server
+  can initialize successfully but reject every call: `approvalPolicy: "never"`
+  does not approve MCP tools. The run's bridge needs
+  `default_tools_approval_mode: "approve"`; authorization still happens through
+  its interceptors and the worker channel.
+- The Sprite image can reject Codex's nested Linux sandbox with
+  `bwrap: Unexpected capabilities but not setuid, old file caps config?`.
+  Sprite dispatch defaults Codex to `danger-full-access` inside the isolated VM
+  and forwards `TASK_ORCH_CODEX_SANDBOX` overrides. Local runs retain
+  `workspace-write`.
+- Exercise a real CLI tool call when changing MCP configuration. An SDK mock
+  plus a direct MCP-client test does not cover Codex's tool approval policy.
+  See [codex-integration.md](codex-integration.md) for the integration decision
+  and verification contract.
+
 ## Liveness
 
 - There is no heartbeat and no stale window. "Is the worker alive" is

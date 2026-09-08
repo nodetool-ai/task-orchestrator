@@ -168,6 +168,12 @@ describe("mapCodexEvent", () => {
     ]);
   });
 
+  it("keeps a useful diagnostic when a failed turn reports only an error code", () => {
+    expect(mapCodexEvent({ type: "turn.failed", error: { code: "rate_limit" } })).toEqual([
+      { type: "result", result: "Turn failed (code rate_limit)", is_error: true, total_cost_usd: null },
+    ]);
+  });
+
   it("ignores unknown events rather than throwing", () => {
     expect(mapCodexEvent({ type: "something.new" })).toEqual([]);
     expect(mapCodexEvent(undefined)).toEqual([]);

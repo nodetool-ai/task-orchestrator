@@ -81,6 +81,24 @@ describe("spritesRunnerStateFromStatus", () => {
   });
 });
 
+describe("buildSpritesWorkerEnv", () => {
+  it("defaults Codex to full access inside the isolated Sprite worker", async () => {
+    vi.stubEnv("TASK_ORCH_CODEX_SANDBOX", undefined);
+
+    await expect(buildSpritesWorkerEnv(42)).resolves.toMatchObject({
+      TASK_ORCH_CODEX_SANDBOX: "danger-full-access",
+    });
+  });
+
+  it("forwards an explicit Codex sandbox override to the Sprite worker", async () => {
+    vi.stubEnv("TASK_ORCH_CODEX_SANDBOX", "workspace-write");
+
+    await expect(buildSpritesWorkerEnv(42)).resolves.toMatchObject({
+      TASK_ORCH_CODEX_SANDBOX: "workspace-write",
+    });
+  });
+});
+
 describe("SpritesRunnerProvider.inspect", () => {
   it("returns a stable service incarnation and never throws", async () => {
     const provider = new SpritesRunnerProvider(fakeSpritesClient({

@@ -456,12 +456,13 @@ process with no in-process tool seam:
   (`lib/agent-backend/codex-mcp-bridge.ts`). The tool-call interceptor chain runs
   inside that bridge, so the planning-stage gates hold. Codex's own shell and
   apply_patch tools do not pass through it: writes are confined by Codex's
-  sandbox instead (`TASK_ORCH_CODEX_SANDBOX`, default `workspace-write`), and
+  sandbox instead (`TASK_ORCH_CODEX_SANDBOX`, default `workspace-write` locally;
+  isolated Sprite workers default to `danger-full-access`), and
   secrets are absent from the CLI's environment rather than unset per command.
-- **Auth.** A non-empty `CODEX_API_KEY` takes precedence, followed by a
-  non-empty `OPENAI_API_KEY`; the selected API key is passed to the SDK's
-  `apiKey` option so the pinned CLI receives it as `CODEX_API_KEY`. Otherwise the ChatGPT
-  credential this deployment already stores for pi's `openai-codex` provider
+- **Auth.** A non-empty `CODEX_API_KEY` takes precedence, followed by the stored
+  ChatGPT credential, then a non-empty `OPENAI_API_KEY`. A selected API key is
+  passed to the SDK's `apiKey` option so the pinned CLI receives it as
+  `CODEX_API_KEY`. The ChatGPT credential stored for pi's `openai-codex` provider
   (Settings → Codex) is materialized as the CLI's `auth.json` — so one ChatGPT
   subscription serves both. Runs use a dedicated `CODEX_HOME`
   (`~/.task-orchestrator/codex`, or `TASK_ORCH_CODEX_HOME`) so this never
@@ -471,6 +472,10 @@ process with no in-process tool seam:
 `@openai/codex-sdk` is an **optional** dependency: its platform CLI is ~300MB, so
 an image built with `npm ci --omit=optional` simply won't offer the backend, and
 selecting it there fails with an actionable message.
+
+See [Codex integration decisions and verification](docs/codex-integration.md)
+for MCP approval settings, Sprite isolation, regression coverage, and the
+decision to retain the SDK while evaluating App Server for interactive clients.
 
 Requires:
 - Agent-backend auth. The `claude` backend resolves it like the Claude Code CLI:

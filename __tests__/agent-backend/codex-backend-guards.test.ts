@@ -283,6 +283,54 @@ describe("CodexBackend.runTurn conversation handling", () => {
     });
   });
 
+  it("rejects a terminal turn.failed after persisting its failure diagnostic", async () => {
+    sdk.scripts = [[started("th_failed"), { type: "turn.failed", error: { message: "quota exceeded" } }]];
+    const events: any[] = [];
+
+    await expect(
+      new CodexBackend().runTurn(makeArgs({ onEvent: (event) => { events.push(event); } }))
+    ).rejects.toThrow("Codex turn failed: quota exceeded");
+    expect(events.at(-1)).toMatchObject({
+      type: "result",
+      result: "quota exceeded",
+      is_error: true,
+    });
+  });
+
+  it("does not classify a terminal failure as a launch or resume retry", async () => {
+    sdk.scripts = [[
+      started("th_failed"),
+      { type: "turn.failed", error: { message: "failed to spawn codex ENOENT" } },
+    ], [started("th_should_not_run"), completed]];
+
+    await expect(new CodexBackend().runTurn(makeArgs())).rejects.toThrow(
+      "Codex turn failed: failed to spawn codex ENOENT"
+    );
+    expect(sdk.inputs).toHaveLength(1);
+  });
+
+  it("keeps a recoverable stream error non-terminal when the turn completes", async () => {
+    sdk.scripts = [[
+      started("th_recovered"),
+      { type: "error", message: "connection interrupted; reconnecting" },
+      said("finished after reconnect"),
+      completed,
+    ]];
+
+    await expect(new CodexBackend().runTurn(makeArgs())).resolves.toMatchObject({
+      summary: "finished after reconnect",
+      turns: 1,
+    });
+  });
+
+  it("rejects a stream that ends before a terminal turn event", async () => {
+    sdk.scripts = [[started("th_eof"), said("partial")]];
+
+    await expect(new CodexBackend().runTurn(makeArgs())).rejects.toThrow(
+      /stream ended before a terminal turn event/
+    );
+  });
+
   it("falls back to a fresh thread — once, with a context-loss note — when the transcript is gone", async () => {
     sdk.scripts = [
       new Error("thread th_gone not found"),

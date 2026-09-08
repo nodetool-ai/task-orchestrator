@@ -131,6 +131,10 @@ export async function buildSpritesWorkerEnv(
     TASK_ORCH_AGENT_BACKEND: envValue("TASK_ORCH_AGENT_BACKEND"),
     TASK_ORCH_CHAT_MODEL: envValue("TASK_ORCH_CHAT_MODEL"),
     TASK_ORCH_AGENT_MODEL: envValue("TASK_ORCH_AGENT_MODEL"),
+    // Sprite workers are already isolated per run, so the VM supplies the
+    // filesystem boundary instead of Codex's nested sandbox. Keep an override for
+    // operators who want the local/default workspace-write policy there too.
+    TASK_ORCH_CODEX_SANDBOX: envValue("TASK_ORCH_CODEX_SANDBOX") ?? "danger-full-access",
     TASK_ORCH_CHAT_IDLE_MS: envValue("TASK_ORCH_CHAT_IDLE_MS"),
     TASK_ORCH_DETACHED_RUNS: "1",
     TASK_ORCH_INSIDE_WORKER: "1",
