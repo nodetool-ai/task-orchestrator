@@ -34,6 +34,8 @@ declare global {
   var __tasksDb: DB | undefined;
   // eslint-disable-next-line no-var
   var __tasksPg: Client | undefined;
+  // eslint-disable-next-line no-var
+  var __tasksGenerationPg: Client | undefined;
 }
 
 // Optional per-connection schema. Tests set TASK_ORCH_PG_SCHEMA to a unique name
@@ -50,7 +52,7 @@ const PG_SCHEMA = config.db.pgSchema;
 // loudly at the exact call site with an actionable message instead of at
 // import time. Migrations + seeding run out-of-band via initDb() (boot / test
 // setup), not at import time.
-function createClient(): Client {
+function createClient(max = 10): Client {
   const dbUrl = databaseUrl();
   // Supabase (and any explicit sslmode=require URL) requires TLS; a local dev/CI
   // Postgres does not. Auto-enable so the same code works against both without a
@@ -70,7 +72,7 @@ function createClient(): Client {
     );
   }
   return postgres(dbUrl, {
-    max: 10,
+    max,
     // Recycle connections proactively to reduce stale-socket resets — an idle
     // connection dropped by flycast/the DB surfaces as an ECONNRESET on next use
     // (which can crash detached workers). Closing idle connections after 30s and
@@ -85,6 +87,24 @@ function createClient(): Client {
     ...(isTxnPooler ? { prepare: false } : {}),
     ...(PG_SCHEMA ? { connection: { search_path: PG_SCHEMA } } : {}),
   });
+}
+
+/** A small independent pool for operations that intentionally hold a
+ * generation authority advisory lock across external/slow work. Keeping this
+ * separate from the main pool prevents a blocked tool from starving channel
+ * traffic and ordinary request transactions. */
+function ensureGenerationAuthorityClient(): Client {
+  if (!globalThis.__tasksGenerationPg) {
+    if (insideWorker() && !dbAllowedInWorker()) {
+      throw new Error(
+        "Direct database access attempted inside a run worker " +
+        "(TASK_ORCH_INSIDE_WORKER=1). Workers must go through the worker " +
+        "channel — see the worker WebSocket protocol."
+      );
+    }
+    globalThis.__tasksGenerationPg = createClient(2);
+  }
+  return globalThis.__tasksGenerationPg;
 }
 
 function insideWorker(): boolean {
@@ -151,6 +171,26 @@ export const sql: Client = new Proxy(function () {} as unknown as Client, {
     return prop in (ensureClient() as object);
   },
 });
+
+/** Raw postgres.js client dedicated to generation authority transactions. */
+export const generationAuthoritySql: Client = new Proxy(function () {} as unknown as Client, {
+  get(_t, prop) {
+    const real = ensureGenerationAuthorityClient();
+    const v = (real as unknown as Record<PropertyKey, unknown>)[prop];
+    return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(real) : v;
+  },
+  apply(_t, _this, args) {
+    const real = ensureGenerationAuthorityClient();
+    return (real as unknown as (...a: unknown[]) => unknown)(...args);
+  },
+  has(_t, prop) {
+    return prop in (ensureGenerationAuthorityClient() as object);
+  },
+});
+
+export function workerGenerationAuthorityKey(runId: number): string {
+  return `worker-generation:${runId}`;
+}
 export { schema };
 
 /**
@@ -162,12 +202,17 @@ export { schema };
  */
 export async function closeDb(): Promise<void> {
   const client = globalThis.__tasksPg;
-  if (!client) return;
+  const generationClient = globalThis.__tasksGenerationPg;
+  if (!client && !generationClient) return;
   try {
-    await client.end({ timeout: 5 });
+    await Promise.all([
+      client?.end({ timeout: 5 }),
+      generationClient?.end({ timeout: 5 }),
+    ]);
   } finally {
     globalThis.__tasksPg = undefined;
     globalThis.__tasksDb = undefined;
+    globalThis.__tasksGenerationPg = undefined;
   }
 }
 

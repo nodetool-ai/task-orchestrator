@@ -4,13 +4,17 @@ import { agentSessions, runnerInstances } from "../../db/schema";
 import { __setRunnerProviderForTests, type RunnerObservation, type RunnerProvider } from "../../lib/runner/provider";
 
 const observations = new Map<string, RunnerObservation>();
+let beforeInspect: ((handle: string) => Promise<void> | void) | undefined;
 
 const provider: RunnerProvider = {
   kind: "local",
   async create() { return null; },
   async stop() {},
   async sweep() {},
-  async inspect(handle) { return observations.get(handle) ?? { status: "unknown" }; },
+  async inspect(handle) {
+    await beforeInspect?.(handle);
+    return observations.get(handle) ?? { status: "unknown" };
+  },
 };
 
 /** Idempotent: re-installing keeps observations already recorded in this file. */
@@ -20,6 +24,12 @@ export function installFakeRunnerProvider(): void {
 
 export function clearFakeRunLiveness(): void {
   observations.clear();
+  beforeInspect = undefined;
+}
+
+/** Deterministic race seam for reconciliation tests. */
+export function setFakeLivenessInspectionHook(hook: ((handle: string) => Promise<void> | void) | undefined): void {
+  beforeInspect = hook;
 }
 
 export async function setFakeRunLiveness(

@@ -4,7 +4,14 @@ import { eq } from "drizzle-orm";
 import { db } from "../db";
 import { agentSessions, runnerInstances } from "../db/schema";
 import { create } from "../lib/runs";
-import { buildSpritesWorkerEnv, isRunSpriteName, SpritesRunnerProvider, spriteNameForRun, spritesRunnerStateFromStatus } from "../lib/runner/sprites";
+import {
+  buildSpritesWorkerEnv,
+  isRunSpriteName,
+  SpritesRunnerProvider,
+  spriteNameForRun,
+  spritesRunnerStateFromStatus,
+  workerServiceName,
+} from "../lib/runner/sprites";
 import { SpritesApiError } from "../lib/runner/sprites-client";
 import { workerBundleId } from "../lib/worker-bundle";
 import type { SpritesClient } from "../lib/runner/sprites-client";
@@ -97,6 +104,13 @@ describe("buildSpritesWorkerEnv", () => {
       TASK_ORCH_CODEX_SANDBOX: "workspace-write",
     });
   });
+
+  it("names worker services by generation and forwards the generation to the worker", async () => {
+    expect(workerServiceName(17)).toBe("worker-g17");
+    expect(await buildSpritesWorkerEnv(42, { workerGeneration: 17 })).toMatchObject({
+      TASK_ORCH_WORKER_GENERATION: "17",
+    });
+  });
 });
 
 describe("SpritesRunnerProvider.inspect", () => {
@@ -110,6 +124,48 @@ describe("SpritesRunnerProvider.inspect", () => {
     await expect(missing.inspect("to-run-1")).resolves.toEqual({ status: "dead", detail: "sprite gone" });
     const broken = new SpritesRunnerProvider(fakeSpritesClient({ getSprite: vi.fn(async () => { throw new Error("down"); }) }));
     await expect(broken.inspect("to-run-1")).resolves.toEqual({ status: "unknown" });
+  });
+
+  it("inspects the generation-specific service instead of the stable worker name", async () => {
+    const getService = vi.fn(async (_spriteName: string, serviceName: string) => ({
+      name: serviceName,
+      cmd: "node",
+      state: { status: "running", pid: 17, startedAt: "2026-09-08T10:00:00Z" },
+    }));
+    const provider = new SpritesRunnerProvider(fakeSpritesClient({ getService }));
+
+    await expect(provider.inspectGeneration({
+      runId: 42,
+      generation: 17,
+      instanceId: "wi_0123456789abcdef0123456789abcdef",
+      providerHandle: "to-run-42",
+      providerServiceName: "worker-g17",
+    })).resolves.toMatchObject({ status: "alive", incarnation: "2026-09-08T10:00:00Z#17" });
+    expect(getService).toHaveBeenCalledWith("to-run-42", "worker-g17");
+  });
+
+  it("waits for the captured generation service to stop before returning", async () => {
+    let stopped = false;
+    const stopService = vi.fn(async (_spriteName: string, serviceName: string) => {
+      expect(serviceName).toBe("worker-g16");
+      stopped = true;
+    });
+    const getService = vi.fn(async (_spriteName: string, serviceName: string) => ({
+      name: serviceName,
+      cmd: "node",
+      state: { status: stopped ? "stopped" : "running", pid: 16, startedAt: "2026-09-08T09:00:00Z" },
+    }));
+    const provider = new SpritesRunnerProvider(fakeSpritesClient({ getService, stopService }));
+
+    await provider.stopGeneration({
+      runId: 42,
+      generation: 16,
+      instanceId: "wi_0123456789abcdef0123456789abcdef",
+      providerHandle: "to-run-42",
+      providerServiceName: "worker-g16",
+    });
+    expect(stopService).toHaveBeenCalledWith("to-run-42", "worker-g16");
+    expect(getService).toHaveBeenCalledWith("to-run-42", "worker-g16");
   });
 
   it("a hibernating sprite is never dead unless its service proves an exit", async () => {
@@ -146,6 +202,135 @@ describe("SpritesRunnerProvider.inspect", () => {
 });
 
 describe("SpritesRunnerProvider.create", () => {
+  it("persists the stable Sprite mapping before boot begins", async () => {
+    let releaseBoot!: () => void;
+    let enteredBoot!: () => void;
+    const bootEntered = new Promise<void>((resolve) => { enteredBoot = resolve; });
+    const bootRelease = new Promise<void>((resolve) => { releaseBoot = resolve; });
+    const client = fakeSpritesClient({
+      createSprite: vi.fn(async (input: { name: string }) => {
+        enteredBoot();
+        await bootRelease;
+        return { name: input.name, status: "running" };
+      }),
+    });
+    const provider = new SpritesRunnerProvider(client);
+    const run = await create({ goal: "<implement>", defer: true });
+    const operationId = "00000000-0000-4000-8000-000000000001";
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      provider: "sprites",
+      state: "starting",
+      workerGeneration: 4,
+      generationState: "allocating",
+      providerOperationId: operationId,
+      channelInstanceId: "wi_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    });
+
+    const creating = provider.create({
+      runId: run.id,
+      scope: `run-${run.id}`,
+      workerGeneration: 4,
+      providerOperationId: operationId,
+      channelInstanceId: "wi_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      providerServiceName: "worker-g4",
+    });
+    await bootEntered;
+    const [mapped] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(mapped.spriteName).toBe(spriteNameForRun(run.id));
+    expect(mapped.generationState).toBe("booting");
+    releaseBoot();
+    await creating;
+  });
+
+  it("does not create a replacement when Sprite adoption cannot be observed", async () => {
+    const createSprite = vi.fn(async (input: { name: string }) => ({ name: input.name, status: "running" }));
+    const client = fakeSpritesClient({
+      createSprite,
+      getSprite: vi.fn(async () => { throw new Error("provider unavailable"); }),
+    });
+    const provider = new SpritesRunnerProvider(client);
+    const run = await create({ goal: "<implement>", defer: true });
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      provider: "sprites",
+      spriteName: spriteNameForRun(run.id),
+      state: "running",
+      workerGeneration: 2,
+      providerOperationId: "00000000-0000-4000-8000-000000000002",
+    });
+
+    await expect(provider.create({
+      runId: run.id,
+      scope: `run-${run.id}`,
+      workerGeneration: 3,
+      providerOperationId: "00000000-0000-4000-8000-000000000003",
+      channelInstanceId: "wi_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      providerServiceName: "worker-g3",
+      previousProviderServiceName: "worker-g2",
+      replacesGeneration: 2,
+    })).rejects.toThrow("provider unavailable");
+    expect(createSprite).not.toHaveBeenCalled();
+  });
+
+  it("uses a durable per-run lock across provider instances", async () => {
+    let releaseBoot!: () => void;
+    let enteredBoot!: () => void;
+    const bootEntered = new Promise<void>((resolve) => { enteredBoot = resolve; });
+    const bootRelease = new Promise<void>((resolve) => { releaseBoot = resolve; });
+    const first = fakeSpritesClient({
+      createSprite: vi.fn(async (input: { name: string }) => {
+        enteredBoot();
+        await bootRelease;
+        return { name: input.name, status: "running" };
+      }),
+    });
+    const stopService = vi.fn(async () => {});
+    const second = fakeSpritesClient({
+      stopService,
+      getService: vi.fn(async (spriteName: string, serviceName: string) => ({
+        name: serviceName,
+        cmd: "node",
+        state: { status: "stopped" },
+      })),
+    });
+    const provider1 = new SpritesRunnerProvider(first);
+    const provider2 = new SpritesRunnerProvider(second);
+    const run = await create({ goal: "<implement>", defer: true });
+    const operationId = "00000000-0000-4000-8000-000000000004";
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      provider: "sprites",
+      state: "starting",
+      workerGeneration: 4,
+      generationState: "allocating",
+      providerOperationId: operationId,
+      channelInstanceId: "wi_cccccccccccccccccccccccccccccccc",
+      providerServiceName: "worker-g4",
+    });
+    const creating = provider1.create({
+      runId: run.id,
+      scope: `run-${run.id}`,
+      workerGeneration: 4,
+      providerOperationId: operationId,
+      channelInstanceId: "wi_cccccccccccccccccccccccccccccccc",
+      providerServiceName: "worker-g4",
+    });
+    await bootEntered;
+    const stopping = provider2.stopGeneration({
+      runId: run.id,
+      generation: 4,
+      instanceId: "wi_cccccccccccccccccccccccccccccccc",
+      providerHandle: spriteNameForRun(run.id),
+      providerServiceName: "worker-g4",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(stopService).not.toHaveBeenCalled();
+    releaseBoot();
+    await Promise.all([creating, stopping]);
+    expect(stopService).toHaveBeenCalledWith(spriteNameForRun(run.id), "worker-g4");
+  });
+
   it("inserts row with provider sprites and sprite:// endpoint", async () => {
     const client = fakeSpritesClient();
     const provider = new SpritesRunnerProvider(client);

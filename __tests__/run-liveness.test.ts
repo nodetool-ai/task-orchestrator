@@ -3,12 +3,14 @@
 // The single liveness module: the provider verdict (no clocks) and the shared
 // reaper policy that decides re-dispatch / idle / failed.
 import { beforeEach, describe, expect, it } from "vitest";
+import { hostname } from "node:os";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
 import { agentSessions, runnerInstances } from "../db/schema";
 import { CONTROLLER_BOOT_ID, decideDeadRunPolicy, isResumableDeadRun, resolveLiveness, serverClaimScope } from "../lib/run-liveness";
-import { create } from "../lib/runs";
+import { create, reconcileOrphanedRuns } from "../lib/runs";
 import { installFakeRunnerProvider, setFakeRunLiveness } from "./helpers/fake-runner-provider";
+import { __setRunnerProviderForTests, type RunnerProvider } from "../lib/runner/provider";
 
 describe("resolveLiveness", () => {
   beforeEach(() => installFakeRunnerProvider());
@@ -90,6 +92,51 @@ describe("resolveLiveness — a run being provisioned by this process", () => {
       .where(eq(agentSessions.id, run.id));
 
     expect((await resolveLiveness(run.id)).verdict).toBe("alive");
+  });
+
+  it("boot reconciliation preserves a live pre-mapped Sprite after its server claim dies", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    const spriteName = `run-${run.id}-sprite`;
+    const spriteProvider: RunnerProvider = {
+      kind: "sprites",
+      async create() { return null; },
+      async stop() {},
+      async sweep() {},
+      async inspect() { return { status: "unknown" }; },
+      async inspectGeneration() {
+        return { status: "alive", incarnation: "sprite-process-g2" };
+      },
+    };
+    const previousRunner = process.env.TASK_ORCH_RUNNER;
+    process.env.TASK_ORCH_RUNNER = "sprites";
+    try {
+      __setRunnerProviderForTests(spriteProvider);
+      await db.update(agentSessions)
+        .set({
+          status: "running",
+          // A dispatcher process that no longer exists. The Sprite mapping below
+          // was persisted before its generation finished booting.
+          workerScope: `server-${hostname()}@4194303@dead-boot@dispatch`,
+        })
+        .where(eq(agentSessions.id, run.id));
+      await db.insert(runnerInstances).values({
+        runId: run.id,
+        provider: "sprites",
+        spriteName,
+        state: "running",
+        workerGeneration: 2,
+        generationState: "booting",
+        providerServiceName: "worker-g2",
+      });
+
+      await reconcileOrphanedRuns();
+
+      expect((await db.select({ status: agentSessions.status }).from(agentSessions).where(eq(agentSessions.id, run.id)))[0]?.status)
+        .toBe("running");
+    } finally {
+      if (previousRunner == null) delete process.env.TASK_ORCH_RUNNER;
+      else process.env.TASK_ORCH_RUNNER = previousRunner;
+    }
   });
 });
 

@@ -39,6 +39,8 @@ export interface WorkerEnvelope<T = unknown> {
   id: string;
   runId: number;
   instanceId: string;
+  /** Worker process/spool generation. Omitted only by generation-1 legacy workers. */
+  workerGeneration?: number;
   controllerEpoch: number;
   seq: number;
   sentAt: string;
@@ -270,6 +272,8 @@ export interface ChannelHello {
   lastControllerEpoch: number;
   lastAckedControlSeq: number;
   nextWorkerSeq: number;
+  /** Generation bound to this worker process. Optional for legacy generation 1 bundles. */
+  workerGeneration?: number;
   /** Optional while older worker bundles remain deployable. */
   pid?: number;
   /** Whether this worker PROCESS already holds its run.start. Optional while
@@ -286,6 +290,7 @@ export interface ChannelAccept {
   heartbeatMs: number;
   disconnectGraceMs: number;
   maxInFlightBytes: number;
+  workerGeneration?: number;
 }
 
 export type ChannelRejectReason =
@@ -513,6 +518,7 @@ const envelopeFields = {
   id: uuid,
   runId: positiveInt,
   instanceId,
+  workerGeneration: positiveInt.optional(),
   controllerEpoch: nonNegativeInt,
   seq: nonNegativeInt,
   sentAt: isoDate,
@@ -577,6 +583,7 @@ const handshakeFrameSchema = z.discriminatedUnion("type", [
       lastControllerEpoch: nonNegativeInt,
       lastAckedControlSeq: nonNegativeInt,
       nextWorkerSeq: positiveInt,
+      workerGeneration: positiveInt.optional(),
       pid: positiveInt.optional(),
     }).passthrough(),
   }).strict(),
@@ -592,6 +599,7 @@ const handshakeFrameSchema = z.discriminatedUnion("type", [
       heartbeatMs: positiveInt,
       disconnectGraceMs: positiveInt,
       maxInFlightBytes: positiveInt,
+      workerGeneration: positiveInt.optional(),
     }).passthrough(),
   }).strict(),
   z.object({

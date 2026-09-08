@@ -394,11 +394,21 @@ export const runnerInstances = pgTable(
     controllerId: text("controller_id"),
     // Provider-observed identity of the process that completed channel.hello.
     workerIncarnation: text("worker_incarnation"),
+    // Monotonic worker-process/spool generation. Reconnects keep this value;
+    // process replacement allocates the next value and a fresh channel id.
+    workerGeneration: integer("worker_generation").notNull().default(1),
+    generationState: text("generation_state").notNull().default("stopped"),
+    providerOperationId: uuid("provider_operation_id"),
+    providerServiceName: text("provider_service_name"),
   },
   (t) => ({
     channelInstanceIdIdx: uniqueIndex("runner_instances_channel_instance_id_idx")
       .on(t.channelInstanceId)
       .where(sql`${t.channelInstanceId} IS NOT NULL`),
+    generationStateCheck: check(
+      "runner_instances_generation_state_check",
+      sql`${t.generationState} IN ('allocating', 'booting', 'connecting', 'active', 'stopping', 'stopped', 'failed')`
+    ),
   })
 );
 
@@ -410,6 +420,7 @@ export const workerChannelCommands = pgTable(
       .notNull()
       .references(() => agentSessions.id, { onDelete: "cascade" }),
     instanceId: text("instance_id").notNull(),
+    workerGeneration: integer("worker_generation").notNull().default(1),
     controllerEpoch: integer("controller_epoch").notNull(),
     seq: bigint("seq", { mode: "number" }).notNull(),
     type: text("type").notNull(),
@@ -419,11 +430,12 @@ export const workerChannelCommands = pgTable(
     ackedAt: ts("acked_at"),
   },
   (t) => ({
-    runInstanceEpochSeqUniq: uniqueIndex(
-      "worker_channel_commands_run_instance_epoch_seq_uniq"
-    ).on(t.runId, t.instanceId, t.controllerEpoch, t.seq),
-    runInstanceStateSeqIdx: index("worker_channel_commands_run_instance_state_seq_idx").on(
+    runGenerationInstanceEpochSeqUniq: uniqueIndex(
+      "worker_channel_commands_run_generation_instance_epoch_seq_uniq"
+    ).on(t.runId, t.workerGeneration, t.instanceId, t.controllerEpoch, t.seq),
+    runGenerationInstanceStateSeqIdx: index("worker_channel_commands_run_generation_instance_state_seq_idx").on(
       t.runId,
+      t.workerGeneration,
       t.instanceId,
       t.state,
       t.seq
@@ -433,6 +445,7 @@ export const workerChannelCommands = pgTable(
       sql`${t.state} IN ('pending', 'acked')`
     ),
     seqCheck: check("worker_channel_commands_seq_check", sql`${t.seq} > 0`),
+    generationCheck: check("worker_channel_commands_generation_check", sql`${t.workerGeneration} > 0`),
   })
 );
 
@@ -444,6 +457,7 @@ export const workerChannelReceipts = pgTable(
       .notNull()
       .references(() => agentSessions.id, { onDelete: "cascade" }),
     instanceId: text("instance_id").notNull(),
+    workerGeneration: integer("worker_generation").notNull().default(1),
     workerSeq: bigint("worker_seq", { mode: "number" }).notNull(),
     controllerEpoch: integer("controller_epoch").notNull(),
     type: text("type").notNull(),
@@ -456,15 +470,17 @@ export const workerChannelReceipts = pgTable(
     appliedAt: ts("applied_at").notNull().defaultNow(),
   },
   (t) => ({
-    runInstanceWorkerSeqUniq: uniqueIndex(
-      "worker_channel_receipts_run_instance_worker_seq_uniq"
-    ).on(t.runId, t.instanceId, t.workerSeq),
-    runInstanceWorkerSeqIdx: index("worker_channel_receipts_run_instance_worker_seq_idx").on(
+    runGenerationInstanceWorkerSeqUniq: uniqueIndex(
+      "worker_channel_receipts_run_generation_instance_worker_seq_uniq"
+    ).on(t.runId, t.workerGeneration, t.instanceId, t.workerSeq),
+    runGenerationInstanceWorkerSeqIdx: index("worker_channel_receipts_run_generation_instance_worker_seq_idx").on(
       t.runId,
+      t.workerGeneration,
       t.instanceId,
       t.workerSeq
     ),
     workerSeqCheck: check("worker_channel_receipts_worker_seq_check", sql`${t.workerSeq} > 0`),
+    generationCheck: check("worker_channel_receipts_generation_check", sql`${t.workerGeneration} > 0`),
   })
 );
 

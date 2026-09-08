@@ -117,10 +117,12 @@ export function workerChannelDispatchEnv(
   runId: number,
   instanceId: string,
   listenEndpoint: string,
+  workerGeneration = 1,
 ): Record<string, string> {
   return {
     TASK_ORCH_WORKER_INSTANCE_ID: instanceId,
-    TASK_ORCH_WORKER_CHANNEL_CREDENTIAL: mintChannelCredential(runId, instanceId),
+    TASK_ORCH_WORKER_GENERATION: String(workerGeneration),
+    TASK_ORCH_WORKER_CHANNEL_CREDENTIAL: mintChannelCredential(runId, instanceId, { workerGeneration }),
     TASK_ORCH_WORKER_CHANNEL_ENDPOINT: listenEndpoint,
   };
 }

@@ -83,6 +83,7 @@ async function main() {
     supervisor = await startWorkerServer({
       runId,
       instanceId,
+      workerGeneration: appConfig.worker.generation,
       credential,
       endpoint,
       disconnectGraceMs: waitMs,

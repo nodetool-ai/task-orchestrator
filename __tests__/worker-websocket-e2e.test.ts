@@ -356,15 +356,19 @@ describe("worker websocket e2e", () => {
         content: JSON.stringify([{ type: "text", text: "follow-up" }]),
         createdAt: new Date(),
       });
-      await db
-        .update(agentSessions)
-        .set({ status: "failed", workerScope: "run-x", completedAt: new Date() })
-        .where(eq(agentSessions.id, run.id));
-
+      vi.spyOn(backend, "getBackend").mockResolvedValue(fakeChatBackend("done"));
       const dispatchSpy = vi.spyOn(runDispatch, "dispatchRun").mockResolvedValue("spawned" as never);
       const { server } = await bootWorkerChannel(run.id);
       try {
         const start = (await server.session.waitForStart!()) as RunStart;
+        // Land the terminal decision after the authenticated hello. Terminal
+        // runs are intentionally rejected during hello now; this ordering
+        // preserves the race under test (completion versus claim release)
+        // without asking the controller to activate an already-failed run.
+        await db
+          .update(agentSessions)
+          .set({ status: "failed", workerScope: "run-x", completedAt: new Date() })
+          .where(eq(agentSessions.id, run.id));
         await (driveWorkerRun as any)({ start, session: server.session } as any);
         expect(dispatchSpy).not.toHaveBeenCalled();
         expect((await get(run.id))!.status).toBe("failed");

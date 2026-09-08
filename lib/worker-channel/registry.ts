@@ -33,6 +33,7 @@ const REGISTRY = Symbol.for("task-orchestrator.worker-channel.registry");
 type Supervisor = {
   runId: number;
   instanceId: string;
+  workerGeneration: number;
   connection: ControllerConnection;
   /** Set true by an intentional disconnect so the reconnect loop stands down. */
   stopped: boolean;
@@ -96,7 +97,19 @@ export async function connectRun(
   > & { bumpEpoch?: boolean } = {},
 ): Promise<ControllerConnection> {
   const { bumpEpoch, ...connectionOptions } = options;
+  // Resolve the durable identity before consulting the in-memory supervisor.
+  // A run can be re-dispatched while an old socket is still connected; reusing
+  // that cached controller would let old frames cross the new generation.
+  const identity = await getChannelIdentity(runId);
   let existing = registry().supervisors.get(runId);
+  if (existing && identity && (existing.instanceId !== identity.instanceId || existing.workerGeneration !== identity.workerGeneration)) {
+    existing.stopped = true;
+    if (existing.reconnectTimer) clearTimeout(existing.reconnectTimer);
+    registry().supervisors.delete(runId);
+    registry().blobs.delete(runId);
+    await existing.connection.disconnect(false).catch(() => undefined);
+    existing = undefined;
+  }
   if (existing?.connection.shutDown) {
     // A stood-down connection (the sprites idle close after every turn calls
     // disconnect(false) but keeps the supervisor registered) can never dial
@@ -104,6 +117,16 @@ export async function connectRun(
     // build a fresh connection below; the blob coordinator is kept (run 187).
     if (existing.reconnectTimer) clearTimeout(existing.reconnectTimer);
     registry().supervisors.delete(runId);
+    existing = undefined;
+  }
+  if (existing && bumpEpoch) {
+    // An explicit takeover must replace even a connected cached controller.
+    // Otherwise the caller asks for a new epoch but silently keeps commanding
+    // the old lease.
+    existing.stopped = true;
+    if (existing.reconnectTimer) clearTimeout(existing.reconnectTimer);
+    registry().supervisors.delete(runId);
+    await existing.connection.disconnect(false).catch(() => undefined);
     existing = undefined;
   }
   if (existing) {
@@ -121,12 +144,12 @@ export async function connectRun(
     if (!existing.connection.connected) await existing.connection.connect({ bumpEpoch });
     return existing.connection;
   }
-  const identity = await getChannelIdentity(runId);
   if (!identity) throw new Error(`Run ${runId} has no worker channel endpoint or instance identity`);
   const blobs = blobCoordinatorFor(runId, identity.instanceId);
   const supervisor: Supervisor = {
     runId,
     instanceId: identity.instanceId,
+    workerGeneration: identity.workerGeneration,
     stopped: false,
     connection: undefined as unknown as ControllerConnection,
   };
@@ -138,7 +161,10 @@ export async function connectRun(
     runId,
     controllerId: registry().controllerId,
     onClose: () => scheduleReconnect(supervisor),
-    onTerminal: (info) => void finalizeTerminalRun(runId, info.status).catch(() => undefined),
+    // Capture this supervisor, not a later registry entry for the same run.
+    // A replacement generation can connect before the old terminal callback
+    // drains its microtask queue.
+    onTerminal: (info) => void finalizeTerminalRun(supervisor, info.status).catch(() => undefined),
   });
   registry().supervisors.set(runId, supervisor);
   try {
@@ -246,9 +272,9 @@ async function replaceWorker(runId: number): Promise<void> {
  * channel down (without racing the run.commit off the wire — the worker closes
  * its own side after receiving it), stop the provider where appropriate, and
  * clear the controller lease and worker claim. */
-async function finalizeTerminalRun(runId: number, _status: string): Promise<void> {
-  const supervisor = registry().supervisors.get(runId);
-  if (!supervisor || supervisor.stopped) return;
+async function finalizeTerminalRun(supervisor: Supervisor, _status: string): Promise<void> {
+  const runId = supervisor.runId;
+  if (registry().supervisors.get(runId) !== supervisor || supervisor.stopped) return;
   supervisor.stopped = true;
   if (supervisor.reconnectTimer) clearTimeout(supervisor.reconnectTimer);
   supervisor.connection.neutralize();
@@ -256,8 +282,12 @@ async function finalizeTerminalRun(runId: number, _status: string): Promise<void
   registry().blobs.delete(runId);
   const scope = await currentWorkerScope(runId);
   const runDispatch = await import("../run-dispatch");
-  if (scope) await runDispatch.stopRunner(scope).catch(() => undefined);
-  await clearChannelClaim(runId).catch(() => undefined);
+  await runDispatch.stopRunner(scope, {
+    runId,
+    workerGeneration: supervisor.workerGeneration,
+    instanceId: supervisor.instanceId,
+  }).catch(() => undefined);
+  await clearChannelClaim(runId, { workerGeneration: supervisor.workerGeneration, instanceId: supervisor.instanceId }).catch(() => undefined);
 }
 
 async function currentWorkerScope(runId: number): Promise<string | null> {
@@ -284,7 +314,7 @@ export async function disconnectRun(runId: number): Promise<void> {
 export async function sendCommand(runId: number, type: string, payload: unknown, id?: string): Promise<void> {
   const connection = getConnection(runId);
   if (!connection) throw new Error(`No worker channel is registered for run ${runId}`);
-  const row: CommandRow = await persistCommand({ runId, instanceId: connection.instanceId, controllerEpoch: connection.controllerEpoch, type, payload, id });
+  const row: CommandRow = await persistCommand({ runId, instanceId: connection.instanceId, workerGeneration: connection.workerGeneration, controllerEpoch: connection.controllerEpoch, type, payload, id });
   // A disconnected controller has no acknowledgement path. The durable row is
   // the delivery promise in that state; connect() rebases and replays it.
   if (!connection.connected) return;
@@ -374,7 +404,7 @@ export async function maybeCloseSpritesChannel(runId: number): Promise<void> {
   // landed here a tick before the new generation's run.start went out
   // (run 187, 2026-08-27). The next idle after delivery closes the tunnel.
   const { listPendingCommands } = await import("./repository");
-  const pending = await listPendingCommands(runId, supervisor.instanceId, supervisor.connection.controllerEpoch).catch(() => []);
+  const pending = await listPendingCommands(runId, supervisor.instanceId, supervisor.connection.controllerEpoch, supervisor.workerGeneration).catch(() => []);
   if (pending.length > 0) return;
   // Close after the final frame's ack is flushed — next tick
   setTimeout(() => {

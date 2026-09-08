@@ -55,6 +55,68 @@ describe("worker channel schema", () => {
     });
   });
 
+  it("persists generation state and separates command/receipt sequence spaces", async () => {
+    const runId = await makeRun();
+    await db.insert(runnerInstances).values({
+      runId,
+      channelInstanceId: INSTANCE_ID,
+      workerGeneration: 2,
+      generationState: "active",
+      providerOperationId: "00000000-0000-4000-8000-000000000001",
+      providerServiceName: "worker-g2",
+    });
+    const [runner] = await db
+      .select({
+        workerGeneration: runnerInstances.workerGeneration,
+        generationState: runnerInstances.generationState,
+        providerServiceName: runnerInstances.providerServiceName,
+      })
+      .from(runnerInstances)
+      .where(eq(runnerInstances.runId, runId));
+    expect(runner).toEqual({
+      workerGeneration: 2,
+      generationState: "active",
+      providerServiceName: "worker-g2",
+    });
+
+    await db.insert(workerChannelCommands).values([
+      { ...commandValues(runId, "00000000-0000-4000-8000-000000000011", 1, 1), workerGeneration: 1 },
+      { ...commandValues(runId, "00000000-0000-4000-8000-000000000012", 1, 1), workerGeneration: 2 },
+    ]);
+    await db.insert(workerChannelReceipts).values([
+      {
+        id: "10000000-0000-4000-8000-000000000011",
+        runId,
+        instanceId: INSTANCE_ID,
+        workerGeneration: 1,
+        workerSeq: 1,
+        controllerEpoch: 1,
+        type: "run.phase",
+        payloadSha256: "generation-1",
+      },
+      {
+        id: "10000000-0000-4000-8000-000000000012",
+        runId,
+        instanceId: INSTANCE_ID,
+        workerGeneration: 2,
+        workerSeq: 1,
+        controllerEpoch: 1,
+        type: "run.phase",
+        payloadSha256: "generation-2",
+      },
+    ]);
+    const commands = await db
+      .select({ workerGeneration: workerChannelCommands.workerGeneration, seq: workerChannelCommands.seq })
+      .from(workerChannelCommands)
+      .where(eq(workerChannelCommands.runId, runId));
+    expect(commands).toEqual(
+      expect.arrayContaining([
+        { workerGeneration: 1, seq: 1 },
+        { workerGeneration: 2, seq: 1 },
+      ]),
+    );
+  });
+
   it("rejects duplicate channel instance ids", async () => {
     const firstRunId = await makeRun();
     const secondRunId = await makeRun();

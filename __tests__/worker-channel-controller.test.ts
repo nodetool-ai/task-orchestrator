@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -112,8 +112,10 @@ describe("local worker channel end-to-end (no driver)", () => {
     // Control plane dials the stored ws+unix endpoint and completes the handshake.
     const connection = await connectRun(run.id);
     expect(connection.connected).toBe(true);
-    const [instance] = await db.select({ workerIncarnation: runnerInstances.workerIncarnation }).from(runnerInstances).where(eq(runnerInstances.runId, run.id));
-    expect(instance.workerIncarnation).toBe(`${process.pid}#2026-08-27T10:00:00.000Z`);
+    await vi.waitFor(async () => {
+      const [instance] = await db.select({ workerIncarnation: runnerInstances.workerIncarnation }).from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+      expect(instance.workerIncarnation).toBe(`${process.pid}#2026-08-27T10:00:00.000Z`);
+    });
 
     // A persisted command is delivered and cumulatively acked by the worker.
     await sendCommand(run.id, "run.cancel", { reason: "stop", requestId: "req-1", deadline: null });

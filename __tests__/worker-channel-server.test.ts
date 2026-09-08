@@ -30,12 +30,13 @@ afterEach(async () => {
 
 async function makeServer(
   options: Partial<Parameters<typeof startWorkerServer>[0]> = {},
-): Promise<{ server: WorkerServer; token: string; instanceId: string }> {
+): Promise<{ server: WorkerServer; token: string; instanceId: string; workerGeneration: number }> {
   const root = await mkdtemp(join(tmpdir(), "worker-channel-server-"));
   roots.push(root);
   const runId = 71;
   const instanceId = `wi_${"a".repeat(32)}`;
-  const token = mintChannelCredential(runId, instanceId, { secret });
+  const workerGeneration = options.workerGeneration ?? 1;
+  const token = mintChannelCredential(runId, instanceId, { secret, workerGeneration });
   const server = await startWorkerServer({
     runId,
     instanceId,
@@ -48,7 +49,7 @@ async function makeServer(
     ...options,
   });
   servers.push(server);
-  return { server, token, instanceId };
+  return { server, token, instanceId, workerGeneration };
 }
 
 function serverUrl(server: WorkerServer): string {
@@ -107,7 +108,7 @@ async function closed(socket: WebSocket): Promise<number> {
   });
 }
 
-function accept(epoch: number, cursor = 0, graceMs = 60_000): AcceptFrame {
+function accept(epoch: number, cursor = 0, graceMs = 60_000, workerGeneration?: number): AcceptFrame {
   const payload: ChannelAccept = {
     protocol: WORKER_CHANNEL_PROTOCOL,
     controllerEpoch: epoch,
@@ -116,6 +117,7 @@ function accept(epoch: number, cursor = 0, graceMs = 60_000): AcceptFrame {
     heartbeatMs: 10_000,
     disconnectGraceMs: graceMs,
     maxInFlightBytes: 8 * 1024 * 1024,
+    ...(workerGeneration === undefined ? {} : { workerGeneration }),
   };
   return { v: 1, type: "channel.accept", seq: 0, payload };
 }
@@ -155,7 +157,7 @@ function fakeSession(overrides: Partial<WorkerSessionLike> = {}): WorkerSessionL
     attach: vi.fn(async () => {}),
     receive: vi.fn(async () => {}),
     emit: vi.fn(async () => ({}) as never),
-    handshakeState: () => ({ lastControllerEpoch: 0, lastAckedControlSeq: 0, nextWorkerSeq: 1 }),
+    handshakeState: () => ({ workerGeneration: 1, lastControllerEpoch: 0, lastAckedControlSeq: 0, nextWorkerSeq: 1 }),
     abort: vi.fn(),
     close: vi.fn(async () => {}),
     ...overrides,
@@ -230,6 +232,19 @@ describe("worker WebSocket supervisor", () => {
     expect(event.seq).toBe(1);
     expect((await nextFrame(socket)).type).toBe("agent.event");
     socket.close();
+  });
+
+  it("rejects a controller accept from a different worker generation", async () => {
+    const { server, token, workerGeneration } = await makeServer({ workerGeneration: 2 });
+    const socket = connect(server, token);
+    await openSocket(socket);
+    const hello = await nextFrame(socket);
+    expect(hello.type).toBe("channel.hello");
+    if (hello.type === "channel.hello") expect(hello.payload.workerGeneration).toBe(workerGeneration);
+
+    socket.send(encodeFrame(accept(1, 0, 60_000, 1)));
+    expect((await nextFrame(socket)).type).toBe("channel.reject");
+    expect(await closed(socket)).toBe(4403);
   });
 
   it("admits one controller and fences a superseded or stale competitor", async () => {

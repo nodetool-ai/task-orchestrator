@@ -118,13 +118,21 @@ function isHandshakeFrame(frame: WireFrame): frame is HandshakeFrame {
 export function assertEnvelopeScope(
   frame: WireFrame,
   runId: number,
-  instanceId: string
+  instanceId: string,
+  workerGeneration = 1,
 ): asserts frame is Exclude<WireFrame, HandshakeFrame> {
   if (isHandshakeFrame(frame)) {
     throw new WorkerChannelProtocolError("Handshake frames do not carry an application scope", 4403);
   }
-  if (frame.runId !== runId || frame.instanceId !== instanceId) {
-    throw new WorkerChannelProtocolError("Worker channel run or instance scope mismatch", 4403);
+  // Generation was added after the original channel protocol. Missing means
+  // legacy generation 1; once a run advances, callers pass the current value
+  // and stale frames fail closed before any handler executes.
+  if (
+    frame.runId !== runId ||
+    frame.instanceId !== instanceId ||
+    (frame.workerGeneration ?? 1) !== workerGeneration
+  ) {
+    throw new WorkerChannelProtocolError("Worker channel run, instance, or generation scope mismatch", 4403);
   }
 }
 

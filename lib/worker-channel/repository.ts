@@ -2,7 +2,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { sql as drizzleSql, type SQL } from "drizzle-orm";
 import type { PgTransaction } from "drizzle-orm/pg-core";
-import { db } from "../../db";
+import type postgres from "postgres";
+import { db, generationAuthoritySql, workerGenerationAuthorityKey } from "../../db";
 import { payloadSha256 } from "./codec";
 import type { WorkerEvent } from "./protocol";
 
@@ -22,6 +23,7 @@ export type CommandRow = {
   id: string;
   runId: number;
   instanceId: string;
+  workerGeneration: number;
   controllerEpoch: number;
   seq: number;
   type: string;
@@ -34,6 +36,7 @@ export type CommandRow = {
 export type PersistCommandInput = {
   runId: number;
   instanceId: string;
+  workerGeneration?: number;
   controllerEpoch: number;
   type: string;
   payload: unknown;
@@ -50,6 +53,7 @@ export type ControllerLease = {
   epoch: number;
   /** Alias used by callers that use the protocol field name. */
   controllerEpoch: number;
+  workerGeneration: number;
   /** Stable for the lifetime of this controller/epoch pair. */
   leaseId: string;
 };
@@ -169,6 +173,7 @@ function commandRow(row: RawRow): CommandRow {
     id: String(row.id),
     runId: numberValue(row.run_id, "run_id"),
     instanceId: String(row.instance_id),
+    workerGeneration: numberValue(row.worker_generation ?? 1, "worker_generation"),
     controllerEpoch: numberValue(row.controller_epoch, "controller_epoch"),
     seq: numberValue(row.seq, "seq"),
     type: String(row.type),
@@ -198,26 +203,84 @@ function ts(value: Date): SQL {
   return drizzleSql`${value.toISOString()}::timestamptz`;
 }
 
-function channelLockKey(runId: number, instanceId: string): string {
-  return `${runId}:${instanceId}`;
+function channelLockKey(runId: number, instanceId: string, workerGeneration = 1): string {
+  return `${runId}:${workerGeneration}:${instanceId}`;
 }
 
-async function lockChannel<T extends SqlExecutor>(tx: T, runId: number, instanceId: string): Promise<void> {
+async function lockChannel<T extends SqlExecutor>(tx: T, runId: number, instanceId: string, workerGeneration = 1): Promise<void> {
   // The advisory lock serializes command allocation, rebase, and event cursor
   // work even while the runner row is being replaced by provider code.
   await tx.execute(
-    drizzleSql`SELECT pg_advisory_xact_lock(hashtext(${channelLockKey(runId, instanceId)}))`
+    drizzleSql`SELECT pg_advisory_xact_lock(hashtext(${channelLockKey(runId, instanceId, workerGeneration)}))`
   );
 }
 
 async function lockRunner(tx: SqlExecutor, runId: number): Promise<RawRow> {
   const result = await queryRows(
     tx,
-    drizzleSql`SELECT run_id FROM runner_instances WHERE run_id = ${runId} FOR UPDATE`
+    drizzleSql`SELECT run_id, worker_generation, channel_instance_id, controller_id, controller_epoch
+                FROM runner_instances WHERE run_id = ${runId} FOR UPDATE`
   );
   const row = result[0];
   if (!row) throw new Error(`Runner instance for run ${runId} was not found`);
   return row;
+}
+
+function generationOf(value: number | undefined): number {
+  const generation = value ?? 1;
+  if (!Number.isSafeInteger(generation) || generation <= 0) throw new TypeError("workerGeneration must be a positive integer");
+  return generation;
+}
+
+function assertCurrentRunner(row: RawRow, runId: number, instanceId: string, workerGeneration: number): void {
+  const current = numberValue(row.worker_generation ?? 1, "worker_generation");
+  const currentInstance = row.channel_instance_id == null ? null : String(row.channel_instance_id);
+  if (current !== workerGeneration || currentInstance !== instanceId) {
+    throw new WorkerChannelRepositoryError(
+      `Worker generation ${workerGeneration}/${instanceId} is not current for run ${runId}`,
+      "GENERATION_SCOPE_MISMATCH",
+      { closeCode: 4403 },
+    );
+  }
+}
+
+/** Run work while holding the per-run generation authority lock on the small
+ * dedicated pool. Generation allocators take the same key on their ordinary
+ * transaction connection, so a replacement waits for the operation without
+ * consuming a main-pool connection. */
+export async function withWorkerGenerationAuthority<T>(
+  runId: number,
+  operation: (tx: postgres.TransactionSql) => Promise<T>,
+): Promise<T> {
+  return generationAuthoritySql.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(hashtext(${workerGenerationAuthorityKey(runId)}))`;
+    return operation(tx);
+  }) as Promise<T>;
+}
+
+/** Execute a worker-targeted operation with generation authority fencing.
+ *
+ * Do not hold the runner row lock while invoking the operation: channel events,
+ * heartbeats, and generation replacement all need that row and a slow tool
+ * would otherwise pin a pooled connection for its entire execution. The
+ * authority transaction holds the advisory lock while the operation runs;
+ * the generation allocator takes the matching lock before replacing a worker.
+ * Durable writes performed by the caller still have their own
+ * `(run,generation,instance)` CAS as a final cross-process fence.
+ */
+export async function withCurrentWorkerGeneration<T>(
+  runId: number,
+  instanceId: string,
+  workerGeneration: number,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const generation = generationOf(workerGeneration);
+  return withWorkerGenerationAuthority(runId, async (authorityTx) => {
+    const currentRows = rows<RawRow>(await authorityTx`SELECT run_id, worker_generation, channel_instance_id
+                  FROM runner_instances WHERE run_id = ${runId}`);
+    assertCurrentRunner(currentRows[0], runId, instanceId, generation);
+    return operation();
+  });
 }
 
 function canonicalJson(value: unknown): string {
@@ -255,13 +318,13 @@ function handlerResultCommandId(result: WorkerEventHandlerResult): string | null
   return null;
 }
 
-async function contiguousWorkerSeq(tx: SqlExecutor, runId: number, instanceId: string): Promise<number> {
+async function contiguousWorkerSeq(tx: SqlExecutor, runId: number, instanceId: string, workerGeneration = 1): Promise<number> {
   const result = await queryRows(
     tx,
     drizzleSql`
       SELECT worker_seq
       FROM worker_channel_receipts
-      WHERE run_id = ${runId} AND instance_id = ${instanceId}
+      WHERE run_id = ${runId} AND worker_generation = ${workerGeneration} AND instance_id = ${instanceId}
       ORDER BY worker_seq ASC
     `
   );
@@ -280,14 +343,16 @@ async function listPendingCommandsTx(
   tx: SqlExecutor,
   runId: number,
   instanceId: string,
-  epoch: number
+  epoch: number,
+  workerGeneration = 1
 ): Promise<CommandRow[]> {
   const result = await queryRows(
     tx,
     drizzleSql`
-      SELECT id, run_id, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
+      SELECT id, run_id, worker_generation, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
       FROM worker_channel_commands
       WHERE run_id = ${runId}
+        AND worker_generation = ${workerGeneration}
         AND instance_id = ${instanceId}
         AND controller_epoch = ${epoch}
         AND state = 'pending'
@@ -301,14 +366,17 @@ async function listPendingCommandsTx(
 export async function reserveChannelIdentity(
   runId: number,
   instanceId: string,
-  endpoint: string
+  endpoint: string,
+  workerGeneration?: number,
 ): Promise<void> {
+  const generationGuard = workerGeneration == null ? drizzleSql`` : drizzleSql`AND worker_generation = ${generationOf(workerGeneration)}`;
   const updated = await queryRows(
     db,
     drizzleSql`
       UPDATE runner_instances
       SET channel_instance_id = ${instanceId}, channel_endpoint = ${endpoint}
       WHERE run_id = ${runId}
+        ${generationGuard}
         AND (channel_instance_id IS NULL OR channel_instance_id = ${instanceId})
       RETURNING run_id
     `
@@ -327,13 +395,14 @@ export async function reserveChannelIdentity(
   );
 }
 
-export async function setChannelEndpoint(runId: number, instanceId: string, endpoint: string): Promise<void> {
+export async function setChannelEndpoint(runId: number, instanceId: string, endpoint: string, workerGeneration?: number): Promise<void> {
+  const generationGuard = workerGeneration == null ? drizzleSql`` : drizzleSql`AND worker_generation = ${generationOf(workerGeneration)}`;
   const updated = await queryRows(
     db,
     drizzleSql`
       UPDATE runner_instances
       SET channel_endpoint = ${endpoint}
-      WHERE run_id = ${runId} AND channel_instance_id = ${instanceId}
+      WHERE run_id = ${runId} ${generationGuard} AND channel_instance_id = ${instanceId}
       RETURNING run_id
     `
   );
@@ -351,18 +420,18 @@ export async function setChannelEndpoint(runId: number, instanceId: string, endp
  * channel persistence boundary. */
 export async function getChannelIdentity(
   runId: number,
-): Promise<{ instanceId: string; endpoint: string } | null> {
+): Promise<{ instanceId: string; endpoint: string; workerGeneration: number } | null> {
   const result = await queryRows(
     db,
     drizzleSql`
-      SELECT channel_instance_id, channel_endpoint
+      SELECT channel_instance_id, channel_endpoint, worker_generation
       FROM runner_instances
       WHERE run_id = ${runId}
     `,
   );
   const row = result[0];
   if (!row || row.channel_instance_id == null || row.channel_endpoint == null) return null;
-  return { instanceId: String(row.channel_instance_id), endpoint: String(row.channel_endpoint) };
+  return { instanceId: String(row.channel_instance_id), endpoint: String(row.channel_endpoint), workerGeneration: numberValue(row.worker_generation ?? 1, "worker_generation") };
 }
 
 /** One reconnectable channel: a runner instance that still has a dial identity
@@ -370,6 +439,7 @@ export async function getChannelIdentity(
 export type ChannelInstanceRow = {
   runId: number;
   instanceId: string;
+  workerGeneration: number;
   endpoint: string;
   status: string;
   workerScope: string | null;
@@ -379,6 +449,7 @@ function channelInstanceRow(row: RawRow): ChannelInstanceRow {
   return {
     runId: numberValue(row.run_id, "run_id"),
     instanceId: String(row.channel_instance_id),
+    workerGeneration: numberValue(row.worker_generation ?? 1, "worker_generation"),
     endpoint: String(row.channel_endpoint),
     status: String(row.status),
     workerScope: row.worker_scope == null ? null : String(row.worker_scope),
@@ -398,7 +469,7 @@ export async function listReconnectableChannels(): Promise<ChannelInstanceRow[]>
   const result = await queryRows(
     db,
     drizzleSql`
-      SELECT ri.run_id, ri.channel_instance_id, ri.channel_endpoint,
+      SELECT ri.run_id, ri.worker_generation, ri.channel_instance_id, ri.channel_endpoint,
              r.status, r.worker_scope
       FROM runner_instances ri
       JOIN agent_runs r ON r.id = ri.run_id
@@ -418,20 +489,26 @@ export async function listReconnectableChannels(): Promise<ChannelInstanceRow[]>
  * reserveChannelIdentity can claim the row. Leaves the run's status untouched —
  * dispatchRun re-claims it.
  */
-export async function releaseChannelForReplacement(runId: number): Promise<void> {
+export async function releaseChannelForReplacement(runId: number, options: { workerGeneration?: number; instanceId?: string } = {}): Promise<void> {
   await db.transaction(async (tx) => {
+    const generation = options.workerGeneration == null ? undefined : generationOf(options.workerGeneration);
+    const instance = options.instanceId;
+    const guard = generation == null ? drizzleSql`` : drizzleSql`AND worker_generation = ${generation}`;
+    const instanceGuard = instance == null ? drizzleSql`` : drizzleSql`AND channel_instance_id = ${instance}`;
+    await tx.execute(drizzleSql`SELECT run_id FROM runner_instances WHERE run_id = ${runId} FOR UPDATE`);
     await tx.execute(
       drizzleSql`
         UPDATE agent_runs
         SET worker_scope = NULL
         WHERE id = ${runId}
+          AND EXISTS (SELECT 1 FROM runner_instances WHERE run_id = ${runId} ${guard} ${instanceGuard})
       `
     );
     await tx.execute(
       drizzleSql`
         UPDATE runner_instances
         SET channel_instance_id = NULL, channel_endpoint = NULL, controller_id = NULL
-        WHERE run_id = ${runId}
+        WHERE run_id = ${runId} ${guard} ${instanceGuard}
       `
     );
   });
@@ -439,20 +516,26 @@ export async function releaseChannelForReplacement(runId: number): Promise<void>
 
 /** Clear a run's worker claim and controller lease as part of terminal channel
  * teardown. Idempotent; leaves status untouched (the terminal landing owns it). */
-export async function clearChannelClaim(runId: number): Promise<void> {
+export async function clearChannelClaim(runId: number, options: { workerGeneration?: number; instanceId?: string } = {}): Promise<void> {
   await db.transaction(async (tx) => {
+    const generation = options.workerGeneration == null ? undefined : generationOf(options.workerGeneration);
+    const instance = options.instanceId;
+    const guard = generation == null ? drizzleSql`` : drizzleSql`AND worker_generation = ${generation}`;
+    const instanceGuard = instance == null ? drizzleSql`` : drizzleSql`AND channel_instance_id = ${instance}`;
+    await tx.execute(drizzleSql`SELECT run_id FROM runner_instances WHERE run_id = ${runId} FOR UPDATE`);
     await tx.execute(
       drizzleSql`
         UPDATE agent_runs
         SET worker_scope = NULL
         WHERE id = ${runId}
+          AND EXISTS (SELECT 1 FROM runner_instances WHERE run_id = ${runId} ${guard} ${instanceGuard})
       `
     );
     await tx.execute(
       drizzleSql`
         UPDATE runner_instances
         SET controller_id = NULL
-        WHERE run_id = ${runId}
+        WHERE run_id = ${runId} ${guard} ${instanceGuard}
       `
     );
   });
@@ -462,14 +545,14 @@ export async function acquireControllerLease(
   runId: number,
   controllerId: string,
   now: Date,
-  options: { bump?: boolean } = {}
+  options: { bump?: boolean; workerGeneration?: number } = {}
 ): Promise<ControllerLease> {
   const at = asDate(now, "now");
   return db.transaction(async (tx) => {
     const current = await queryRows(
       tx,
       drizzleSql`
-        SELECT controller_epoch, controller_id
+        SELECT controller_epoch, controller_id, worker_generation
         FROM runner_instances
         WHERE run_id = ${runId}
         FOR UPDATE
@@ -478,6 +561,10 @@ export async function acquireControllerLease(
     if (!current.length) throw new Error(`Runner instance for run ${runId} was not found`);
 
     const row = current[0];
+    const workerGeneration = generationOf(options.workerGeneration);
+    if (numberValue(row.worker_generation ?? 1, "worker_generation") !== workerGeneration) {
+      throw new WorkerChannelRepositoryError("controller lease belongs to a stale worker generation", "GENERATION_SCOPE_MISMATCH", { closeCode: 4403 });
+    }
     const currentEpoch = numberValue(row.controller_epoch ?? 0, "controller_epoch");
     const currentController = row.controller_id == null ? null : String(row.controller_id);
     // No expiry: the epoch IS the single-controller rule. The same controller
@@ -502,31 +589,81 @@ export async function acquireControllerLease(
       controllerId,
       epoch,
       controllerEpoch: epoch,
+      workerGeneration,
       leaseId: leaseId(runId, controllerId, epoch),
     };
   });
 }
 
-export async function releaseControllerLease(runId: number, controllerId: string, epoch: number): Promise<void> {
+export async function releaseControllerLease(runId: number, controllerId: string, epoch: number, workerGeneration = 1): Promise<void> {
   await queryRows(
     db,
     drizzleSql`
       UPDATE runner_instances
       SET controller_id = NULL
-      WHERE run_id = ${runId} AND controller_id = ${controllerId} AND controller_epoch = ${epoch}
+      WHERE run_id = ${runId} AND worker_generation = ${workerGeneration} AND controller_id = ${controllerId} AND controller_epoch = ${epoch}
       RETURNING run_id
     `
   );
 }
 
-export async function markChannelConnected(runId: number, instanceId: string, now: Date): Promise<void> {
+export async function markChannelConnected(
+  runId: number,
+  instanceId: string,
+  now: Date,
+  workerGeneration = 1,
+  controllerId?: string,
+  controllerEpoch?: number,
+  provisioningScope?: string,
+): Promise<void> {
   asDate(now, "now");
-  // Liveness is the provider's verdict (resolveLiveness), not a channel clock;
-  // this only proves the dialed instance is the one registered for the run.
-  const registered = await queryRows(
-    db,
-    drizzleSql`SELECT run_id FROM runner_instances WHERE run_id = ${runId} AND channel_instance_id = ${instanceId}`
-  );
+  // Liveness is the provider's verdict (resolveLiveness), not a channel clock.
+  // This transition is nevertheless the durable proof that the current
+  // generation completed an authenticated hello. Fence it to the exact lease
+  // that accepted the hello so an older asynchronous connection cannot mark a
+  // replacement generation active.
+  const registered = await db.transaction(async (tx) => {
+    const rows = await queryRows(
+      tx,
+      drizzleSql`
+        UPDATE runner_instances ri
+        SET generation_state = 'active'
+        WHERE ri.run_id = ${runId}
+          AND ri.worker_generation = ${workerGeneration}
+          AND ri.channel_instance_id = ${instanceId}
+          ${controllerId == null ? drizzleSql`` : drizzleSql`AND ri.controller_id = ${controllerId}`}
+          ${controllerEpoch == null ? drizzleSql`` : drizzleSql`AND ri.controller_epoch = ${controllerEpoch}`}
+          AND EXISTS (
+            SELECT 1 FROM agent_runs ar
+            WHERE ar.id = ri.run_id
+              AND ar.status NOT IN ('completed', 'failed', 'cancelled', 'closed', 'budget_exhausted')
+          )
+        RETURNING ri.run_id, ri.sprite_name
+      `,
+    );
+    if (!rows.length) return rows;
+    // A Sprite stays run-scoped, so its name is the stable provider handle.
+    // Transfer the observable server provisioning claim only after authenticated
+    // hello; local process handles already use the server claim string.
+    if (rows[0].sprite_name != null) {
+      const promoted = await queryRows(tx, drizzleSql`
+        UPDATE agent_runs
+        SET worker_scope = ${String(rows[0].sprite_name)}
+        WHERE id = ${runId}
+          ${provisioningScope == null ? drizzleSql`` : drizzleSql`AND worker_scope = ${provisioningScope}`}
+          AND status NOT IN ('completed', 'failed', 'cancelled', 'closed', 'budget_exhausted')
+        RETURNING id
+      `);
+      if (!promoted.length) {
+        throw new WorkerChannelRepositoryError(
+          `Worker provisioning claim for run ${runId} is no longer current`,
+          "INSTANCE_SCOPE_MISMATCH",
+          { closeCode: 4403 },
+        );
+      }
+    }
+    return rows;
+  });
   if (!registered.length) {
     throw new WorkerChannelRepositoryError(
       `Worker instance ${instanceId} is not registered for run ${runId}`,
@@ -540,18 +677,24 @@ export async function markChannelConnected(runId: number, instanceId: string, no
 export async function getWorkerObservationTarget(
   runId: number,
   instanceId: string,
-): Promise<{ provider: string; handle: string } | null> {
+  workerGeneration = 1,
+): Promise<{ provider: string; handle: string; providerServiceName: string | null } | null> {
   const result = await queryRows(
     db,
     drizzleSql`
-      SELECT ri.provider, COALESCE(ri.sprite_name, ar.worker_scope) AS handle
+      SELECT ri.provider, ri.provider_service_name,
+             COALESCE(ri.sprite_name, ar.worker_scope) AS handle
       FROM runner_instances ri
       JOIN agent_runs ar ON ar.id = ri.run_id
-      WHERE ri.run_id = ${runId} AND ri.channel_instance_id = ${instanceId}
+      WHERE ri.run_id = ${runId} AND ri.worker_generation = ${workerGeneration} AND ri.channel_instance_id = ${instanceId}
     `,
   );
   const row = result[0];
-  return row?.handle ? { provider: String(row.provider), handle: String(row.handle) } : null;
+  return row?.handle ? {
+    provider: String(row.provider),
+    handle: String(row.handle),
+    providerServiceName: row.provider_service_name == null ? null : String(row.provider_service_name),
+  } : null;
 }
 
 /** Store only an identity verified against this channel instance. */
@@ -559,13 +702,20 @@ export async function persistWorkerIncarnation(
   runId: number,
   instanceId: string,
   incarnation: string,
+  workerGeneration = 1,
+  controllerId?: string,
+  controllerEpoch?: number,
 ): Promise<boolean> {
   const updated = await queryRows(
     db,
     drizzleSql`
       UPDATE runner_instances
       SET worker_incarnation = ${incarnation}
-      WHERE run_id = ${runId} AND channel_instance_id = ${instanceId}
+      WHERE run_id = ${runId}
+        AND worker_generation = ${workerGeneration}
+        AND channel_instance_id = ${instanceId}
+        ${controllerId == null ? drizzleSql`` : drizzleSql`AND controller_id = ${controllerId}`}
+        ${controllerEpoch == null ? drizzleSql`` : drizzleSql`AND controller_epoch = ${controllerEpoch}`}
       RETURNING run_id
     `,
   );
@@ -580,7 +730,8 @@ export async function touchChannel(
   instanceId: string,
   controllerId: string,
   epoch: number,
-  now: Date
+  now: Date,
+  workerGeneration = 1
 ): Promise<boolean> {
   asDate(now, "now");
   const rows = await queryRows(
@@ -589,6 +740,7 @@ export async function touchChannel(
       SELECT run_id FROM runner_instances
       WHERE run_id = ${runId}
         AND channel_instance_id = ${instanceId}
+        AND worker_generation = ${workerGeneration}
         AND controller_id = ${controllerId}
         AND controller_epoch = ${epoch}
     `
@@ -601,10 +753,11 @@ export async function touchChannel(
  * that sequence allocation is serialized. */
 async function insertCommandCore(tx: SqlExecutor, input: PersistCommandInput): Promise<CommandRow> {
   const commandId = input.id ?? randomUUID();
+  const workerGeneration = generationOf(input.workerGeneration);
   const existing = await queryRows(
     tx,
     drizzleSql`
-      SELECT id, run_id, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
+      SELECT id, run_id, worker_generation, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
       FROM worker_channel_commands
       WHERE id = ${commandId}
     `
@@ -613,6 +766,7 @@ async function insertCommandCore(tx: SqlExecutor, input: PersistCommandInput): P
     const row = commandRow(existing[0]);
     if (
       row.runId !== input.runId ||
+      row.workerGeneration !== workerGeneration ||
       row.instanceId !== input.instanceId ||
       row.controllerEpoch !== input.controllerEpoch ||
       row.type !== input.type ||
@@ -633,6 +787,7 @@ async function insertCommandCore(tx: SqlExecutor, input: PersistCommandInput): P
       SELECT COALESCE(MAX(seq), 0) AS max_seq
       FROM worker_channel_commands
       WHERE run_id = ${input.runId}
+        AND worker_generation = ${workerGeneration}
         AND instance_id = ${input.instanceId}
         AND controller_epoch = ${input.controllerEpoch}
     `
@@ -651,11 +806,11 @@ async function insertCommandCore(tx: SqlExecutor, input: PersistCommandInput): P
     tx,
     drizzleSql`
       INSERT INTO worker_channel_commands
-        (id, run_id, instance_id, controller_epoch, seq, type, payload, state, created_at)
+        (id, run_id, worker_generation, instance_id, controller_epoch, seq, type, payload, state, created_at)
       VALUES
-        (${commandId}, ${input.runId}, ${input.instanceId}, ${input.controllerEpoch}, ${seq},
+        (${commandId}, ${input.runId}, ${workerGeneration}, ${input.instanceId}, ${input.controllerEpoch}, ${seq},
          ${input.type}, ${JSON.stringify(input.payload)}::jsonb, 'pending', ${ts(createdAt)})
-      RETURNING id, run_id, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
+      RETURNING id, run_id, worker_generation, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
     `
   );
   if (!inserted.length) throw new Error("Postgres did not return the persisted worker command");
@@ -668,8 +823,10 @@ export async function persistCommand(input: PersistCommandInput): Promise<Comman
   }
 
   return db.transaction(async (tx) => {
-    await lockChannel(tx, input.runId, input.instanceId);
-    await lockRunner(tx, input.runId);
+    const generation = generationOf(input.workerGeneration);
+    await lockChannel(tx, input.runId, input.instanceId, generation);
+    const runner = await lockRunner(tx, input.runId);
+    assertCurrentRunner(runner, input.runId, input.instanceId, generation);
     return insertCommandCore(tx, input);
   });
 }
@@ -690,25 +847,31 @@ export async function persistCommandTx(
   if (!Number.isSafeInteger(input.controllerEpoch) || input.controllerEpoch <= 0) {
     throw new TypeError("controllerEpoch must be a positive integer");
   }
+  const generation = generationOf(input.workerGeneration);
+  const runner = await lockRunner(tx as unknown as SqlExecutor, input.runId);
+  assertCurrentRunner(runner, input.runId, input.instanceId, generation);
   return insertCommandCore(tx as unknown as SqlExecutor, input);
 }
 
 export async function rebasePendingCommands(
   runId: number,
   instanceId: string,
-  newEpoch: number
+  newEpoch: number,
+  workerGeneration = 1
 ): Promise<CommandRow[]> {
   if (!Number.isSafeInteger(newEpoch) || newEpoch <= 0) throw new TypeError("newEpoch must be a positive integer");
 
   return db.transaction(async (tx) => {
-    await lockChannel(tx, runId, instanceId);
-    await lockRunner(tx, runId);
+    await lockChannel(tx, runId, instanceId, generationOf(workerGeneration));
+    const runner = await lockRunner(tx, runId);
+    assertCurrentRunner(runner, runId, instanceId, generationOf(workerGeneration));
     const pending = await queryRows(
       tx,
       drizzleSql`
         SELECT id
         FROM worker_channel_commands
         WHERE run_id = ${runId}
+          AND worker_generation = ${workerGeneration}
           AND instance_id = ${instanceId}
           AND controller_epoch < ${newEpoch}
           AND state = 'pending'
@@ -725,16 +888,17 @@ export async function rebasePendingCommands(
         `
       );
     }
-    return listPendingCommandsTx(tx, runId, instanceId, newEpoch);
+    return listPendingCommandsTx(tx, runId, instanceId, newEpoch, workerGeneration);
   });
 }
 
 export async function listPendingCommands(
   runId: number,
   instanceId: string,
-  epoch: number
+  epoch: number,
+  workerGeneration = 1
 ): Promise<CommandRow[]> {
-  return listPendingCommandsTx(db, runId, instanceId, epoch);
+  return listPendingCommandsTx(db, runId, instanceId, epoch, workerGeneration);
 }
 
 /** Load a single persisted command by id (control-plane delivery of a command
@@ -743,7 +907,7 @@ export async function getCommand(id: string): Promise<CommandRow | null> {
   const result = await queryRows(
     db,
     drizzleSql`
-      SELECT id, run_id, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
+      SELECT id, run_id, worker_generation, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
       FROM worker_channel_commands
       WHERE id = ${id}
       LIMIT 1
@@ -759,14 +923,15 @@ export async function getCommand(id: string): Promise<CommandRow | null> {
  *  generation's command when deciding whether one still needs to be sent. */
 export async function getLatestRunStartCommand(
   runId: number,
-  instanceId: string
+  instanceId: string,
+  workerGeneration = 1
 ): Promise<CommandRow | null> {
   const result = await queryRows(
     db,
     drizzleSql`
-      SELECT id, run_id, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
+      SELECT id, run_id, worker_generation, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
       FROM worker_channel_commands
-      WHERE run_id = ${runId} AND instance_id = ${instanceId} AND type = 'run.start'
+      WHERE run_id = ${runId} AND worker_generation = ${workerGeneration} AND instance_id = ${instanceId} AND type = 'run.start'
       ORDER BY controller_epoch DESC, seq DESC
       LIMIT 1
     `
@@ -783,14 +948,15 @@ export async function getLatestRunStartCommand(
  */
 export async function getRunStartPolicy(
   runId: number,
-  instanceId: string
+  instanceId: string,
+  workerGeneration = 1
 ): Promise<{ allowedTools: string[] } | null> {
   const result = await queryRows(
     db,
     drizzleSql`
       SELECT payload
       FROM worker_channel_commands
-      WHERE run_id = ${runId} AND instance_id = ${instanceId} AND type = 'run.start'
+      WHERE run_id = ${runId} AND worker_generation = ${workerGeneration} AND instance_id = ${instanceId} AND type = 'run.start'
       ORDER BY controller_epoch DESC, seq DESC
       LIMIT 1
     `
@@ -815,6 +981,7 @@ export async function getRunStartPolicy(
 export async function persistToolResultCommand(input: {
   runId: number;
   instanceId: string;
+  workerGeneration?: number;
   controllerEpoch: number;
   invokeEventId: string;
   payload: unknown;
@@ -823,8 +990,10 @@ export async function persistToolResultCommand(input: {
     throw new TypeError("controllerEpoch must be a positive integer");
   }
   return db.transaction(async (tx) => {
-    await lockChannel(tx, input.runId, input.instanceId);
-    await lockRunner(tx, input.runId);
+    const generation = generationOf(input.workerGeneration);
+    await lockChannel(tx, input.runId, input.instanceId, generation);
+    const runner = await lockRunner(tx, input.runId);
+    assertCurrentRunner(runner, input.runId, input.instanceId, generation);
 
     const receiptRows = await queryRows(
       tx,
@@ -832,6 +1001,7 @@ export async function persistToolResultCommand(input: {
         SELECT result_command_id
         FROM worker_channel_receipts
         WHERE id = ${input.invokeEventId}
+          AND worker_generation = ${generation}
       `
     );
     const linked = receiptRows[0]?.result_command_id;
@@ -839,7 +1009,7 @@ export async function persistToolResultCommand(input: {
       const existing = await queryRows(
         tx,
         drizzleSql`
-          SELECT id, run_id, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
+          SELECT id, run_id, worker_generation, instance_id, controller_epoch, seq, type, payload, state, created_at, acked_at
           FROM worker_channel_commands
           WHERE id = ${String(linked)}
         `
@@ -850,6 +1020,7 @@ export async function persistToolResultCommand(input: {
     const command = await insertCommandCore(tx as unknown as SqlExecutor, {
       runId: input.runId,
       instanceId: input.instanceId,
+      workerGeneration: generation,
       controllerEpoch: input.controllerEpoch,
       type: "tool.result",
       payload: input.payload,
@@ -859,6 +1030,7 @@ export async function persistToolResultCommand(input: {
         UPDATE worker_channel_receipts
         SET result_command_id = ${command.id}
         WHERE id = ${input.invokeEventId}
+          AND worker_generation = ${generation}
       `
     );
     return command;
@@ -870,6 +1042,7 @@ export type OrphanedToolInvoke = {
   id: string;
   runId: number;
   instanceId: string;
+  workerGeneration: number;
   controllerEpoch: number;
   seq: number;
   payload: unknown;
@@ -884,14 +1057,16 @@ export type OrphanedToolInvoke = {
  */
 export async function listOrphanedToolInvokes(
   runId: number,
-  instanceId: string
+  instanceId: string,
+  workerGeneration = 1
 ): Promise<OrphanedToolInvoke[]> {
   const result = await queryRows(
     db,
     drizzleSql`
-      SELECT id, run_id, instance_id, controller_epoch, worker_seq, invoke_payload
+      SELECT id, run_id, worker_generation, instance_id, controller_epoch, worker_seq, invoke_payload
       FROM worker_channel_receipts
       WHERE run_id = ${runId}
+        AND worker_generation = ${workerGeneration}
         AND instance_id = ${instanceId}
         AND type = 'tool.invoke'
         AND result_command_id IS NULL
@@ -903,6 +1078,7 @@ export async function listOrphanedToolInvokes(
     id: String(row.id),
     runId: numberValue(row.run_id, "run_id"),
     instanceId: String(row.instance_id),
+    workerGeneration: numberValue(row.worker_generation ?? 1, "worker_generation"),
     controllerEpoch: numberValue(row.controller_epoch, "controller_epoch"),
     seq: numberValue(row.worker_seq, "worker_seq"),
     payload: jsonValue(row.invoke_payload),
@@ -914,27 +1090,35 @@ export async function ackCommandsThrough(
   instanceId: string,
   epoch: number,
   seq: number,
-  now: Date
+  now: Date,
+  workerGeneration = 1
 ): Promise<void> {
   if (!Number.isSafeInteger(seq) || seq < 0) throw new TypeError("seq must be a non-negative integer");
   const at = asDate(now, "now");
-  await queryRows(
-    db,
-    drizzleSql`
+  await db.transaction(async (tx) => {
+    const generation = generationOf(workerGeneration);
+    await lockChannel(tx, runId, instanceId, generation);
+    const runner = await lockRunner(tx, runId);
+    assertCurrentRunner(runner, runId, instanceId, generation);
+    await queryRows(
+      tx,
+      drizzleSql`
       UPDATE worker_channel_commands
       SET state = 'acked', acked_at = ${ts(at)}
       WHERE run_id = ${runId}
+        AND worker_generation = ${generation}
         AND instance_id = ${instanceId}
         AND controller_epoch = ${epoch}
         AND state = 'pending'
         AND seq <= ${seq}
       RETURNING id
-    `
-  );
+      `,
+    );
+  });
 }
 
-export async function getLastAcceptedWorkerSeq(runId: number, instanceId: string): Promise<number> {
-  return contiguousWorkerSeq(db, runId, instanceId);
+export async function getLastAcceptedWorkerSeq(runId: number, instanceId: string, workerGeneration = 1): Promise<number> {
+  return contiguousWorkerSeq(db, runId, instanceId, workerGeneration);
 }
 
 /**
@@ -952,17 +1136,19 @@ export async function applyWorkerEvent(frame: WorkerEventFrame, handler: WorkerE
     });
   }
   const payloadHash = canonicalPayloadSha256(frame.payload);
+  const workerGeneration = generationOf(frame.workerGeneration);
   const emissions: PostCommitEmission[] = [];
 
   return postCommitEmissions.run(emissions, async () => {
     const result = await db.transaction(async (tx) => {
-    await lockChannel(tx, frame.runId, frame.instanceId);
-    await lockRunner(tx, frame.runId);
+    await lockChannel(tx, frame.runId, frame.instanceId, workerGeneration);
+    const runner = await lockRunner(tx, frame.runId);
+    assertCurrentRunner(runner, frame.runId, frame.instanceId, workerGeneration);
 
     const priorRows = await queryRows(
       tx,
       drizzleSql`
-        SELECT id, run_id, instance_id, worker_seq, controller_epoch, type, payload_sha256, result_command_id
+        SELECT id, run_id, worker_generation, instance_id, worker_seq, controller_epoch, type, payload_sha256, result_command_id
         FROM worker_channel_receipts
         WHERE id = ${frame.id}
       `
@@ -970,7 +1156,7 @@ export async function applyWorkerEvent(frame: WorkerEventFrame, handler: WorkerE
     if (priorRows.length) {
       const prior = priorRows[0];
       const sameScope =
-        numberValue(prior.run_id, "run_id") === frame.runId && String(prior.instance_id) === frame.instanceId;
+        numberValue(prior.run_id, "run_id") === frame.runId && numberValue(prior.worker_generation ?? 1, "worker_generation") === workerGeneration && String(prior.instance_id) === frame.instanceId;
       const sameEnvelope =
         sameScope &&
         numberValue(prior.worker_seq, "worker_seq") === frame.seq &&
@@ -983,7 +1169,7 @@ export async function applyWorkerEvent(frame: WorkerEventFrame, handler: WorkerE
           { closeCode: 4403 }
         );
       }
-      const cursor = await contiguousWorkerSeq(tx, frame.runId, frame.instanceId);
+      const cursor = await contiguousWorkerSeq(tx, frame.runId, frame.instanceId, workerGeneration);
       return {
         duplicate: true,
         resultCommandId: prior.result_command_id == null ? null : String(prior.result_command_id),
@@ -992,7 +1178,7 @@ export async function applyWorkerEvent(frame: WorkerEventFrame, handler: WorkerE
       };
     }
 
-    const cursor = await contiguousWorkerSeq(tx, frame.runId, frame.instanceId);
+    const cursor = await contiguousWorkerSeq(tx, frame.runId, frame.instanceId, workerGeneration);
     const expectedSeq = cursor + 1;
     if (frame.seq !== expectedSeq) {
       throw new WorkerChannelRepositoryError(
@@ -1024,14 +1210,14 @@ export async function applyWorkerEvent(frame: WorkerEventFrame, handler: WorkerE
     await tx.execute(
       drizzleSql`
         INSERT INTO worker_channel_receipts
-          (id, run_id, instance_id, worker_seq, controller_epoch, type, payload_sha256, result_command_id, invoke_payload)
+          (id, run_id, worker_generation, instance_id, worker_seq, controller_epoch, type, payload_sha256, result_command_id, invoke_payload)
         VALUES
-          (${frame.id}, ${frame.runId}, ${frame.instanceId}, ${frame.seq}, ${frame.controllerEpoch},
+          (${frame.id}, ${frame.runId}, ${workerGeneration}, ${frame.instanceId}, ${frame.seq}, ${frame.controllerEpoch},
            ${frame.type}, ${payloadHash}, ${resultCommandId}, ${invokePayload})
       `
     );
 
-    const nextCursor = await contiguousWorkerSeq(tx, frame.runId, frame.instanceId);
+    const nextCursor = await contiguousWorkerSeq(tx, frame.runId, frame.instanceId, workerGeneration);
     return {
       duplicate: false,
       resultCommandId,

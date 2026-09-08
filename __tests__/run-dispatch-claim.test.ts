@@ -3,7 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
-import { agentSessions } from "../db/schema";
+import { agentSessions, runnerInstances } from "../db/schema";
 import { create, get } from "../lib/runs";
 import { dispatchRun } from "../lib/run-dispatch";
 
@@ -102,5 +102,30 @@ describe("dispatchRun claim guards", () => {
     expect(row.status).toBe("failed");
     expect(row.error).toMatch(/boom-owned/);
     expect(row.workerScope).toBeNull();
+  });
+
+  it("allocates a monotonic generation and fresh channel instance on redispatch", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
+    expect(await dispatchRun(run.id, { spawn: () => 111 })).toBe("spawned");
+    const [first] = await db
+      .select({ workerGeneration: runnerInstances.workerGeneration, instanceId: runnerInstances.channelInstanceId })
+      .from(runnerInstances)
+      .where(eq(runnerInstances.runId, run.id));
+
+    // Model the orphan reaper releasing the previous claim before the next
+    // dispatch. A new process must never inherit its predecessor's identity or
+    // sequence namespace.
+    await db
+      .update(agentSessions)
+      .set({ status: "idle", workerScope: null })
+      .where(eq(agentSessions.id, run.id));
+    expect(await dispatchRun(run.id, { spawn: () => 222 })).toBe("spawned");
+    const [second] = await db
+      .select({ workerGeneration: runnerInstances.workerGeneration, instanceId: runnerInstances.channelInstanceId })
+      .from(runnerInstances)
+      .where(eq(runnerInstances.runId, run.id));
+
+    expect(second.workerGeneration).toBe(first.workerGeneration + 1);
+    expect(second.instanceId).not.toBe(first.instanceId);
   });
 });

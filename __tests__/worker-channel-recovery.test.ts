@@ -17,7 +17,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
 import { db } from "../db";
-import { agentSessions, runnerInstances, workerChannelCommands } from "../db/schema";
+import {
+  agentSessions,
+  runnerInstances,
+  workerChannelCommands,
+  workerChannelReceipts,
+} from "../db/schema";
 import { create } from "../lib/runs";
 import * as runDispatch from "../lib/run-dispatch";
 import { provisionLocalChannel } from "../lib/run-dispatch";
@@ -26,7 +31,9 @@ import {
   getChannelIdentity,
   getLastAcceptedWorkerSeq,
   listReconnectableChannels,
+  persistWorkerIncarnation,
   releaseControllerLease,
+  releaseChannelForReplacement,
   touchChannel,
 } from "../lib/worker-channel/repository";
 import {
@@ -161,7 +168,7 @@ describe("worker channel recovery (plan section 17)", () => {
     expect(ids).not.toContain(dead.runId);
   });
 
-  it("worker restart resumes the durable spool with a monotonic worker sequence", async () => {
+  it("control-plane reconnect resumes the durable spool with a monotonic worker sequence", async () => {
     const { runId, channel } = await provisionRun("running");
     const root = await newRoot();
     let server = await bootServer(runId, channel.instanceId, channel.listenEndpoint, root);
@@ -171,16 +178,65 @@ describe("worker channel recovery (plan section 17)", () => {
     expect(first.seq).toBe(1);
     await waitFor(async () => (await getLastAcceptedWorkerSeq(runId, channel.instanceId)) >= 1);
 
-    // The worker process dies and restarts against the SAME durable spool root.
+    // The controller connection drops while the worker process and its durable
+    // spool remain alive. Re-adopting the same channel keeps the generation,
+    // instance, and sequence space.
     await disconnectRun(runId);
-    await server.close();
-
-    server = await bootServer(runId, channel.instanceId, channel.listenEndpoint, root);
     await connectRun(runId);
     // Sequence continues from the persisted state — the restart does not reset it.
     const second = await server.emit("run.phase", { phase: "running" });
     expect(second.seq).toBe(2);
     await waitFor(async () => (await getLastAcceptedWorkerSeq(runId, channel.instanceId)) >= 2);
+  });
+
+  it("a process replacement gets a fresh channel instance and sequence space", async () => {
+    const { runId, channel } = await provisionRun("running");
+    const firstRoot = await newRoot();
+    const firstServer = await bootServer(runId, channel.instanceId, channel.listenEndpoint, firstRoot);
+    await connectRun(runId);
+
+    const first = await firstServer.emit("run.phase", { phase: "running" });
+    expect(first.seq).toBe(1);
+    await waitFor(async () => (await getLastAcceptedWorkerSeq(runId, channel.instanceId)) === 1);
+    const oldInstanceId = channel.instanceId;
+
+    // A true process replacement abandons the old channel identity. The next
+    // worker gets a new instance/spool, so sequence 1 is valid again without
+    // colliding with receipts from the old process.
+    await disconnectRun(runId);
+    await firstServer.close();
+    await releaseChannelForReplacement(runId);
+    const replacement = await provisionLocalChannel(runId);
+    expect(replacement.instanceId).not.toBe(oldInstanceId);
+
+    const secondRoot = await newRoot();
+    const secondServer = await bootServer(
+      runId,
+      replacement.instanceId,
+      replacement.listenEndpoint,
+      secondRoot,
+    );
+    await connectRun(runId);
+
+    // A late observation tied to the old process cannot update the replacement
+    // row because the old instance id is no longer current.
+    expect(await persistWorkerIncarnation(runId, oldInstanceId, "old-process")).toBe(false);
+    expect(await persistWorkerIncarnation(runId, replacement.instanceId, "new-process")).toBe(true);
+
+    const second = await secondServer.emit("run.phase", { phase: "running" });
+    expect(second.seq).toBe(1);
+    await waitFor(async () => (await getLastAcceptedWorkerSeq(runId, replacement.instanceId)) === 1);
+
+    const receipts = await db
+      .select({ instanceId: workerChannelReceipts.instanceId, workerSeq: workerChannelReceipts.workerSeq })
+      .from(workerChannelReceipts)
+      .where(eq(workerChannelReceipts.runId, runId));
+    expect(receipts).toEqual(
+      expect.arrayContaining([
+        { instanceId: oldInstanceId, workerSeq: 1 },
+        { instanceId: replacement.instanceId, workerSeq: 1 },
+      ]),
+    );
   });
 
   it("provider death lets the heartbeat reaper apply the existing policy", async () => {
@@ -479,7 +535,7 @@ describe("worker channel recovery (plan section 17)", () => {
       attach: async () => {},
       receive: async () => {}, // never acknowledges the command
       emit: async () => ({}) as never,
-      handshakeState: () => ({ lastControllerEpoch: 0, lastAckedControlSeq: 0, nextWorkerSeq: 1 }),
+      handshakeState: () => ({ workerGeneration: 1, lastControllerEpoch: 0, lastAckedControlSeq: 0, nextWorkerSeq: 1 }),
       abort: () => {},
       close: async () => {},
     };

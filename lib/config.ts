@@ -228,6 +228,11 @@ export const config = Object.freeze({
     get channelEndpoint(): string | undefined {
       return strEnv("TASK_ORCH_WORKER_CHANNEL_ENDPOINT");
     },
+    /** Process/spool generation bound into every channel frame. Generation 1
+     * remains the compatibility default for workers launched before rollout. */
+    get generation(): number {
+      return intEnv("TASK_ORCH_WORKER_GENERATION", 1);
+    },
     /** HMAC secret channel instance credentials are derived from (control plane). */
     get channelSecret(): string | undefined {
       return strEnv("TASK_ORCH_WORKER_CHANNEL_SECRET");

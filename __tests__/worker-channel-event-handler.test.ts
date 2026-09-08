@@ -17,7 +17,7 @@
 
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { db } from "../db";
 import {
@@ -27,9 +27,18 @@ import {
   runTimers,
   runnerInstances,
   workerChannelCommands,
+  workerChannelReceipts,
 } from "../db/schema";
 import { create } from "../lib/runs";
-import { applyWorkerEvent, persistCommandTx } from "../lib/worker-channel/repository";
+import {
+  acquireControllerLease,
+  ackCommandsThrough,
+  applyWorkerEvent,
+  markChannelConnected,
+  persistCommand,
+  persistCommandTx,
+  persistWorkerIncarnation,
+} from "../lib/worker-channel/repository";
 import { handleWorkerEvent } from "../lib/worker-channel/event-handler";
 import type { WorkerEvent } from "../lib/worker-channel/protocol";
 
@@ -56,7 +65,7 @@ function makeFrame(
   runId: number,
   type: WorkerEvent["type"],
   payload: unknown,
-  opts: { id?: string; seq?: number } = {}
+  opts: { id?: string; seq?: number; workerGeneration?: number } = {}
 ): WorkerEvent {
   return {
     v: 1,
@@ -64,6 +73,7 @@ function makeFrame(
     id: opts.id ?? randomUUID(),
     runId,
     instanceId,
+    ...(opts.workerGeneration === undefined ? {} : { workerGeneration: opts.workerGeneration }),
     controllerEpoch: 1,
     seq: opts.seq ?? nextSeq(runId),
     sentAt: new Date().toISOString(),
@@ -137,6 +147,128 @@ describe("transcript.append", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].role).toBe("agent");
     expect(rows[0].idempotencyKey).toBe(id);
+  });
+
+  it("rejects a stale-generation frame before invoking its handler", async () => {
+    const runId = await newRun();
+    await db
+      .update(runnerInstances)
+      .set({ workerGeneration: 2 })
+      .where(eq(runnerInstances.runId, runId));
+    const handler = vi.fn(async () => undefined);
+    const frame = makeFrame(runId, "transcript.append", {
+      message: { id: 1, role: "agent", content: [{ type: "text", text: "stale" }] },
+    }, { workerGeneration: 1 });
+
+    await expect(applyWorkerEvent(frame, handler)).rejects.toMatchObject({
+      code: "GENERATION_SCOPE_MISMATCH",
+    });
+    expect(handler).not.toHaveBeenCalled();
+    expect(
+      await db.select().from(workerChannelReceipts).where(eq(workerChannelReceipts.runId, runId)),
+    ).toHaveLength(0);
+  });
+
+  it("cannot let a delayed old incarnation observation overwrite the current epoch", async () => {
+    const runId = await newRun();
+    const oldLease = await acquireControllerLease(runId, "controller-old", new Date("2026-09-08T10:00:00Z"));
+    expect(await persistWorkerIncarnation(
+      runId,
+      instanceId,
+      "old-process",
+      1,
+      oldLease.controllerId,
+      oldLease.epoch,
+    )).toBe(true);
+
+    const newLease = await acquireControllerLease(runId, "controller-new", new Date("2026-09-08T10:00:01Z"));
+    expect(newLease.epoch).toBeGreaterThan(oldLease.epoch);
+    expect(await persistWorkerIncarnation(
+      runId,
+      instanceId,
+      "late-old-process",
+      1,
+      oldLease.controllerId,
+      oldLease.epoch,
+    )).toBe(false);
+    expect(await persistWorkerIncarnation(
+      runId,
+      instanceId,
+      "new-process",
+      1,
+      newLease.controllerId,
+      newLease.epoch,
+    )).toBe(true);
+
+    const [row] = await db
+      .select({ workerIncarnation: runnerInstances.workerIncarnation })
+      .from(runnerInstances)
+      .where(eq(runnerInstances.runId, runId));
+    expect(row.workerIncarnation).toBe("new-process");
+  });
+
+  it("hands a Sprite claim to the provider scope only after the matching hello", async () => {
+    const runId = await newRun();
+    const provisioningScope = `server-claim-${runId}`;
+    const spriteName = `to-run-${runId}`;
+    await db.update(agentSessions)
+      .set({ status: "running", workerScope: provisioningScope })
+      .where(eq(agentSessions.id, runId));
+    await db.update(runnerInstances)
+      .set({
+        provider: "sprites",
+        spriteName,
+        workerGeneration: 2,
+        channelInstanceId: instanceId,
+        controllerId: "controller-1",
+        controllerEpoch: 1,
+      })
+      .where(eq(runnerInstances.runId, runId));
+
+    // A stale/competing hello may mark the generation only when its captured
+    // provisioning claim still matches; it must not steal the run scope.
+    await expect(markChannelConnected(runId, instanceId, new Date(), 2, "controller-1", 1, "other-claim"))
+      .rejects.toMatchObject({ code: "INSTANCE_SCOPE_MISMATCH" });
+    const [stillProvisioning] = await db.select({ workerScope: agentSessions.workerScope })
+      .from(agentSessions).where(eq(agentSessions.id, runId));
+    expect(stillProvisioning.workerScope).toBe(provisioningScope);
+
+    await markChannelConnected(runId, instanceId, new Date(), 2, "controller-1", 1, provisioningScope);
+    const [promoted] = await db.select({ workerScope: agentSessions.workerScope })
+      .from(agentSessions).where(eq(agentSessions.id, runId));
+    expect(promoted.workerScope).toBe(spriteName);
+  });
+
+  it("does not let a stale-generation acknowledgement ack current commands", async () => {
+    const runId = await newRun();
+    await db
+      .update(runnerInstances)
+      .set({ workerGeneration: 2 })
+      .where(eq(runnerInstances.runId, runId));
+    const command = await persistCommand({
+      runId,
+      instanceId,
+      workerGeneration: 2,
+      controllerEpoch: 1,
+      type: "run.input",
+      payload: { messages: [] },
+    });
+
+    await expect(
+      ackCommandsThrough(runId, instanceId, 1, command.seq, new Date(), 1),
+    ).rejects.toMatchObject({ code: "GENERATION_SCOPE_MISMATCH" });
+    const [stillPending] = await db
+      .select({ state: workerChannelCommands.state })
+      .from(workerChannelCommands)
+      .where(eq(workerChannelCommands.id, command.id));
+    expect(stillPending.state).toBe("pending");
+
+    await ackCommandsThrough(runId, instanceId, 1, command.seq, new Date(), 2);
+    const [acked] = await db
+      .select({ state: workerChannelCommands.state })
+      .from(workerChannelCommands)
+      .where(eq(workerChannelCommands.id, command.id));
+    expect(acked.state).toBe("acked");
   });
 });
 

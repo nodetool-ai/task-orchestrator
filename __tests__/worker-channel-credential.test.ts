@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { describe, expect, it, afterEach, beforeEach } from "vitest";
 import {
   mintChannelCredential,
@@ -39,6 +40,40 @@ describe("worker channel credentials", () => {
       ok: true,
       runId: RUN_ID,
       instanceId: INSTANCE_ID,
+    });
+  });
+
+  it("preserves the legacy generation-1 signature during compatibility rollout", () => {
+    const expectedSignature = createHmac("sha256", "channel-secret-a")
+      .update(`wc1:${RUN_ID}:${INSTANCE_ID}`, "utf8")
+      .digest("base64url");
+    expect(mintChannelCredential(RUN_ID, INSTANCE_ID)).toBe(
+      `wc1.${INSTANCE_ID}.${expectedSignature}`,
+    );
+  });
+
+  it("binds generation 2 credentials to the worker process generation", () => {
+    const token = mintChannelCredential(RUN_ID, INSTANCE_ID, { workerGeneration: 2 });
+    expect(token).toMatch(/^wc1\.wi_[a-f0-9]{32}\.2\.[A-Za-z0-9_-]{43}$/);
+    expect(verifyChannelCredential(token, RUN_ID, INSTANCE_ID, { workerGeneration: 2 })).toEqual({
+      ok: true,
+      runId: RUN_ID,
+      instanceId: INSTANCE_ID,
+      workerGeneration: 2,
+    });
+    expect(verifyChannelCredential(token, RUN_ID, INSTANCE_ID, { workerGeneration: 1 })).toEqual({
+      ok: false,
+      reason: "instance-mismatch",
+    });
+  });
+
+  it("rejects a tampered generation before accepting the signature", () => {
+    const token = mintChannelCredential(RUN_ID, INSTANCE_ID, { workerGeneration: 2 });
+    const parts = token.split(".");
+    parts[2] = "3";
+    expect(verifyChannelCredential(parts.join("."), RUN_ID, INSTANCE_ID, { workerGeneration: 3 })).toEqual({
+      ok: false,
+      reason: "bad-signature",
     });
   });
 

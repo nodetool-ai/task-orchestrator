@@ -289,6 +289,7 @@ async function landTerminal(
   const row = await persistCommandTx(tx, {
     runId: frame.runId,
     instanceId: frame.instanceId,
+    workerGeneration: frame.workerGeneration,
     controllerEpoch: frame.controllerEpoch,
     type: "run.commit",
     payload: commitPayload,

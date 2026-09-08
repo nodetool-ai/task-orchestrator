@@ -1079,6 +1079,28 @@ function incarnationFence(runId: number, storedIncarnation: string | null | unde
   return sql`NOT EXISTS (SELECT 1 FROM runner_instances ri WHERE ri.run_id = ${runId} AND ri.worker_incarnation IS DISTINCT FROM ${storedIncarnation ?? null})`;
 }
 
+/** Fence an out-of-transaction orphan decision to the exact runner generation
+ * and provider operation observed by the reaper. A replacement may reuse the
+ * same Sprite/worker scope, so worker_scope and incarnation alone are not an
+ * authority token. The NOT EXISTS shape keeps server-runtime runs (which have
+ * no runner row) compatible; generation-bearing rows require an exact match. */
+function runnerGenerationFence(
+  runId: number,
+  workerGeneration: number | null | undefined,
+  providerOperationId: string | null | undefined,
+) {
+  if (workerGeneration == null) return sql`TRUE`;
+  const operation = providerOperationId == null
+    ? sql`ri.provider_operation_id IS NULL`
+    : sql`ri.provider_operation_id = ${providerOperationId}`;
+  return sql`EXISTS (
+    SELECT 1 FROM runner_instances ri
+    WHERE ri.run_id = ${runId}
+      AND ri.worker_generation = ${workerGeneration}
+      AND ${operation}
+  )`;
+}
+
 /**
  * Park a run at 'pending' as a dispatch request for the SERVER's pump — the
  * worker-side counterpart of dispatchRun for FOLLOW-UP messages, mirroring
@@ -4790,7 +4812,11 @@ export async function reconcileOrphanedRuns(): Promise<number> {
     // provisioning, is live by definition; never consult the DB for it.
     if (isLive(row.id) || runDispatch.isDispatchInFlight(row.id)) continue;
     const [instance] = await db
-      .select({ workerIncarnation: runnerInstances.workerIncarnation })
+      .select({
+        workerIncarnation: runnerInstances.workerIncarnation,
+        workerGeneration: runnerInstances.workerGeneration,
+        providerOperationId: runnerInstances.providerOperationId,
+      })
       .from(runnerInstances)
       .where(eq(runnerInstances.runId, row.id));
     const liveness = await resolveLiveness(row.id);
@@ -4809,7 +4835,12 @@ export async function reconcileOrphanedRuns(): Promise<number> {
       ? isNull(agentSessions.workerScope)
       : and(
           eq(agentSessions.workerScope, row.workerScope),
-          incarnationFence(row.id, instance?.workerIncarnation ?? null)
+          incarnationFence(row.id, instance?.workerIncarnation ?? null),
+          runnerGenerationFence(
+            row.id,
+            instance?.workerGeneration,
+            instance?.providerOperationId ?? null,
+          )
         );
     const stillOrphan = and(
       inArray(agentSessions.status, LEASE_STATUSES),
@@ -4967,6 +4998,14 @@ export async function handleWorkerDeath(
   if (row.workerScope !== info.containerName) return;
   if (isTerminalStatus(row.status)) return; // finished before/while dying — normal exit
   if (row.status === "pending") return; // claim already released (deferred)
+  const [instance] = await db
+    .select({
+      workerIncarnation: runnerInstances.workerIncarnation,
+      workerGeneration: runnerInstances.workerGeneration,
+      providerOperationId: runnerInstances.providerOperationId,
+    })
+    .from(runnerInstances)
+    .where(eq(runnerInstances.runId, runId));
 
   // Atomically take ownership of this death: release the claim ONLY if this
   // container still holds it. This is the real guard (the read above is just a
@@ -4981,14 +5020,19 @@ export async function handleWorkerDeath(
   // or, failing that, the one stored when we started.
   const observedIncarnation = info.incarnation !== undefined
     ? info.incarnation
-    : (await db.select({ i: runnerInstances.workerIncarnation }).from(runnerInstances).where(eq(runnerInstances.runId, runId)))[0]?.i ?? null;
+    : instance?.workerIncarnation ?? null;
   const released = await db
     .update(agentSessions)
     .set({ workerScope: null })
     .where(and(
       eq(agentSessions.id, runId),
       eq(agentSessions.workerScope, info.containerName),
-      incarnationFence(runId, observedIncarnation)
+      incarnationFence(runId, observedIncarnation),
+      runnerGenerationFence(
+        runId,
+        instance?.workerGeneration,
+        instance?.providerOperationId ?? null,
+      )
     ));
   if (released.count === 0) return; // lost the race — another handler owns it
 

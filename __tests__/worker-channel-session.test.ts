@@ -3,7 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WorkerSession } from "../lib/worker-channel/worker-session";
-import { CLOSE_CODE_STALE_CONTROLLER_EPOCH } from "../lib/worker-channel/protocol";
+import {
+  CLOSE_CODE_SCOPE_MISMATCH,
+  CLOSE_CODE_STALE_CONTROLLER_EPOCH,
+} from "../lib/worker-channel/protocol";
 import type { WireFrame } from "../lib/worker-channel/protocol";
 
 const runId = 41;
@@ -11,9 +14,9 @@ const instanceId = "wi_0123456789abcdef0123456789abcdef";
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
 
-async function session() {
+async function session(workerGeneration = 1) {
   const root = await mkdtemp(join(tmpdir(), "worker-session-")); roots.push(root);
-  return WorkerSession.open({ root, runId, instanceId, disconnectGraceMs: 20 });
+  return WorkerSession.open({ root, runId, instanceId, workerGeneration, disconnectGraceMs: 20 });
 }
 
 function sink() {
@@ -89,6 +92,32 @@ describe("WorkerSession", () => {
     await expect(value.attach({ controllerEpoch: 1, transport: sink().transport })).rejects.toMatchObject({
       closeCode: CLOSE_CODE_STALE_CONTROLLER_EPOCH,
     });
+    await value.close();
+  });
+
+  it("binds the session handshake and events to its worker generation", async () => {
+    const value = await session(2);
+    const first = sink();
+    await value.attach({ controllerEpoch: 1, workerGeneration: 2, transport: first.transport });
+    expect(value.handshakeState().workerGeneration).toBe(2);
+
+    const emitted = await value.emit("agent.event", { event: { kind: "generation-2" } } as never);
+    expect(emitted.workerGeneration).toBe(2);
+
+    await expect(
+      value.attach({ controllerEpoch: 2, workerGeneration: 1, transport: sink().transport }),
+    ).rejects.toMatchObject({ closeCode: CLOSE_CODE_SCOPE_MISMATCH });
+    await value.close();
+  });
+
+  it("rejects a command from a stale worker generation before handling it", async () => {
+    const value = await session(2);
+    const first = sink();
+    await value.attach({ controllerEpoch: 1, workerGeneration: 2, transport: first.transport });
+    const stale = { ...command("run.input", { messages: [] }, 1), workerGeneration: 1 };
+
+    await expect(value.receive(stale)).rejects.toMatchObject({ closeCode: CLOSE_CODE_SCOPE_MISMATCH });
+    expect(first.frames.filter((frame) => frame.type === "channel.ack")).toHaveLength(0);
     await value.close();
   });
 

@@ -9,11 +9,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
-import { agentSessions, agentEvents } from "../db/schema";
+import { agentSessions, agentEvents, runnerInstances } from "../db/schema";
 import { create, get, reconcileOrphanedRuns } from "../lib/runs";
 import * as dispatch from "../lib/run-dispatch";
 import * as repo from "../lib/repo";
-import { installFakeRunnerProvider, setFakeRunLiveness } from "./helpers/fake-runner-provider";
+import {
+  installFakeRunnerProvider,
+  setFakeLivenessInspectionHook,
+  setFakeRunLiveness,
+} from "./helpers/fake-runner-provider";
 
 const STALE = new Date(Date.now() - 10 * 60_000); // 10 min ago
 const FRESH = new Date(Date.now() - 5_000); // 5 s ago
@@ -75,6 +79,36 @@ describe("reconcileOrphanedRuns", () => {
     await reconcileOrphanedRuns();
 
     expect((await get(run.id))?.status).toBe("running");
+  });
+
+  it("does not reap after a provider operation is replaced during observation", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    await setRun(run.id, "running", STALE);
+    await setFakeRunLiveness(run.id, { status: "dead", detail: "old worker exited" }, "old-incarnation");
+    await db.update(runnerInstances)
+      .set({ workerGeneration: 1, providerOperationId: "00000000-0000-4000-8000-000000000001" })
+      .where(eq(runnerInstances.runId, run.id));
+
+    let raced = false;
+    setFakeLivenessInspectionHook(async (handle) => {
+      if (handle !== `fake-runner-${run.id}` || raced) return;
+      raced = true;
+      // A replacement can win after the reaper's initial runner snapshot but
+      // before its guarded worker_scope transition. The old reaper must not
+      // clear or fail the new operation merely because the Sprite scope is
+      // stable across generations.
+      await db.update(runnerInstances)
+        .set({ providerOperationId: "00000000-0000-4000-8000-000000000002" })
+        .where(eq(runnerInstances.runId, run.id));
+    });
+    try {
+      await reconcileOrphanedRuns();
+    } finally {
+      setFakeLivenessInspectionHook(undefined);
+    }
+    expect(raced).toBe(true);
+    expect((await get(run.id))?.status).toBe("running");
+    expect((await get(run.id))?.workerScope).toBe(`fake-runner-${run.id}`);
   });
 
   it("re-dispatches immediately when the observed incarnation was replaced", async () => {

@@ -80,6 +80,8 @@ export interface WorkerSessionLike {
 export interface WorkerServerConfig {
   runId: number;
   instanceId: string;
+  /** Worker process/spool generation; legacy bundles default to generation 1. */
+  workerGeneration?: number;
   /** Expected complete bearer token. `expectedCredential` is an alias. */
   credential?: string;
   expectedCredential?: string;
@@ -133,6 +135,7 @@ export interface WorkerServer {
   readonly endpoint: string;
   readonly runId: number;
   readonly instanceId: string;
+  readonly workerGeneration: number;
   emit(type: string, payload: unknown): Promise<WorkerEnvelope>;
   drain(reason?: string): Promise<void>;
   close(options?: WorkerServerCloseOptions): Promise<void>;
@@ -259,6 +262,7 @@ class WorkerServerImpl implements WorkerServer {
   readonly websocketServer: WebSocketServer;
   readonly runId: number;
   readonly instanceId: string;
+  readonly workerGeneration: number;
   endpoint: string;
   readonly session: WorkerSessionLike;
 
@@ -283,6 +287,7 @@ class WorkerServerImpl implements WorkerServer {
     this.session = session;
     this.runId = config.runId;
     this.instanceId = config.instanceId;
+    this.workerGeneration = positiveInteger(config.workerGeneration, 1, "workerGeneration");
     this.acceptTimeoutMs = positiveInteger(config.acceptTimeoutMs, DEFAULT_ACCEPT_TIMEOUT_MS, "acceptTimeoutMs");
     this.defaultGraceMs = positiveInteger(config.disconnectGraceMs, DEFAULT_GRACE_MS, "disconnectGraceMs");
     // 0 / absent => disabled. Deliberately opt-in; see WorkerServerConfig.idleExitMs.
@@ -320,6 +325,7 @@ class WorkerServerImpl implements WorkerServer {
         root,
         runId: config.runId,
         instanceId: config.instanceId,
+        workerGeneration: config.workerGeneration,
         disconnectGraceMs: config.disconnectGraceMs,
         maxInFlightBytes: config.maxInFlightBytes,
       }));
@@ -426,6 +432,7 @@ class WorkerServerImpl implements WorkerServer {
     try {
       return verifyChannelCredential(token, this.runId, this.instanceId, {
         secret: this.config.credentialSecret,
+        workerGeneration: this.workerGeneration,
       }).ok;
     } catch {
       return false;
@@ -472,6 +479,7 @@ class WorkerServerImpl implements WorkerServer {
       lastControllerEpoch: state.lastControllerEpoch,
       lastAckedControlSeq: state.lastAckedControlSeq,
       nextWorkerSeq: state.nextWorkerSeq,
+      ...(state.workerGeneration > 1 ? { workerGeneration: state.workerGeneration } : {}),
       pid: process.pid,
       ...(typeof state.started === "boolean" ? { started: state.started } : {}),
     };
@@ -522,6 +530,10 @@ class WorkerServerImpl implements WorkerServer {
       await this.sendReject(connection, "protocol_mismatch", "unsupported protocol major");
       return this.closeConnection(connection, CLOSE_CODE_PROTOCOL_MISMATCH, "protocol mismatch", false);
     }
+    if ((payload.workerGeneration ?? 1) !== this.workerGeneration) {
+      await this.sendReject(connection, "scope_mismatch", "worker generation does not match this server");
+      return this.closeConnection(connection, 4403, "worker generation mismatch", false);
+    }
 
     const transport: WorkerSessionTransport = {
       send: (frame) => this.queueSend(connection, frame),
@@ -533,6 +545,7 @@ class WorkerServerImpl implements WorkerServer {
     try {
       await this.session.attach({
         controllerEpoch: payload.controllerEpoch,
+        workerGeneration: payload.workerGeneration ?? this.workerGeneration,
         lastAcceptedWorkerSeq: payload.lastAcceptedWorkerSeq,
         maxInFlightBytes: payload.maxInFlightBytes,
         transport,
@@ -716,7 +729,7 @@ export const createWorkerServer = startWorkerServer;
 
 /** Derive the expected credential for run-worker integration without exposing
  * the signing secret to the session or model subprocess. */
-export function expectedWorkerCredential(runId: number, instanceId: string, secret?: string): string {
-  if (secret !== undefined) return mintChannelCredential(runId, instanceId, { secret });
-  return mintChannelCredential(runId, instanceId, { secret: channelCredentialSecret() });
+export function expectedWorkerCredential(runId: number, instanceId: string, secret?: string, workerGeneration = 1): string {
+  if (secret !== undefined) return mintChannelCredential(runId, instanceId, { secret, workerGeneration });
+  return mintChannelCredential(runId, instanceId, { secret: channelCredentialSecret(), workerGeneration });
 }

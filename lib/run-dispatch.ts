@@ -1,11 +1,12 @@
 // lib/run-dispatch.ts
-import { and, eq, inArray, isNotNull, isNull, notInArray } from "drizzle-orm";
+import { and, eq, exists, inArray, isNotNull, isNull, notInArray, sql } from "drizzle-orm";
 import { spawn as nodeSpawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { lstat, mkdir, readdir, unlink } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
 import { dirname, join } from "node:path";
-import { db } from "../db";
+import { db, workerGenerationAuthorityKey } from "../db";
 import { agentSessions, runnerInstances } from "../db/schema";
 import { AGENT_CREDENTIAL_ENV_KEYS, agentCredentialEnv } from "./agent-backend/provider-env";
 // lib/inbox has no static import of this module (its wake path uses a lazy
@@ -465,7 +466,16 @@ async function dispatchRunInner(
   // reservation count seen by the next caller already includes this claim. The
   // spawn itself (a slow Docker round-trip) runs OUTSIDE the lock.
   const outcome = await withAdmissionLock<
-    { kind: Exclude<DispatchResult, "spawned"> } | { kind: "claimed"; scope: string }
+    { kind: Exclude<DispatchResult, "spawned"> } | {
+      kind: "claimed";
+      scope: string;
+      workerGeneration: number;
+      channelInstanceId: string;
+      providerOperationId: string;
+      providerServiceName: string | null;
+      previousProviderServiceName: string | null;
+      previousWorkerGeneration: number | null;
+    }
   >(async () => {
     const run = await runs().get(runId);
     if (!run) return { kind: "not-found" };
@@ -580,33 +590,101 @@ async function dispatchRunInner(
     // completed_at (so a revived run reads as running, not as its last failure —
     // run 58 was actively running while still showing "Interrupted by a process
     // restart" and a completed_at hours in the past).
-    const claimed = await db
-      .update(agentSessions)
-      .set({
-        status: "preparing",
-        workerScope: scope,
-        cancelRequested: 0,
-        claimedAt: new Date(),
-        pendingSince: null,
-        workerLog: null,
-        workerExitCode: null,
-        error: null,
-        completedAt: null,
-        pendingReason: null,
-      })
-      .where(
-        and(
-          eq(agentSessions.id, runId),
-          isNull(agentSessions.workerScope),
-          notInArray(agentSessions.status, HARD_TERMINAL_STATUSES)
-        )
-      );
-    if (claimed.count === 0) return { kind: "already-claimed" };
-    return { kind: "claimed", scope };
+    // Claiming the run and allocating its worker generation are one
+    // transaction. A dispatcher crash after this commit is recoverable from
+    // generationState='allocating'; a concurrent dispatcher cannot advance the
+    // generation without first acquiring the run row lock.
+    const claimed = await db.transaction(async (tx) => {
+      // A generation allocation is the exclusive side of the authority fence
+      // held by tool execution. It is intentionally distinct from the Sprite
+      // lifecycle lock: ordinary channel traffic need not wait on either one.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${workerGenerationAuthorityKey(runId)}))`);
+      // Share the provider lifecycle lock with Sprites create/stop/sweep. This
+      // keeps a new generation from being allocated between an old generation's
+      // terminal CAS and its external Sprite deletion.
+      if (provider === "sprites") {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${"sprites:" + runId}))`);
+      }
+      const [existing] = await tx
+        .select({
+          workerGeneration: runnerInstances.workerGeneration,
+          spriteName: runnerInstances.spriteName,
+          channelInstanceId: runnerInstances.channelInstanceId,
+          providerServiceName: runnerInstances.providerServiceName,
+        })
+        .from(runnerInstances)
+        .where(eq(runnerInstances.runId, runId));
+      const nextGeneration = Math.max(1, (existing?.workerGeneration ?? 0) + 1);
+      const channelInstanceId = newChannelInstanceId();
+      const providerOperationId = randomUUID();
+      const providerServiceName = provider === "sprites" ? `worker-g${nextGeneration}` : null;
+      const result = await tx
+        .update(agentSessions)
+        .set({
+          status: "preparing",
+          workerScope: scope,
+          cancelRequested: 0,
+          claimedAt: new Date(),
+          pendingSince: null,
+          workerLog: null,
+          workerExitCode: null,
+          error: null,
+          completedAt: null,
+          pendingReason: null,
+        })
+        .where(
+          and(
+            eq(agentSessions.id, runId),
+            isNull(agentSessions.workerScope),
+            notInArray(agentSessions.status, HARD_TERMINAL_STATUSES)
+          )
+        );
+      if (result.count === 0) return null;
+      const generation = {
+        workerGeneration: nextGeneration,
+        generationState: "allocating",
+        providerOperationId,
+        providerServiceName,
+        // Sprites use a stable run-scoped handle. Persist it in the allocation
+        // transaction so a crash before provider.create still protects the
+        // Sprite from the orphan reaper and allows boot adoption.
+        spriteName: provider === "sprites"
+          ? `${config.sprites.prefix || "to-run-"}${runId}`
+          : null,
+        channelInstanceId,
+        channelEndpoint: null,
+        workerIncarnation: null,
+        controllerId: null,
+        controllerEpoch: 0,
+      };
+      if (existing) {
+        await tx.update(runnerInstances).set(generation).where(eq(runnerInstances.runId, runId));
+      } else {
+        await tx.insert(runnerInstances).values({
+          runId,
+          provider,
+          state: "starting",
+          ...generation,
+        });
+      }
+      return {
+        scope,
+        workerGeneration: nextGeneration,
+        channelInstanceId,
+        providerOperationId,
+        providerServiceName,
+        previousProviderServiceName: existing?.providerServiceName ?? null,
+        previousWorkerGeneration: existing?.workerGeneration ?? null,
+      };
+    });
+    if (!claimed) return { kind: "already-claimed" };
+    return { kind: "claimed", ...claimed };
   });
 
   if (outcome.kind !== "claimed") return finish(outcome.kind);
   recordRunnerEvent("runner_claimed", { provider, runId, fields: { scope: outcome.scope } });
+  const failCurrent = (message: string): Promise<DispatchResult> =>
+    failSpawn(runId, outcome.scope, message, outcome.workerGeneration, outcome.providerOperationId);
 
   // Start the worker through the selected provider. A throw/null must NOT leave
   // the run wedged in 'preparing' with no error — mark it failed and release the
@@ -622,7 +700,7 @@ async function dispatchRunInner(
         { provider, fields: { runId, scope: outcome.scope } }
       );
       if (spawned == null) {
-        return finish(await failSpawn(runId, outcome.scope, "run worker did not start (spawn returned no pid — worker image/runtime available?)"));
+        return finish(await failCurrent("run worker did not start (spawn returned no pid — worker image/runtime available?)"));
       }
       pid = spawned;
     } else if (provider === "local") {
@@ -630,7 +708,7 @@ async function dispatchRunInner(
       // runner kind covers both the plain detached tsx process and the Docker
       // worker container (plan section 19) — LocalRunnerProvider.create picks
       // between them on TASK_ORCH_WORKER_IMAGE.
-      const channel = await provisionLocalChannel(runId);
+      const channel = await provisionLocalChannel(runId, outcome.channelInstanceId);
       const ref = await timeRunnerPhase(
         "runner_create",
         () => getRunnerProvider().create({
@@ -638,21 +716,38 @@ async function dispatchRunInner(
           scope: outcome.scope,
           channelInstanceId: channel.instanceId,
           channelEndpoint: channel.dialEndpoint,
+          workerGeneration: outcome.workerGeneration,
+          providerOperationId: outcome.providerOperationId,
         }),
         { provider, fields: { runId, scope: outcome.scope } }
       );
       if (!ref) {
-        return finish(await failSpawn(runId, outcome.scope, "run worker did not start (spawn returned no pid — worker image/runtime available?)"));
+        return finish(await failCurrent("run worker did not start (spawn returned no pid — worker image/runtime available?)"));
       }
       // The provider must surface a control-plane-dialable endpoint.
       if (!ref.channelEndpoint) {
-        return finish(await failSpawn(runId, outcome.scope, "runner started without a worker channel endpoint"));
+        return finish(await failCurrent("runner started without a worker channel endpoint"));
       }
-      await setChannelEndpoint(runId, channel.instanceId, ref.channelEndpoint);
+      await setChannelEndpoint(runId, channel.instanceId, ref.channelEndpoint, outcome.workerGeneration);
+      if (!await markGenerationConnecting(runId, outcome.workerGeneration, outcome.providerOperationId, {
+        channelEndpoint: ref.channelEndpoint,
+      })) {
+        await getRunnerProvider().stopGeneration?.({
+          runId,
+          generation: outcome.workerGeneration,
+          instanceId: channel.instanceId,
+          providerHandle: ref.handle,
+          channelEndpoint: ref.channelEndpoint,
+        });
+        return finish("already-claimed");
+      }
       // Connect and push the authoritative start snapshot off the dispatch
       // path: the worker is still booting its listener, and dispatch must not
       // block on the controller handshake or the worker's ack.
-      void startChannelForRun(runId, channel.instanceId, { freshWorker: true }).catch((err) =>
+      void startChannelForRun(runId, channel.instanceId, {
+        freshWorker: true,
+        provisioningScope: outcome.scope,
+      }).catch((err) =>
         console.error(`Worker channel start failed for run ${runId}:`, err)
       );
       handle = ref.handle;
@@ -661,7 +756,7 @@ async function dispatchRunInner(
       // reserve the instance id, let SpritesRunnerProvider create the sprite
       // and define the worker service, then store the logical `sprite://` endpoint
       // which the channel dialer resolves through the authenticated TCP proxy.
-      const channel = await provisionSpritesChannel(runId);
+      const channel = await provisionSpritesChannel(runId, outcome.channelInstanceId);
       const ref = await timeRunnerPhase(
         "runner_create",
         () =>
@@ -670,27 +765,49 @@ async function dispatchRunInner(
             scope: outcome.scope,
             channelInstanceId: channel.instanceId,
             channelEndpoint: channel.listenEndpoint,
+            workerGeneration: outcome.workerGeneration,
+            providerOperationId: outcome.providerOperationId,
+            providerServiceName: outcome.providerServiceName ?? undefined,
+            previousProviderServiceName: outcome.previousProviderServiceName ?? undefined,
+            replacesGeneration: outcome.previousWorkerGeneration ?? undefined,
           }),
         { provider, fields: { runId, scope: outcome.scope } },
       );
       if (!ref) {
-        return finish(await failSpawn(runId, outcome.scope, "run worker did not start (spawn returned no pid — worker image/runtime available?)"));
+        return finish(await failCurrent("run worker did not start (spawn returned no pid — worker image/runtime available?)"));
       }
       if (!ref.channelEndpoint) {
-        return finish(await failSpawn(runId, outcome.scope, "runner started without a worker channel endpoint"));
+        return finish(await failCurrent("runner started without a worker channel endpoint"));
       }
-      await setChannelEndpoint(runId, ref.channelInstanceId ?? channel.instanceId, ref.channelEndpoint);
-      void startChannelForRun(runId, ref.channelInstanceId ?? channel.instanceId, { freshWorker: true }).catch((err) =>
+      await setChannelEndpoint(runId, ref.channelInstanceId ?? channel.instanceId, ref.channelEndpoint, outcome.workerGeneration);
+      if (!await markGenerationConnecting(runId, outcome.workerGeneration, outcome.providerOperationId, {
+        channelEndpoint: ref.channelEndpoint,
+        providerServiceName: ref.providerServiceName ?? outcome.providerServiceName,
+      })) {
+        await getRunnerProvider().stopGeneration?.({
+          runId,
+          generation: outcome.workerGeneration,
+          instanceId: ref.channelInstanceId ?? channel.instanceId,
+          providerHandle: ref.handle,
+          providerServiceName: ref.providerServiceName ?? outcome.providerServiceName ?? undefined,
+          channelEndpoint: ref.channelEndpoint,
+        });
+        return finish("already-claimed");
+      }
+      void startChannelForRun(runId, ref.channelInstanceId ?? channel.instanceId, {
+        freshWorker: true,
+        provisioningScope: outcome.scope,
+      }).catch((err) =>
         console.error(`Worker channel start failed for run ${runId}:`, err),
       );
       handle = ref.handle;
     } else {
       // Any genuinely unknown provider still fails fast rather than silently
       // falling back to a transport that no longer exists.
-      return finish(await failSpawn(runId, outcome.scope, unsupportedWsProviderMessage(provider)));
+      return finish(await failCurrent(unsupportedWsProviderMessage(provider)));
     }
   } catch (err) {
-    return finish(await failSpawn(runId, outcome.scope, `run worker failed to spawn: ${err instanceof Error ? err.message : String(err)}`));
+    return finish(await failCurrent(`run worker failed to spawn: ${err instanceof Error ? err.message : String(err)}`));
   }
   // Condition the post-spawn write on THIS dispatch still owning the claim. A slow
   // create can outlast a sweep that declared the (container-less) run dead and
@@ -698,16 +815,44 @@ async function dispatchRunInner(
   // unconditional write here would repoint it back — driving one run with two
   // workers. If our token is gone we lost the race; leave the winner alone (its
   // orphaned container, if any, is reaped as a stray by the sweep).
+  // Sprites use their stable Sprite name as the worker scope, but that scope is
+  // not authoritative until the worker has completed the authenticated hello.
+  // markChannelConnected performs that guarded hand-off using provisioningScope;
+  // writing it here would let a fast hello/terminal callback race this write and
+  // either resurrect a stopped run or tear down the replacement generation.
+  if (provider === "sprites") {
+    recordRunnerEvent("runner_spawned", { provider, runId, fields: { handle, awaitingHello: true } });
+    return finish("spawned");
+  }
   const owned = await db
     .update(agentSessions)
     .set({ workerScope: handle })
-    .where(and(eq(agentSessions.id, runId), eq(agentSessions.workerScope, outcome.scope)));
-  if (owned.count === 0) return finish("already-claimed");
+    .where(and(
+      eq(agentSessions.id, runId),
+      eq(agentSessions.workerScope, outcome.scope),
+      notInArray(agentSessions.status, HARD_TERMINAL_STATUSES),
+    ));
+  if (owned.count === 0) {
+    // Cancellation/terminalization may have won while provider.create was in
+    // flight. The captured generation is the only thing we may stop here; do
+    // not inspect the row and accidentally stop a later generation.
+    const stopGeneration = getRunnerProvider().stopGeneration;
+    if (stopGeneration) {
+      await stopGeneration.call(getRunnerProvider(), {
+        runId,
+        generation: outcome.workerGeneration,
+        instanceId: outcome.channelInstanceId,
+        providerHandle: handle,
+        providerServiceName: outcome.providerServiceName ?? undefined,
+      }).catch(() => undefined);
+    }
+    return finish("already-claimed");
+  }
   recordRunnerEvent("runner_spawned", { provider, runId, fields: { handle } });
   return finish("spawned");
 }
 
-async function failSpawn(runId: number, scope: string, message: string): Promise<DispatchResult> {
+async function failSpawn(runId: number, scope: string, message: string, workerGeneration?: number, providerOperationId?: string): Promise<DispatchResult> {
   // Only release + fail if THIS dispatch still owns the claim. A re-dispatch that
   // superseded us (see the post-spawn note) holds a healthy claim — nulling it and
   // marking the run failed would kill a live worker for a spawn that's no longer ours.
@@ -716,6 +861,15 @@ async function failSpawn(runId: number, scope: string, message: string): Promise
     .set({ workerScope: null })
     .where(and(eq(agentSessions.id, runId), eq(agentSessions.workerScope, scope)));
   if (released.count === 0) return "already-claimed";
+  if (workerGeneration != null && providerOperationId) {
+    await db.update(runnerInstances)
+      .set({ generationState: "failed" })
+      .where(and(
+        eq(runnerInstances.runId, runId),
+        eq(runnerInstances.workerGeneration, workerGeneration),
+        eq(runnerInstances.providerOperationId, providerOperationId),
+      ));
+  }
   await runs().failRun(runId, message);
   return "spawn-failed";
 }
@@ -737,6 +891,28 @@ export function unsupportedWsProviderMessage(provider: string): string {
   return `Runner provider '${provider}' does not expose a private control-plane-to-worker WebSocket endpoint.`;
 }
 
+/** Advance provisioning only when this dispatch still owns its generation and
+ * provider operation. Late provider completions therefore cannot resurrect a
+ * superseded worker row. */
+async function markGenerationConnecting(runId: number, generation: number, operationId: string, patch: {
+  channelEndpoint?: string | null;
+  providerServiceName?: string | null;
+} = {}): Promise<boolean> {
+  const result = await db.update(runnerInstances).set({
+    ...patch,
+    generationState: "connecting",
+  }).where(and(
+    eq(runnerInstances.runId, runId),
+    eq(runnerInstances.workerGeneration, generation),
+    eq(runnerInstances.providerOperationId, operationId),
+    exists(db.select({ one: sql`1` }).from(agentSessions).where(and(
+      eq(agentSessions.id, runId),
+      notInArray(agentSessions.status, HARD_TERMINAL_STATUSES),
+    ))),
+  ));
+  return result.count > 0;
+}
+
 /** Endpoints a Sprites dispatch reserves (see docs/sprites-migration-design.md §3).
  *  Resume-identity rule mirrors Fly: reuse the channel instance id already on
  *  record for this run's sprite (its filesystem survived), else mint fresh.
@@ -744,12 +920,16 @@ export function unsupportedWsProviderMessage(provider: string): string {
  *  provider can compute it without a private-IP lookup. */
 export async function provisionSpritesChannel(
   runId: number,
+  generationInstanceId?: string,
 ): Promise<{ instanceId: string; listenEndpoint: string }> {
   const [existing] = await db
     .select({ channelInstanceId: runnerInstances.channelInstanceId, channelEndpoint: runnerInstances.channelEndpoint })
     .from(runnerInstances)
     .where(eq(runnerInstances.runId, runId));
-  const instanceId = existing?.channelInstanceId || newChannelInstanceId();
+  // A real process replacement always receives a fresh spool namespace. The
+  // optional argument is allocated transactionally by dispatchRun; retaining
+  // the fallback preserves compatibility for direct callers/tests.
+  const instanceId = generationInstanceId ?? existing?.channelInstanceId ?? newChannelInstanceId();
   const listenEndpoint = spritesListenEndpoint();
   await db
     .insert(runnerInstances)
@@ -824,7 +1004,7 @@ export const BOOT_DEADLINE_MS = (() => {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 180_000;
 })();
 
-async function connectWithBootBackoff(runId: number, opts: { bumpEpoch?: boolean } = {}) {
+async function connectWithBootBackoff(runId: number, opts: { bumpEpoch?: boolean; provisioningScope?: string } = {}) {
   const deadline = Date.now() + BOOT_DEADLINE_MS;
   for (let attempt = 0; ; attempt++) {
     try {
@@ -853,16 +1033,19 @@ async function connectWithBootBackoff(runId: number, opts: { bumpEpoch?: boolean
 export async function startChannelForRun(
   runId: number,
   instanceId: string,
-  opts: { freshWorker?: boolean } = {}
+  opts: { freshWorker?: boolean; provisioningScope?: string } = {}
 ): Promise<void> {
   // A fresh worker generation gets a fresh controller epoch, so its run.start
   // id (scoped per epoch) never collides with the previous generation's
   // already-acked row — see the `existing` branches below.
-  let connection = await connectWithBootBackoff(runId, { bumpEpoch: opts.freshWorker === true });
+  let connection = await connectWithBootBackoff(runId, {
+    bumpEpoch: opts.freshWorker === true,
+    ...(opts.provisioningScope ? { provisioningScope: opts.provisioningScope } : {}),
+  });
   // The command id is scoped to (instanceId, controllerEpoch) — see
   // runStartCommandId — so this lookup spans every epoch ever persisted for
   // this instance, not just the current one.
-  let existing = await getLatestRunStartCommand(runId, instanceId);
+  let existing = await getLatestRunStartCommand(runId, instanceId, connection.workerGeneration);
 
   // Does the process on the other end need a run.start? Its own hello is the
   // authority (`started`); the caller's `freshWorker` and, for bundles that
@@ -900,8 +1083,11 @@ export async function startChannelForRun(
     // The same-epoch run.start was consumed by a PREVIOUS process. Ids are
     // per epoch, so re-dial with a bumped epoch before minting a new one.
     await connection.disconnect(false).catch(() => undefined);
-    connection = await connectWithBootBackoff(runId, { bumpEpoch: true });
-    existing = await getLatestRunStartCommand(runId, instanceId);
+    connection = await connectWithBootBackoff(runId, {
+      bumpEpoch: true,
+      ...(opts.provisioningScope ? { provisioningScope: opts.provisioningScope } : {}),
+    });
+    existing = await getLatestRunStartCommand(runId, instanceId, connection.workerGeneration);
     if (existing && existing.controllerEpoch === connection.controllerEpoch && !existing.ackedAt) {
       await connection.sendPersisted(existing);
       return;
@@ -917,6 +1103,7 @@ export async function startChannelForRun(
   const row = await persistCommand({
     runId,
     instanceId,
+    workerGeneration: connection.workerGeneration,
     controllerEpoch: connection.controllerEpoch,
     type: "run.start",
     payload: snapshot,
@@ -1080,6 +1267,9 @@ export async function observeWorkerIncarnations(): Promise<void> {
       provider: runnerInstances.provider,
       spriteName: runnerInstances.spriteName,
       workerIncarnation: runnerInstances.workerIncarnation,
+      workerGeneration: runnerInstances.workerGeneration,
+      providerServiceName: runnerInstances.providerServiceName,
+      channelInstanceId: runnerInstances.channelInstanceId,
       workerScope: agentSessions.workerScope,
     })
     .from(runnerInstances)
@@ -1091,7 +1281,18 @@ export async function observeWorkerIncarnations(): Promise<void> {
     let observed: import("./runner/provider").RunnerObservation = { status: "unknown" };
     try {
       const provider = createRunnerProvider(row.provider as "local" | "sprites");
-      observed = await provider.inspect(handle);
+      const generation = row.workerGeneration;
+      if (generation != null && provider.inspectGeneration) {
+        observed = await provider.inspectGeneration({
+          runId: row.runId,
+          generation,
+          instanceId: row.channelInstanceId ?? "legacy",
+          providerHandle: handle,
+          ...(row.providerServiceName ? { providerServiceName: row.providerServiceName } : {}),
+        });
+      } else {
+        observed = await provider.inspect(handle);
+      }
     } catch {
       // A missing provider credential, for example, is an unknown observation.
     }
@@ -1150,15 +1351,16 @@ export const defaultSpawn = async (
   runId: number,
   scope: string,
   channelInstanceId?: string,
-  channelEndpoint?: string
+  channelEndpoint?: string,
+  workerGeneration = 1,
 ): Promise<{ pid: number; channelEndpoint: string; spawnedAt?: string } | null> => {
   if (config.deployment.workerImage) {
     if (!channelInstanceId) {
       throw new Error("Docker worker dispatch requires a provisioned channel instance id");
     }
-    return dockerSpawn(runId, scope, channelInstanceId);
+    return dockerSpawn(runId, scope, channelInstanceId, undefined, workerGeneration);
   }
-  const pid = detachedSpawn(runId, scope, channelInstanceId, channelEndpoint);
+  const pid = detachedSpawn(runId, scope, channelInstanceId, channelEndpoint, workerGeneration);
   if (pid == null || !channelEndpoint) return null;
   // `channelEndpoint` arrives in the LISTEN form (`unix:<path>`) for the worker
   // process env; the caller persists the RETURNED endpoint as what the
@@ -1175,6 +1377,7 @@ export const defaultSpawn = async (
 /** Channel identity injected into a Docker worker's env (plan section 19). */
 export interface DockerChannelConfig {
   instanceId: string;
+  workerGeneration?: number;
   /** What the worker binds — always `tcp:0.0.0.0:8787` (plan section 2). */
   listenEndpoint: string;
 }
@@ -1226,7 +1429,7 @@ export async function buildWorkerContainerConfig(
     // (never re-dispatch). Any code branching on "am I the worker" reads this.
     "TASK_ORCH_INSIDE_WORKER=1",
     ...(channel
-      ? Object.entries(workerChannelDispatchEnv(runId, channel.instanceId, channel.listenEndpoint)).map(
+      ? Object.entries(workerChannelDispatchEnv(runId, channel.instanceId, channel.listenEndpoint, channel.workerGeneration ?? 1)).map(
           ([k, v]) => `${k}=${v}`
         )
       : []),
@@ -1347,10 +1550,11 @@ export async function dockerSpawn(
   runId: number,
   scope: string,
   channelInstanceId: string,
-  dockerArg?: DockerLike
+  dockerArg?: DockerLike,
+  workerGeneration = 1,
 ): Promise<{ pid: number; channelEndpoint: string } | null> {
   const docker = dockerArg ?? (await getDocker());
-  const channel: DockerChannelConfig = { instanceId: channelInstanceId, listenEndpoint: dockerListenEndpoint() };
+  const channel: DockerChannelConfig = { instanceId: channelInstanceId, workerGeneration, listenEndpoint: dockerListenEndpoint() };
   const container = await docker.createContainer(
     await buildWorkerContainerConfig(runId, scope, channel)
   );
@@ -1398,6 +1602,7 @@ function detachedSpawn(
   _scope: string,
   channelInstanceId?: string,
   listenEndpoint?: string,
+  workerGeneration = 1,
 ): number | null {
   if (!channelInstanceId || !listenEndpoint) {
     throw new Error("detached worker spawn requires a provisioned channel identity and listen endpoint");
@@ -1405,7 +1610,7 @@ function detachedSpawn(
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     TASK_ORCH_INSIDE_WORKER: "1",
-    ...workerChannelDispatchEnv(runId, channelInstanceId, listenEndpoint),
+    ...workerChannelDispatchEnv(runId, channelInstanceId, listenEndpoint, workerGeneration),
   };
   // The durable outbox spool lives at $SESSION_ROOT/channel (plan section 6)
   // and is scoped to one run+instance. Fly workers get SESSION_ROOT from their
@@ -1439,9 +1644,64 @@ export async function stopWorkerContainer(scope: string | null): Promise<void> {
 }
 
 /** Provider-aware hard-stop used by run cancellation. */
-export async function stopRunner(scope: string | null): Promise<void> {
-  if (!scope) return;
-  await getRunnerProvider().stop(scope);
+export async function stopRunner(scope: string | null, generationGuard?: { runId: number; workerGeneration: number; instanceId: string }): Promise<void> {
+  // A terminal callback may run after another path has released workerScope.
+  // The generation guard still identifies the exact provider resource, so do
+  // not require the transient claim token in that case.
+  if (!scope && !generationGuard) return;
+  const effectiveScope = scope ?? "";
+  const provider = getRunnerProvider();
+  // During provisioning workerScope is still the server claim, so stopping it
+  // as a provider handle is incorrect (and on Sprites could target nothing).
+  // Resolve the stable/generation-qualified provider identity first.
+  const [row] = await db
+    .select({
+      runId: runnerInstances.runId,
+      provider: runnerInstances.provider,
+      spriteName: runnerInstances.spriteName,
+      workerGeneration: runnerInstances.workerGeneration,
+      channelInstanceId: runnerInstances.channelInstanceId,
+      providerServiceName: runnerInstances.providerServiceName,
+    })
+    .from(runnerInstances)
+    .innerJoin(agentSessions, eq(agentSessions.id, runnerInstances.runId))
+    .where(and(
+      ...(generationGuard
+        ? [eq(runnerInstances.runId, generationGuard.runId)]
+        : [eq(agentSessions.workerScope, effectiveScope)]),
+      ...(generationGuard ? [
+        eq(runnerInstances.workerGeneration, generationGuard.workerGeneration),
+        eq(runnerInstances.channelInstanceId, generationGuard.instanceId),
+      ] : []),
+    ));
+  // A guarded cleanup belongs to one exact generation. If that generation has
+  // already been replaced or its row was reclaimed, never fall back to the
+  // stable run scope: that could stop/delete the replacement generation.
+  if (generationGuard && !row) return;
+  if (row && row.workerGeneration > 0) {
+    // Invalidate the provider operation before issuing the external stop. A
+    // late create/start completion must fail its `(generation, operation)` CAS
+    // even for providers whose stop API has no generation-aware primitive.
+    await db.update(runnerInstances)
+      .set({ generationState: "stopping", providerOperationId: null })
+      .where(and(
+        eq(runnerInstances.runId, row.runId),
+        eq(runnerInstances.workerGeneration, row.workerGeneration),
+        ...(row.channelInstanceId ? [eq(runnerInstances.channelInstanceId, row.channelInstanceId)] : []),
+      ));
+  }
+  if (row && row.provider === provider.kind && provider.destroyGeneration && row.workerGeneration > 0) {
+    await provider.destroyGeneration({
+      runId: row.runId,
+      generation: row.workerGeneration,
+      instanceId: row.channelInstanceId ?? "legacy",
+      providerHandle: row.spriteName ?? effectiveScope,
+      ...(row.providerServiceName ? { providerServiceName: row.providerServiceName } : {}),
+    });
+    return;
+  }
+  if (generationGuard && row?.provider !== provider.kind) return;
+  await provider.stop(row?.spriteName ?? effectiveScope);
 }
 
 // ── worker container monitor ─────────────────────────────────────────────────

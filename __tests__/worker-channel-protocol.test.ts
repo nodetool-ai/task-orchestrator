@@ -28,13 +28,14 @@ function message(id = 1) {
   return { id, runId: RUN_ID, role: "user" as const, content: [{ type: "text", text: "hello" }] };
 }
 
-function frame(type: string, payload: unknown, seq = 1): WireFrame {
+function frame(type: string, payload: unknown, seq = 1, workerGeneration?: number): WireFrame {
   return {
     v: 1,
     type,
     id: ID,
     runId: RUN_ID,
     instanceId: INSTANCE_ID,
+    ...(workerGeneration === undefined ? {} : { workerGeneration }),
     controllerEpoch: 3,
     seq,
     sentAt: "2026-07-15T10:00:00.000Z",
@@ -167,6 +168,15 @@ describe("worker channel protocol", () => {
     expect(() => assertEnvelopeScope(decoded, RUN_ID + 1, INSTANCE_ID)).toThrow(/scope mismatch/);
     expect(() => assertEnvelopeScope(decoded, RUN_ID, "wi_fedcba9876543210fedcba9876543210")).toThrow(/scope mismatch/);
     expect(() => assertEnvelopeScope(decoded, RUN_ID, INSTANCE_ID)).not.toThrow();
+  });
+
+  it("fails closed when a frame addresses the wrong worker generation", () => {
+    const decoded = decodeFrame(encodeFrame(frame("run.phase", { phase: "running" }, 1, 2)));
+    expect(() => assertEnvelopeScope(decoded, RUN_ID, INSTANCE_ID, 1)).toThrow(/scope mismatch/);
+    expect(() => assertEnvelopeScope(decoded, RUN_ID, INSTANCE_ID, 2)).not.toThrow();
+    // Generation-1 workers omit the additive field during compatibility rollout.
+    const legacy = decodeFrame(encodeFrame(frame("run.phase", { phase: "running" })));
+    expect(() => assertEnvelopeScope(legacy, RUN_ID, INSTANCE_ID, 1)).not.toThrow();
   });
 
   it("hashes payloads canonically with recursive object-key sorting", () => {

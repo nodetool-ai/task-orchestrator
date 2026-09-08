@@ -6,7 +6,7 @@ const PREFIX = "wc1";
 const INSTANCE_ID_PATTERN = /^wi_[a-f0-9]{32}$/;
 
 export type ChannelCredentialVerdict =
-  | { ok: true; runId: number; instanceId: string }
+  | { ok: true; runId: number; instanceId: string; workerGeneration?: number }
   | {
       ok: false;
       reason: "malformed" | "instance-mismatch" | "bad-signature" | "missing-secret";
@@ -36,9 +36,20 @@ function validInstanceId(instanceId: string): boolean {
   return typeof instanceId === "string" && INSTANCE_ID_PATTERN.test(instanceId);
 }
 
-function signature(runId: number, instanceId: string, secret: string): string {
+function validGeneration(workerGeneration: number): boolean {
+  return Number.isSafeInteger(workerGeneration) && workerGeneration > 0;
+}
+
+function signature(runId: number, instanceId: string, workerGeneration: number, secret: string): string {
+  // Preserve the original generation-1 credential byte-for-byte while legacy
+  // workers are allowed to drain. Later generations use the explicit field in
+  // both the token payload and signature input, so they cannot be replayed
+  // across a process replacement.
+  const scope = workerGeneration === 1
+    ? `${PREFIX}:${runId}:${instanceId}`
+    : `${PREFIX}:${runId}:${instanceId}:${workerGeneration}`;
   return createHmac("sha256", secret)
-    .update(`${PREFIX}:${runId}:${instanceId}`, "utf8")
+    .update(scope, "utf8")
     .digest("base64url");
 }
 
@@ -46,14 +57,16 @@ function signature(runId: number, instanceId: string, secret: string): string {
 export function mintChannelCredential(
   runId: number,
   instanceId: string,
-  options: ChannelCredentialOptions = {}
+  options: ChannelCredentialOptions & { workerGeneration?: number } = {}
 ): string {
   if (!validRunId(runId)) throw new Error(`Invalid runId: ${runId}`);
   if (!validInstanceId(instanceId)) throw new Error(`Invalid channel instance id: ${instanceId}`);
+  const workerGeneration = options.workerGeneration ?? 1;
+  if (!validGeneration(workerGeneration)) throw new Error(`Invalid worker generation: ${workerGeneration}`);
   const secret = options.secret ?? channelCredentialSecret();
   if (!secret) throw new Error("Channel credential secret must not be empty");
-  const payload = `${PREFIX}.${instanceId}`;
-  return `${payload}.${signature(runId, instanceId, secret)}`;
+  const payload = workerGeneration === 1 ? `${PREFIX}.${instanceId}` : `${PREFIX}.${instanceId}.${workerGeneration}`;
+  return `${payload}.${signature(runId, instanceId, workerGeneration, secret)}`;
 }
 
 /**
@@ -66,16 +79,20 @@ export function verifyChannelCredential(
   token: unknown,
   runId: number,
   instanceId: string,
-  options: ChannelCredentialOptions = {}
+  options: ChannelCredentialOptions & { workerGeneration?: number } = {}
 ): ChannelCredentialVerdict {
   if (!validRunId(runId) || !validInstanceId(instanceId)) return { ok: false, reason: "malformed" };
   if (typeof token !== "string") return { ok: false, reason: "malformed" };
 
   const parts = token.split(".");
-  if (parts.length !== 3 || parts[0] !== PREFIX) return { ok: false, reason: "malformed" };
+  if ((parts.length !== 3 && parts.length !== 4) || parts[0] !== PREFIX) return { ok: false, reason: "malformed" };
   if (!validInstanceId(parts[1])) return { ok: false, reason: "malformed" };
   if (parts[1] !== instanceId) return { ok: false, reason: "instance-mismatch" };
-  if (!/^[A-Za-z0-9_-]{43}$/.test(parts[2])) return { ok: false, reason: "malformed" };
+  const workerGeneration = parts.length === 4 ? Number(parts[2]) : 1;
+  if (!validGeneration(workerGeneration)) return { ok: false, reason: "malformed" };
+  if ((options.workerGeneration ?? 1) !== workerGeneration) return { ok: false, reason: "instance-mismatch" };
+  const signaturePart = parts.length === 4 ? parts[3] : parts[2];
+  if (!/^[A-Za-z0-9_-]{43}$/.test(signaturePart)) return { ok: false, reason: "malformed" };
 
   let secret: string;
   try {
@@ -84,12 +101,14 @@ export function verifyChannelCredential(
     return { ok: false, reason: "missing-secret" };
   }
 
-  const expected = Buffer.from(signature(runId, instanceId, secret), "utf8");
-  const given = Buffer.from(parts[2], "utf8");
+  const expected = Buffer.from(signature(runId, instanceId, workerGeneration, secret), "utf8");
+  const given = Buffer.from(signaturePart, "utf8");
   if (expected.length !== given.length || !timingSafeEqual(expected, given)) {
     return { ok: false, reason: "bad-signature" };
   }
-  return { ok: true, runId, instanceId };
+  return workerGeneration === 1 && parts.length === 3
+    ? { ok: true, runId, instanceId }
+    : { ok: true, runId, instanceId, workerGeneration };
 }
 
 /** Generate the exact worker-instance identifier used by the channel. */

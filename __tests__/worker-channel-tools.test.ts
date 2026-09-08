@@ -21,7 +21,12 @@ import { and, eq } from "drizzle-orm";
 import { db } from "../db";
 import { agentSessions, runnerInstances, workerChannelCommands, workerChannelReceipts } from "../db/schema";
 import { create } from "../lib/runs";
-import { persistCommand, type CommandRow } from "../lib/worker-channel/repository";
+import { dispatchRun } from "../lib/run-dispatch";
+import {
+  persistCommand,
+  withCurrentWorkerGeneration,
+  type CommandRow,
+} from "../lib/worker-channel/repository";
 import {
   executeChannelTool,
   executeToolInvoke,
@@ -39,6 +44,7 @@ vi.mock("../lib/worker/server-tools", () => ({
 }));
 
 const instanceId = "wi_0123456789abcdef0123456789abcdef";
+const generationTwoInstanceId = "wi_fedcba9876543210fedcba9876543210";
 const EPOCH = 1;
 
 let ctxSeen: unknown = null;
@@ -327,6 +333,41 @@ describe("control-plane tool.invoke handling (plan section 15)", () => {
     expect((result.result as any).content[0].text).toBe("done");
   });
 
+  it("fences generation replacement while a tool executes without blocking cancellation", async () => {
+    const runId = await newRun();
+    let entered!: () => void;
+    let release!: () => void;
+    const enteredPromise = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const fenced = withCurrentWorkerGeneration(runId, instanceId, 1, async () => {
+      entered();
+      await gate;
+      return "finished";
+    });
+    await enteredPromise;
+
+    // Generation rollover uses the matching authority lock. It must wait for
+    // the old tool to release that lock, while an ordinary cancellation write
+    // remains free to persist through the main pool.
+    // Exercise the real generation allocator: it takes the matching authority
+    // lock before claiming a replacement worker.
+    let replacementEntered = false;
+    const replacement = dispatchRun(runId, {
+      spawn: () => {
+        replacementEntered = true;
+        return 1234;
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(replacementEntered).toBe(false);
+    await db.update(agentSessions).set({ cancelRequested: 1 }).where(eq(agentSessions.id, runId));
+    expect((await db.select({ cancelRequested: agentSessions.cancelRequested }).from(agentSessions).where(eq(agentSessions.id, runId)))[0]?.cancelRequested).toBe(1);
+    release();
+    await expect(fenced).resolves.toBe("finished");
+    await expect(replacement).resolves.toBe("spawned");
+    expect((await db.select({ workerGeneration: runnerInstances.workerGeneration }).from(runnerInstances).where(eq(runnerInstances.runId, runId)))[0]?.workerGeneration).toBe(2);
+  });
+
   it("delivers a persisted result on reconnect after a disconnect between commit and delivery", async () => {
     const runId = await newRun();
     // Controller disconnected while the tool ran: the result command is persisted
@@ -416,6 +457,35 @@ describe("control-plane tool.invoke handling (plan section 15)", () => {
     await sweepOrphanedToolInvokes(runId, instanceId, io3);
     expect(counter).toBe(1);
     expect(toolResultFrames(io3)).toHaveLength(0);
+  });
+
+  it("sweeps orphaned tool invocations within the current worker generation", async () => {
+    const runId = await newRun();
+    await db.update(runnerInstances).set({
+      workerGeneration: 2,
+      channelInstanceId: generationTwoInstanceId,
+    }).where(eq(runnerInstances.runId, runId));
+    await persistCommand({
+      runId,
+      instanceId: generationTwoInstanceId,
+      workerGeneration: 2,
+      controllerEpoch: EPOCH,
+      type: "run.start",
+      payload: { mode: "resume", policy: { allowedTools: ALLOWED, maxTurns: null, deadline: null } },
+    });
+
+    const io = { ...makeIO(), workerGeneration: 2 };
+    const frame = {
+      ...invokeFrame(runId, "counter", {}),
+      instanceId: generationTwoInstanceId,
+      workerGeneration: 2,
+    } as ToolInvokeEnvelope;
+    await reserveToolInvoke(frame, io);
+
+    const reconnect = { ...makeIO(), workerGeneration: 2 };
+    await sweepOrphanedToolInvokes(runId, generationTwoInstanceId, reconnect, 2);
+    expect(counter).toBe(1);
+    expect(toolResultFrames(reconnect)).toHaveLength(1);
   });
 
   it("does not double-execute an invocation already in flight in this process", async () => {

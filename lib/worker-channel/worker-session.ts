@@ -46,6 +46,7 @@ export interface WorkerSessionTransport {
 
 export interface WorkerSessionAttachOptions {
   controllerEpoch: number;
+  workerGeneration?: number;
   /** Last worker event sequence durably accepted by the controller. */
   lastAcceptedWorkerSeq?: number;
   /** Controller-negotiated in-flight budget applied to the durable outbox. */
@@ -55,6 +56,7 @@ export interface WorkerSessionAttachOptions {
 
 /** Handshake numbers the supervisor advertises in `channel.hello`. */
 export interface WorkerHandshakeState {
+  workerGeneration: number;
   lastControllerEpoch: number;
   lastAckedControlSeq: number;
   nextWorkerSeq: number;
@@ -65,6 +67,7 @@ export interface WorkerHandshakeState {
 export interface WorkerSessionOptions {
   runId: number;
   instanceId: string;
+  workerGeneration?: number;
   outbox: WorkerOutbox;
   transport?: WorkerSessionTransport | ((frame: WireFrame) => Promise<void> | void);
   disconnectGraceMs?: number;
@@ -214,6 +217,7 @@ export class WorkerSession {
 
   private readonly runId: number;
   private readonly instanceId: string;
+  private readonly workerGeneration: number;
   private readonly outbox: WorkerOutbox;
   private readonly blobs: BlobCoordinator;
   private readonly disconnectGraceMs: number;
@@ -245,6 +249,7 @@ export class WorkerSession {
     this.runId = positiveInteger(options.runId, "runId");
     if (!/^wi_[a-f0-9]{32}$/.test(options.instanceId)) throw new TypeError("instanceId is invalid");
     this.instanceId = options.instanceId;
+    this.workerGeneration = positiveInteger(options.workerGeneration ?? 1, "workerGeneration");
     this.outbox = options.outbox;
     this.blobs = new BlobCoordinator(
       options.blobRoot ?? options.outbox.sessionRoot(),
@@ -279,6 +284,7 @@ export class WorkerSession {
   /** Snapshot the numbers the supervisor advertises in `channel.hello`. */
   handshakeState(): WorkerHandshakeState {
     return {
+      workerGeneration: this.workerGeneration,
       lastControllerEpoch: this.controllerEpoch,
       lastAckedControlSeq: this.lastCommandSeq,
       nextWorkerSeq: this.outbox.nextSeq(),
@@ -314,6 +320,13 @@ export class WorkerSession {
             lastAcceptedWorkerSeq,
           };
     const epoch = positiveInteger(options.controllerEpoch, "controllerEpoch");
+    const generation = options.workerGeneration ?? 1;
+    if (generation !== this.workerGeneration) {
+      throw new WorkerSessionProtocolError(
+        `worker generation ${generation} does not match ${this.workerGeneration}`,
+        CLOSE_CODE_SCOPE_MISMATCH,
+      );
+    }
     const cursor = nonNegativeInteger(options.lastAcceptedWorkerSeq ?? 0, "lastAcceptedWorkerSeq");
     if (this.closed) throw new Error("worker session is closed");
 
@@ -518,6 +531,7 @@ export class WorkerSession {
         id: randomUUID(),
         runId: this.runId,
         instanceId: this.instanceId,
+        ...(this.workerGeneration > 1 ? { workerGeneration: this.workerGeneration } : {}),
         controllerEpoch: this.controllerEpoch,
         seq: this.outbox.nextSeq(),
         sentAt: new Date().toISOString(),
@@ -617,7 +631,7 @@ export class WorkerSession {
   private async acceptCommandInner(frame: WorkerCommand): Promise<void> {
     if (this.closed) throw new Error("worker session is closed");
     assertPostHandshakeEnvelope(frame);
-    assertEnvelopeScope(frame, this.runId, this.instanceId);
+    assertEnvelopeScope(frame, this.runId, this.instanceId, this.workerGeneration);
     if (frame.controllerEpoch !== this.controllerEpoch) throw this.staleEpoch(frame.controllerEpoch);
 
     const fingerprint = commandFingerprint(frame);
@@ -750,7 +764,7 @@ export class WorkerSession {
   private async handleTransportFrame(frame: TransportFrame): Promise<void> {
     if (this.closed) return;
     assertPostHandshakeEnvelope(frame);
-    assertEnvelopeScope(frame, this.runId, this.instanceId);
+    assertEnvelopeScope(frame, this.runId, this.instanceId, this.workerGeneration);
     if (frame.controllerEpoch !== this.controllerEpoch) throw this.staleEpoch(frame.controllerEpoch);
     if (frame.type === "channel.ack") {
       await this.outbox.ackThrough((frame.payload as ChannelAck).throughSeq);
@@ -785,6 +799,7 @@ export class WorkerSession {
       id: randomUUID(),
       runId: this.runId,
       instanceId: this.instanceId,
+      ...(this.workerGeneration > 1 ? { workerGeneration: this.workerGeneration } : {}),
       controllerEpoch: active.epoch,
       seq: 0,
       sentAt: new Date().toISOString(),
@@ -802,6 +817,7 @@ export class WorkerSession {
       id: randomUUID(),
       runId: this.runId,
       instanceId: this.instanceId,
+      ...(this.workerGeneration > 1 ? { workerGeneration: this.workerGeneration } : {}),
       controllerEpoch: active.epoch,
       seq: 0,
       sentAt: new Date().toISOString(),
@@ -841,4 +857,3 @@ export class WorkerSession {
     if (close) await close.call(asTransport(transport), code, reason);
   }
 }
-

@@ -274,6 +274,13 @@
       "when": 1788897600000,
       "tag": "0038_drop_persona_backend",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1788898000000,
+      "tag": "0039_worker_generations",
+      "breakpoints": true
     }
   ]
 }

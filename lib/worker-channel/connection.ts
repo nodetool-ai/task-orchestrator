@@ -72,6 +72,11 @@ export function __resetHeartbeatIntervalForTests(): void {
 export interface ControllerConnectionOptions {
   runId: number;
   instanceId: string;
+  workerGeneration?: number;
+  /** Temporary server claim held during provider provisioning. For a Sprite,
+   * it is atomically replaced by the stable Sprite scope only after this
+   * connection's authenticated hello succeeds. */
+  provisioningScope?: string;
   endpoint: string;
   controllerId: string;
   onEvent?: WorkerEventHandler;
@@ -139,6 +144,8 @@ function once(ws: WebSocket, event: "open" | "message"): Promise<unknown> {
 export class ControllerConnection {
   readonly runId: number;
   readonly instanceId: string;
+  readonly workerGeneration: number;
+  readonly provisioningScope?: string;
   readonly endpoint: string;
   readonly controllerId: string;
   private readonly onEvent: WorkerEventHandler;
@@ -161,6 +168,8 @@ export class ControllerConnection {
   constructor(options: ControllerConnectionOptions) {
     this.runId = options.runId;
     this.instanceId = options.instanceId;
+    this.workerGeneration = options.workerGeneration ?? 1;
+    this.provisioningScope = options.provisioningScope;
     this.endpoint = options.endpoint;
     this.controllerId = options.controllerId;
     this.onEvent = options.onEvent ?? (() => undefined);
@@ -220,9 +229,9 @@ export class ControllerConnection {
   }
 
   private async connectInner(options: { bumpEpoch?: boolean }): Promise<void> {
-    const lease = await acquireControllerLease(this.runId, this.controllerId, new Date(), { bump: options.bumpEpoch });
+    const lease = await acquireControllerLease(this.runId, this.controllerId, new Date(), { bump: options.bumpEpoch, workerGeneration: this.workerGeneration });
     this.epoch = lease.epoch;
-    const credential = mintChannelCredential(this.runId, this.instanceId);
+    const credential = mintChannelCredential(this.runId, this.instanceId, { workerGeneration: this.workerGeneration });
     let socket: WebSocket;
     if (isSpritesDialEndpoint(this.endpoint)) {
       socket = await this.createSpritesProxiedSocket(credential);
@@ -257,7 +266,11 @@ export class ControllerConnection {
       // the worker sends nothing between hello and our accept, so this persistent
       // listener never double-processes a frame.
       this.attachSocketHandlers(socket);
-      const lastAcceptedWorkerSeq = await getLastAcceptedWorkerSeq(this.runId, this.instanceId);
+      if ((hello.workerGeneration ?? 1) !== this.workerGeneration) {
+        socket.close(CLOSE_CODE_SCOPE_MISMATCH, "worker generation mismatch");
+        throw new ControllerProtocolError("worker generation mismatch", CLOSE_CODE_SCOPE_MISMATCH, false);
+      }
+      const lastAcceptedWorkerSeq = await getLastAcceptedWorkerSeq(this.runId, this.instanceId, this.workerGeneration);
       // channel.accept is a handshake frame ({v,type,seq,payload}), not an
       // envelope: the codec validates it strictly, so it must not carry the
       // id/runId/instanceId/sentAt envelope fields.
@@ -267,6 +280,7 @@ export class ControllerConnection {
         seq: 0,
         payload: {
           protocol: WORKER_CHANNEL_PROTOCOL,
+          ...(this.workerGeneration > 1 ? { workerGeneration: this.workerGeneration } : {}),
           controllerEpoch: lease.epoch,
           leaseId: lease.leaseId,
           lastAcceptedWorkerSeq,
@@ -279,10 +293,21 @@ export class ControllerConnection {
       // provider API (two round trips, 30s timeouts) while the worker's accept
       // timer is 10s. Liveness treats a missing incarnation as "trust the
       // observation", so a late or failed record is never a wrong verdict.
-      void this.observeHelloIncarnation(hello);
-      await markChannelConnected(this.runId, this.instanceId, new Date());
-      await rebasePendingCommands(this.runId, this.instanceId, lease.epoch);
-      for (const command of await listPendingCommands(this.runId, this.instanceId, lease.epoch)) this.sendCommandRow(command);
+      // Capture the accepted lease before any provider I/O. A reconnect/takeover
+      // may advance `this.epoch` while inspect() is in flight; that observation
+      // must only be allowed to update the lease that accepted this hello.
+      void this.observeHelloIncarnation(hello, lease.epoch);
+      await markChannelConnected(
+        this.runId,
+        this.instanceId,
+        new Date(),
+        this.workerGeneration,
+        this.controllerId,
+        lease.epoch,
+        this.provisioningScope,
+      );
+      await rebasePendingCommands(this.runId, this.instanceId, lease.epoch, this.workerGeneration);
+      for (const command of await listPendingCommands(this.runId, this.instanceId, lease.epoch, this.workerGeneration)) this.sendCommandRow(command);
       // Bind the shared coordinator to THIS connection's transport and re-announce
       // any outgoing blob so a reconnect resumes from the receiver's cursor.
       await this.blobs.rebind(this.controlBlobIO());
@@ -293,11 +318,11 @@ export class ControllerConnection {
       // is the only thing that unhangs the agent's call. Fire-and-forget so it
       // never blocks the receive loop; it is idempotent and guarded against
       // double-running a concurrently live redelivery.
-      void sweepOrphanedToolInvokes(this.runId, this.instanceId, this.toolIO()).catch(() => undefined);
+      void sweepOrphanedToolInvokes(this.runId, this.instanceId, this.toolIO(), this.workerGeneration).catch(() => undefined);
     } catch (error) {
       if (this.socket === socket) this.socket = undefined;
       socket.terminate();
-      await releaseControllerLease(this.runId, this.controllerId, lease.epoch).catch(() => undefined);
+      await releaseControllerLease(this.runId, this.controllerId, lease.epoch, this.workerGeneration).catch(() => undefined);
       throw error;
     }
   }
@@ -388,7 +413,7 @@ export class ControllerConnection {
     // on the strength of the durable row.
     for (const waiters of this.ackWaiters.values()) for (const waiter of waiters) waiter.resolve();
     this.ackWaiters.clear();
-    if (release && this.epoch) await releaseControllerLease(this.runId, this.controllerId, this.epoch);
+    if (release && this.epoch) await releaseControllerLease(this.runId, this.controllerId, this.epoch, this.workerGeneration);
   }
 
   /** Abandon the connection when the reconnect grace is exhausted. Unlike
@@ -434,16 +459,24 @@ export class ControllerConnection {
    * provider-derived value is therefore authoritative: for the same process,
    * provider.inspect().incarnation === stored incarnation.
    */
-  private async observeHelloIncarnation(hello: ChannelHello): Promise<void> {
+  private async observeHelloIncarnation(hello: ChannelHello, acceptedEpoch: number): Promise<void> {
     try {
-      const target = await getWorkerObservationTarget(this.runId, this.instanceId);
+      const target = await getWorkerObservationTarget(this.runId, this.instanceId, this.workerGeneration);
       if (!target) return;
       const provider = getRunnerProvider();
       if (provider.kind !== target.provider) {
         console.warn(`[worker-channel] liveness observation provider mismatch runId=${this.runId} row=${target.provider} configured=${provider.kind}`);
         return;
       }
-      const observed = await provider.inspect(target.handle);
+      const observed = provider.inspectGeneration
+        ? await provider.inspectGeneration({
+            runId: this.runId,
+            generation: this.workerGeneration,
+            instanceId: this.instanceId,
+            providerHandle: target.handle,
+            ...(target.providerServiceName ? { providerServiceName: target.providerServiceName } : {}),
+          })
+        : await provider.inspect(target.handle);
       if (observed.status !== "alive") return;
       // The handle we inspected is the instance registered for this channel, so
       // the observed process IS the one we dialed: the handle suffices. The pid
@@ -455,7 +488,7 @@ export class ControllerConnection {
       if (observed.pid != null && hello.pid != null && observed.pid !== hello.pid) {
         console.log(`[worker-channel] hello pid ${hello.pid} differs from provider pid ${observed.pid} for run ${this.runId}; trusting the handle`);
       }
-      await persistWorkerIncarnation(this.runId, this.instanceId, observed.incarnation);
+      await persistWorkerIncarnation(this.runId, this.instanceId, observed.incarnation, this.workerGeneration, this.controllerId, acceptedEpoch);
     } catch (err) {
       console.warn(`[worker-channel] liveness observation failed runId=${this.runId}:`, err);
     }
@@ -468,13 +501,14 @@ export class ControllerConnection {
     const self = this;
     return {
       get epoch() { return self.epoch; },
+      get workerGeneration() { return self.workerGeneration; },
       get connected() { return self.connected; },
       send: (frame) => self.send(frame),
     };
   }
 
   private frame<T>(type: string, payload: T): WorkerEnvelope<T> {
-    return { v: 1, type, id: randomUUID(), runId: this.runId, instanceId: this.instanceId, controllerEpoch: this.epoch, seq: 0, sentAt: new Date().toISOString(), payload };
+    return { v: 1, type, id: randomUUID(), runId: this.runId, instanceId: this.instanceId, ...(this.workerGeneration > 1 ? { workerGeneration: this.workerGeneration } : {}), controllerEpoch: this.epoch, seq: 0, sentAt: new Date().toISOString(), payload };
   }
 
   private send(frame: WireFrame): void {
@@ -485,7 +519,7 @@ export class ControllerConnection {
   private sendCommandRow(row: CommandRow, replyTo?: string): void {
     const frame: WorkerCommand = {
       v: 1, type: row.type as WorkerCommand["type"], id: row.id, runId: row.runId,
-      instanceId: row.instanceId, controllerEpoch: row.controllerEpoch, seq: row.seq,
+      instanceId: row.instanceId, ...(row.workerGeneration > 1 ? { workerGeneration: row.workerGeneration } : {}), controllerEpoch: row.controllerEpoch, seq: row.seq,
       sentAt: row.createdAt.toISOString(), payload: row.payload as never,
       ...(replyTo ? { replyTo } : {}),
     } as WorkerCommand;
@@ -512,7 +546,7 @@ export class ControllerConnection {
   private async receive(data: string | ArrayBuffer | Uint8Array): Promise<void> {
     if (this.stopped) return;
     const frame = decodeFrame(data);
-    assertEnvelopeScope(frame, this.runId, this.instanceId);
+    assertEnvelopeScope(frame, this.runId, this.instanceId, this.workerGeneration);
     // Every inbound frame is worker-authored (events + transport acks); the
     // control plane never receives commands. A replayed worker event retains the
     // epoch it was first emitted under, and acquireControllerLease bumps the epoch
@@ -528,7 +562,7 @@ export class ControllerConnection {
     if (isTransportFrame(frame)) {
       if (frame.type === "channel.ack") {
         const through = frame.payload.throughSeq;
-        await ackCommandsThrough(this.runId, this.instanceId, this.epoch, through, new Date());
+        await ackCommandsThrough(this.runId, this.instanceId, this.epoch, through, new Date(), this.workerGeneration);
         for (const [seq, waiters] of [...this.ackWaiters]) if (seq <= through) {
           this.ackWaiters.delete(seq); for (const waiter of waiters) waiter.resolve();
         }
@@ -637,6 +671,7 @@ export class ControllerConnection {
     const row = await persistCommand({
       runId: this.runId,
       instanceId: this.instanceId,
+      workerGeneration: this.workerGeneration,
       controllerEpoch: this.epoch,
       type,
       payload,
@@ -650,7 +685,7 @@ export class ControllerConnection {
   }
 
   private async touch(): Promise<void> {
-    const ok = await touchChannel(this.runId, this.instanceId, this.controllerId, this.epoch, new Date());
+    const ok = await touchChannel(this.runId, this.instanceId, this.controllerId, this.epoch, new Date(), this.workerGeneration);
     if (!ok) throw new ControllerProtocolError("controller lease lost", CLOSE_CODE_STALE_CONTROLLER_EPOCH, false);
   }
 

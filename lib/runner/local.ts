@@ -10,7 +10,7 @@ import {
 } from "../run-dispatch";
 import { dialEndpointToSocketPath, localListenEndpoint } from "../worker-channel/dispatch-env";
 import type { DockerLike } from "../run-dispatch";
-import type { CreateRunnerInput, RunnerObservation, RunnerProvider, RunnerRef } from "./provider";
+import type { CreateRunnerInput, WorkerGenerationRef, RunnerObservation, RunnerProvider, RunnerRef } from "./provider";
 
 type LocalProcess = { pid: number; spawnedAt: string };
 const localProcesses = new Map<string, LocalProcess>();
@@ -40,7 +40,7 @@ export class LocalRunnerProvider implements RunnerProvider {
     // placeholder Unix one.
     const socketPath = input.channelEndpoint ? dialEndpointToSocketPath(input.channelEndpoint) : null;
     const listenEndpoint = socketPath ? localListenEndpoint(socketPath) : undefined;
-    const spawned = await defaultSpawn(input.runId, input.scope, input.channelInstanceId, listenEndpoint);
+    const spawned = await defaultSpawn(input.runId, input.scope, input.channelInstanceId, listenEndpoint, input.workerGeneration ?? 1);
     if (spawned == null) return null;
     if (!config.deployment.workerImage && spawned.spawnedAt) {
       localProcesses.set(input.scope, { pid: spawned.pid, spawnedAt: spawned.spawnedAt });
@@ -51,6 +51,8 @@ export class LocalRunnerProvider implements RunnerProvider {
       provider: "local",
       channelInstanceId: input.channelInstanceId,
       channelEndpoint: spawned.channelEndpoint,
+      workerGeneration: input.workerGeneration,
+      providerServiceName: input.providerServiceName,
     };
   }
 
@@ -85,6 +87,18 @@ export class LocalRunnerProvider implements RunnerProvider {
       if ((err as NodeJS.ErrnoException).code === "ESRCH") return { status: "dead" };
       return { status: "unknown" };
     }
+  }
+
+  async inspectGeneration(ref: WorkerGenerationRef): Promise<RunnerObservation> {
+    // Docker container names are generation-scoped by dispatch. For detached
+    // local workers the scope is likewise the process handle, so retaining the
+    // explicit processHandle makes the fence unambiguous when a caller keeps a
+    // stable provider handle for a run.
+    return this.inspect(ref.processHandle ?? ref.providerHandle);
+  }
+
+  async stopGeneration(ref: WorkerGenerationRef): Promise<void> {
+    await this.stop(ref.processHandle ?? ref.providerHandle);
   }
 
   async sweep(): Promise<void> {

@@ -86,6 +86,9 @@ export async function resolveLiveness(runId: number): Promise<Liveness> {
       provider: runnerInstances.provider,
       spriteName: runnerInstances.spriteName,
       workerIncarnation: runnerInstances.workerIncarnation,
+      workerGeneration: runnerInstances.workerGeneration,
+      channelInstanceId: runnerInstances.channelInstanceId,
+      providerServiceName: runnerInstances.providerServiceName,
     })
     .from(agentSessions)
     .leftJoin(runnerInstances, eq(runnerInstances.runId, agentSessions.id))
@@ -94,8 +97,19 @@ export async function resolveLiveness(runId: number): Promise<Liveness> {
   // No claim → unowned. (A reusable runner may still be alive, but the claim is
   // what gives it work.)
   if (!row?.workerScope) return { verdict: "unowned" };
-  // An in-process turn: observe the control-plane process itself.
-  if (isServerClaimScope(row.workerScope)) return observeServerClaim(row.workerScope);
+  // An in-process turn: observe the control-plane process itself. A Sprite
+  // generation is the exception when this claim belongs to a dead process:
+  // dispatch persists the stable Sprite mapping before boot, so on restart the
+  // provider can still tell us that the generation is alive and adoptable. Do
+  // not bypass a live/unknown server claim, and do not extend this fallback to
+  // local or server-only runs.
+  if (isServerClaimScope(row.workerScope)) {
+    const serverClaim = observeServerClaim(row.workerScope);
+    const preMappedSprite = row.provider === "sprites"
+      && row.spriteName != null
+      && row.workerGeneration != null;
+    if (serverClaim.verdict !== "dead" || !preMappedSprite) return serverClaim;
+  }
   // A claim with no runner row at all: nothing to observe. This is NOT "no
   // owner" — a dispatch may be provisioning the runner right now.
   if (!row.provider) return { verdict: "unknown" };
@@ -112,7 +126,17 @@ export async function resolveLiveness(runId: number): Promise<Liveness> {
   try {
     const active = getRunnerProvider();
     const provider = active.kind === row.provider ? active : createRunnerProvider(row.provider);
-    observed = await provider.inspect(handle);
+    if (row.workerGeneration != null && provider.inspectGeneration) {
+      observed = await provider.inspectGeneration({
+        runId,
+        generation: row.workerGeneration,
+        instanceId: row.channelInstanceId ?? "legacy",
+        providerHandle: handle,
+        ...(row.providerServiceName ? { providerServiceName: row.providerServiceName } : {}),
+      });
+    } else {
+      observed = await provider.inspect(handle);
+    }
   } catch (err) {
     // No provider (missing credentials in this process) is "cannot observe", never "dead".
     console.warn(`[liveness] cannot observe run ${runId}: ${err instanceof Error ? err.message : String(err)}`);

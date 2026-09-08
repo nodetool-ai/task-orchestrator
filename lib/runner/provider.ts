@@ -41,6 +41,23 @@ export interface RunnerRef {
   provider: RunnerProviderKind;
   channelEndpoint?: string;
   channelInstanceId?: string;
+  /** Worker process generation. A restart gets a new generation and instance. */
+  workerGeneration?: number;
+  /** Provider-specific process/service identity for this generation. */
+  providerServiceName?: string;
+}
+
+/** A generation-qualified provider handle. Unlike a stable Sprite name this
+ * identifies one supervised worker process and is safe to stop independently
+ * of later generations. */
+export interface WorkerGenerationRef {
+  runId: number;
+  generation: number;
+  instanceId: string;
+  providerHandle: string;
+  processHandle?: string;
+  providerServiceName?: string;
+  channelEndpoint?: string;
 }
 
 export interface CreateRunnerInput {
@@ -49,6 +66,12 @@ export interface CreateRunnerInput {
   scope: string;
   channelInstanceId?: string;
   channelEndpoint?: string;
+  workerGeneration?: number;
+  providerServiceName?: string;
+  providerOperationId?: string;
+  /** Existing process identity that must be torn down before this generation. */
+  previousProviderServiceName?: string;
+  replacesGeneration?: number;
 }
 
 /** A provider's pre-provisioning capacity decision. */
@@ -76,6 +99,14 @@ export interface RunnerProvider {
   stop(handle: string): Promise<void>;
   /** Observe only. Implementations must convert all failures to `unknown`. */
   inspect(handle: string): Promise<RunnerObservation>;
+  /** Generation-aware observation. Providers should prefer this when a row has
+   * a process/service identity; the legacy inspect(handle) remains for old rows. */
+  inspectGeneration?(ref: WorkerGenerationRef): Promise<RunnerObservation>;
+  /** Stop one generation without deleting a run-scoped provider environment. */
+  stopGeneration?(ref: WorkerGenerationRef): Promise<void>;
+  /** Terminal teardown for one generation; provider environments may be
+   * run-scoped (Sprites) and must be CAS-claimed before destruction. */
+  destroyGeneration?(ref: WorkerGenerationRef): Promise<void>;
   /** Reconcile DB run state against real runner state for this instance's runs. */
   sweep(): Promise<void>;
 }

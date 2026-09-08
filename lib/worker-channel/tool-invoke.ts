@@ -37,6 +37,7 @@ import {
   listOrphanedToolInvokes,
   persistCommand,
   persistToolResultCommand,
+  withCurrentWorkerGeneration,
   type CommandRow,
 } from "./repository";
 import { handleWorkerEvent } from "./event-handler";
@@ -55,6 +56,7 @@ export const TOOL_ACCEPTED_THRESHOLD_MS = 5_000;
 /** Minimal transport seam the tool handler needs from a controller connection. */
 export interface ToolChannelIO {
   readonly epoch: number;
+  readonly workerGeneration?: number;
   readonly connected: boolean;
   send(frame: WireFrame): void;
 }
@@ -71,6 +73,7 @@ function commandFrame(row: CommandRow, replyTo?: string): WorkerCommand {
     id: row.id,
     runId: row.runId,
     instanceId: row.instanceId,
+    ...(row.workerGeneration > 1 ? { workerGeneration: row.workerGeneration } : {}),
     controllerEpoch: row.controllerEpoch,
     seq: row.seq,
     sentAt: row.createdAt.toISOString(),
@@ -86,6 +89,9 @@ function channelAckFrame(io: ToolChannelIO, frame: ToolInvokeEnvelope, throughSe
     id: crypto.randomUUID(),
     runId: frame.runId,
     instanceId: frame.instanceId,
+    ...((io.workerGeneration ?? frame.workerGeneration ?? 1) > 1
+      ? { workerGeneration: io.workerGeneration ?? frame.workerGeneration }
+      : {}),
     controllerEpoch: io.epoch,
     seq: 0,
     sentAt: new Date().toISOString(),
@@ -113,6 +119,8 @@ export interface ExecuteChannelToolOptions {
   /** Invoked once if the tool is still running after `slowThresholdMs`. */
   onSlow?: () => void;
   slowThresholdMs?: number;
+  /** Generation whose authoritative run.start policy governs this call. */
+  workerGeneration?: number;
 }
 
 /**
@@ -129,33 +137,40 @@ export async function executeChannelTool(
   opts: ExecuteChannelToolOptions = {}
 ): Promise<ToolResult> {
   const { callId, tool } = payload;
-
-  const policy = await getRunStartPolicy(runId, instanceId);
-  if (!policy || !policy.allowedTools.includes(tool)) {
-    return structuredError(
-      callId,
-      `Tool '${tool}' is not permitted for this run (not in the authorized start policy).`
-    );
-  }
-
-  const { resolveServerTool } = await import("../worker/server-tools");
-  const def = await resolveServerTool(tool);
-  if (!def) return structuredError(callId, `Unknown tool: ${tool}`);
-
-  const ctx = await deriveToolContext(runId);
-
-  let slowTimer: ReturnType<typeof setTimeout> | undefined;
-  if (opts.onSlow) {
-    slowTimer = setTimeout(opts.onSlow, opts.slowThresholdMs ?? TOOL_ACCEPTED_THRESHOLD_MS);
-    slowTimer.unref?.();
-  }
   try {
-    const result = await def.execute(payload.arguments, { ...ctx, runId });
-    return { callId, result, isError: result.isError ?? false };
+    return await withCurrentWorkerGeneration(
+      runId,
+      instanceId,
+      opts.workerGeneration ?? 1,
+      async () => {
+        const policy = await getRunStartPolicy(runId, instanceId, opts.workerGeneration ?? 1);
+        if (!policy || !policy.allowedTools.includes(tool)) {
+          return structuredError(
+            callId,
+            `Tool '${tool}' is not permitted for this run (not in the authorized start policy).`,
+          );
+        }
+
+        const { resolveServerTool } = await import("../worker/server-tools");
+        const def = await resolveServerTool(tool);
+        if (!def) return structuredError(callId, `Unknown tool: ${tool}`);
+        const ctx = await deriveToolContext(runId);
+
+        let slowTimer: ReturnType<typeof setTimeout> | undefined;
+        if (opts.onSlow) {
+          slowTimer = setTimeout(opts.onSlow, opts.slowThresholdMs ?? TOOL_ACCEPTED_THRESHOLD_MS);
+          slowTimer.unref?.();
+        }
+        try {
+          const result = await def.execute(payload.arguments, { ...ctx, runId });
+          return { callId, result, isError: result.isError ?? false };
+        } finally {
+          if (slowTimer) clearTimeout(slowTimer);
+        }
+      },
+    );
   } catch (err) {
     return structuredError(callId, err instanceof Error ? err.message : String(err));
-  } finally {
-    if (slowTimer) clearTimeout(slowTimer);
   }
 }
 
@@ -242,6 +257,7 @@ async function executeToolInvokeInner(frame: ToolInvokeEnvelope, io: ToolChannel
   const payload = frame.payload as ToolInvoke;
 
   const result = await executeChannelTool(frame.runId, frame.instanceId, payload, {
+    workerGeneration: io.workerGeneration ?? frame.workerGeneration ?? 1,
     onSlow: () => {
       // Fire-and-forget: the accepted notice is advisory. A failure to deliver it
       // never affects the eventual tool.result.
@@ -250,6 +266,7 @@ async function executeToolInvokeInner(frame: ToolInvokeEnvelope, io: ToolChannel
           const command = await persistCommand({
             runId: frame.runId,
             instanceId: frame.instanceId,
+            workerGeneration: io.workerGeneration ?? frame.workerGeneration ?? 1,
             controllerEpoch: io.epoch,
             type: "tool.accepted",
             payload: { callId: payload.callId },
@@ -265,6 +282,7 @@ async function executeToolInvokeInner(frame: ToolInvokeEnvelope, io: ToolChannel
   const command = await persistToolResultCommand({
     runId: frame.runId,
     instanceId: frame.instanceId,
+    workerGeneration: io.workerGeneration ?? frame.workerGeneration ?? 1,
     controllerEpoch: io.epoch,
     invokeEventId: frame.id,
     payload: result,
@@ -292,9 +310,10 @@ async function executeToolInvokeInner(frame: ToolInvokeEnvelope, io: ToolChannel
 export async function sweepOrphanedToolInvokes(
   runId: number,
   instanceId: string,
-  io: ToolChannelIO
+  io: ToolChannelIO,
+  workerGeneration = io.workerGeneration ?? 1
 ): Promise<void> {
-  const orphans = await listOrphanedToolInvokes(runId, instanceId);
+  const orphans = await listOrphanedToolInvokes(runId, instanceId, workerGeneration);
   for (const orphan of orphans) {
     const frame: ToolInvokeEnvelope = {
       v: 1,
@@ -302,6 +321,7 @@ export async function sweepOrphanedToolInvokes(
       id: orphan.id,
       runId: orphan.runId,
       instanceId: orphan.instanceId,
+      workerGeneration,
       // The result command is persisted under io.epoch (the current controller
       // epoch), not the epoch the invocation was first emitted under. sentAt is
       // diagnostic only.
