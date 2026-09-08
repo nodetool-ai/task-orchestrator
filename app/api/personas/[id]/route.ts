@@ -11,7 +11,6 @@ const PatchBody = z.object({
   systemPrompt: z.string().min(1).optional(),
   toolsProfile: z.string().min(1).optional(),
   model: z.string().min(1).nullable().optional(),
-  backend: z.enum(["pi", "claude", "codex"]).nullable().optional(),
   budgetMaxTurns: z.number().int().positive().nullable().optional(),
   budgetMaxSeconds: z.number().int().positive().nullable().optional(),
 });
@@ -28,7 +27,6 @@ function serialize(p: Awaited<ReturnType<typeof repo.getPersona>> & {}) {
     systemPrompt: p.systemPrompt,
     toolsProfile: p.toolsProfile,
     model: p.model,
-    backend: p.backend,
     budgetMaxTurns: p.budgetMaxTurns,
     budgetMaxSeconds: p.budgetMaxSeconds,
   };
@@ -70,10 +68,6 @@ export async function PATCH(
     systemPrompt: parsed.data.systemPrompt ?? existing.systemPrompt,
     toolsProfile: parsed.data.toolsProfile ?? existing.toolsProfile,
     model: parsed.data.model !== undefined ? parsed.data.model : existing.model,
-    backend:
-      parsed.data.backend !== undefined
-        ? parsed.data.backend
-        : existing.backend as "pi" | "claude" | "codex" | null,
     skillPaths: [],
     budgetMaxTurns:
       parsed.data.budgetMaxTurns !== undefined
@@ -122,7 +116,6 @@ export async function POST(
     systemPrompt: defaults.systemPrompt,
     toolsProfile: defaults.toolsProfile,
     model: null,
-    backend: null,
     skillPaths: [],
     budgetMaxTurns: defaults.budget?.maxTurns ?? null,
     budgetMaxSeconds: defaults.budget?.maxSeconds ?? null,

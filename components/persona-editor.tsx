@@ -10,14 +10,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { ToolsPicker } from "@/components/pickers/tools-picker";
 import { PersonaLaurels } from "@/components/persona-laurels";
 import { ErrorText } from "@/components/ui/error-text";
-import {
-  ProviderModelPicker,
-  firstModelForBackend,
-  useProviderCatalog,
-} from "@/components/pickers/provider-model-picker";
-import { parseProviderQualifiedModel } from "@/lib/model-id";
-import { Select } from "@/components/ui/select";
-import type { BackendId } from "@/components/chat/use-model-options";
+import { useProviderCatalog } from "@/components/pickers/provider-model-picker";
+import { ModelPicker } from "@/components/chat/model-picker";
 
 export interface PersonaDto {
   id: string;
@@ -26,7 +20,6 @@ export interface PersonaDto {
   systemPrompt: string;
   toolsProfile: string;
   model: string | null;
-  backend: BackendId | null;
   budgetMaxTurns: number | null;
   budgetMaxSeconds: number | null;
 }
@@ -43,6 +36,10 @@ export function PersonaEditor({ persona }: Props) {
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [resetState, setResetState] = useState<SaveState>("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const providers = catalog?.byBackend.get(catalog.defaultBackend) ?? [];
+  const modelOptions = providers.flatMap((provider) =>
+    provider.models.map((model) => ({ ...model, provider: provider.id }))
+  );
 
   function update<K extends keyof PersonaDto>(key: K, value: PersonaDto[K]) {
     setDraft((d) => ({ ...d, [key]: value }));
@@ -63,7 +60,6 @@ export function PersonaEditor({ persona }: Props) {
           systemPrompt: draft.systemPrompt,
           toolsProfile: draft.toolsProfile,
           model: draft.model,
-          backend: draft.backend,
           budgetMaxTurns: draft.budgetMaxTurns ?? null,
           budgetMaxSeconds: draft.budgetMaxSeconds ?? null,
         }),
@@ -156,42 +152,18 @@ export function PersonaEditor({ persona }: Props) {
       </Field>
 
       <div>
-        <Field label="Engine">
-          <Select
-            mono
-            value={draft.backend ?? ""}
-            onChange={(event) => {
-              const backend = (event.target.value || null) as BackendId | null;
-              const first = backend ? firstModelForBackend(catalog, backend) : null;
-              setDraft((current) => ({
-                ...current,
-                backend,
-                model: first ? `${first.provider}/${first.model}` : current.model,
-              }));
-              setSaveState("idle");
-              setResetState("idle");
-            }}
-            className="w-full md:w-1/2"
-          >
-            <option value="">Deployment default</option>
-            {[...(catalog?.byBackend.keys() ?? [])].map((backend) => (
-              <option key={backend} value={backend}>{backend}</option>
-            ))}
-          </Select>
+        <Field label="Model">
+          <ModelPicker
+            value={draft.model ?? ""}
+            options={modelOptions}
+            onChange={(model) => update("model", model || null)}
+            disabled={modelOptions.length === 0}
+            allowEmpty
+          />
         </Field>
-        <ProviderModelPicker
-          provider={draft.model ? parseProviderQualifiedModel(draft.model).provider : ""}
-          model={draft.model ? parseProviderQualifiedModel(draft.model).id : ""}
-          allowEmpty
-          emptyLabel="Deployment default"
-          backend={draft.backend ?? undefined}
-          onChange={({ provider, model }) =>
-            update("model", provider && model ? `${provider}/${model}` : null)
-          }
-        />
         <p className="mt-1 text-[11px] text-muted-foreground">
-          Used when this persona starts a run without an explicit engine or model,
-          including agent-spawned child runs.
+          Used when this persona starts a run without an explicit model, including
+          agent-spawned child runs. The engine is configured globally.
         </p>
       </div>
 

@@ -283,7 +283,7 @@ export async function startSession(input: StartSessionInput): Promise<AgentSessi
     backend = backend ?? prior.backend;
   }
 
-  // Resolve the selected persona once. Model/backend may inherit from it in
+  // Resolve the selected persona once. Model may inherit from it in
   // runs.create(), while permissions and budgets inherit here fieldwise.
   const personaId = input.personaId ?? "implementor";
   const persona = await repo.getPersona(personaId);

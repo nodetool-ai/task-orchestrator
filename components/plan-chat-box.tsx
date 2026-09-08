@@ -14,7 +14,6 @@ import {
   type RepositoryOption,
 } from "@/components/pickers/repository-picker";
 import { ModelPicker } from "@/components/chat/model-picker";
-import { BackendPicker } from "@/components/pickers/backend-picker";
 import { ThinkingLevelPicker, type ThinkingLevel } from "@/components/pickers/thinking-level-picker";
 import { stashPendingMessage } from "@/lib/pending-first-message";
 import { ErrorText } from "@/components/ui/error-text";
@@ -83,9 +82,7 @@ export function PlanChatBox({
   const [input, setInput] = useState("");
   const [personaId, setPersonaId] = useState(personas[0]?.id ?? "implementor");
   const [repoId, setRepoId] = useState<string>(repoOptions[0]?.id ?? "");
-  // Plan-scoped chats run on either backend; the engine picker narrows the
-  // model catalog and only renders when the server offers more than one.
-  const { model, setModel, modelOptions, backend, setBackend, backendOptions } =
+  const { model, setModel, modelOptions } =
     useModelOptions(undefined, open);
   const [reasoning, setReasoning] = useState<ThinkingLevel | null>(null);
   const [pending, setPending] = useState(false);
@@ -146,7 +143,6 @@ export function PlanChatBox({
           repoId: repoId || null,
           personaId,
           model,
-          backend,
           thinkingLevel: reasoning,
         }),
       });
@@ -212,12 +208,6 @@ export function PlanChatBox({
                 value={personaId}
                 onChange={setPersonaId}
                 size="compact"
-              />
-              <BackendPicker
-                value={backend}
-                options={backendOptions}
-                onChange={setBackend}
-                disabled={pending}
               />
               <ModelPicker
                 value={model}

@@ -9,7 +9,6 @@ import {
   type RepositoryOption,
 } from "@/components/pickers/repository-picker";
 import { ModelPicker } from "@/components/chat/model-picker";
-import { BackendPicker } from "@/components/pickers/backend-picker";
 import { ThinkingLevelPicker, type ThinkingLevel } from "@/components/pickers/thinking-level-picker";
 import { stashPendingMessage } from "@/lib/pending-first-message";
 import {
@@ -38,10 +37,7 @@ interface Props {
 export function NewChatBox({ defaultModel, repositories }: Props) {
   const router = useRouter();
   const [input, setInput] = useState("");
-  // Chat runs on either backend: pi (multi-provider) or claude (Anthropic).
-  // The engine picker narrows the model catalog and only renders when the
-  // server offers more than one backend.
-  const { model, setModel, modelOptions, backend, setBackend, backendOptions } =
+  const { model, setModel, modelOptions } =
     useModelOptions(defaultModel, true);
   const [reasoning, setReasoning] = useState<ThinkingLevel | null>(null);
   const [repoId, setRepoId] = useState<string>(repositories[0]?.id ?? "");
@@ -81,7 +77,6 @@ export function NewChatBox({ defaultModel, repositories }: Props) {
           cwdStrategy,
           repoId: repoId || null,
           model,
-          backend,
           thinkingLevel: reasoning,
         }),
       });
@@ -121,12 +116,6 @@ export function NewChatBox({ defaultModel, repositories }: Props) {
           className="w-full px-3 pb-1 pt-3"
         />
         <div className="flex flex-wrap items-center gap-2 border-t border-border/60 px-3 py-2">
-          <BackendPicker
-            value={backend}
-            options={backendOptions}
-            onChange={setBackend}
-            disabled={pending}
-          />
           <ModelPicker
             value={model}
             options={modelOptions}

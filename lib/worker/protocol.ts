@@ -33,7 +33,6 @@ export interface PersonaRecord {
   systemPrompt: string;
   toolsProfile: string;
   model: string | null;
-  backend: string | null;
   budgetMaxTurns: number | null;
   budgetMaxSeconds: number | null;
   skillPaths: string;

@@ -26,9 +26,9 @@ primary_region = "ams"
   TASK_ORCH_DETACHED_RUNS = "1"
   # Cap concurrently-active sprites (cost/quota guard). 0 = unlimited.
   TASK_ORCH_MAX_SPRITES = "4"
-  TASK_ORCH_AGENT_BACKEND = "claude"
+  TASK_ORCH_AGENT_BACKEND = "codex"
   TASK_ORCH_CHAT_MODEL = "openai/gpt-5.6-sol"
-  TASK_ORCH_AGENT_MODEL = "anthropic/claude-opus-4-8"
+  TASK_ORCH_AGENT_MODEL = "openai/gpt-5.6-sol"
   # Behind Fly's proxy the app terminates TLS at the edge; trust the forwarded host.
   AUTH_TRUST_HOST = "true"
   PORT = "3000"

@@ -385,12 +385,6 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
             description: "Reasoning level for the child agent. Omit to use the persona's default.",
           })
         ),
-        backend: Type.Optional(
-          Type.Union([Type.Literal("pi"), Type.Literal("claude"), Type.Literal("codex")], {
-            description:
-              "Agent engine/backend for the child run. Omit to use the selected persona's engine pin, then the deployment default.",
-          })
-        ),
         model: Type.Optional(
           Type.String({
             minLength: 1,
@@ -502,7 +496,6 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
             goal: args.goal,
             personaId: args.persona,
             model: args.model ?? undefined,
-            backend: args.backend ?? undefined,
             thinkingLevel: args.reasoning ?? null,
             toolsProfile: args.tools_profile,
             cwdStrategy: args.cwd_strategy as CwdStrategy,

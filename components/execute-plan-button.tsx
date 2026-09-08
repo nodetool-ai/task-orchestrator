@@ -12,7 +12,6 @@ import { Modal } from "@/components/ui/modal";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip } from "@/components/ui/tooltip";
-import { BackendPicker } from "@/components/pickers/backend-picker";
 import { ModelPicker } from "@/components/chat/model-picker";
 import { DEFAULT_CHAT_MODEL, useModelOptions } from "@/components/chat/use-model-options";
 
@@ -37,11 +36,7 @@ interface Props {
 export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  // The plan executor defaults to the deployment-default backend (pi runs on
-  // the lightweight in-process loop; claude falls back to the full worker
-  // harness). The engine picker only renders when the server offers more than
-  // one backend.
-  const { model, setModel, modelOptions, backend, setBackend, backendOptions } =
+  const { model, setModel, modelOptions } =
     useModelOptions(DEFAULT_CHAT_MODEL, open);
   const [instructions, setInstructions] = useState("");
   const [maxUsd, setMaxUsd] = useState(Math.max(openTaskCount, 1) * 25);
@@ -71,7 +66,6 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
             planId,
             personaId: "executor",
             model,
-            backend,
             initialPrompt: instructions.trim() || undefined,
             budget: { maxUsd, maxTurns: 200 },
           }),
@@ -132,12 +126,6 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
               <div className="grid grid-cols-2 gap-4 text-xs">
                 <Field label="Model">
                   <div className="flex items-center gap-2">
-                    <BackendPicker
-                      value={backend}
-                      options={backendOptions}
-                      onChange={setBackend}
-                      disabled={pending}
-                    />
                     <ModelPicker
                       value={model}
                       options={modelOptions}
@@ -204,4 +192,3 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
     </>
   );
 }
-

@@ -36,7 +36,7 @@ export async function POST(
     if (prior.goal === "<execute>") {
       const run = await runs.resumeExecutorRun(priorId, {
         model: input.model ?? null,
-        backend: input.backend ?? null,
+        backend: null,
       });
       return NextResponse.json(run, { status: 201 });
     }
@@ -48,8 +48,8 @@ export async function POST(
     const session = await agent.startSession({
       taskId: prior.taskId,
       model: input.model ?? prior.model ?? undefined,
-      // Omitted → startSession inherits the prior session's backend.
-      backend: input.backend ?? null,
+      // Resumes retain the prior session's globally selected backend.
+      backend: null,
       baseBranch: input.baseBranch,
       resumeOf: priorId,
     });

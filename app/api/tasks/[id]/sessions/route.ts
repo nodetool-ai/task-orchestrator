@@ -28,7 +28,6 @@ export async function POST(
     const session = await agent.startSession({
       taskId: id,
       model: input.model,
-      backend: input.backend ?? null,
       baseBranch: input.baseBranch,
       resumeOf: input.resumeOf,
     });

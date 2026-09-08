@@ -289,8 +289,7 @@ async function validateBot(bot: PersonaBotConfig): Promise<void> {
     );
   }
 
-  // No backend check here: the pipe overrides any persona engine pin with 'pi'
-  // on every conversation run it creates
+  // No backend check here: the pipe pins 'pi' on every conversation run
   // (lib/pipe/session-store.ts), which is the only engine the in-process
   // postgres-turn loop supports, so no deployment default can break a bot.
 }

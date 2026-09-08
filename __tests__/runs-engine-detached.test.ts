@@ -30,10 +30,10 @@ beforeEach(async () => {
 });
 
 describe("persona model pinning", () => {
-  it("carries nullable model and backend pins but no reasoning pin", async () => {
+  it("carries a nullable model but no backend or reasoning pin", async () => {
     const persona = (await repo.getPersona("implementor"))!;
     expect(persona.model).toBeNull();
-    expect(persona.backend).toBeNull();
+    expect(persona).not.toHaveProperty("backend");
     expect(persona).not.toHaveProperty("thinkingLevel");
   });
 
@@ -54,22 +54,6 @@ describe("persona model pinning", () => {
       skillPaths: [],
     });
     const run = await runs.create({ goal: "<implement>", defer: true });
-    expect(run.model).toBe("openai/gpt-5.6-terra");
-  });
-
-  it("uses the selected persona's backend when a run omits one", async () => {
-    await repo.upsertPersona({
-      id: "implementor",
-      name: "Implementor",
-      description: null,
-      systemPrompt: "test",
-      toolsProfile: "orchestrator",
-      model: "openai/gpt-5.6-terra",
-      backend: "codex",
-      skillPaths: [],
-    });
-    const run = await runs.create({ goal: "<implement>", defer: true });
-    expect(run.backend).toBe("codex");
     expect(run.model).toBe("openai/gpt-5.6-terra");
   });
 

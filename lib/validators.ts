@@ -103,7 +103,6 @@ export const updateCriterionSchema = z
 
 export const startSessionSchema = z.object({
   model: z.string().optional(),
-  backend: z.enum(["pi", "claude", "codex"]).nullable().optional(),
   baseBranch: z.string().optional(),
   resumeOf: z.number().int().positive().optional(),
 });

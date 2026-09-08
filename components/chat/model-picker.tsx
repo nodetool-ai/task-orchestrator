@@ -16,6 +16,8 @@ interface Props {
   onChange: (next: string) => void; // emits "provider/modelId"
   disabled?: boolean;
   id?: string;
+  allowEmpty?: boolean;
+  emptyLabel?: string;
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -42,7 +44,15 @@ function providerLabel(provider: string): string {
   );
 }
 
-export function ModelPicker({ value, options, onChange, disabled, id }: Props) {
+export function ModelPicker({
+  value,
+  options,
+  onChange,
+  disabled,
+  id,
+  allowEmpty = false,
+  emptyLabel = "Deployment default",
+}: Props) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
@@ -51,13 +61,13 @@ export function ModelPicker({ value, options, onChange, disabled, id }: Props) {
   // Ensure current value is always in the list.
   const allOptions = useMemo((): ModelOption[] => {
     const qualified = options.map((o) => `${o.provider}/${o.id}`);
-    if (qualified.includes(value)) return options;
+    if ((allowEmpty && !value) || qualified.includes(value)) return options;
     // Derive a fallback entry from the qualified string.
     const parts = value.split("/");
     const modelId = parts[parts.length - 1];
     const provider = parts.length > 1 ? parts.slice(0, -1).join("/") : "unknown";
     return [...options, { id: modelId, name: modelId, provider }];
-  }, [options, value]);
+  }, [allowEmpty, options, value]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -84,9 +94,10 @@ export function ModelPicker({ value, options, onChange, disabled, id }: Props) {
 
   // Display label: last segment of the qualified value string.
   const displayLabel = useMemo(() => {
+    if (!value) return emptyLabel;
     const parts = value.split("/");
     return parts[parts.length - 1];
-  }, [value]);
+  }, [emptyLabel, value]);
 
   useEffect(() => {
     if (!open) return;
@@ -137,7 +148,24 @@ export function ModelPicker({ value, options, onChange, disabled, id }: Props) {
             />
           </div>
           <div className="max-h-72 overflow-y-auto py-1">
-            {grouped.length === 0 ? (
+            {allowEmpty && !query.trim() && (
+              <button
+                type="button"
+                onClick={() => {
+                  onChange("");
+                  setOpen(false);
+                  setQuery("");
+                }}
+                className={cn(
+                  "flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[12px] transition-colors",
+                  !value ? "bg-muted/60 text-foreground" : "text-foreground/90 hover:bg-muted/40"
+                )}
+              >
+                <Check className={cn("size-3 shrink-0", value ? "opacity-0" : "text-state-done")} />
+                <span>{emptyLabel}</span>
+              </button>
+            )}
+            {grouped.length === 0 && !(allowEmpty && !query.trim()) ? (
               <div className="px-3 py-4 text-center text-[11px] text-muted-foreground">
                 No models match.
               </div>

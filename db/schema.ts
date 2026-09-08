@@ -725,7 +725,6 @@ export const personas = pgTable("personas", {
   systemPrompt: text("system_prompt").notNull(),
   toolsProfile: text("tools_profile").notNull(),
   model: text("model"),
-  backend: text("backend"),
   skillPaths: text("skill_paths").notNull().default("[]"),
   budgetMaxTurns: integer("budget_max_turns"),
   budgetMaxSeconds: integer("budget_max_seconds"),

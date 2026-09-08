@@ -9,7 +9,6 @@ import { Button } from "@/components/ui/button";
 import { ErrorText } from "@/components/ui/error-text";
 import { Field } from "@/components/ui/field";
 import { Modal } from "@/components/ui/modal";
-import { BackendPicker } from "@/components/pickers/backend-picker";
 import { ModelPicker } from "@/components/chat/model-picker";
 import { DEFAULT_CHAT_MODEL, useModelOptions } from "@/components/chat/use-model-options";
 
@@ -30,7 +29,7 @@ export function TaskAgentButton({ taskId, hasAttachedRun, className }: Props) {
   const [pending, startTransition] = useTransition();
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { model, setModel, modelOptions, backend, setBackend, backendOptions } =
+  const { model, setModel, modelOptions } =
     useModelOptions(DEFAULT_CHAT_MODEL, open && !hasAttachedRun);
 
   const submit = () => {
@@ -40,7 +39,7 @@ export function TaskAgentButton({ taskId, hasAttachedRun, className }: Props) {
         const res = await fetch(`/api/tasks/${taskId}/attached-run`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ seed: true, model, backend }),
+          body: JSON.stringify({ seed: true, model }),
         });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
@@ -96,12 +95,6 @@ export function TaskAgentButton({ taskId, hasAttachedRun, className }: Props) {
           <div className="px-5 py-4 space-y-4 text-xs">
             <Field label="Model">
               <div className="flex items-center gap-2">
-                <BackendPicker
-                  value={backend}
-                  options={backendOptions}
-                  onChange={setBackend}
-                  disabled={pending}
-                />
                 <ModelPicker
                   value={model}
                   options={modelOptions}

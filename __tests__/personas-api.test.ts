@@ -20,7 +20,7 @@ describe("GET /api/personas", () => {
     expect(typeof r.systemPrompt).toBe("string");
     expect(typeof r.toolsProfile).toBe("string");
     expect(r).toHaveProperty("model", null);
-    expect(r).toHaveProperty("backend", null);
+    expect(r).not.toHaveProperty("backend");
     expect(r).not.toHaveProperty("thinkingLevel");
   });
 });

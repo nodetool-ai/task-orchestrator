@@ -162,7 +162,7 @@ export async function getOrCreateRun(
   // backend as one decision and rejects a server run that resolves to claude.
   // 'pi' is not a preference here but the only engine the in-process
   // postgres-turn loop supports, so it does not follow the deployment default
-  // and deliberately overrides the persona's worker-run engine pin.
+  // rather than following the worker deployment's global engine.
   const created = await runs.create({
     goal: "<chat>",
     personaId,

@@ -14,32 +14,17 @@ interface ProviderCatalog {
 
 interface ProvidersResponse {
   providers?: ProviderCatalog[];
-  backends?: { id: BackendId; providers: ProviderCatalog[] }[];
   defaultBackend?: BackendId;
 }
 
 export interface BackendCatalog {
   defaultBackend: BackendId;
-  /** Selectable backends, deployment default first. */
-  backendOptions: BackendId[];
-  modelsByBackend: Partial<Record<BackendId, ModelOption[]>>;
+  models: ModelOption[];
 }
 
 let catalogCache: BackendCatalog | null = null;
 let catalogPromise: Promise<BackendCatalog> | null = null;
 const LAST_MODEL_KEY_PREFIX = "task-orchestrator:last-model:";
-const LAST_BACKEND_KEY = "task-orchestrator:last-model-backend";
-
-function storedBackend(options: BackendId[]): BackendId | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const value = window.localStorage.getItem(LAST_BACKEND_KEY) as BackendId | null;
-    return value && options.includes(value) ? value : null;
-  } catch {
-    return null;
-  }
-}
-
 function storedModel(backend: BackendId): string | null {
   if (typeof window === "undefined") return null;
   try {
@@ -77,20 +62,7 @@ function loadCatalog(): Promise<BackendCatalog> {
     .then((res) => res.json() as Promise<ProvidersResponse>)
     .then((data) => {
       const defaultBackend: BackendId = data.defaultBackend ?? "pi";
-      const modelsByBackend: Partial<Record<BackendId, ModelOption[]>> = {};
-      for (const b of data.backends ?? []) {
-        modelsByBackend[b.id] = flatten(b.providers ?? []);
-      }
-      // Old single-catalog response shape → one implicit backend.
-      if (!data.backends?.length) {
-        modelsByBackend[defaultBackend] = flatten(data.providers ?? []);
-      }
-      const ids = Object.keys(modelsByBackend) as BackendId[];
-      const backendOptions = [
-        ...ids.filter((id) => id === defaultBackend),
-        ...ids.filter((id) => id !== defaultBackend),
-      ];
-      catalogCache = { defaultBackend, backendOptions, modelsByBackend };
+      catalogCache = { defaultBackend, models: flatten(data.providers ?? []) };
       return catalogCache;
     })
     .catch((): BackendCatalog => {
@@ -100,8 +72,7 @@ function loadCatalog(): Promise<BackendCatalog> {
       catalogPromise = null;
       return {
         defaultBackend: "pi",
-        backendOptions: [],
-        modelsByBackend: {},
+        models: [],
       };
     });
 
@@ -109,29 +80,19 @@ function loadCatalog(): Promise<BackendCatalog> {
 }
 
 /**
- * Model + backend selection state for the run-starting composers. The backend
- * choice narrows the model catalog (the claude backend is Anthropic-only; pi
- * spans every provider it has a credential for), and switching backends keeps
- * the current model when the other backend also offers it — otherwise it snaps
- * to the first model of the new catalog.
- *
- * Pass `lockBackend` to pin a composer to a single backend. The picker then
- * surfaces just that backend's models and `backendOptions` is empty so no
- * engine selector renders; `setBackend` becomes a no-op.
+ * Model selection state for run-starting composers. The server's deployment
+ * backend determines the only catalog shown; the browser remembers the last
+ * valid model selected for that backend.
  */
 export function useModelOptions(
   defaultModel = DEFAULT_CHAT_MODEL,
-  enabled = true,
-  lockBackend?: BackendId
+  enabled = true
 ) {
   const [model, setModel] = useState(defaultModel);
-  const [backend, setBackendState] = useState<BackendId | null>(lockBackend ?? null);
   const [catalog, setCatalog] = useState<BackendCatalog | null>(catalogCache);
 
-  const effectiveBackend = lockBackend ?? backend ?? catalog?.defaultBackend ?? null;
-  const modelOptions =
-    (effectiveBackend ? catalog?.modelsByBackend[effectiveBackend] : undefined) ??
-    [];
+  const effectiveBackend = catalog?.defaultBackend ?? null;
+  const modelOptions = catalog?.models ?? [];
 
   useEffect(() => {
     if (!enabled) return;
@@ -139,9 +100,8 @@ export function useModelOptions(
     loadCatalog().then((c) => {
       if (!alive) return;
       setCatalog(c);
-      const target = lockBackend ?? storedBackend(c.backendOptions) ?? c.defaultBackend;
-      if (!lockBackend) setBackendState(target);
-      const options = c.modelsByBackend[target] ?? [];
+      const target = c.defaultBackend;
+      const options = c.models;
       const qualified = options.map((o) => `${o.provider}/${o.id}`);
       const remembered = storedModel(target);
       setModel((cur) =>
@@ -155,27 +115,7 @@ export function useModelOptions(
     return () => {
       alive = false;
     };
-  }, [enabled, lockBackend]);
-
-  function setBackend(next: BackendId) {
-    if (lockBackend) return; // pinned — no-op
-    setBackendState(next);
-    try {
-      window.localStorage.setItem(LAST_BACKEND_KEY, next);
-    } catch {
-      // Keep the in-memory selection when browser storage is unavailable.
-    }
-    const options = catalog?.modelsByBackend[next] ?? [];
-    const qualified = options.map((o) => `${o.provider}/${o.id}`);
-    const remembered = storedModel(next);
-    setModel((cur) =>
-      remembered && qualified.includes(remembered)
-        ? remembered
-        : qualified.includes(cur)
-          ? cur
-          : qualified[0] ?? cur
-    );
-  }
+  }, [enabled]);
 
   function selectModel(next: string) {
     setModel(next);
@@ -186,11 +126,5 @@ export function useModelOptions(
     model,
     setModel: selectModel,
     modelOptions,
-    /** Selected backend ('pi'|'claude'), or null until the catalog loads. */
-    backend: effectiveBackend,
-    setBackend,
-    /** Backends offered by the server, deployment default first. Empty when
-     *  `lockBackend` is set — the engine picker should not render. */
-    backendOptions: lockBackend ? [] : catalog?.backendOptions ?? [],
   };
 }
