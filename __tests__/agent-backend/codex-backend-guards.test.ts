@@ -189,6 +189,9 @@ describe("CodexBackend.runTurn CLI configuration", () => {
     expect(servers.task_orch.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/);
     expect(servers.task_orch.required).toBe(true);
     expect(servers.task_orch.startup_timeout_sec).toBe(30);
+    // Unattended turns cannot answer Codex's separate MCP approval prompts.
+    expect(sdk.threadOptions.approvalPolicy).toBe("never");
+    expect(servers.task_orch.default_tools_approval_mode).toBe("approve");
     // The bearer travels in the environment, never on a command line.
     const varName = servers.task_orch.bearer_token_env_var;
     expect(sdk.ctorOptions.env[varName]).toHaveLength(64);

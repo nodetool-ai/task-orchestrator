@@ -224,6 +224,11 @@ export class CodexBackend implements AgentBackend {
                     // window, or fail silently while the agent keeps working.
                     required: true,
                     startup_timeout_sec: 30,
+                    // MCP approval is independent of approvalPolicy='never':
+                    // without this, Codex rejects calls that would prompt.
+                    // The run-scoped bridge already enforces interceptors and
+                    // the control plane authorizes orchestrator operations.
+                    default_tools_approval_mode: "approve",
                   },
                 },
               }
