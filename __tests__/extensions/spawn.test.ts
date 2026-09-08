@@ -457,11 +457,11 @@ describe("spawnExtension", () => {
     ]);
   });
 
-  it("lets agents choose a child run backend and model", () => {
+  it("lets agents choose a child model but keeps the deployment backend", () => {
     const { calls, pi } = makeStub();
     spawnExtension({ runId: 0 })(pi);
     const spawn = calls.find((c) => c.name === "spawn__spawn_agent")!.def;
-    expect(spawn.parameters.properties.backend).toBeTruthy();
+    expect(spawn.parameters.properties.backend).toBeUndefined();
     expect(spawn.parameters.properties.model).toBeTruthy();
   });
 });
