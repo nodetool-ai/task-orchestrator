@@ -33,9 +33,10 @@ describe("buildRunStart", () => {
     expect(start.task).toBeNull();
     expect(start.plan).toBeNull();
     expect(start.persona.id).toBe("implementor");
-    // The persona snapshot is prompt + tools + budget; the engine travels on
-    // the run, not the persona (migration 0031).
+    // The persona snapshot carries optional engine/model defaults; the run
+    // records the resolved values actually used.
     expect(start.persona).toHaveProperty("model", null);
+    expect(start.persona).toHaveProperty("backend", null);
     expect(start.run.model).toBe("anthropic/claude-opus-4-8");
     expect(start.repository).toBeTruthy();
     expect(Array.isArray(start.transcript)).toBe(true);

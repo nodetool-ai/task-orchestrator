@@ -289,8 +289,8 @@ async function validateBot(bot: PersonaBotConfig): Promise<void> {
     );
   }
 
-  // No backend check any more: a persona carries no engine (migration 0031).
-  // The pipe pins backend 'pi' on every conversation run it creates
+  // No backend check here: the pipe overrides any persona engine pin with 'pi'
+  // on every conversation run it creates
   // (lib/pipe/session-store.ts), which is the only engine the in-process
   // postgres-turn loop supports, so no deployment default can break a bot.
 }

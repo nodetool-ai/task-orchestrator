@@ -283,8 +283,8 @@ export async function startSession(input: StartSessionInput): Promise<AgentSessi
     backend = backend ?? prior.backend;
   }
 
-  // Resolve the selected persona once. Model/backend remain deployment-level,
-  // while permissions and budgets inherit fieldwise from this persona.
+  // Resolve the selected persona once. Model/backend may inherit from it in
+  // runs.create(), while permissions and budgets inherit here fieldwise.
   const personaId = input.personaId ?? "implementor";
   const persona = await repo.getPersona(personaId);
   if (!persona) throw new repo.RepoError(`Persona ${personaId} not found`, 404);

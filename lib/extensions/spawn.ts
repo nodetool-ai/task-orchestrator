@@ -388,7 +388,7 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
         backend: Type.Optional(
           Type.Union([Type.Literal("pi"), Type.Literal("claude"), Type.Literal("codex")], {
             description:
-              "Agent engine/backend for the child run. Omit to use the deployment default.",
+              "Agent engine/backend for the child run. Omit to use the selected persona's engine pin, then the deployment default.",
           })
         ),
         model: Type.Optional(

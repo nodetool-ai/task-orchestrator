@@ -137,14 +137,15 @@ personas                 persona registry (seeded from lib/personas/*.ts)
   system_prompt       TEXT  NOT NULL
   tools_profile       TEXT  NOT NULL        composed profile keys
   model               TEXT                  nullable provider-qualified model pin
+  backend             TEXT                  nullable pi | claude | codex engine pin
   skill_paths         TEXT  NOT NULL        JSON array of repo-relative paths
   budget_max_turns    INTEGER
   budget_max_seconds  INTEGER
   created_at, updated_at
 
-A persona may pin a provider-qualified model. Run creation resolves model from
-the explicit request, then the persona pin, then TASK_ORCH_AGENT_MODEL. Backend
-and thinking level remain per-run choices with deployment defaults.
+A persona may pin a provider-qualified model and backend. Run creation resolves
+each from the explicit request, then the persona pin, then its deployment
+default. Thinking level remains a per-run choice with a deployment default.
 
 persona_memories         per-persona cross-session notes
   id          INTEGER  AUTOINC PK

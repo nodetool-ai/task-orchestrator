@@ -797,7 +797,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   // never run, so it is a 400 at creation rather than a run that dies on its
   // first turn.
   let backend: "pi" | "claude" | "codex" | null = null;
-  const requestedBackend = input.backend;
+  const requestedBackend = input.backend ?? persona.backend;
   const validateBackendProvider = () => {
     const { provider } = parseProviderQualifiedModel(effectiveModel);
     if (backend === "claude" && provider !== "anthropic") {

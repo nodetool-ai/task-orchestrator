@@ -36,6 +36,7 @@ export default async function SettingsPage({
     systemPrompt: p.systemPrompt,
     toolsProfile: p.toolsProfile,
     model: p.model,
+    backend: p.backend as "pi" | "claude" | "codex" | null,
     budgetMaxTurns: p.budgetMaxTurns,
     budgetMaxSeconds: p.budgetMaxSeconds,
   }));
