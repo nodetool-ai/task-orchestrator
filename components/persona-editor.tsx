@@ -10,17 +10,16 @@ import { Textarea } from "@/components/ui/textarea";
 import { ToolsPicker } from "@/components/pickers/tools-picker";
 import { PersonaLaurels } from "@/components/persona-laurels";
 import { ErrorText } from "@/components/ui/error-text";
+import { ProviderModelPicker } from "@/components/pickers/provider-model-picker";
+import { parseProviderQualifiedModel } from "@/lib/model-id";
 
-/** A persona is WHO an agent is, not which engine runs it: model, backend and
- *  reasoning level are picked per run (migration 0031), so this editor has no
- *  model, engine or reasoning field. Pick them in the run-agent dialog or a
- *  chat composer instead. */
 export interface PersonaDto {
   id: string;
   name: string;
   description: string | null;
   systemPrompt: string;
   toolsProfile: string;
+  model: string | null;
   budgetMaxTurns: number | null;
   budgetMaxSeconds: number | null;
 }
@@ -55,6 +54,7 @@ export function PersonaEditor({ persona }: Props) {
           description: draft.description ?? "",
           systemPrompt: draft.systemPrompt,
           toolsProfile: draft.toolsProfile,
+          model: draft.model,
           budgetMaxTurns: draft.budgetMaxTurns ?? null,
           budgetMaxSeconds: draft.budgetMaxSeconds ?? null,
         }),
@@ -145,6 +145,22 @@ export function PersonaEditor({ persona }: Props) {
           onChange={(next) => update("toolsProfile", next)}
         />
       </Field>
+
+      <div>
+        <ProviderModelPicker
+          provider={draft.model ? parseProviderQualifiedModel(draft.model).provider : ""}
+          model={draft.model ? parseProviderQualifiedModel(draft.model).id : ""}
+          allowEmpty
+          emptyLabel="Deployment default"
+          onChange={({ provider, model }) =>
+            update("model", provider && model ? `${provider}/${model}` : null)
+          }
+        />
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          Used when this persona starts a run without an explicit model, including
+          agent-spawned child runs.
+        </p>
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <Field label="Budget — max turns">

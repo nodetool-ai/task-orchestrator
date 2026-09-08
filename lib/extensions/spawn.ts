@@ -395,7 +395,7 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
           Type.String({
             minLength: 1,
             description:
-              "Provider-qualified model id for the child run, e.g. openai/gpt-5.6-sol or openai/gpt-5.6-terra. Omit to use the run default.",
+              "Provider-qualified model id for the child run, e.g. openai/gpt-5.6-sol or openai/gpt-5.6-terra. Omit to use the selected persona's model pin, then the deployment default.",
           })
         ),
         tools_profile: Type.String({

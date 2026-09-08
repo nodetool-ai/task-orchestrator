@@ -715,17 +715,16 @@ export const users = pgTable(
   })
 );
 
-// A persona is WHO an agent is — prompt, tools, budget — never WHICH engine or
-// model runs it (migration 0031). Model, backend and reasoning level are per-run
-// choices with deployment-level defaults (TASK_ORCH_AGENT_MODEL /
-// TASK_ORCH_AGENT_BACKEND / TASK_ORCH_THINKING_LEVEL), so one persona can run on
-// any engine and a run's engine is visible on the run itself.
+// A persona can pin a model for runs that do not make an explicit choice. The
+// backend and reasoning level remain per-run choices; model is nullable so the
+// deployment default remains the final fallback.
 export const personas = pgTable("personas", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   description: text("description"),
   systemPrompt: text("system_prompt").notNull(),
   toolsProfile: text("tools_profile").notNull(),
+  model: text("model"),
   skillPaths: text("skill_paths").notNull().default("[]"),
   budgetMaxTurns: integer("budget_max_turns"),
   budgetMaxSeconds: integer("budget_max_seconds"),

@@ -27,6 +27,37 @@ export interface BackendCatalog {
 
 let catalogCache: BackendCatalog | null = null;
 let catalogPromise: Promise<BackendCatalog> | null = null;
+const LAST_MODEL_KEY_PREFIX = "task-orchestrator:last-model:";
+const LAST_BACKEND_KEY = "task-orchestrator:last-model-backend";
+
+function storedBackend(options: BackendId[]): BackendId | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const value = window.localStorage.getItem(LAST_BACKEND_KEY) as BackendId | null;
+    return value && options.includes(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function storedModel(backend: BackendId): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(`${LAST_MODEL_KEY_PREFIX}${backend}`);
+  } catch {
+    return null;
+  }
+}
+
+function rememberModel(backend: BackendId | null, model: string) {
+  if (!backend || !model || typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(`${LAST_MODEL_KEY_PREFIX}${backend}`, model);
+  } catch {
+    // Storage can be disabled (private browsing / browser policy). Selection
+    // remains usable for the current component lifetime.
+  }
+}
 
 function flatten(providers: ProviderCatalog[]): ModelOption[] {
   const flat: ModelOption[] = [];
@@ -108,10 +139,18 @@ export function useModelOptions(
     loadCatalog().then((c) => {
       if (!alive) return;
       setCatalog(c);
-      const target = lockBackend ?? c.defaultBackend;
+      const target = lockBackend ?? storedBackend(c.backendOptions) ?? c.defaultBackend;
+      if (!lockBackend) setBackendState(target);
       const options = c.modelsByBackend[target] ?? [];
       const qualified = options.map((o) => `${o.provider}/${o.id}`);
-      setModel((cur) => (qualified.includes(cur) ? cur : qualified[0] ?? cur));
+      const remembered = storedModel(target);
+      setModel((cur) =>
+        remembered && qualified.includes(remembered)
+          ? remembered
+          : qualified.includes(cur)
+            ? cur
+            : qualified[0] ?? cur
+      );
     });
     return () => {
       alive = false;
@@ -121,14 +160,31 @@ export function useModelOptions(
   function setBackend(next: BackendId) {
     if (lockBackend) return; // pinned — no-op
     setBackendState(next);
+    try {
+      window.localStorage.setItem(LAST_BACKEND_KEY, next);
+    } catch {
+      // Keep the in-memory selection when browser storage is unavailable.
+    }
     const options = catalog?.modelsByBackend[next] ?? [];
     const qualified = options.map((o) => `${o.provider}/${o.id}`);
-    setModel((cur) => (qualified.includes(cur) ? cur : qualified[0] ?? cur));
+    const remembered = storedModel(next);
+    setModel((cur) =>
+      remembered && qualified.includes(remembered)
+        ? remembered
+        : qualified.includes(cur)
+          ? cur
+          : qualified[0] ?? cur
+    );
+  }
+
+  function selectModel(next: string) {
+    setModel(next);
+    rememberModel(effectiveBackend, next);
   }
 
   return {
     model,
-    setModel,
+    setModel: selectModel,
     modelOptions,
     /** Selected backend ('pi'|'claude'), or null until the catalog loads. */
     backend: effectiveBackend,

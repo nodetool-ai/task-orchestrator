@@ -775,10 +775,9 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
 
   // Resolve the effective model. The run-agent dialog / chat composers may
   // explicitly emit "provider/model-id"; model-id itself may contain slashes,
-  // e.g. OpenRouter ids. When omitted, the deployment default applies — the
-  // persona has no say (migration 0031): it describes WHO the agent is, not
-  // which engine runs it. We persist the resolved value so the UI shows what
-  // was used.
+  // e.g. OpenRouter ids. When omitted, inherit the selected persona's pin and
+  // then the deployment default. This lets operators control child-run models
+  // by persona without requiring the parent to pass a model every time.
   const personaId = input.personaId ?? "implementor";
   const persona = await repo.getPersona(personaId);
   if (!persona) {
@@ -786,7 +785,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     // insert fail with an opaque "FOREIGN KEY constraint failed".
     throw new repo.RepoError(`Persona '${personaId}' not found`, 404);
   }
-  const effectiveModel = input.model ?? DEFAULT_MODEL;
+  const effectiveModel = input.model ?? persona.model ?? DEFAULT_MODEL;
 
   // Per-run backend choice. Chat runs execute in the full worker harness now
   // (the lightweight in-process/postgres tier was retired), so they support

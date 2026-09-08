@@ -35,6 +35,7 @@ export default async function SettingsPage({
     description: p.description,
     systemPrompt: p.systemPrompt,
     toolsProfile: p.toolsProfile,
+    model: p.model,
     budgetMaxTurns: p.budgetMaxTurns,
     budgetMaxSeconds: p.budgetMaxSeconds,
   }));
@@ -122,11 +123,10 @@ export default async function SettingsPage({
             <header className="space-y-1">
               <h2 className="text-base font-semibold tracking-tight">Personas</h2>
               <p className="text-sm text-muted-foreground">
-                Each persona bundles a system prompt, tools profile, and budget
-                defaults. It carries no model or engine: pick those per run when
-                you launch the agent, or set the deployment defaults with
-                <code>TASK_ORCH_AGENT_MODEL</code> and
-                <code>TASK_ORCH_AGENT_BACKEND</code>.
+                Each persona bundles a system prompt, tools profile, budget defaults,
+                and an optional model pin. Explicit run selections override the pin;
+                otherwise the deployment model default applies. Engines remain per-run
+                or deployment-level via <code>TASK_ORCH_AGENT_BACKEND</code>.
                 Skills are loaded automatically from the project
                 (<code>.pi/skills/</code>, <code>.agents/skills/</code>) — no
                 per-persona setup needed. Edits saved here override the seed in{" "}

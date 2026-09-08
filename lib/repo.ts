@@ -1523,6 +1523,7 @@ export interface PersonaUpsert {
   description?: string | null;
   systemPrompt: string;
   toolsProfile: string;
+  model?: string | null;
   skillPaths: string[];
   budgetMaxTurns?: number | null;
   budgetMaxSeconds?: number | null;
@@ -1554,6 +1555,7 @@ export async function upsertPersona(p: PersonaUpsert): Promise<void> {
       description: p.description ?? null,
       systemPrompt: p.systemPrompt,
       toolsProfile: p.toolsProfile,
+      model: p.model ?? null,
       skillPaths: JSON.stringify(p.skillPaths),
       budgetMaxTurns: p.budgetMaxTurns ?? null,
       budgetMaxSeconds: p.budgetMaxSeconds ?? null,
@@ -1567,6 +1569,7 @@ export async function upsertPersona(p: PersonaUpsert): Promise<void> {
         description: p.description ?? null,
         systemPrompt: p.systemPrompt,
         toolsProfile: p.toolsProfile,
+        model: p.model ?? null,
         skillPaths: JSON.stringify(p.skillPaths),
         budgetMaxTurns: p.budgetMaxTurns ?? null,
         budgetMaxSeconds: p.budgetMaxSeconds ?? null,

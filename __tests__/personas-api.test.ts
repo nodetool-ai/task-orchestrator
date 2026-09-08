@@ -19,10 +19,7 @@ describe("GET /api/personas", () => {
     expect(r).toMatchObject({ id: "implementor", name: "Implementor" });
     expect(typeof r.systemPrompt).toBe("string");
     expect(typeof r.toolsProfile).toBe("string");
-    // A persona carries no engine (migration 0031) — model, backend and
-    // reasoning level are per-run.
-    expect(r).not.toHaveProperty("modelProvider");
-    expect(r).not.toHaveProperty("modelId");
+    expect(r).toHaveProperty("model", null);
     expect(r).not.toHaveProperty("backend");
     expect(r).not.toHaveProperty("thinkingLevel");
   });

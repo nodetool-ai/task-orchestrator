@@ -1,6 +1,5 @@
-// A persona is WHO an agent is, not WHICH engine runs it (migration 0031).
-// model / backend / thinkingLevel are per-run choices with the deployment
-// defaults behind them; the persona row has no say and no columns for them.
+// Personas may pin a model for omitted per-run selections. Backend and
+// thinkingLevel remain per-run choices with deployment defaults behind them.
 //
 // The gap this closes: the concierge used to pin backend='pi' with an Anthropic
 // model, so prod run 190 died with "No API key found for anthropic" on a host
@@ -30,11 +29,10 @@ beforeEach(async () => {
   });
 });
 
-describe("a persona carries no engine", () => {
-  it("has no model, backend or reasoning column to carry one", async () => {
+describe("persona model pinning", () => {
+  it("carries a nullable model but no backend or reasoning pin", async () => {
     const persona = (await repo.getPersona("implementor"))!;
-    expect(persona).not.toHaveProperty("modelProvider");
-    expect(persona).not.toHaveProperty("modelId");
+    expect(persona.model).toBeNull();
     expect(persona).not.toHaveProperty("backend");
     expect(persona).not.toHaveProperty("thinkingLevel");
   });
@@ -43,6 +41,38 @@ describe("a persona carries no engine", () => {
     const run = await runs.create({ goal: "<implement>", defer: true });
     expect(run.model).toBe("anthropic/claude-opus-4-8");
     expect(run.backend).toBe("pi");
+  });
+
+  it("uses the selected persona's model when a run omits one", async () => {
+    await repo.upsertPersona({
+      id: "implementor",
+      name: "Implementor",
+      description: null,
+      systemPrompt: "test",
+      toolsProfile: "orchestrator",
+      model: "openai/gpt-5.6-terra",
+      skillPaths: [],
+    });
+    const run = await runs.create({ goal: "<implement>", defer: true });
+    expect(run.model).toBe("openai/gpt-5.6-terra");
+  });
+
+  it("lets an explicit run model override the persona pin", async () => {
+    await repo.upsertPersona({
+      id: "implementor",
+      name: "Implementor",
+      description: null,
+      systemPrompt: "test",
+      toolsProfile: "orchestrator",
+      model: "openai/gpt-5.6-terra",
+      skillPaths: [],
+    });
+    const run = await runs.create({
+      goal: "<implement>",
+      model: "anthropic/claude-sonnet-5",
+      defer: true,
+    });
+    expect(run.model).toBe("anthropic/claude-sonnet-5");
   });
 
   it("a per-run pick decides the engine", async () => {

@@ -136,16 +136,15 @@ personas                 persona registry (seeded from lib/personas/*.ts)
   description         TEXT
   system_prompt       TEXT  NOT NULL
   tools_profile       TEXT  NOT NULL        composed profile keys
+  model               TEXT                  nullable provider-qualified model pin
   skill_paths         TEXT  NOT NULL        JSON array of repo-relative paths
   budget_max_turns    INTEGER
   budget_max_seconds  INTEGER
   created_at, updated_at
 
-A persona is WHO an agent is, never WHICH engine runs it: migration 0031
-dropped model_provider, model_id, backend and thinking_level. Those are per-run
-columns on agent_runs, resolved at create from the request and then the
-deployment defaults (TASK_ORCH_AGENT_MODEL, TASK_ORCH_AGENT_BACKEND,
-TASK_ORCH_THINKING_LEVEL).
+A persona may pin a provider-qualified model. Run creation resolves model from
+the explicit request, then the persona pin, then TASK_ORCH_AGENT_MODEL. Backend
+and thinking level remain per-run choices with deployment defaults.
 
 persona_memories         per-persona cross-session notes
   id          INTEGER  AUTOINC PK

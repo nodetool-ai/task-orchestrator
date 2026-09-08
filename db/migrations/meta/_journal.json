@@ -253,6 +253,13 @@
       "when": 1788025200000,
       "tag": "0035_codex_device_code",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1788890400000,
+      "tag": "0036_persona_model",
+      "breakpoints": true
     }
   ]
 }
