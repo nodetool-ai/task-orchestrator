@@ -167,6 +167,17 @@ export class CodexBackend implements AgentBackend {
       if (persona) parts.push(persona);
       for (const s of collected.skills) parts.push(`# ${s.name}\n${s.description}\n\n${s.body}`);
       const preamble = parts.join("\n\n");
+      // MCP tools may be deferred behind Codex's tool discovery interface.
+      // Repeat this on resumed turns too: older transcripts may claim these
+      // tools are unavailable and otherwise keep falling back to the task CLI.
+      const toolGuidance = bridge
+        ? `Run tools are available through the MCP server '${MCP_SERVER_NAME}'. ` +
+          "If they are not visible, discover/load that server's tools using the available tool discovery interface " +
+          "(in code mode, inspect ALL_TOOLS for task_orch and call the matching tools entry). " +
+          "Use these tools for orchestrator operations; the worker has no direct database access, " +
+          "so the repository task CLI cannot replace them. Registered MCP tool names: " +
+          collected.tools.map((t) => `mcp__${MCP_SERVER_NAME}__${t.name}`).join(", ")
+        : "";
 
       // Abort wiring: onAgentStart hooks (the abort bridge) observe the same
       // controller the turn's AbortSignal comes from.
@@ -208,6 +219,11 @@ export class CodexBackend implements AgentBackend {
                   [MCP_SERVER_NAME]: {
                     url: bridge.url,
                     bearer_token_env_var: bridge.tokenEnvVar,
+                    // These tools are part of the run's contract. Optional MCP
+                    // servers can miss the initial catalogue's startup grace
+                    // window, or fail silently while the agent keeps working.
+                    required: true,
+                    startup_timeout_sec: 30,
                   },
                 },
               }
@@ -278,7 +294,8 @@ export class CodexBackend implements AgentBackend {
             ? RESUME_LOST_NOTE
             : ""
           : [preamble, resumeLostRetried ? RESUME_LOST_NOTE : ""].filter(Boolean).join("\n\n");
-        const input = header ? `${header}\n\n---\n\n${prompt}` : prompt;
+        const turnHeader = [header, toolGuidance].filter(Boolean).join("\n\n");
+        const input = turnHeader ? `${turnHeader}\n\n---\n\n${prompt}` : prompt;
 
         const thread = threadId
           ? codex.resumeThread(threadId, threadOptions)
