@@ -151,8 +151,8 @@ export async function executeChannelTool(
           );
         }
 
-        const { resolveServerTool, executeServerTool } = await import("../worker/server-tools");
-        const def = await resolveServerTool(tool);
+        const serverTools = await import("../worker/server-tools");
+        const def = await serverTools.resolveServerTool(tool);
         if (!def) return structuredError(callId, `Unknown tool: ${tool}`);
         const ctx = await deriveToolContext(runId);
 
@@ -162,7 +162,16 @@ export async function executeChannelTool(
           slowTimer.unref?.();
         }
         try {
-          const result = await executeServerTool(def, payload.arguments, { ...ctx, runId });
+          // Keep the narrow registry mock seam used by channel tests and by
+          // embedders that only provide resolveServerTool. Production always
+          // exports executeServerTool, which applies the shared app-api policy
+          // boundary before invoking the definition.
+          const dispatch = (serverTools as typeof serverTools & {
+            executeServerTool?: typeof serverTools.executeServerTool;
+          }).executeServerTool;
+          const result = dispatch
+            ? await dispatch(def, payload.arguments, { ...ctx, runId })
+            : await def.execute(payload.arguments, { ...ctx, runId });
           return { callId, result, isError: result.isError ?? false };
         } finally {
           if (slowTimer) clearTimeout(slowTimer);
