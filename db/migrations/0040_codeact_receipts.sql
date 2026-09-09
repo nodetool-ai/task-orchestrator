@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS "codeact_subcalls" (
   "result" jsonb,
   "error" text,
   "started_at" timestamp with time zone DEFAULT now() NOT NULL,
-  "completed_at" timestamp with time zone
+  "completed_at" timestamp with time zone,
+  CONSTRAINT "codeact_subcalls_status_check" CHECK ("status" IN ('running', 'completed', 'failed', 'cancelled', 'unknown'))
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "codeact_subcalls_execution_started_idx" ON "codeact_subcalls" ("execution_id", "started_at");
