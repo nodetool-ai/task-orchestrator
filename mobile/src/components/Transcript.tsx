@@ -163,14 +163,16 @@ function UserBubble({ blocks }: { blocks: Block[] }) {
       <View
         style={{
           maxWidth: "85%",
-          backgroundColor: c.fg,
+          backgroundColor: c.raised,
+          borderWidth: 1,
+          borderColor: c.hairline,
           paddingVertical: 9,
           paddingHorizontal: 13,
           borderRadius: 16,
           borderBottomRightRadius: 5,
         }}
       >
-        <Text style={{ color: c.bg, fontSize: 13.5, lineHeight: 19 }}>{text}</Text>
+        <Text style={{ color: c.fg, fontSize: 13.5, lineHeight: 19 }}>{text}</Text>
       </View>
     </View>
   );
