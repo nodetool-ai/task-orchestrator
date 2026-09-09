@@ -48,6 +48,7 @@ import type {
   WireFrame,
   WorkerCommand,
 } from "./protocol";
+import { appCapabilitiesForTools } from "../worker/server-policy";
 
 /** How long a tool may run before the worker is told it is executing async
  *  (plan section 15 rule 5). */
@@ -172,7 +173,19 @@ export async function executeChannelTool(
               }).executeServerTool
             : undefined;
           const result = dispatch
-            ? await dispatch(def, payload.arguments, { ...ctx, runId })
+            ? await dispatch(def, payload.arguments, {
+                ...ctx,
+                runId,
+                // CodeAct's nested dispatcher consumes these explicit grants.
+                // They come from the persisted run.start policy, never from the
+                // worker's payload, and are re-applied to every subcall.
+                ...(tool === "codeact_catalog" || tool === "codeact_execute"
+                  ? {
+                      capabilities: appCapabilitiesForTools(policy.allowedTools),
+                      runtime: "worker" as const,
+                    }
+                  : {}),
+              })
             : await def.execute(payload.arguments, { ...ctx, runId });
           return { callId, result, isError: result.isError ?? false };
         } finally {

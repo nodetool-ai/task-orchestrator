@@ -56,6 +56,7 @@ export const APP_API_DESCRIPTORS: readonly OperationDescriptor[] =
 const byName = new Map<string, OperationDescriptor>();
 for (const descriptor of APP_API_DESCRIPTORS) {
   byName.set(descriptor.name, descriptor);
+  byName.set(descriptor.sdkPath, descriptor);
   for (const alias of descriptor.aliases) byName.set(alias, descriptor);
 }
 

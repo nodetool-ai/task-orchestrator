@@ -36,7 +36,7 @@ import { resolveCodexAccessToken } from "../codex-oauth-token";
 import { interceptorToolName } from "../builtin-tools";
 import { config } from "../config";
 import type { RunEnvelope } from "../pi-event-mapper";
-import { collectExtensions, composeSystemPrompt, runInterceptors } from "./collect";
+import { collectExtensions, composeSystemPrompt, runInterceptors, withCodeActTools } from "./collect";
 import { createUsageAccumulator } from "./usage";
 import type {
   NeutralTool,
@@ -113,6 +113,9 @@ function toSdkBlocks(message: Message, opts: { includePiMessage?: boolean } = {}
       return [];
     });
   } else {
+    const codeact = message.content.find((block) =>
+      Boolean(block && typeof block === "object" && "codeact" in block)
+    ) as ({ codeact?: unknown } | undefined);
     blocks = [{
       type: "tool_result",
       tool_use_id: message.toolCallId,
@@ -120,6 +123,7 @@ function toSdkBlocks(message: Message, opts: { includePiMessage?: boolean } = {}
         block.type === "text" ? block.text : { ...block }
       ),
       is_error: message.isError,
+      ...(codeact?.codeact ? { codeact: codeact.codeact } : {}),
     } as SdkContentBlock];
   }
   return opts.includePiMessage ? withPiMessage(blocks, message) : blocks;
@@ -131,17 +135,29 @@ function textFromAssistant(message: AssistantMessage): string | null {
 
 function toPiContent(
   blocks: Array<{ type: string; [k: string]: unknown }>
-): Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> {
+): Array<
+  | { type: "text"; text: string; codeact?: unknown }
+  | { type: "image"; data: string; mimeType: string; codeact?: unknown }
+> {
   return blocks.map((block) => {
     if (block.type === "text" && typeof block.text === "string") {
-      return { type: "text", text: block.text };
+      return {
+        type: "text",
+        text: block.text,
+        ...(block.codeact ? { codeact: block.codeact } : {}),
+      };
     }
     if (
       block.type === "image" &&
       typeof block.data === "string" &&
       typeof block.mimeType === "string"
     ) {
-      return { type: "image", data: block.data, mimeType: block.mimeType };
+      return {
+        type: "image",
+        data: block.data,
+        mimeType: block.mimeType,
+        ...(block.codeact ? { codeact: block.codeact } : {}),
+      };
     }
     return { type: "text" as const, text: JSON.stringify(block) };
   });
@@ -486,7 +502,10 @@ export async function runPostgresTurn(args: RunTurnArgs): Promise<TurnOutcome> {
   }
   const { abort, prompt, onEvent } = args;
 
-  const collected = await collectExtensions(args.extensions);
+  const collected = withCodeActTools(
+    await collectExtensions(args.extensions),
+    args.codeActInvoker,
+  );
 
   // System prompt: the persona transforms (persona prompt + memory guidance) plus
   // the ambient skills (the persona's memory notes), the same composition the

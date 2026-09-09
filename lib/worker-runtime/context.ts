@@ -549,6 +549,7 @@ async function runModelTurn(
     model: { provider: resolvedProvider, id: resolvedModel },
     thinkingLevel: (runField(run, "thinkingLevel") as RunTurnArgs["thinkingLevel"]) ?? undefined,
     extensions,
+    codeActInvoker: invoke,
     resumeToken: sdkSessionId,
     abort,
     prompt: modelPrompt,

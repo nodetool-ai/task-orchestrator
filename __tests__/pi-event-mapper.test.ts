@@ -81,6 +81,33 @@ describe("mapPiEvent", () => {
     }]);
   });
 
+  it("promotes CodeAct presentation details onto the persisted tool result", () => {
+    const codeact = {
+      executionId: "execution",
+      source: "return 1",
+      status: "completed",
+      subcalls: [],
+    };
+    expect(mapPiEvent({
+      type: "tool_execution_end",
+      toolCallId: "tc-codeact",
+      result: {
+        content: [{ type: "text", text: "done", codeact }],
+      },
+    }, {}, { getSessionFile: () => undefined })).toEqual([{
+      type: "user",
+      message: {
+        content: [{
+          type: "tool_result",
+          tool_use_id: "tc-codeact",
+          content: [{ type: "text", text: "done", codeact }],
+          is_error: false,
+          codeact,
+        }],
+      },
+    }]);
+  });
+
   it("agent_end sums per-AssistantMessage usage into the result envelope", () => {
     // pi never puts a `usage` field on agent_end; usage lives on each assistant
     // message as pi-ai's Usage shape ({input, output, cacheRead, cacheWrite,

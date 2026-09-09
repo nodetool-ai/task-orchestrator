@@ -13,7 +13,10 @@ const CAPABILITY_ALIASES: Record<string, string> = {
   "domain:*": "*",
 };
 
-function hasCapability(ctx: AppApiContext, descriptor: OperationDescriptor): boolean {
+export function hasAppApiCapability(
+  ctx: AppApiContext,
+  descriptor: OperationDescriptor,
+): boolean {
   if (!ctx.capabilities) return true;
   const grants = new Set(ctx.capabilities);
   return descriptor.capabilities.some((capability) =>
@@ -67,7 +70,7 @@ export async function dispatchDescriptor(
   params: unknown,
   ctx: AppApiContext,
 ): Promise<AppApiResult> {
-  if (!hasCapability(ctx, descriptor)) {
+  if (!hasAppApiCapability(ctx, descriptor)) {
     throw new AppApiError("forbidden", `Operation '${descriptor.name}' is not authorized for this caller.`);
   }
   if (ctx.runtime === "server" && !descriptor.serverSafe) {
