@@ -213,6 +213,7 @@ export function withCodeActCapabilities(
   const byOperation = new Map<string, NeutralTool>();
   for (const [index, entry] of catalog.operations.entries()) {
     const tool = directTools[index];
+    if (!tool) continue;
     for (const name of [entry.sdkPath, ...entry.aliases]) byOperation.set(name, tool);
   }
 
