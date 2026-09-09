@@ -189,6 +189,50 @@ describe("worker websocket e2e", () => {
       }
     }, 30_000);
 
+    it("wakes a legacy idle chat worker for a follow-up input", async () => {
+      const run = await create({ goal: "<chat>", defer: true });
+      // Exercise the legacy keep-open loop directly. V2 inputs require the
+      // scheduler receipt/park handshake and are covered by other cases.
+      await db.update(agentSessions).set({ deliveryVersion: 1 }).where(eq(agentSessions.id, run.id));
+      vi.spyOn(backend, "getBackend").mockResolvedValue(fakeChatBackend("idle-wake"));
+      process.env.TASK_ORCH_CHAT_IDLE_MS = "6000";
+
+      const { server } = await bootWorkerChannel(run.id);
+      try {
+        const drive = (driveWorkerRun as any)({ session: server.session } as any);
+
+        // The first reply alone is not enough: wait until the worker has
+        // landed idle, so the input below must wake its waitForWake path.
+        await vi.waitFor(async () => {
+          expect((await listMessages(run.id)).filter((m) => m.role === "agent")).toHaveLength(1);
+          expect((await get(run.id))!.status).toBe("idle");
+        }, { timeout: 5000 });
+
+        const [userRow] = await db
+          .insert(agentMessages)
+          .values({
+            runId: run.id,
+            role: "user",
+            content: JSON.stringify([{ type: "text", text: "wake me" }]),
+            createdAt: new Date(),
+          })
+          .returning();
+        // Await the controller ACK: the command has reached the live worker
+        // before the drive is awaited, avoiding a delivery-vs-timeout race.
+        await sendCommand(run.id, "run.input", {
+          messages: [{ id: userRow.id, role: "user", content: [{ type: "text", text: "wake me" }] }],
+        });
+
+        await drive;
+        const msgs = await listMessages(run.id);
+        expect(msgs.filter((m) => m.role === "agent").length).toBeGreaterThanOrEqual(2);
+      } finally {
+        delete process.env.TASK_ORCH_CHAT_IDLE_MS;
+        await disconnectRun(run.id);
+        await server.close();
+      }
+    }, 30_000);
+
     it("releases the claim on idle exit exactly as the legacy driver does", async () => {
       const run = await create({ goal: "<chat>", defer: true });
       vi.spyOn(backend, "getBackend").mockResolvedValue(fakeChatBackend("bye"));

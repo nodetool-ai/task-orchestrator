@@ -875,6 +875,9 @@ async function driveChatRun(context: WorkerRunContext, inputDriven: boolean): Pr
           await landIdle(session);
           landedIdle = true;
         }
+        // landIdle awaits controller ACKs. Input may arrive during that await,
+        // before a wake callback exists; do not sleep past already-queued work.
+        if (queue.hasPending()) continue;
         const woke = await waitForWake(idleMs, session.abortSignal, (resume) => {
           wake = resume;
         });
