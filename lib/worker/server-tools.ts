@@ -24,6 +24,8 @@
 // this module is reachable from lib/runs.ts via the transport.
 
 import type { OrchestratorTool } from "../orchestrator-tools";
+import { dispatchTool } from "../app-api/dispatcher";
+import type { AppApiContext, AppApiResult } from "../app-api/types";
 
 export type { OrchestratorTool };
 
@@ -64,4 +66,15 @@ async function buildRegistry(): Promise<Map<string, OrchestratorTool>> {
 export async function resolveServerTool(name: string): Promise<OrchestratorTool | null> {
   if (!registryPromise) registryPromise = buildRegistry();
   return (await registryPromise).get(name) ?? null;
+}
+
+/** Execute any server tool through the same descriptor/policy boundary used by
+ * MCP and SDK callers. The registry remains the implementation catalogue; the
+ * dispatcher is the authorization and validation boundary. */
+export async function executeServerTool(
+  tool: OrchestratorTool,
+  params: unknown,
+  ctx: AppApiContext,
+): Promise<AppApiResult> {
+  return dispatchTool(tool, params, ctx);
 }

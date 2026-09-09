@@ -1,11 +1,8 @@
 import { type NextRequest } from "next/server";
 import { verifyToken } from "@/lib/api-tokens";
 import { getUserById } from "@/lib/users";
-import {
-  ORCHESTRATOR_TOOLS,
-  type OrchestratorContentBlock,
-} from "@/lib/orchestrator-tools";
-import { validateToolArgs } from "@/lib/tool-args";
+import type { OrchestratorContentBlock } from "@/lib/orchestrator-tools";
+import { AppApiError, dispatchAppOperation, discoverOperations } from "@/lib/app-api";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -99,12 +96,12 @@ async function handleInitialize() {
 
 function handleToolsList() {
   return {
-    tools: ORCHESTRATOR_TOOLS.map((t) => ({
+    tools: discoverOperations().map((t) => ({
       name: t.name,
       description: t.description,
       // TypeBox schemas are JSON Schema-shaped; the MCP `inputSchema` field
       // expects a JSON Schema. Pass through as-is.
-      inputSchema: t.parameters as unknown,
+      inputSchema: t.schema as unknown,
     })),
   };
 }
@@ -123,25 +120,16 @@ async function handleToolsCall(
   if (typeof name !== "string") {
     throw rpcThrow(InvalidParams, "tools/call: missing name");
   }
-  const tool = ORCHESTRATOR_TOOLS.find((t) => t.name === name);
-  if (!tool) {
-    throw rpcThrow(MethodNotFound, `Unknown tool: ${name}`);
+  try {
+    return await dispatchAppOperation(name, args ?? {}, ctx);
+  } catch (error) {
+    if (error instanceof AppApiError) {
+      const code = error.code === "unknown_operation" ? MethodNotFound :
+        error.code === "invalid_params" ? InvalidParams : -32003;
+      throw rpcThrow(code, error.message, { policy: error.code });
+    }
+    throw error;
   }
-  // The TypeBox schemas served in tools/list are more than documentation —
-  // enforce them here too, the same way the agent backends do (they convert
-  // to Zod and let their SDK validate before calling execute). Without this,
-  // any bearer-token client can pass a bogus enum or wrong-typed arg straight
-  // into repo.* mutations (e.g. create_plan with an unknown `state`).
-  const validated = validateToolArgs(tool, args ?? {});
-  if (!validated.ok) {
-    throw rpcThrow(
-      InvalidParams,
-      `Invalid params for tool '${name}': ${validated.message}`,
-      { issues: validated.issues }
-    );
-  }
-  const result = await tool.execute(validated.value, ctx);
-  return { content: result.content, isError: result.isError };
 }
 
 class RpcThrow extends Error {
