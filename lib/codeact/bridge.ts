@@ -1,7 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { dispatchAppOperation, resolveOperation } from "../app-api";
-import type { AppApiContext } from "../app-api/types";
-import { codeActCatalogForContext } from "./catalog";
 import { executeInThread, type ThreadResult } from "./thread";
 import { resolveLimits, type ExecutionLimits } from "./limits";
 import { boundedText, normalizeOutput, type CodeActOutput } from "./output";
@@ -45,26 +42,26 @@ export interface CodeActReceiptStore {
 export interface CodeActExecuteRequest {
   code: string;
   title?: string;
-  context: AppApiContext;
-  /** Rebuild the trusted context before every host operation. Worker channel
-   * policy is immutable, while mutable planning/lifecycle state is refreshed. */
-  resolveContext?: () => Promise<AppApiContext>;
+  /**
+   * Host-owned catalogue embedded into the guest. Keeping this injectable is
+   * what lets worker backends expose their already-authorized neutral tools
+   * without importing the control-plane operation registry (and its database
+   * dependencies) into the worker bundle.
+   */
+  catalog?: unknown;
+  /** Dispatch one resolved guest operation. The host generates both receipt
+   * ids; guest source can never select or reuse them. */
+  dispatch?: (
+    operation: string,
+    input: unknown,
+    metadata: { executionId: string; subcallId: string },
+  ) => Promise<unknown>;
   limits?: Partial<ExecutionLimits>;
   signal?: AbortSignal;
   receipts?: CodeActReceiptStore;
 }
 
 export type CodeActExecuteResult = ThreadResult & { executionId: string; receipt: CodeActExecutionReceipt };
-
-const TURN_CONTROL_OPERATIONS = new Set([
-  "timer__sleep",
-  "ask_parent",
-  "report_result",
-  "raise",
-  "await_session",
-  "propose_spec",
-  "propose_implementation_plan",
-]);
 
 export async function executeCodeAct(request: CodeActExecuteRequest): Promise<CodeActExecuteResult> {
   const limits = resolveLimits(request.limits);
@@ -81,7 +78,6 @@ export async function executeCodeAct(request: CodeActExecuteRequest): Promise<Co
   await request.receipts?.begin(receipt);
   let cancelled = false;
   let closed = false;
-  let acceptingCalls = true;
   const durability: Promise<void>[] = [];
   const abort = () => { cancelled = true; };
   request.signal?.addEventListener("abort", abort, { once: true });
@@ -116,9 +112,6 @@ export async function executeCodeAct(request: CodeActExecuteRequest): Promise<Co
   }
   const hostCall = async (operation: string, input: unknown): Promise<unknown> => {
     if (cancelled) throw new Error("CodeAct execution cancelled");
-    if (!acceptingCalls) {
-      throw new Error("CodeAct execution was closed by a successful lifecycle operation");
-    }
     const subcallId = randomUUID();
     const subcallStartedMs = Date.now();
     const subcall: CodeActSubcallReceipt = {
@@ -133,7 +126,7 @@ export async function executeCodeAct(request: CodeActExecuteRequest): Promise<Co
     await persistSubcall(subcall);
     // Cancellation can race the durable reservation above. Never dispatch an
     // operation after cancellation, even if the guest had already submitted it.
-    if (cancelled || closed || !acceptingCalls) {
+    if (cancelled || closed) {
       subcall.status = "cancelled";
       subcall.error = "execution cancelled before dispatch";
       await persistSubcall(subcall);
@@ -141,20 +134,8 @@ export async function executeCodeAct(request: CodeActExecuteRequest): Promise<Co
     }
     try {
       if (operation === "output.text" || operation === "output.image") return input;
-      // Capability, serverSafe, resource and planning-stage decisions are made
-      // from trusted host state for this individual subcall. Never inherit a
-      // once-authorized outer executor decision.
-      const currentContext = request.resolveContext
-        ? await request.resolveContext()
-        : request.context;
-      const result = await dispatchAppOperation(
-        operation,
-        input,
-        { ...currentContext, executionId, subcallId } as AppApiContext & {
-          executionId: string;
-          subcallId: string;
-        },
-      );
+      if (!request.dispatch) throw new Error(`No host dispatcher is available for CodeAct operation '${operation}'.`);
+      const result = await request.dispatch(operation, input, { executionId, subcallId });
       if (closed || cancelled) return result;
       subcall.status = "completed";
       subcall.result = normalizeOutput(result, limits.maxOutputBytes);
@@ -162,12 +143,6 @@ export async function executeCodeAct(request: CodeActExecuteRequest): Promise<Co
       subcall.durationMs = Date.now() - subcallStartedMs;
       subcall.links = extractCodeActLinks(subcall.result);
       await persistSubcall(subcall);
-      const canonical = resolveOperation(operation)?.name ?? operation.replace(/^(app|tools)\./, "");
-      if (!result.isError && TURN_CONTROL_OPERATIONS.has(canonical)) {
-        // Parking/reporting/proposal calls retain their existing turn-control
-        // semantics even when guest code catches the next bridge rejection.
-        acceptingCalls = false;
-      }
       return result;
     } catch (error) {
       if (closed) throw error;
@@ -179,13 +154,10 @@ export async function executeCodeAct(request: CodeActExecuteRequest): Promise<Co
       throw error;
     }
   };
-  const catalogContext = request.resolveContext
-    ? await request.resolveContext()
-    : request.context;
   const result = await executeInThread({
     code: request.code,
     limits,
-    catalog: codeActCatalogForContext(catalogContext),
+    catalog: request.catalog,
     hostCall,
     signal: request.signal,
   });

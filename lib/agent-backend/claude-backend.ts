@@ -18,6 +18,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mapClaudeMessage } from "./claude-event-mapper";
 import { collectExtensions, composeSystemPrompt, runInterceptors } from "./collect";
+import { CODEACT_BACKEND_GUIDANCE, withCodeActCapabilities } from "./codeact-capabilities";
 import { createUsageAccumulator } from "./usage";
 import { toZodRawShape } from "./typebox-to-zod";
 import { interceptorToolName, isFileTool } from "../builtin-tools";
@@ -167,7 +168,7 @@ export class ClaudeBackend implements AgentBackend {
       );
     }
 
-    const collected = await collectExtensions(extensions);
+    const collected = withCodeActCapabilities(await collectExtensions(extensions), abort.signal);
     const { query, tool, createSdkMcpServer } = await import("@anthropic-ai/claude-agent-sdk");
 
     // Tools → in-process MCP server.
@@ -189,6 +190,7 @@ export class ClaudeBackend implements AgentBackend {
     const persona = (await composeSystemPrompt("", collected.systemPromptFns)).trim();
     if (persona) parts.push(persona);
     for (const s of collected.skills) parts.push(`# ${s.name}\n${s.description}\n\n${s.body}`);
+    parts.push(CODEACT_BACKEND_GUIDANCE);
     const append = parts.join("\n\n");
 
     // Tool-call interceptors → PreToolUse hook.

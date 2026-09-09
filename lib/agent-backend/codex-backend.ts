@@ -43,6 +43,7 @@
 
 import { codexErrorMessage, mapCodexEvent } from "./codex-event-mapper";
 import { collectExtensions, composeSystemPrompt } from "./collect";
+import { CODEACT_BACKEND_GUIDANCE, withCodeActCapabilities } from "./codeact-capabilities";
 import { createUsageAccumulator } from "./usage";
 import { startCodexMcpBridge, type CodexMcpBridge } from "./codex-mcp-bridge";
 import { resolveCodexAuth } from "./codex-auth";
@@ -147,7 +148,7 @@ export class CodexBackend implements AgentBackend {
       );
     }
 
-    const collected = await collectExtensions(extensions);
+    const collected = withCodeActCapabilities(await collectExtensions(extensions), abort.signal);
     const { Codex } = await importCodexSdk();
 
     // Tools → loopback MCP server. Interceptors run inside it (see module note).
@@ -171,7 +172,7 @@ export class CodexBackend implements AgentBackend {
       // Repeat this on resumed turns too: older transcripts may claim these
       // tools are unavailable and otherwise keep falling back to the task CLI.
       const toolGuidance = bridge
-        ? `Run tools are available through the MCP server '${MCP_SERVER_NAME}'. ` +
+        ? `${CODEACT_BACKEND_GUIDANCE}\n\nRun tools are available through the MCP server '${MCP_SERVER_NAME}'. ` +
           "If they are not visible, discover/load that server's tools using the available tool discovery interface " +
           "(in code mode, inspect ALL_TOOLS for task_orch and call the matching tools entry). " +
           "Use these tools for orchestrator operations; the worker has no direct database access, " +

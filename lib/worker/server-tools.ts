@@ -30,7 +30,7 @@ import { Type } from "typebox";
 import {
   codeActCatalogForContext,
   codeActModelText,
-  executeCodeAct,
+  executeAppCodeAct,
   presentCodeActReceipt,
 } from "../codeact";
 import { PostgresCodeActReceiptStore } from "../codeact/receipts";
@@ -81,7 +81,7 @@ const codeActTools: OrchestratorTool[] = [
     execute: async (params: { code: string; title?: string }, ctx) => {
       const baseContext = ctx as AppApiContext;
       const context = await currentCodeActContext(baseContext);
-      const result = await executeCodeAct({
+      const result = await executeAppCodeAct({
         code: params.code,
         title: params.title,
         context,
