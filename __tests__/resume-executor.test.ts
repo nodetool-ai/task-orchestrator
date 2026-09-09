@@ -12,7 +12,7 @@
 //     runs.resumeExecutorRun (a fresh <execute> generation on the same plan).
 
 import { NextRequest } from "next/server";
-import { ne } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db";
 import {
@@ -25,6 +25,9 @@ import {
   taskDependencies,
   taskNotes,
   tasks,
+  inboxEvents,
+  runEventSubscriptions,
+  runSourceEvents,
 } from "../db/schema";
 import { seedPersonas } from "../db/seed-personas";
 
@@ -76,6 +79,9 @@ beforeEach(async () => {
   await seedPersonas();
   await db.delete(agentMessages);
   await db.delete(agentEvents);
+  await db.delete(inboxEvents);
+  await db.delete(runEventSubscriptions);
+  await db.delete(runSourceEvents);
   await db.delete(agentSessions);
   await db.delete(acceptanceCriteria);
   await db.delete(taskNotes);
@@ -140,6 +146,10 @@ describe("in-place resume of a terminal plan executor", () => {
     // attempt, and append's turn-end for a non-worktree run lands 'idle'
     // (resumable again) unless a tool wrote a result/park.
     expect(after.attempt).toBe(prior.attempt + 1);
+    const turnFacts = await db.select().from(runSourceEvents).where(and(
+      eq(runSourceEvents.sourceRunId, prior.id), eq(runSourceEvents.eventType, "run.turn_finished")
+    ));
+    expect(turnFacts.map(fact => fact.attempt)).toContain(after.attempt);
     expect(["idle", "completed", "parked"]).toContain(after.status);
     const texts = (await runs.listMessages(prior.id)).map((m) => JSON.stringify(m.content));
     expect(texts.some((t) => t.includes("Task T-1 unblocked"))).toBe(true);

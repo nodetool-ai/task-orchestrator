@@ -11,6 +11,9 @@ import {
   taskDependencies,
   taskNotes,
   tasks,
+  inboxEvents,
+  runEventSubscriptions,
+  runSourceEvents,
 } from "../db/schema";
 import * as repo from "../lib/repo";
 import * as runs from "../lib/runs";
@@ -25,6 +28,9 @@ beforeEach(async () => {
   await seedPersonas();
   await db.delete(agentMessages);
   await db.delete(agentEvents);
+  await db.delete(inboxEvents);
+  await db.delete(runEventSubscriptions);
+  await db.delete(runSourceEvents);
   await db.delete(agentSessions);
   await db.delete(acceptanceCriteria);
   await db.delete(taskNotes);
@@ -127,6 +133,7 @@ describe("await_session", () => {
 
   it("parks the caller instead of blocking for a running session", async () => {
     const parent = await insertRun({ goal: "<chat>", status: "running" });
+    await db.update(agentSessions).set({ deliveryVersion: 1 }).where(eq(agentSessions.id, parent));
     const id = await insertRun({ status: "running", parentRunId: parent });
     const res = await tool("await_session").execute(
       { session_id: id, timeout_seconds: 60 },
@@ -147,6 +154,7 @@ describe("await_session", () => {
     // parkReason, so the run waits on the child's terminal EVENT rather than a
     // held HTTP connection. This ties the tool's park write to decideTurnEndStatus.
     const parent = await insertRun({ goal: "<chat>", status: "running" });
+    await db.update(agentSessions).set({ deliveryVersion: 1 }).where(eq(agentSessions.id, parent));
     const child = await insertRun({ status: "running", parentRunId: parent });
 
     const res = await tool("await_session").execute(

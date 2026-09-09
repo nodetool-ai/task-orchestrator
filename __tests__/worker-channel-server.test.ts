@@ -240,7 +240,10 @@ describe("worker WebSocket supervisor", () => {
     await openSocket(socket);
     const hello = await nextFrame(socket);
     expect(hello.type).toBe("channel.hello");
-    if (hello.type === "channel.hello") expect(hello.payload.workerGeneration).toBe(workerGeneration);
+    if (hello.type === "channel.hello") {
+      expect(hello.payload.workerGeneration).toBe(workerGeneration);
+      expect(hello.payload.capabilities).toContain("run-input-receipts-v2");
+    }
 
     socket.send(encodeFrame(accept(1, 0, 60_000, 1)));
     expect((await nextFrame(socket)).type).toBe("channel.reject");

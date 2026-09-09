@@ -202,7 +202,10 @@ runtime, not by this endpoint), grouped as:
 - **Attachments** — `list_attachments`, `get_attachment`, `add_attachment`,
   `delete_attachment`
 - **Sessions** — `list_sessions`, `get_session`, `start_session`,
-  `await_session`, `cancel_session`
+  `await_session`, `cancel_session`, `events__subscribe`,
+  `events__unsubscribe`, `events__list_subscriptions`. Subscriptions create
+  durable interest in typed run facts; matching events become attributed
+  conversation inputs and wake or resume the subscriber automatically.
 
 Arguments are validated server-side against the same TypeBox schemas served
 in `tools/list`, so a bad enum or wrong-typed field is rejected with

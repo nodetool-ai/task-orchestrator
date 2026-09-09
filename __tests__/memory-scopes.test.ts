@@ -25,6 +25,9 @@ import {
   personaMemories,
   personas as personasTable,
   users,
+  inboxEvents,
+  runEventSubscriptions,
+  runSourceEvents,
 } from "../db/schema";
 import * as backend from "../lib/agent-backend";
 import * as repo from "../lib/repo";
@@ -106,6 +109,9 @@ beforeEach(async () => {
   await db.delete(agentMessages);
   await db.delete(memories);
   await db.delete(personaMemories);
+  await db.delete(inboxEvents);
+  await db.delete(runEventSubscriptions);
+  await db.delete(runSourceEvents);
   await db.delete(agentSessions);
   await db.delete(users);
   await db.delete(personasTable);

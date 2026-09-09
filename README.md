@@ -6,6 +6,9 @@ that defines "done" — then hand a task to a Claude agent. The agent writes
 the code on its own branch, opens a pull request on GitHub, and reports
 back. You watch its progress live, review the result, and merge.
 
+Agent runs supervise children through [durable event subscriptions](docs/run-event-subscriptions.md):
+child events arrive in the parent conversation and wake it automatically.
+
 ## How it works
 
 1. **Plan.** Create a plan and split it into tasks. Give each task

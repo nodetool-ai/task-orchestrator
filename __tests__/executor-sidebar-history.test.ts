@@ -11,6 +11,9 @@ import {
   taskDependencies,
   taskNotes,
   tasks,
+  inboxEvents,
+  runEventSubscriptions,
+  runSourceEvents,
 } from "../db/schema";
 import { seedPersonas } from "../db/seed-personas";
 
@@ -84,6 +87,9 @@ beforeEach(async () => {
   await seedPersonas();
   await db.delete(agentMessages);
   await db.delete(agentEvents);
+  await db.delete(inboxEvents);
+  await db.delete(runEventSubscriptions);
+  await db.delete(runSourceEvents);
   await db.delete(agentSessions);
   await db.delete(acceptanceCriteria);
   await db.delete(taskNotes);

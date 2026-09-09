@@ -18,7 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 
 import { db } from "../db";
-import { agentMessages, agentSessions } from "../db/schema";
+import { agentMessages, agentSessions, inboxEvents, runEventSubscriptions, runSourceEvents } from "../db/schema";
 import * as backend from "../lib/agent-backend";
 import * as dispatch from "../lib/run-dispatch";
 import { __resetDemotionWarnings, isServerRuntimeRun } from "../lib/run-runtime";
@@ -44,7 +44,11 @@ const ENV_KEYS = [
 ] as const;
 let saved: Record<string, string | undefined>;
 
-beforeEach(() => {
+beforeEach(async () => {
+  await db.delete(inboxEvents);
+  await db.delete(runEventSubscriptions);
+  await db.delete(runSourceEvents);
+  await db.delete(agentSessions);
   saved = {};
   for (const k of ENV_KEYS) {
     saved[k] = process.env[k];
@@ -282,7 +286,7 @@ describe("dispatch never gives a server-runtime run a worker", () => {
     const spawn = vi.fn().mockResolvedValue(4321);
 
     const run = await create({ goal: "<chat>", defer: true });
-    const result = await dispatch.dispatchRun(run.id, { spawn });
+    const result = await dispatch.dispatchRun(run.id, { spawn, admit: () => "admit" });
 
     expect(result).toBe("spawned");
     expect(spawn).toHaveBeenCalledTimes(1);
@@ -406,7 +410,7 @@ describe("legacy server-runtime rows with an unsafe tools profile", () => {
       payload: { summary: "child finished" },
     });
 
-    const result = await dispatch.dispatchRun(id, { spawn });
+    const result = await dispatch.dispatchRun(id, { spawn, admit: () => "admit" });
     expect(result).not.toBe("server-runtime");
     expect(spawn).toHaveBeenCalledTimes(1);
   });

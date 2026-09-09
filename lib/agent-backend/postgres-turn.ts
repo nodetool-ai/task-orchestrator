@@ -251,6 +251,18 @@ function fallbackToolResultMessage(row: PostgresMessageRow): ToolResultMessage |
 function systemContextMessage(row: PostgresMessageRow): UserMessage | null {
   const first = row.content[0] as { type?: string } | undefined;
   if (first?.type === "inbox_event" || first?.type === "event_digest") return null;
+  // Durable event messages are canonical model history. Older inbox mirrors
+  // and digest frames above remain excluded, but a run_event block must survive
+  // every postgres turn and be rendered with its platform attribution.
+  const event = row.content.find((block) => block && typeof block === "object" && (block as { type?: unknown }).type === "run_event") as
+    | { text?: unknown; event_type?: unknown; source?: unknown; payload?: unknown }
+    | undefined;
+  if (event) {
+    const text = typeof event.text === "string"
+      ? event.text
+      : `Event from run ${JSON.stringify(event.source ?? "unknown")}: ${String(event.event_type ?? "run_event")} ${JSON.stringify(event.payload ?? {})}`;
+    return { role: "user", content: `[run event]\n${text}`, timestamp: row.createdAt };
+  }
   const text = row.content
     .filter(
       (block): block is { type: "text"; text: string } =>

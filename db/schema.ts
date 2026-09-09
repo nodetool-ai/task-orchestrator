@@ -309,6 +309,9 @@ export const agentSessions = pgTable(
     // roll time and inbox target resolution follows the pointer to the live
     // successor. Kept as forward-provision so the schema is ready.
     supersededBy: integer("superseded_by"),
+    // v1 uses legacy parent inbox routing; v2 uses durable source events and
+    // subscriptions. New runs default to v2 while old rows remain readable.
+    deliveryVersion: integer("delivery_version").notNull().default(2),
   },
   (t) => ({
     taskIdx: index("agent_runs_task_idx").on(t.taskId),
@@ -521,12 +524,16 @@ export const agentMessages = pgTable(
     // Worker HTTP retries use this to make message appends idempotent across a
     // timed-out request whose DB insert may still have committed.
     idempotencyKey: text("idempotency_key"),
+    // New durable event delivery represented in the conversation. Nullable so
+    // legacy/user/agent messages retain their existing shape.
+    eventDeliveryId: integer("event_delivery_id"),
     createdAt: ts("created_at").notNull().defaultNow(),
   },
   (t) => ({
     runIdx: index("agent_messages_run_idx").on(t.runId),
     runOrdIdx: index("agent_messages_run_id_ord_idx").on(t.runId, t.id),
     idempotencyKeyIdx: uniqueIndex("agent_messages_idempotency_key_idx").on(t.idempotencyKey),
+    eventDeliveryIdx: uniqueIndex("agent_messages_event_delivery_id_idx").on(t.eventDeliveryId),
   })
 );
 
@@ -554,6 +561,58 @@ export const agentEvents = pgTable(
 // Event system (docs/agent-events.md)
 // ──────────────────────────────────────────────────────────────────────────
 
+// Immutable, typed facts published by a run. Revisions are allocated while
+// holding the source advisory lock; they are deliberately independent of UI
+// telemetry ids and input sequence numbers.
+export const runSourceEvents = pgTable(
+  "run_source_events",
+  {
+    id: uuid("id").primaryKey(),
+    sourceRunId: integer("source_run_id").notNull().references(() => agentSessions.id, { onDelete: "restrict" }),
+    revision: bigint("revision", { mode: "number" }).notNull(),
+    attempt: integer("attempt").notNull(),
+    logicalTurnId: uuid("logical_turn_id"),
+    workerGeneration: integer("worker_generation"),
+    eventType: text("event_type").notNull(),
+    schemaVersion: integer("schema_version").notNull().default(1),
+    payload: jsonb("payload").notNull().default({}),
+    occurredAt: ts("occurred_at").notNull().defaultNow(),
+    producerKey: text("producer_key").notNull(),
+  },
+  (t) => ({
+    sourceRevisionUniq: uniqueIndex("run_source_events_source_revision_uniq").on(t.sourceRunId, t.revision),
+    sourceProducerUniq: uniqueIndex("run_source_events_source_producer_uniq").on(t.sourceRunId, t.producerKey),
+    sourceRevisionIdx: index("run_source_events_source_revision_idx").on(t.sourceRunId, t.revision),
+  })
+);
+
+export const runEventSubscriptions = pgTable(
+  "run_event_subscriptions",
+  {
+    id: uuid("id").primaryKey(),
+    subscriberRunId: integer("subscriber_run_id").notNull().references(() => agentSessions.id, { onDelete: "cascade" }),
+    sourceRunId: integer("source_run_id").notNull().references(() => agentSessions.id, { onDelete: "restrict" }),
+    eventTypes: jsonb("event_types").notNull().default([]),
+    attemptMode: text("attempt_mode").notNull().default("current"),
+    resolvedAttempt: integer("resolved_attempt"),
+    replayMode: text("replay_mode").notNull().default("future_only"),
+    lifetime: text("lifetime").notNull().default("until_unsubscribed"),
+    keepOpen: boolean("keep_open").notNull().default(false),
+    startRevision: bigint("start_revision", { mode: "number" }).notNull(),
+    endRevision: bigint("end_revision", { mode: "number" }),
+    status: text("status").notNull().default("active"),
+    clientKey: text("client_key"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    finishedAt: ts("finished_at"),
+    cancelledAt: ts("cancelled_at"),
+  },
+  (t) => ({
+    subscriberClientUniq: uniqueIndex("run_event_subscriptions_subscriber_client_uniq").on(t.subscriberRunId, t.clientKey),
+    sourceActiveIdx: index("run_event_subscriptions_source_active_idx").on(t.sourceRunId, t.status, t.startRevision),
+    subscriberActiveIdx: index("run_event_subscriptions_subscriber_active_idx").on(t.subscriberRunId, t.status),
+  })
+);
+
 // Inbox: events ADDRESSED to a run, whose arrival wakes it. Distinct from
 // agent_events (telemetry stream nothing consumes). Lifecycle:
 // pending → injected | superseded | error. See lib/inbox.ts for the only
@@ -576,6 +635,9 @@ export const inboxEvents = pgTable(
     sourceId: text("source_id"),
     correlationId: text("correlation_id"),
     causationEventId: integer("causation_event_id"),
+    // Canonical journal fact behind a subscription delivery. Legacy inbox
+    // rows may remain NULL during migration.
+    sourceEventId: uuid("source_event_id").references(() => runSourceEvents.id, { onDelete: "restrict" }),
     // Rework generation of the source child when sourceKind='run'.
     attempt: integer("attempt"),
     // Original target when re-addressed up the parent chain.
@@ -600,7 +662,60 @@ export const inboxEvents = pgTable(
       .on(t.targetRunId, t.dedupeKey)
       .where(sql`dedupe_key IS NOT NULL`),
     correlationIdx: index("inbox_correlation_idx").on(t.correlationId),
+    sourceEventTargetUniq: uniqueIndex("inbox_source_event_target_uniq").on(t.targetRunId, t.sourceEventId),
   })
+);
+
+export const runEventDeliveryMatches = pgTable(
+  "run_event_delivery_matches",
+  {
+    deliveryId: integer("delivery_id").notNull().references(() => inboxEvents.id, { onDelete: "cascade" }),
+    subscriptionId: uuid("subscription_id").notNull().references(() => runEventSubscriptions.id, { onDelete: "cascade" }),
+    matchedAt: ts("matched_at").notNull().defaultNow(),
+  },
+  (t) => ({ pairPk: primaryKey({ columns: [t.deliveryId, t.subscriptionId] }), subscriptionIdx: index("run_event_delivery_matches_subscription_idx").on(t.subscriptionId) })
+);
+
+// Durable scheduler receipts. An input is assigned to at most one logical
+// turn, and a run has at most one unfinished turn.
+export const runInputs = pgTable(
+  "run_inputs",
+  {
+    id: uuid("id").primaryKey(),
+    runId: integer("run_id").notNull().references(() => agentSessions.id, { onDelete: "cascade" }),
+    inputSeq: bigint("input_seq", { mode: "number" }).notNull(),
+    messageId: integer("message_id").notNull().references(() => agentMessages.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    status: text("status").notNull().default("pending"),
+    assignedTurnId: uuid("assigned_turn_id"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    assignedAt: ts("assigned_at"),
+    completedAt: ts("completed_at"),
+    cancelledAt: ts("cancelled_at"),
+  },
+  (t) => ({ runSeqUniq: uniqueIndex("run_inputs_run_seq_uniq").on(t.runId, t.inputSeq), messageUniq: uniqueIndex("run_inputs_message_uniq").on(t.messageId), readyIdx: index("run_inputs_ready_idx").on(t.runId, t.status, t.inputSeq) })
+);
+
+export const runTurns = pgTable(
+  "run_turns",
+  {
+    id: uuid("id").primaryKey(),
+    runId: integer("run_id").notNull().references(() => agentSessions.id, { onDelete: "cascade" }),
+    ordinal: bigint("ordinal", { mode: "number" }).notNull(),
+    // Logical rework attempt owning this receipt.  A worker-generation retry
+    // within the same attempt may recover the row; a new attempt must retire it.
+    attempt: integer("attempt").notNull().default(1),
+    state: text("state").notNull().default("active"),
+    inputManifest: jsonb("input_manifest").notNull().default([]),
+    backendResumeBefore: text("backend_resume_before"),
+    backendResumeAfter: text("backend_resume_after"),
+    executionGeneration: integer("execution_generation").notNull().default(1),
+    result: jsonb("result"),
+    checkpoint: jsonb("checkpoint"),
+    startedAt: ts("started_at").notNull().defaultNow(),
+    completedAt: ts("completed_at"),
+  },
+  (t) => ({ runOrdinalUniq: uniqueIndex("run_turns_run_ordinal_uniq").on(t.runId, t.ordinal), unfinishedIdx: uniqueIndex("run_turns_unfinished_idx").on(t.runId).where(sql`${t.state} IN ('active','running')`) })
 );
 
 // Future events: a timer is a promise of a `timer.fired` inbox event. Fired

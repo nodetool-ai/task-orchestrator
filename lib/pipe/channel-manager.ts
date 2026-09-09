@@ -13,7 +13,7 @@
 // AgentLoop.wakeConversation).
 
 import { config as appConfig } from "@/lib/config";
-import { hasPendingInboxEvents } from "@/lib/inbox";
+import { hasPendingRunInput } from "@/lib/runs";
 import { isLive } from "@/lib/runs";
 
 import { AgentLoop, type ReactionResolver } from "./agent-loop";
@@ -94,7 +94,7 @@ export class ChannelManager {
         const conversations = await listConversations(channel.name, personaId);
         for (const conv of conversations) {
           if (isLive(conv.runId)) continue;
-          if (!(await hasPendingInboxEvents(conv.runId))) continue;
+          if (!(await hasPendingRunInput(conv.runId))) continue;
           // Counted on the DECISION to wake, not on the turn's outcome: a wake
           // that finds nothing to say is still a wake this pump paid for
           // (PRD §11 "wakes per persona").

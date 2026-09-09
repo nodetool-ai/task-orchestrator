@@ -12,6 +12,8 @@ import { AGENT_CREDENTIAL_ENV_KEYS, agentCredentialEnv } from "./agent-backend/p
 // lib/inbox has no static import of this module (its wake path uses a lazy
 // dynamic import), so this edge is cycle-free.
 import { fireDueTimers, parkedRunsWithPendingEvents } from "./inbox";
+import { pumpRunEventDeliveries } from "./run-event-delivery";
+import { lockSourceTx, registerDefaultChildSubscriptionTx } from "./run-source-events";
 import type { RunRow } from "./runs";
 import {
   config,
@@ -605,6 +607,8 @@ async function dispatchRunInner(
       if (provider === "sprites") {
         await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${"sprites:" + runId}))`);
       }
+      await lockSourceTx(tx, runId);
+      const [priorRun] = await tx.select().from(agentSessions).where(eq(agentSessions.id, runId)).for("update");
       const [existing] = await tx
         .select({
           workerGeneration: runnerInstances.workerGeneration,
@@ -631,6 +635,8 @@ async function dispatchRunInner(
           error: null,
           completedAt: null,
           pendingReason: null,
+          ...(priorRun?.deliveryVersion === 2 && ["completed", "failed"].includes(priorRun.status)
+            ? { attempt: priorRun.attempt + 1, result: null, parkReason: null } : {}),
         })
         .where(
           and(
@@ -640,6 +646,9 @@ async function dispatchRunInner(
           )
         );
       if (result.count === 0) return null;
+      if (priorRun?.deliveryVersion === 2 && ["completed", "failed"].includes(priorRun.status)) {
+        await registerDefaultChildSubscriptionTx(tx, { ...priorRun, attempt: priorRun.attempt + 1 });
+      }
       const generation = {
         workerGeneration: nextGeneration,
         generationState: "allocating",
@@ -1099,6 +1108,13 @@ export async function startChannelForRun(
   // pendingInput/inboxDigest, so a resumed worker gets current state, not the
   // run's original kickoff snapshot.
   const startId = runStartCommandId(instanceId, connection.controllerEpoch);
+  const deliveryRun = await runs().get(runId);
+  if ((deliveryRun?.deliveryVersion ?? 1) >= 2 && !connection.supportsRunInputReceiptsV2) {
+    // A v2 snapshot contains durable input manifests whose receipt semantics
+    // an old worker cannot honor. Refuse this bootstrap rather than silently
+    // downgrading to transcript/high-water delivery.
+    throw new Error("worker does not advertise run-input-receipts-v2 capability");
+  }
   const snapshot = await buildRunStart(runId);
   const row = await persistCommand({
     runId,
@@ -1241,6 +1257,7 @@ async function pumpTick(): Promise<void> {
   // dispatch (crash, race) is retried here every tick, forever, because the
   // state — parked + pending owner events — is durable. Bounded (the query
   // LIMITs and rides the pending-only partial index); continue on error.
+  await pumpRunEventDeliveries().catch((error) => console.error("[run-events] Recovery sweep failed:", error));
   let parkedIds: number[] = [];
   try {
     parkedIds = await parkedRunsWithPendingEvents();

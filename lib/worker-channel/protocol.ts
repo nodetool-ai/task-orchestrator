@@ -103,6 +103,9 @@ export interface RunStart {
   inboxDigest: string | null;
   memoryContext: string;
   pendingInput: MessageSnapshot[];
+  /** Durable scheduler manifest, when the start command owns a claimed turn. */
+  turnId?: string;
+  inputManifest?: Array<{ id: string; inputSeq: number; messageId: number; kind: "user" | "event" }>;
   policy: RunPolicy;
   /**
    * Goal-synthesized kickoff prompt for a FRESH start (mode "start" only):
@@ -116,6 +119,10 @@ export interface RunStart {
 
 export interface RunInput {
   messages: MessageSnapshot[];
+  /** Stable durable input identities. Legacy workers may omit these fields. */
+  inputIds?: string[];
+  inputSeqs?: number[];
+  turnId?: string;
 }
 
 export interface RunCancel {
@@ -126,9 +133,10 @@ export interface RunCancel {
 
 export interface RunPark {
   reason: string;
+  action?: "park" | "finalize" | "idle";
 }
 
-export type RunCommitStatus = "completed" | "failed" | "cancelled" | "closed" | "budget_exhausted";
+export type RunCommitStatus = "parked" | "completed" | "failed" | "cancelled" | "closed" | "budget_exhausted";
 
 export interface RunCommit {
   status: RunCommitStatus;
@@ -229,6 +237,12 @@ export interface ToolInvoke {
 export interface RunCheckpoint {
   sdkSessionId: string | null;
   metadata?: unknown;
+  /** Receipt identity for the logical turn which produced this checkpoint. */
+  turnId?: string;
+  inputIds?: string[];
+  workerGeneration?: number;
+  instanceId?: string;
+  checkpoint?: unknown;
 }
 
 export interface UsageSnapshot {
@@ -462,15 +476,20 @@ const runStartSchema = z
 
 const payloadSchemas = {
   "run.start": runStartSchema,
-  "run.input": z.object({ messages: z.array(messageSchema).min(1) }).passthrough(),
+  "run.input": z.object({
+    messages: z.array(messageSchema).min(1),
+    inputIds: z.array(uuid).optional(),
+    inputSeqs: z.array(nonNegativeInt).optional(),
+    turnId: uuid.optional(),
+  }).passthrough(),
   "run.cancel": z.object({
     reason: z.string().min(1),
     requestId: z.string().min(1),
     deadline: isoDate.nullable(),
   }).passthrough(),
-  "run.park": z.object({ reason: z.string().min(1) }).passthrough(),
+  "run.park": z.object({ reason: z.string().min(1), action: z.enum(["park", "finalize", "idle"]).optional() }).passthrough(),
   "run.commit": z.object({
-    status: z.enum(["completed", "failed", "cancelled", "closed", "budget_exhausted"]),
+    status: z.enum(["completed", "failed", "cancelled", "closed", "budget_exhausted", "parked"]),
     result: z.unknown().optional(),
     error: z.string().nullable().optional(),
     prUrl: z.string().nullable().optional(),
@@ -501,7 +520,12 @@ const payloadSchemas = {
   "transcript.append": z.object({ message: messageSchema }).passthrough(),
   "agent.event": z.object({ event: jsonValue }).passthrough(),
   "tool.invoke": z.object({ callId: z.string().min(1), tool: z.string().min(1), arguments: jsonValue }).passthrough(),
-  "run.checkpoint": z.object({ sdkSessionId: z.string().nullable(), metadata: jsonValue.optional() }).passthrough(),
+  "run.checkpoint": z.object({
+    sdkSessionId: z.string().nullable(), metadata: jsonValue.optional(),
+    turnId: uuid.optional(), inputIds: z.array(uuid).optional(),
+    workerGeneration: positiveInt.optional(), instanceId: z.string().optional(),
+    checkpoint: jsonValue.optional(),
+  }).passthrough(),
   "run.finished": z.object({ result: jsonValue, usage: usageSchema.optional(), prUrl: z.string().nullable().optional() }).passthrough(),
   "run.failed": z.object({ error: z.string().min(1), usage: usageSchema.optional(), result: jsonValue.optional() }).passthrough(),
   "run.cancelled": z.object({ requestId: z.string().min(1), reason: z.string().optional() }).passthrough(),

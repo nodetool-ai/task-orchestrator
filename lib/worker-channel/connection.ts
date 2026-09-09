@@ -209,6 +209,10 @@ export class ControllerConnection {
   /** Whether the worker process holds a run.start, as reported in its hello.
    *  `undefined` for bundles that predate the field. */
   get workerHasStart(): boolean | undefined { return this.lastHello?.started; }
+  /** Whether this worker can fence durable input manifests with checkpoints. */
+  get supportsRunInputReceiptsV2(): boolean {
+    return this.lastHello?.capabilities?.includes("run-input-receipts-v2") === true;
+  }
   private lastHello?: ChannelHello;
   /** True once disconnect()/abandon()/neutralize() ran: connect() refuses forever. */
   get shutDown(): boolean { return this.stopped; }

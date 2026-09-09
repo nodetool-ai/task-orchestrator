@@ -29,6 +29,7 @@ import {
 } from "@/db/schema";
 import { TERMINAL_STATUSES } from "./run-state";
 import { isTerminalStatus, type SessionStatus } from "./types";
+import { lockSourceTx, publishSourceEventTx } from "./run-source-events";
 
 // ────────────────────────────────────────
 // Taxonomy & classes
@@ -1061,39 +1062,46 @@ export async function cancelPendingTimersForRun(runId: number): Promise<number> 
  * never lost. Returns the number fired.
  */
 export async function fireDueTimers(now = new Date()): Promise<number> {
-  const due = await db
-    .update(runTimers)
-    .set({ status: "fired", firedAt: now })
-    .where(and(eq(runTimers.status, "pending"), sql`${runTimers.fireAt} <= ${now}`))
-    .returning();
+  const due = await db.select().from(runTimers)
+    .where(and(eq(runTimers.status, "pending"), sql`${runTimers.fireAt} <= ${now.toISOString()}`))
+    .orderBy(asc(runTimers.id)).limit(100);
   let fired = 0;
-  for (const t of due) {
+  for (const candidate of due) {
     try {
-      await emitInboxEvent({
-        targetRunId: t.runId,
-        type: "timer.fired",
-        sourceKind: "timer",
-        sourceId: String(t.id),
-        correlationId: t.correlationId,
-        dedupeKey: `timer:${t.id}`,
-        payload: {
-          timer_id: t.id,
-          note: t.note,
-          set_at: t.createdAt.toISOString(),
-          fire_at: t.fireAt.toISOString(),
-        },
+      await db.transaction(async (tx) => {
+        await lockSourceTx(tx, candidate.runId);
+        const locked = await tx.select().from(runTimers)
+          .where(and(eq(runTimers.id, candidate.id), eq(runTimers.status, "pending"), sql`${runTimers.fireAt} <= ${now.toISOString()}`))
+          .for("update");
+        const timer = locked[0];
+        if (!timer) return;
+        await tx.update(runTimers).set({ status: "fired", firedAt: now }).where(eq(runTimers.id, timer.id));
+        const payload = {
+          timer_id: timer.id, note: timer.note,
+          set_at: timer.createdAt.toISOString(), fire_at: timer.fireAt.toISOString(),
+        };
+        await tx.insert(inboxEvents).values({
+          targetRunId: timer.runId, type: "timer.fired", payload,
+          audience: "owner", sourceKind: "timer", sourceId: String(timer.id),
+          correlationId: timer.correlationId, dedupeKey: `timer:${timer.id}`,
+        }).onConflictDoNothing();
+        // Question deadlines and answers race on the same run row. The open
+        // state CAS makes timeout publish exactly once and never overwrite an
+        // answer that won first.
+        if (timer.correlationId) {
+          const changed = await tx.update(agentSessions).set({
+            pendingQuestion: sql`jsonb_set(${agentSessions.pendingQuestion}, '{state}', '"expired"'::jsonb)`,
+          }).where(and(eq(agentSessions.id, timer.runId), sql`${agentSessions.pendingQuestion}->>'question_id' = ${timer.correlationId}`, sql`coalesce(${agentSessions.pendingQuestion}->>'state','open') = 'open'`)).returning({ id: agentSessions.id, attempt: agentSessions.attempt });
+          if (changed.length > 0) {
+            await publishSourceEventTx(tx, { sourceRunId: timer.runId, attempt: changed[0].attempt ?? 1, eventType: "run.question_resolved", producerKey: `question:${timer.correlationId}:expired`, payload: { question_id: timer.correlationId, state: "expired", reason: "timeout" } });
+          }
+        }
+        fired += 1;
       });
-      fired += 1;
+      void import("./run-event-delivery").then((m) => m.hintRunEventDelivery()).catch(() => {});
     } catch {
-      // At-least-once (§7): the atomic claim already flipped this row to 'fired',
-      // but the emit did not durably land — leaving it 'fired' would lose the
-      // event forever (never re-selected). Revert to 'pending' so the next pump
-      // re-emits; the `timer:<id>` dedupe key makes a possible double-emit safe.
-      await db
-        .update(runTimers)
-        .set({ status: "pending", firedAt: null })
-        .where(eq(runTimers.id, t.id))
-        .catch(() => {});
+      // The transaction rolls back both the claim and publication, so the next
+      // pump can retry without a fired-but-undelivered timer.
     }
   }
   return fired;

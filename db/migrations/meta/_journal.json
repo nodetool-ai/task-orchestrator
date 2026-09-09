@@ -288,6 +288,13 @@
       "when": 1788950000000,
       "tag": "0040_codeact_receipts",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1788953600000,
+      "tag": "0041_run_event_subscriptions",
+      "breakpoints": true
     }
   ]
 }

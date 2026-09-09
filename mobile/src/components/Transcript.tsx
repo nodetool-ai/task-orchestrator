@@ -275,6 +275,12 @@ function SystemRow({ blocks }: { blocks: Block[] }) {
   const { c } = useTheme();
   const first = blocks[0] || {};
   const kind = typeof first.type === "string" && first.type !== "text" ? first.type : null;
+  if (kind === "run_event") {
+    const raw = first as Block & { event_type?: string; source?: { run_id?: number; attempt?: number }; payload?: { status?: string; summary?: string } };
+    const source = raw.source;
+    const detail = [raw.event_type ?? "event", source?.run_id != null ? `from run #${source.run_id}` : "", source?.attempt != null ? `attempt ${source.attempt}` : "", raw.payload?.status ?? "", raw.payload?.summary ?? ""].filter(Boolean).join(" · ");
+    return <View style={{ flexDirection: "row", alignItems: "center", gap: 7, paddingVertical: 3 }}><View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: c.sReview }} /><Mono style={{ fontSize: 10.5, color: c.muted2, flex: 1 }} numberOfLines={2}>{detail}</Mono></View>;
+  }
   const text = blockText(blocks.map((b) => (b.type === "text" ? b.text : b)).filter(Boolean)) || (kind ?? "system event");
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 7, paddingVertical: 3 }}>

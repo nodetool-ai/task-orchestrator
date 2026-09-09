@@ -92,6 +92,7 @@ export type SystemKind =
   | "error"
   | "info"
   | "inbox_event"
+  | "run_event"
   // A digest frame persisted at turn start by the agent event system
   // (docs/agent-events.md §6.4): exactly the events the agent was woken with.
   | "event_digest"

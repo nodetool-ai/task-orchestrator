@@ -24,10 +24,16 @@ import {
   agentEvents,
   agentMessages,
   agentSessions,
+  inboxEvents,
+  runEventDeliveryMatches,
+  runEventSubscriptions,
+  runSourceEvents,
   runTimers,
   runnerInstances,
   workerChannelCommands,
   workerChannelReceipts,
+  runInputs,
+  runTurns,
 } from "../db/schema";
 import { create } from "../lib/runs";
 import {
@@ -126,6 +132,10 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  await db.delete(runEventDeliveryMatches);
+  await db.delete(inboxEvents);
+  await db.delete(runEventSubscriptions);
+  await db.delete(runSourceEvents);
   await db.delete(agentSessions);
 });
 
@@ -321,6 +331,7 @@ describe("run.phase", () => {
     // behind keeps a claim on an exited worker, and sendMessageToRun then bridges
     // the next user message into a channel that is closed at idle (run 181).
     const runId = await newRun();
+    await db.update(agentSessions).set({ deliveryVersion: 1 }).where(eq(agentSessions.id, runId));
     await db
       .update(agentSessions)
       .set({ workerScope: "to-run-1"})
@@ -354,6 +365,46 @@ describe("run.phase", () => {
 // ── 14.2 run.checkpoint ───────────────────────────────────────────────────────
 
 describe("run.checkpoint", () => {
+  it("assigns a pending follow-up to the next durable input command", async () => {
+    const runId = await newRun();
+    const [msg] = await db.insert(agentMessages).values({ runId, role: "user", content: "[]" }).returning({ id: agentMessages.id });
+    const firstInput = randomUUID(); const turnId = randomUUID();
+    await db.insert(runInputs).values({ id: firstInput, runId, inputSeq: 1, messageId: msg.id, kind: "user", status: "assigned", assignedTurnId: turnId });
+    await db.insert(runTurns).values({ id: turnId, runId, ordinal: 1, state: "active", inputManifest: [{ id: firstInput }], executionGeneration: 1 });
+    const [followup] = await db.insert(agentMessages).values({ runId, role: "user", content: JSON.stringify([{ type: "text", text: "next" }]) }).returning({ id: agentMessages.id });
+    const followupInput = randomUUID();
+    await db.insert(runInputs).values({ id: followupInput, runId, inputSeq: 2, messageId: followup.id, kind: "user", status: "pending" });
+    const result = await apply(makeFrame(runId, "run.checkpoint", { sdkSessionId: "sdk", turnId, inputIds: [firstInput] }, { workerGeneration: 1 }));
+    const command = (await db.select({ type: workerChannelCommands.type, payload: workerChannelCommands.payload }).from(workerChannelCommands).where(eq(workerChannelCommands.id, result.resultCommandId!)))[0];
+    expect(command.type).toBe("run.input");
+    expect((command.payload as any).inputIds).toEqual([followupInput]);
+    expect((await db.select({ status: runInputs.status }).from(runInputs).where(eq(runInputs.id, followupInput)))) .toMatchObject([{ status: "assigned" }]);
+  });
+  it("lands budget exhaustion before claiming a queued follow-up", async () => {
+    const runId = await newRun();
+    await db.update(agentSessions).set({ status: "running", budgetMaxTurns: 1 }).where(eq(agentSessions.id, runId));
+    const [msg] = await db.insert(agentMessages).values({ runId, role: "user", content: "[]" }).returning({ id: agentMessages.id });
+    const firstInput = randomUUID(); const turnId = randomUUID();
+    await db.insert(runInputs).values({ id: firstInput, runId, inputSeq: 1, messageId: msg.id, kind: "user", status: "assigned", assignedTurnId: turnId });
+    await db.insert(runTurns).values({ id: turnId, runId, ordinal: 1, state: "active", inputManifest: [{ id: firstInput }], executionGeneration: 1 });
+    const [followup] = await db.insert(agentMessages).values({ runId, role: "user", content: "[]" }).returning({ id: agentMessages.id });
+    await db.insert(runInputs).values({ id: randomUUID(), runId, inputSeq: 2, messageId: followup.id, kind: "user", status: "pending" });
+    const result = await apply(makeFrame(runId, "run.checkpoint", { sdkSessionId: "sdk", turnId, inputIds: [firstInput] }, { workerGeneration: 1 }));
+    expect(result.resultCommandId).toBeTruthy();
+    expect((await db.select({ type: workerChannelCommands.type, payload: workerChannelCommands.payload }).from(workerChannelCommands).where(eq(workerChannelCommands.id, result.resultCommandId!)))[0].type).toBe("run.commit");
+    expect(await db.select({ status: runInputs.status }).from(runInputs).where(eq(runInputs.messageId, followup.id))).toMatchObject([{ status: "pending" }]);
+  });
+  it("returns an explicit finalize decision after a v2 durable receipt", async () => {
+    const runId = await newRun();
+    const [msg] = await db.insert(agentMessages).values({ runId, role: "user", content: "[]" }).returning({ id: agentMessages.id });
+    const inputId = randomUUID(); const turnId = randomUUID();
+    await db.insert(runInputs).values({ id: inputId, runId, inputSeq: 1, messageId: msg.id, kind: "user", status: "assigned", assignedTurnId: turnId });
+    await db.insert(runTurns).values({ id: turnId, runId, ordinal: 1, state: "active", inputManifest: [{ id: inputId }], executionGeneration: 1 });
+    const result = await apply(makeFrame(runId, "run.checkpoint", { sdkSessionId: "sdk", turnId, inputIds: [inputId] }, { workerGeneration: 1 }));
+    expect(result.resultCommandId).toBeTruthy();
+    const command = (await db.select({ type: workerChannelCommands.type, payload: workerChannelCommands.payload }).from(workerChannelCommands).where(eq(workerChannelCommands.id, result.resultCommandId!)))[0];
+    expect(command.type).toBe("run.park"); expect((command.payload as any).action).toBe("finalize");
+  });
   it("updates sdkSessionId and allowlisted metadata only", async () => {
     const runId = await newRun();
     await apply(
@@ -390,6 +441,33 @@ describe("run.checkpoint", () => {
 // ── 14.3 run.finished (port: atomic-finalize idempotency + timers) ────────────
 
 describe("run.finished", () => {
+  it.each([
+    ["report_result", { kind: "result", status: "failed", summary: "reported failure", data: null }],
+    ["raise", { kind: "exception", code: "CHILD_FAILED", message: "raised failure", recoverable: false }],
+  ])("preserves stored %s when the worker summary is only text", async (_kind, storedResult) => {
+    const runId = await newRun();
+    await db.update(agentSessions).set({ status: "running", result: storedResult }).where(eq(agentSessions.id, runId));
+
+    await apply(makeFrame(runId, "run.finished", { result: "The turn completed." }));
+
+    const row = (await db.select().from(agentSessions).where(eq(agentSessions.id, runId)))[0];
+    expect(row.status).toBe("failed");
+    expect(row.result).toEqual(storedResult);
+    const commit = (await commits(runId))[0];
+    expect(commit.payload).toMatchObject({ status: "failed", result: storedResult });
+  });
+
+  it("does not terminally finish when a queued input races completion", async () => {
+    const runId = await newRun();
+    await db.update(agentSessions).set({ status: "running" }).where(eq(agentSessions.id, runId));
+    const [msg] = await db.insert(agentMessages).values({ runId, role: "user", content: "[]" }).returning({ id: agentMessages.id });
+    await db.insert(runInputs).values({ id: randomUUID(), runId, inputSeq: 1, messageId: msg.id, kind: "user", status: "pending" });
+    const result = await apply(makeFrame(runId, "run.finished", { result: { done: true } }));
+    expect(await runStatus(runId)).not.toBe("completed");
+    const command = (await db.select({ payload: workerChannelCommands.payload }).from(workerChannelCommands).where(eq(workerChannelCommands.id, result.resultCommandId!)))[0];
+    expect(command.payload).toMatchObject({ accepted: false });
+    expect(await db.select().from(runSourceEvents).where(eq(runSourceEvents.sourceRunId, runId))).toHaveLength(0);
+  });
   it("lands completed atomically, cancels pending timers, and enqueues run.commit", async () => {
     const runId = await newRun();
     await db.update(agentSessions).set({ status: "running" }).where(eq(agentSessions.id, runId));

@@ -154,6 +154,15 @@ function render(
         ),
       };
     }
+    case "run_event": {
+      const source = payload.source && typeof payload.source === "object" ? payload.source as Record<string, unknown> : {};
+      const eventType = String(payload.event_type ?? "event");
+      const runId = source.run_id ?? payload.source_run_id;
+      const attempt = source.attempt ?? payload.attempt;
+      const summary = payload.payload && typeof payload.payload === "object" ? (payload.payload as Record<string, unknown>).summary : undefined;
+      const status = payload.status ?? (payload.payload && typeof payload.payload === "object" ? (payload.payload as Record<string, unknown>).status : undefined);
+      return { icon: <Info className="size-3.5 text-state-review" />, body: <span>event <code className="pi-mono text-foreground">{eventType}</code>{runId != null && <> from run <code className="pi-mono text-foreground">#{String(runId)}</code></>}{attempt != null && <> · attempt {String(attempt)}</>}{status != null && <> · {String(status)}</>}{summary != null && <> · {String(summary)}</>}</span> };
+    }
     case "status": {
       const s = String(payload.status ?? "");
       return {

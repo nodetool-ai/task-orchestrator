@@ -475,7 +475,7 @@ class WorkerServerImpl implements WorkerServer {
     const hello: ChannelHello = {
       protocol: this.config.helloProtocol ?? { min: WORKER_CHANNEL_PROTOCOL, max: WORKER_CHANNEL_PROTOCOL },
       workerBuild: this.config.workerBuild ?? appConfig.worker.build ?? DEFAULT_WORKER_BUILD,
-      capabilities: this.config.capabilities ?? ["durable-spool"],
+      capabilities: this.config.capabilities ?? ["durable-spool", "run-input-receipts-v2"],
       lastControllerEpoch: state.lastControllerEpoch,
       lastAckedControlSeq: state.lastAckedControlSeq,
       nextWorkerSeq: state.nextWorkerSeq,

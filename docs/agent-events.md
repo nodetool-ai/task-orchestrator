@@ -1,5 +1,10 @@
 # Agent event system — design
 
+Follow-up proposal (2026-09-09): [Run event subscriptions and conversation
+delivery](run-event-subscriptions-design.md) specifies explicit subscriptions,
+durable model inputs, and recovery across worker replacement. Its source audit
+also identifies gaps between this historical design and the current runtime.
+
 Status: proposal, revision 3. Companion to the message-passing review on this
 branch: today the parent→child path (spawn / append_message) is robust, but the
 child→parent path is pull-only — a parent burns a whole turn (and a worker

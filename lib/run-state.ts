@@ -379,6 +379,8 @@ export interface TurnEndDecisionInput {
   requiresPrUrl?: boolean;
   /** PR observed either from git sync, the run row, task row, or report_result. */
   prUrl?: string | null;
+  /** A subscription or its unprocessed final delivery still keeps this run open. */
+  hasOutstandingSupervision?: boolean;
 }
 
 /**
@@ -398,6 +400,11 @@ export interface TurnEndDecisionInput {
  *   6. otherwise the legacy default.
  */
 export function decideTurnEndStatus(i: TurnEndDecisionInput): SessionStatus {
+  if (i.freshStatus === "cancelled" || i.freshStatus === "closed") return i.freshStatus;
+  if (i.budgetHit) return "budget_exhausted";
+  // A backend response is a turn boundary, not necessarily completion of the
+  // supervising run. Keep the checkout and defer PR finalization while waiting.
+  if (i.hasOutstandingSupervision) return "parked";
   if (i.result != null) {
     if (isTerminalStatus(i.freshStatus)) return i.freshStatus;
     const failedish = isFailedResult(i.result);
@@ -406,7 +413,6 @@ export function decideTurnEndStatus(i: TurnEndDecisionInput): SessionStatus {
     if (i.requiresPrUrl && !(i.prUrl ?? resultPrUrl(i.result))) return "running";
     return "completed";
   }
-  if (i.freshStatus === "cancelled" || i.freshStatus === "closed") return i.freshStatus;
   if (i.budgetHit) return "budget_exhausted";
   if (i.requiresPrUrl && !i.prUrl) return "running";
   if (

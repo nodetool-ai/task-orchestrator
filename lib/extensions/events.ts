@@ -24,10 +24,13 @@
 // Pure helpers are exported for direct unit testing without DB setup.
 
 import { Type } from "typebox";
-import { and, eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, notInArray, sql } from "drizzle-orm";
 
 import { db } from "@/db";
-import { agentSessions, runTimers } from "@/db/schema";
+import { agentSessions, inboxEvents, runEventSubscriptions, runTimers } from "@/db/schema";
+import { subscribeRunEvents, unsubscribeRunEvents, listRunSubscriptions } from "../run-event-subscriptions";
+import { lockSourceTx, publishSourceEventTx } from "../run-source-events";
+import { hintRunEventDelivery } from "../run-event-delivery";
 import * as runs from "../runs";
 import * as runDispatch from "../run-dispatch";
 import {
@@ -35,11 +38,9 @@ import {
   TIMER_MAX_MINUTES,
   TIMER_MIN_MINUTES,
   cancelTimer,
-  claimInboxEvents,
   createTimer,
   emitInboxEvent,
   pendingOwnerCount,
-  quarantineEvent,
   toEnvelope,
   type Audience,
 } from "../inbox";
@@ -53,6 +54,14 @@ import type {
   ResultException,
   TurnEffectColumns,
 } from "../run-state";
+
+async function hasActiveSubscriptionsTx(tx: any, runId: number): Promise<boolean> {
+  const rows = await tx.select({ id: runEventSubscriptions.id })
+    .from(runEventSubscriptions)
+    .where(and(eq(runEventSubscriptions.subscriberRunId, runId), eq(runEventSubscriptions.status, "active")))
+    .limit(1);
+  return rows.length > 0;
+}
 
 /** Patch mutable agent_runs columns for `runId` — the single write path the
  *  parking-contract tools hand to recordTurnEffect (see lib/run-state.ts). */
@@ -250,6 +259,65 @@ const NO_RUN = errResult(
 
 export const EVENT_TOOLS: OrchestratorTool[] = [
   {
+    name: "events__subscribe",
+    label: "Subscribe to Run Events",
+    description: "Subscribe to facts about another run in your tree. Returns immediately. Matching events arrive as attributed conversation messages at the next turn boundary and wake an idle run automatically. Child runs are supervised automatically; no wait or polling call is needed.",
+    parameters: Type.Object({
+      source_run_id: Type.Integer({ minimum: 1 }),
+      events: Type.Array(Type.Union([
+        Type.Literal("run.attempt_finished"), Type.Literal("run.turn_finished"),
+        Type.Literal("run.question_opened"), Type.Literal("run.question_resolved"),
+        Type.Literal("run.worker_failed"),
+      ]), { minItems: 1, maxItems: 5 }),
+      attempt: Type.Optional(Type.Union([Type.Integer({ minimum: 1 }), Type.Literal("current"), Type.Literal("all")])),
+      replay: Type.Optional(Type.Union([Type.Literal("current_state"), Type.Literal("future_only")])),
+      lifetime: Type.Optional(Type.Union([Type.Literal("attempt"), Type.Literal("until_unsubscribed")])),
+      keep_open: Type.Optional(Type.Boolean()),
+      client_key: Type.String({ minLength: 1, maxLength: 200 }),
+    }),
+    execute: async (args, ctx) => {
+      const subscriberRunId = requireRunId(ctx);
+      if (!subscriberRunId) return NO_RUN;
+      try {
+        if ((await runs.get(subscriberRunId))?.deliveryVersion !== 2) return errResult("Subscriptions require a new event-enabled run; this run retains legacy delivery.");
+        const subscription = await subscribeRunEvents({
+          subscriberRunId, sourceRunId: args.source_run_id, events: args.events,
+          attempt: args.attempt ?? "current", replay: args.replay ?? "current_state",
+          lifetime: args.lifetime ?? "attempt", keepOpen: args.keep_open ?? false,
+          clientKey: args.client_key,
+        });
+        hintRunEventDelivery();
+        return ok(JSON.stringify({ subscription_id: subscription.id, ...subscription }));
+      } catch (error) { return errResult(error instanceof Error ? error.message : String(error)); }
+    },
+  },
+  {
+    name: "events__unsubscribe",
+    label: "Unsubscribe from Run Events",
+    description: "Stop a subscription you own. Already queued events remain unless discard_pending is true. Does not cancel the observed run or retract an executing turn.",
+    parameters: Type.Object({ subscription_id: Type.String(), discard_pending: Type.Optional(Type.Boolean()) }),
+    execute: async ({ subscription_id, discard_pending }, ctx) => {
+      const runId = requireRunId(ctx);
+      if (!runId) return NO_RUN;
+      try {
+        await unsubscribeRunEvents(runId, subscription_id, { discardPending: discard_pending ?? false });
+        return ok(JSON.stringify({ subscription_id, status: "cancelled" }));
+      }
+      catch (error) { return errResult(error instanceof Error ? error.message : String(error)); }
+    },
+  },
+  {
+    name: "events__list_subscriptions",
+    label: "List Run Subscriptions",
+    description: "List this run's event subscriptions, including finished and cancelled interests.",
+    parameters: Type.Object({}),
+    execute: async (_args, ctx) => {
+      const runId = requireRunId(ctx);
+      if (!runId) return NO_RUN;
+      return ok(JSON.stringify(await listRunSubscriptions(runId)));
+    },
+  },
+  {
     name: "timer__sleep",
     label: "Sleep",
     description:
@@ -331,21 +399,22 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
     execute: async ({ types, max }, ctx) => {
       const runId = requireRunId(ctx);
       if (!runId) return NO_RUN;
-      const claimed = await claimInboxEvents(runId, {
-        audiences: ["owner", "supervisor"] as Audience[],
-        types,
-        max,
-      });
+      // Read-only compatibility view: looking at an event is not a durable
+      // model-input receipt and must not remove it from automatic delivery.
+      const claimed = await db.select().from(inboxEvents).where(and(
+        eq(inboxEvents.targetRunId, runId),
+        eq(inboxEvents.status, "pending"),
+        notInArray(inboxEvents.type, [...CONTROL_TYPES]),
+        types?.length ? inArray(inboxEvents.type, types) : undefined,
+      )).orderBy(asc(inboxEvents.id)).limit(Math.max(1, Math.min(max ?? 200, 500)));
       const owner: unknown[] = [];
       const supervisor: unknown[] = [];
       for (const row of claimed) {
         try {
           const env = toEnvelope(row);
           (env.audience === "supervisor" ? supervisor : owner).push(env);
-        } catch (err) {
-          await quarantineEvent(row.id, err instanceof Error ? err.message : String(err)).catch(
-            () => {}
-          );
+        } catch {
+          // Inspection never acknowledges or mutates a delivery.
         }
       }
       const remaining = await pendingOwnerCount(runId).catch(() => 0);
@@ -441,6 +510,9 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
     execute: async ({ status, summary, data, pr_url, needs }, ctx) => {
       const runId = requireRunId(ctx);
       if (!runId) return NO_RUN;
+      if (await db.transaction((tx) => hasActiveSubscriptionsTx(tx, runId))) {
+        return errResult("This run still supervises outstanding work or has an undelivered result. Continue after the event arrives, or unsubscribe from that work before reporting a final result. Use events__list_subscriptions to inspect the interests.");
+      }
       const payload: ResultReport = {
         kind: "result",
         status,
@@ -477,6 +549,9 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
     execute: async ({ code, message, recoverable, details }, ctx) => {
       const runId = requireRunId(ctx);
       if (!runId) return NO_RUN;
+      if (await db.transaction((tx) => hasActiveSubscriptionsTx(tx, runId))) {
+        return errResult("This run still supervises outstanding work. Unsubscribe from that work before reporting a final exception, or continue supervision when its events arrive.");
+      }
       const payload: ResultException = {
         kind: "exception",
         code,
@@ -549,9 +624,17 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
         );
       }
 
-      await recordTurnEffect(patchRunColumns(runId), { kind: "question", question: pendingQuestion });
+      await db.transaction(async (tx) => {
+        await lockSourceTx(tx, runId);
+        await recordTurnEffect((columns) => tx.update(agentSessions).set(columns).where(eq(agentSessions.id, runId)),
+          { kind: "question", question: pendingQuestion });
+        await publishSourceEventTx(tx, { sourceRunId: runId, attempt,
+          eventType: "run.question_opened", producerKey: `question:${questionId}:opened`,
+          payload: { run_id: runId, question_id: questionId, question, context: context ?? null, deadline: deadline.toISOString() } });
+      });
+      hintRunEventDelivery();
 
-      await emitInboxEvent({
+      if ((await runs.get(self.parentRunId))?.deliveryVersion !== 2) await emitInboxEvent({
         targetRunId: self.parentRunId,
         type: "child.question",
         sourceKind: "run",
@@ -590,6 +673,7 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
       if (!runId) return NO_RUN;
       const child = await getRawRunFields(child_run_id);
       if (!child) return errResult(`Run ${child_run_id} not found.`);
+      if (child.parentRunId !== runId) return errResult("Only the child's parent may answer its question.");
 
       const gateError = checkAnswerable(child.pendingQuestion, question_id);
       if (gateError) return errResult(gateError);
@@ -604,47 +688,27 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
       // two concurrent answers (or a retried tool call) could both pass the
       // gate. Guard the UPDATE on the question still being open so exactly one
       // answer wins and the loser gets the documented "already answered" error.
-      const claimed = await db
-        .update(agentSessions)
-        .set({ pendingQuestion: updated })
-        .where(
-          and(
-            eq(agentSessions.id, child_run_id),
-            sql`${agentSessions.pendingQuestion}->>'question_id' = ${question_id}`,
-            sql`${agentSessions.pendingQuestion}->>'state' = 'open'`
-          )
-        )
-        .returning({ id: agentSessions.id });
-      if (claimed.length === 0) {
-        return errResult(`Question '${question_id}' was already answered.`);
-      }
-
-      // Cancel the child's deadline timer (correlated by question_id).
-      const timerRow = (
-        await db
-          .select({ id: runTimers.id })
-          .from(runTimers)
-          .where(
-            and(
-              eq(runTimers.runId, child_run_id),
-              eq(runTimers.correlationId, question_id),
-              eq(runTimers.status, "pending")
-            )
-          )
-      )[0];
-      if (timerRow) {
-        await cancelTimer(child_run_id, timerRow.id).catch(() => {});
-      }
-
-      const deliverError = await deliverMessage(
-        child_run_id,
-        `[answer to question ${question_id}] ${answer}`
-      );
-      if (deliverError) {
-        return errResult(
-          `Answer recorded, but delivery to run ${child_run_id} failed: ${deliverError}`
-        );
-      }
+      const claimed = await db.transaction(async (tx) => {
+        await lockSourceTx(tx, child_run_id);
+        const rows = await tx.update(agentSessions).set({ pendingQuestion: updated }).where(and(
+          eq(agentSessions.id, child_run_id),
+          sql`${agentSessions.pendingQuestion}->>'question_id' = ${question_id}`,
+          sql`${agentSessions.pendingQuestion}->>'state' = 'open'`,
+        )).returning({ id: agentSessions.id });
+        if (!rows.length) return false;
+        await tx.update(runTimers).set({ status: "cancelled" }).where(and(
+          eq(runTimers.runId, child_run_id), eq(runTimers.correlationId, question_id), eq(runTimers.status, "pending"),
+        ));
+        await publishSourceEventTx(tx, { sourceRunId: child_run_id, attempt: child.attempt,
+          eventType: "run.question_resolved", producerKey: `question:${question_id}:resolved`,
+          payload: { question_id, state: "answered", answered_at: answeredAt } });
+        await tx.insert(inboxEvents).values({ targetRunId: child_run_id, type: "question.answer",
+          sourceKind: "run", sourceId: String(runId), correlationId: question_id,
+          dedupeKey: `answer:${question_id}`, payload: { question_id, answer } }).onConflictDoNothing();
+        return true;
+      });
+      if (!claimed) return errResult(`Question '${question_id}' was already answered.`);
+      hintRunEventDelivery();
       return ok(`Answer delivered to run ${child_run_id} for question ${question_id}.`);
     },
   },

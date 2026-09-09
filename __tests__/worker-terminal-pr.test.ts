@@ -17,7 +17,7 @@ vi.mock("../lib/github-client", () => ({
 }));
 
 import { db } from "../db";
-import { agentSessions, runnerInstances, tasks } from "../db/schema";
+import { agentSessions, inboxEvents, runEventSubscriptions, runSourceEvents, runnerInstances, tasks } from "../db/schema";
 import * as agent from "../lib/agent";
 import * as backend from "../lib/agent-backend";
 import * as repo from "../lib/repo";
@@ -71,6 +71,9 @@ async function boot(runId: number) {
 afterEach(async () => {
   vi.restoreAllMocks();
   delete process.env.TASK_ORCH_WORKER_CHANNEL_SECRET;
+  await db.delete(inboxEvents);
+  await db.delete(runEventSubscriptions);
+  await db.delete(runSourceEvents);
   await db.delete(agentSessions);
 });
 

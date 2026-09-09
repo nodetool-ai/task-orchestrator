@@ -1,4 +1,8 @@
 import { dbTransport } from "../worker/db-transport";
+import { enqueueUserInputTx, materializeAndClaimRunTurn } from "../run-inputs";
+import { db } from "../../db";
+import { and, eq, inArray } from "drizzle-orm";
+import { agentMessages, runnerInstances, runInputs } from "../../db/schema";
 import type {
   MessageSnapshot,
   PersonaSnapshot,
@@ -100,7 +104,7 @@ export async function buildRunStart(
   // fresh start. An explicit mode argument overrides the inference.
   const resolvedMode: SnapshotMode = mode ?? (run.sdkSessionId ? "resume" : "start");
 
-  const [messages, task, persona, repository] = await Promise.all([
+  const [initialMessages, task, persona, repository] = await Promise.all([
     dbTransport.listMessages(runId),
     run.taskId ? dbTransport.getTask(run.taskId) : Promise.resolve(null),
     dbTransport.getPersona(run.personaId ?? "implementor"),
@@ -110,12 +114,26 @@ export async function buildRunStart(
 
   const planId = run.planId ?? task?.planId ?? null;
   const plan = planId ? await dbTransport.getPlan(planId) : null;
-  const [inboxDigest, memoryContext, toolNames] = await Promise.all([
-    dbTransport.claimInboxDigest(runId),
+  const v2 = (run.deliveryVersion ?? 1) >= 2;
+  const legacyDigest = v2 ? null : await dbTransport.claimInboxDigest(runId);
+  const generationRow = v2 ? (await db.select({ generation: runnerInstances.workerGeneration }).from(runnerInstances).where(eq(runnerInstances.runId, runId)).limit(1))[0] : null;
+  let durableTurn = v2 ? await materializeAndClaimRunTurn(runId, generationRow?.generation ?? 1) : null;
+  // Materialization is the durable source of truth. Keep inboxDigest null for
+  // v2 workers; claiming a legacy digest here could acknowledge an event
+  // without a model turn receipt.
+  const [memoryContext, toolNames] = await Promise.all([
     ambientMemory(runId),
     allowedTools(run.toolsProfile || persona.toolsProfile),
   ]);
-  const { transcript, pendingInput } = pendingMessages(messages);
+  let messages = durableTurn ? await dbTransport.listMessages(runId) : initialMessages;
+  let { transcript: rawTranscript, pendingInput } = pendingMessages(messages);
+  let manifestMessageIds = new Set((durableTurn?.inputs ?? []).map((input) => input.messageId));
+  let transcript = manifestMessageIds.size
+    ? rawTranscript.filter((message) => !manifestMessageIds.has(message.id))
+    : rawTranscript;
+  let durablePendingInput = durableTurn
+    ? messages.filter((message) => manifestMessageIds.has(message.id)).map((message) => wire(message) as unknown as MessageSnapshot)
+    : pendingInput;
 
   // Goal-synthesized kickoff prompt (fresh starts only — a resume rides the
   // backend session's prior context plus the inbox digest). This is the
@@ -139,6 +157,37 @@ export async function buildRunStart(
       kickoffPrompt = goal;
     }
   }
+  if (v2 && !durableTurn && !initialMessages.length && !kickoffPrompt) kickoffPrompt = "Continue this run using its goal and conversation context.";
+  // A fresh v2 run must always have a durable first input. Persist the
+  // synthesized kickoff as a user message so it receives the same receipt and
+  // replay guarantees as every later input.
+  if (v2 && !durableTurn && kickoffPrompt?.trim()) {
+    await db.transaction(async (tx) => {
+      const inserted = await tx.insert(agentMessages).values({ runId, role: "user", content: JSON.stringify([{ type: "text", text: kickoffPrompt }]), idempotencyKey: `durable-kickoff:${runId}` }).onConflictDoNothing().returning({ id: agentMessages.id });
+      const row = inserted[0] ?? (await tx.select({ id: agentMessages.id }).from(agentMessages).where(eq(agentMessages.idempotencyKey, `durable-kickoff:${runId}`)).limit(1))[0];
+      if (row) await enqueueUserInputTx(tx, runId, row.id);
+    });
+    durableTurn = await materializeAndClaimRunTurn(runId, generationRow?.generation ?? 1);
+    kickoffPrompt = undefined; // Already represented by the durable kickoff input.
+    messages = await dbTransport.listMessages(runId);
+    ({ transcript: rawTranscript, pendingInput } = pendingMessages(messages));
+    manifestMessageIds = new Set((durableTurn?.inputs ?? []).map((input) => input.messageId));
+    transcript = manifestMessageIds.size ? rawTranscript.filter((message) => !manifestMessageIds.has(message.id)) : rawTranscript;
+    durablePendingInput = messages.filter((message) => manifestMessageIds.has(message.id)).map((message) => wire(message) as unknown as MessageSnapshot);
+  }
+  if (v2 && durableTurn) {
+    const unresolved = await db.select({ messageId: runInputs.messageId }).from(runInputs)
+      .where(and(eq(runInputs.runId, runId), inArray(runInputs.status, ["pending", "assigned", "cancelled"])));
+    const excluded = new Set(unresolved.map(input => input.messageId));
+    messages = await dbTransport.listMessages(runId);
+    transcript = wire(messages.filter(message => !excluded.has(message.id))) as unknown as MessageSnapshot[];
+    const byId = new Map(messages.map(message => [message.id, message]));
+    durablePendingInput = durableTurn.inputs.map(input => {
+      const message = byId.get(input.messageId);
+      if (!message) throw new Error(`Missing input message ${input.messageId}`);
+      return wire(message) as unknown as MessageSnapshot;
+    });
+  }
   const deadline = run.budgetMaxSeconds == null
     ? null
     : new Date(run.startedAt.getTime() + run.budgetMaxSeconds * 1000).toISOString();
@@ -153,9 +202,13 @@ export async function buildRunStart(
       ? (wire(repository) as unknown as RepositorySnapshot)
       : ({ id: "none" } as RepositorySnapshot),
     transcript,
-    inboxDigest,
+    inboxDigest: legacyDigest,
     memoryContext,
-    pendingInput,
+    pendingInput: durablePendingInput,
+    ...(durableTurn ? {
+      turnId: durableTurn.id,
+      inputManifest: durableTurn.inputs.map((input) => ({ id: input.id, inputSeq: input.inputSeq, messageId: input.messageId, kind: input.kind })),
+    } : {}),
     policy: {
       allowedTools: toolNames,
       maxTurns: run.budgetMaxTurns,

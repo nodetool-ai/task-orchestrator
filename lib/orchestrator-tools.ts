@@ -23,6 +23,7 @@ import {
 } from "./types";
 import { createTimer, TIMER_MAX_MINUTES, TIMER_MIN_MINUTES } from "./inbox";
 import { recordTurnEffect } from "./run-state";
+import { subscribeRunEvents, listRunSubscriptions } from "./run-event-subscriptions";
 
 // Derived from TASK_TRANSITIONS so the transition_task description can never
 // drift from the actual allowed edges (a hardcoded list silently goes stale
@@ -1052,7 +1053,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "start_session",
     label: "Start Session",
     description:
-      "Kick off a background Claude agent to implement a task. Creates a worktree, runs the agent, opens a PR when done, and moves the task to review. Returns the session id immediately (non-blocking). To wait, call await_session; it parks your run and child events wake you later.",
+      "Kick off a background Claude agent to implement a task. Creates a worktree, runs the agent, opens a PR when done, and moves the task to review. Returns immediately and automatically subscribes your run to the child. Completion and questions arrive as event messages; continue other work or end your turn without a wait call.",
     parameters: Type.Object({
       task_id: Type.String({ minLength: 1 }),
       model: Type.Optional(Type.String()),
@@ -1076,9 +1077,11 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
         })
       );
       if ("_error" in result) return errResult(`Error: ${result._error}`);
-      return ok(
-        `Started session #${result.id} on ${result.taskId} (model: ${result.model ?? "default"}).`
-      );
+      const subscriptions = ctx.runId ? await listRunSubscriptions(ctx.runId) : [];
+      const subscription = subscriptions.find((s) => s.sourceRunId === result.id && s.keepOpen);
+      return jsonResult({ session_id: result.id, task_id: result.taskId, model: result.model,
+        subscription_id: subscription?.id ?? null, attempt: subscription?.resolvedAttempt ?? 1,
+        message: "Started. Child events arrive automatically in your conversation; no wait call is needed." });
     },
   },
 
@@ -1123,6 +1126,17 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
         });
       }
 
+      const caller = await runs.get(ctx.runId);
+      if (caller?.deliveryVersion === 2) {
+        try {
+          const subscription = await subscribeRunEvents({ subscriberRunId: ctx.runId,
+            sourceRunId: session_id, events: ["run.attempt_finished", "run.question_opened"],
+            attempt: run.attempt, replay: "current_state", lifetime: "attempt", keepOpen: true,
+            clientKey: `await-session:${session_id}:${run.attempt}` });
+          return jsonResult({ session_id, subscription_id: subscription.id, status: run.status,
+            waiting: true, message: "Subscribed. Continue your work or finish this turn; matching events arrive in your conversation automatically." });
+        } catch (error) { return errResult(error instanceof Error ? error.message : String(error)); }
+      }
       const timeoutSeconds = timeout_seconds ?? 1800;
       const minutes = Math.max(
         TIMER_MIN_MINUTES,

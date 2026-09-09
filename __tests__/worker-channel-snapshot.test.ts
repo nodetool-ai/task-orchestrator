@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
-import { agentMessages, agentSessions, personas as personasTable } from "../db/schema";
+import { agentMessages, agentSessions, inboxEvents, personas as personasTable, runEventSubscriptions, runSourceEvents } from "../db/schema";
 import * as repo from "../lib/repo";
 import { create } from "../lib/runs";
 import { buildRunStart } from "../lib/worker-channel/snapshot";
@@ -9,6 +9,10 @@ import { buildRunStart } from "../lib/worker-channel/snapshot";
 const PERSONA_PROMPT = "You are the test implementor persona.";
 
 beforeEach(async () => {
+  await db.delete(inboxEvents);
+  await db.delete(runEventSubscriptions);
+  await db.delete(runSourceEvents);
+  await db.delete(agentMessages);
   await db.delete(agentSessions);
   await db.delete(personasTable);
   await repo.upsertPersona({
@@ -59,7 +63,7 @@ describe("buildRunStart", () => {
     const task = await repo.createTask({ planId: null, title: "No merge", repoId: "R-default" });
     const run = await create({ goal: "<implement>", taskId: task.id, repoId: "R-default", autoMerge: false, defer: true });
     const start = await buildRunStart(run.id);
-    expect(start.kickoffPrompt).toContain("Auto-merge is disabled for this run");
+    expect(JSON.stringify(start.pendingInput)).toContain("Auto-merge is disabled for this run");
     expect(run.baseBranch).toBe("main");
     expect(start.run.baseBranch).toBe("main");
   });
@@ -113,5 +117,26 @@ describe("buildRunStart", () => {
 
   it("throws for a missing run", async () => {
     await expect(buildRunStart(999999)).rejects.toThrow(/not found/i);
+  });
+
+  it("builds a v2 kickoff snapshot from one claimed manifest", async () => {
+    const run = await create({ goal: "<chat>", initialPrompt: "start", defer: true });
+    await db.update(agentSessions).set({ deliveryVersion: 2 }).where(eq(agentSessions.id, run.id));
+    const first = await buildRunStart(run.id);
+    expect(first.kickoffPrompt).toBeUndefined();
+    expect(first.turnId).toBeTruthy();
+    expect(first.inputManifest?.map((input) => input.messageId)).toEqual(first.pendingInput.map((message) => message.id));
+    expect(new Set(first.pendingInput.map((message) => message.id)).size).toBe(first.pendingInput.length);
+  });
+
+  it("replays the same uncompleted v2 manifest on a second snapshot", async () => {
+    const run = await create({ goal: "<chat>", initialPrompt: "start", defer: true });
+    await db.update(agentSessions).set({ deliveryVersion: 2 }).where(eq(agentSessions.id, run.id));
+    const first = await buildRunStart(run.id);
+    const second = await buildRunStart(run.id);
+    expect(second.turnId).toBe(first.turnId);
+    expect(second.inputManifest).toEqual(first.inputManifest);
+    expect(second.pendingInput.map((message) => message.id)).toEqual(first.pendingInput.map((message) => message.id));
+    expect(second.transcript.some((message) => first.pendingInput.some((pending) => pending.id === message.id))).toBe(false);
   });
 });

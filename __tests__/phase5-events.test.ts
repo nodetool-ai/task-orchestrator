@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { asc, eq } from "drizzle-orm";
 
 import { db } from "../db";
-import { agentMessages, agentSessions, inboxEvents, runTimers } from "../db/schema";
+import { agentMessages, agentSessions, inboxEvents, runEventSubscriptions, runSourceEvents, runTimers } from "../db/schema";
 import { seedPersonas } from "../db/seed-personas";
 import {
   cancelTimersByCorrelation,
@@ -51,6 +51,8 @@ beforeEach(async () => {
   await seedPersonas();
   await db.delete(runTimers);
   await db.delete(inboxEvents);
+  await db.delete(runEventSubscriptions);
+  await db.delete(runSourceEvents);
   await db.delete(agentMessages);
   await db.delete(agentSessions);
 });

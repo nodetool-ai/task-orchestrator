@@ -101,6 +101,13 @@ agent_messages           persisted assistant/tool/user message blocks
 
 For chat, `agent_messages` is the UI/streaming projection of the conversation.
 
+`run_source_events` stores immutable typed run facts. `run_event_subscriptions`
+stores durable observer registrations and replay fences, while
+`run_event_delivery_matches` records overlapping interests on inbox deliveries.
+`run_inputs` and `run_turns` store ordered scheduling and logical-turn receipts.
+New runs use `agent_runs.delivery_version = 2`; older rows remain version 1 for
+legacy inbox compatibility.
+
 Nearly every run — chats, plan executors (goal=`<execute>`), implement, and
 review — executes in an out-of-process **worker** (a detached local process,
 Docker container, or Fly Machine). The worker drives its model turns over the

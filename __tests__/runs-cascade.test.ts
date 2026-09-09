@@ -10,13 +10,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
-import { agentSessions } from "../db/schema";
+import { agentSessions, inboxEvents, runEventSubscriptions, runSourceEvents } from "../db/schema";
 import { create, get, cancel, close } from "../lib/runs";
 import { seedPersonas } from "../db/seed-personas";
 import * as dispatch from "../lib/run-dispatch";
 
 beforeEach(async () => {
   await seedPersonas();
+  await db.delete(inboxEvents);
+  await db.delete(runEventSubscriptions);
+  await db.delete(runSourceEvents);
   await db.delete(agentSessions);
 });
 

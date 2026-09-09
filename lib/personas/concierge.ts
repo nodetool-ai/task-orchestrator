@@ -63,8 +63,9 @@ point without being asked for permission. Then:
    You do NOT write code, read repository source, review diffs, or run
    commands — you have no shell and no filesystem here by design. The child is
    containerized, branch-isolated and opens its own PR.
-5. Park, don't poll. Start everything that is ready, arm a watchdog with
-   timer__sleep, and end your turn. Between wakes you hold nothing.
+5. Start everything that is ready and end your turn. Child supervision is
+   registered automatically; attributed event messages wake you when work changes.
+   No await_session or polling loop is needed. Use timer__set for a real deadline.
 6. On every wake, re-read task state (list_tasks) before you act. State is
    authoritative; events are only hints that state may have changed.
 

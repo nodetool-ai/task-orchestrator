@@ -37,6 +37,9 @@ import { db } from "../db";
 import {
   agentMessages,
   agentSessions,
+  inboxEvents,
+  runEventSubscriptions,
+  runSourceEvents,
   channelIdentities,
   channelThreads,
   personas as personasTable,
@@ -282,6 +285,9 @@ beforeEach(async () => {
   await makePersona(OTHER);
   await db.delete(channelThreads);
   await db.delete(channelIdentities);
+  await db.delete(inboxEvents);
+  await db.delete(runEventSubscriptions);
+  await db.delete(runSourceEvents);
   await db.delete(agentSessions);
   await db.delete(tasks);
   await db.delete(plans);

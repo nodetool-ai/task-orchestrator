@@ -18,16 +18,20 @@
 // after a conflicting terminal outcome already won enqueues `run.commit` with the
 // authoritative outcome and `accepted: false`.
 
-import { and, eq, notInArray } from "drizzle-orm";
+import { and, eq, inArray, notInArray, sql } from "drizzle-orm";
 import { agentEvents, agentMessages, agentSessions, runTimers } from "../../db/schema";
 import {
   LEASE_STATUSES,
   TERMINAL_STATUSES,
   buildStatusEventValues,
   coerceRunStatus,
+  isFailedResult,
   type SessionStatus,
 } from "../run-state";
 import { WORKER_LOG_MAX_CHARS } from "../runner/worker-log-store";
+import { buildTurnInputCommand, claimRunTurn, completeRunTurnTx, materializeInboxEventsTx, hasReadyRunInputsTx } from "../run-inputs";
+import { hasOutstandingSupervisionTx } from "../run-event-subscriptions";
+import { lockSourceTx, publishAttemptFinishedTx, publishSourceEventTx } from "../run-source-events";
 import {
   afterWorkerEventCommit,
   persistCommandTx,
@@ -57,6 +61,7 @@ const PHASE_STATUS: Record<string, SessionStatus> = {
   // Clean chat-loop exit: the run returns to resumable-idle (the legacy
   // releaseClaim(..., idle) chat-exit landing). Never a lease status.
   idle: "idle",
+  parked: "parked",
 };
 
 const MAX_ERROR_CHARS = 8 * 1024;
@@ -98,6 +103,20 @@ async function currentStatus(tx: WorkerChannelTransaction, runId: number): Promi
     .where(eq(agentSessions.id, runId))
     .limit(1);
   return rows[0] ? coerceRunStatus(rows[0].status) : null;
+}
+
+/**
+ * report_result/raise are persisted before the worker emits its lifecycle
+ * event.  The worker's terminal payload is often only a textual model
+ * summary, so it must not replace that structured tool result. The terminal
+ * payload is used when no structured tool result has been persisted.
+ */
+function terminalResult(
+  payloadResult: unknown,
+  storedResult: unknown
+): unknown {
+  if (storedResult !== null && typeof storedResult === "object") return storedResult;
+  return payloadResult !== undefined ? payloadResult : storedResult ?? null;
 }
 
 // ── 14.1 Transcript and raw events ───────────────────────────────────────────
@@ -177,6 +196,8 @@ async function handleRunPhase(tx: WorkerChannelTransaction, frame: WorkerEventFr
   const { phase } = frame.payload as RunPhase;
   const target = PHASE_STATUS[phase];
   const status = await currentStatus(tx, frame.runId);
+  const versionRows = await tx.select({ deliveryVersion: agentSessions.deliveryVersion }).from(agentSessions).where(eq(agentSessions.id, frame.runId)).limit(1);
+  const durableV2 = versionRows[0]?.deliveryVersion === 2;
   // Monotonic lifecycle: never regress a run that already landed a terminal
   // outcome back into a live phase.
   if (status != null && TERMINAL_STATUSES.includes(status)) return;
@@ -186,6 +207,11 @@ async function handleRunPhase(tx: WorkerChannelTransaction, frame: WorkerEventFr
     return;
   }
   const set: Record<string, unknown> = { status: target };
+  // New generation-aware workers release their claim only after explicitly
+  // acknowledging the post-checkpoint idle/parked decision.
+  if ((target === "parked" || target === "idle") && durableV2) {
+    set.workerScope = null;
+  }
   // 'idle' no longer releases the claim: the worker lands idle BETWEEN turns
   // and keeps waiting chatIdleMs for the next `run.input` (driveChatRun). A
   // kept claim is what makes sendMessageToRun re-dial the living worker instead
@@ -211,8 +237,9 @@ async function handleRunPhase(tx: WorkerChannelTransaction, frame: WorkerEventFr
   }
 }
 
-async function handleRunCheckpoint(tx: WorkerChannelTransaction, frame: WorkerEventFrame): Promise<void> {
-  const { sdkSessionId, metadata } = frame.payload as RunCheckpoint;
+async function handleRunCheckpoint(tx: WorkerChannelTransaction, frame: WorkerEventFrame): Promise<{ resultCommandId: string } | void> {
+  const { sdkSessionId, metadata, turnId, inputIds, workerGeneration, instanceId, checkpoint } = frame.payload as RunCheckpoint;
+  if (turnId) await lockSourceTx(tx, frame.runId);
   const set: Record<string, unknown> = { sdkSessionId };
   // Allowlisted metadata only — the worker cannot patch arbitrary columns.
   if (metadata && typeof metadata === "object") {
@@ -241,6 +268,96 @@ async function handleRunCheckpoint(tx: WorkerChannelTransaction, frame: WorkerEv
     payload: JSON.stringify({}),
     createdAt: new Date(),
   });
+
+  // New workers send a durable turn receipt with the checkpoint.  Keep the
+  // legacy checkpoint-only path above for old bundles, but never infer input
+  // completion from transcript/message ordering.
+  if (turnId) {
+    const completed = await completeRunTurnTx(tx, {
+      turnId,
+      runId: frame.runId,
+      workerGeneration: frame.workerGeneration ?? 1,
+      instanceId: frame.instanceId,
+      checkpoint: checkpoint ?? metadata,
+      inputIds,
+      resumeTokenAfter: sdkSessionId,
+    });
+    if (!completed) {
+      throw new Error(`Stale or already completed turn receipt ${turnId}`);
+    }
+    const attemptRows = await tx.select({ attempt: agentSessions.attempt }).from(agentSessions).where(eq(agentSessions.id, frame.runId)).limit(1);
+    await publishSourceEventTx(tx, {
+      sourceRunId: frame.runId,
+      attempt: attemptRows[0]?.attempt ?? 1,
+      eventType: "run.turn_finished",
+      logicalTurnId: turnId,
+      workerGeneration: frame.workerGeneration ?? 1,
+      producerKey: `turn:${turnId}:finished`,
+      payload: { turn_id: turnId, input_ids: inputIds ?? [], summary: (checkpoint as { summary?: unknown } | undefined)?.summary ?? null },
+    });
+
+    afterWorkerEventCommit(() => { void import("../run-event-delivery").then(m => m.hintRunEventDelivery()).catch(() => undefined); });
+
+    // The checkpoint is also the safe backend boundary. Decide the next
+    // lifecycle action in this transaction so an acknowledged checkpoint can
+    // never leave a worker waiting without a durable command.
+    const lifecycle = (await tx.select().from(agentSessions).where(eq(agentSessions.id, frame.runId)).limit(1))[0];
+    const persistedPark = lifecycle?.parkReason;
+    const countRows = await tx.execute(sql`SELECT COUNT(*)::int AS count FROM run_turns WHERE run_id=${frame.runId} AND state='completed'`);
+    const persistedBudget = lifecycle?.status === "budget_exhausted" || Boolean(lifecycle && (
+      (lifecycle.budgetMaxTurns != null && Number(countRows[0]?.count ?? 0) >= lifecycle.budgetMaxTurns) ||
+      (lifecycle.budgetMaxUsd != null && (lifecycle.totalCostUsd ?? 0) >= lifecycle.budgetMaxUsd) ||
+      (lifecycle.budgetMaxSeconds != null && Date.now() >= lifecycle.startedAt.getTime() + lifecycle.budgetMaxSeconds * 1000)
+    ));
+    if (persistedBudget) return landTerminal(tx, frame, "budget_exhausted", { completedAt: new Date(), workerScope: null }, { status: "budget_exhausted" });
+    if (lifecycle && TERMINAL_STATUSES.includes(lifecycle.status as SessionStatus)) {
+      const command = await persistCommandTx(tx, { runId: frame.runId, instanceId: frame.instanceId, workerGeneration: frame.workerGeneration, controllerEpoch: frame.controllerEpoch,
+        type: "run.commit", payload: { status: lifecycle.status, finishEventId: frame.id, accepted: false } });
+      return { resultCommandId: command.id };
+    }
+    if (!persistedPark && !persistedBudget) await materializeInboxEventsTx(tx, frame.runId, 32);
+    const next = persistedPark || persistedBudget ? null : await claimRunTurn(tx, frame.runId, frame.workerGeneration ?? 1, 32);
+    let type: "run.input" | "run.park";
+    let payload: Record<string, unknown>;
+    if (next) {
+      const ids = next.inputs.map((item) => item.messageId);
+      const messages = ids.length
+        ? await tx.select({ id: agentMessages.id, runId: agentMessages.runId, role: agentMessages.role, content: agentMessages.content }).from(agentMessages).where(inArray(agentMessages.id, ids))
+        : [];
+      type = "run.input";
+      payload = {
+        ...buildTurnInputCommand(next, messages.map((row) => ({ ...row, content: JSON.parse(row.content) })) as any),
+      };
+    } else {
+      const outstanding = await hasOutstandingSupervisionTx(tx, frame.runId);
+      const goalRow = await tx.select({ goal: agentSessions.goal }).from(agentSessions).where(eq(agentSessions.id, frame.runId)).limit(1);
+      const isChat = goalRow[0]?.goal === "<chat>";
+      if (isChat && lifecycle?.result && !outstanding && !persistedPark) {
+        const status = isFailedResult(lifecycle.result) ? "failed" : "completed";
+        return landTerminal(tx, frame, status, { completedAt: new Date(), workerScope: null }, { status, result: lifecycle.result });
+      }
+      const meta = metadata && typeof metadata === "object" ? metadata as Record<string, unknown> : {};
+      const parkReason = persistedPark ?? (typeof meta.parkReason === "string" ? meta.parkReason : null);
+      const budgetHit = persistedBudget || meta.budgetHit === true;
+      type = "run.park";
+      payload = budgetHit
+        ? { reason: "budget_exhausted", action: "park" }
+        : parkReason
+        ? { reason: parkReason, action: "park" }
+        : outstanding
+        ? { reason: "waiting", action: "park" }
+        : { reason: "turn_finished", action: isChat ? "idle" : "finalize" };
+    }
+    const command = await persistCommandTx(tx, {
+      runId: frame.runId,
+      instanceId: frame.instanceId,
+      workerGeneration: frame.workerGeneration,
+      controllerEpoch: frame.controllerEpoch,
+      type,
+      payload,
+    });
+    return { resultCommandId: command.id };
+  }
 }
 
 // ── 14.3 Finish / fail / cancel ──────────────────────────────────────────────
@@ -252,10 +369,28 @@ async function handleRunCheckpoint(tx: WorkerChannelTransaction, frame: WorkerEv
 async function landTerminal(
   tx: WorkerChannelTransaction,
   frame: WorkerEventFrame,
-  status: Extract<SessionStatus, "completed" | "failed" | "cancelled">,
+  status: Extract<SessionStatus, "completed" | "failed" | "cancelled" | "budget_exhausted">,
   columns: Record<string, unknown>,
   commit: RunCommit
 ): Promise<{ resultCommandId: string }> {
+  // Match the publication lock ordering used by status writers: source
+  // revision ownership is acquired before mutating the source run row.
+  await lockSourceTx(tx, frame.runId);
+  const [before] = await tx.select().from(agentSessions).where(eq(agentSessions.id, frame.runId)).for("update");
+  if (status === "completed" && before?.deliveryVersion === 2 && !TERMINAL_STATUSES.includes(before.status as SessionStatus)) {
+    await materializeInboxEventsTx(tx, frame.runId);
+    if (await hasOutstandingSupervisionTx(tx, frame.runId) || await hasReadyRunInputsTx(tx, frame.runId)) {
+      await tx.update(agentSessions).set({ ...columns, status: "parked", completedAt: null, workerScope: null, parkReason: "waiting" }).where(eq(agentSessions.id, frame.runId));
+      await tx.insert(agentEvents).values(buildStatusEventValues(frame.runId, "parked"));
+      const decision = await persistCommandTx(tx, {
+        runId: frame.runId, instanceId: frame.instanceId, workerGeneration: frame.workerGeneration,
+        controllerEpoch: frame.controllerEpoch, type: "run.commit",
+        payload: { ...commit, status: "parked", accepted: false, finishEventId: frame.id },
+      });
+      emitLive(frame.runId, "status", { status: "parked" });
+      return { resultCommandId: decision.id };
+    }
+  }
   const written = await tx
     .update(agentSessions)
     .set({ status, ...columns })
@@ -272,6 +407,21 @@ async function landTerminal(
       .update(runTimers)
       .set({ status: "cancelled" })
       .where(and(eq(runTimers.runId, frame.runId), eq(runTimers.status, "pending")));
+    const attemptRows = await tx
+      .select({ attempt: agentSessions.attempt })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, frame.runId))
+      .limit(1);
+    await publishAttemptFinishedTx(tx, {
+      sourceRunId: frame.runId,
+      attempt: attemptRows[0]?.attempt ?? 1,
+      status,
+      error: commit.error ?? null,
+      result: (commit.result as Record<string, unknown> | null | undefined) ?? null,
+      prUrl: commit.prUrl ?? null,
+      workerGeneration: frame.workerGeneration,
+    });
+    afterWorkerEventCommit(() => { void import("../run-event-delivery").then(m => m.hintRunEventDelivery()).catch(() => undefined); });
     commitPayload = { ...commit, finishEventId: frame.id, accepted: true } as RunCommit;
     emitLive(frame.runId, "status", { status });
   } else {
@@ -302,12 +452,15 @@ async function handleRunFinished(
   frame: WorkerEventFrame
 ): Promise<{ resultCommandId: string }> {
   const payload = frame.payload as RunFinished;
+  const [stored] = await tx.select({ result: agentSessions.result }).from(agentSessions).where(eq(agentSessions.id, frame.runId));
+  const result = terminalResult(payload.result, stored?.result);
+  const status = result && isFailedResult(result) ? "failed" : "completed";
   return landTerminal(
     tx,
     frame,
-    "completed",
-    { completedAt: new Date(), result: payload.result ?? null, ...(payload.prUrl != null ? { prUrl: payload.prUrl } : {}), ...usageColumns(payload.usage) },
-    { status: "completed", result: payload.result, prUrl: payload.prUrl ?? null, usage: payload.usage }
+    status,
+    { completedAt: new Date(), result, ...(payload.prUrl != null ? { prUrl: payload.prUrl } : {}), ...usageColumns(payload.usage) },
+    { status, result, prUrl: payload.prUrl ?? null, usage: payload.usage }
   );
 }
 

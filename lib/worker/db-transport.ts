@@ -18,6 +18,8 @@ import { db } from "../../db";
 import { agentEvents, agentMessages, agentSessions, resourceLocks, runnerInstances } from "../../db/schema";
 import * as repo from "../repo";
 import { markControlInjected } from "../inbox";
+import { enqueueMessageTx } from "../run-inputs";
+import { lockSourceTx, registerDefaultChildSubscriptionTx } from "../run-source-events";
 import { subscribeRunInput } from "../run-stream-listener";
 import {
   LEASE_STATUSES,
@@ -110,7 +112,10 @@ export const dbTransport: RunTransport = {
 
   async appendMessage(runId, role: MessageRole, content, opts) {
     const idempotencyKey = opts?.idempotencyKey?.trim() || undefined;
-    const inserted = await db
+    const row = await db.transaction(async (tx) => {
+    const [run] = await tx.select({ deliveryVersion: agentSessions.deliveryVersion }).from(agentSessions)
+      .where(eq(agentSessions.id, runId)).for("update");
+    const inserted = await tx
       .insert(agentMessages)
       .values({
         runId,
@@ -125,7 +130,7 @@ export const dbTransport: RunTransport = {
       inserted[0] ??
       (idempotencyKey
         ? (
-            await db
+            await tx
               .select()
               .from(agentMessages)
               .where(and(eq(agentMessages.runId, runId), eq(agentMessages.idempotencyKey, idempotencyKey)))
@@ -134,6 +139,11 @@ export const dbTransport: RunTransport = {
     if (!row) {
       throw new Error("Message append conflicted but no idempotent row was found");
     }
+    if (run?.deliveryVersion === 2 && role === "user") {
+      await enqueueMessageTx(tx, { runId, messageId: row.id, kind: "user" });
+    }
+    return row;
+    });
     return (await runs()).hydrateMessage(row);
   },
 
@@ -195,7 +205,13 @@ export const dbTransport: RunTransport = {
     if ("completedAt" in patch) set.completedAt = toDate(patch.completedAt);
     if (patch.incrementAttempt) set.attempt = sql`${agentSessions.attempt} + 1`;
     if (Object.keys(set).length === 0) return;
-    await db.update(agentSessions).set(set).where(eq(agentSessions.id, runId));
+    await db.transaction(async (tx) => {
+      await lockSourceTx(tx, runId);
+      const [row] = await tx.update(agentSessions).set(set).where(eq(agentSessions.id, runId)).returning();
+      if (row && patch.incrementAttempt && row.deliveryVersion === 2) {
+        await registerDefaultChildSubscriptionTx(tx, row);
+      }
+    });
   },
 
   async pollCancel(runId): Promise<CancelPollResult> {

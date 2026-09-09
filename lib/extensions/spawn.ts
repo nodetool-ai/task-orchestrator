@@ -24,6 +24,7 @@ import * as runDispatch from "../run-dispatch";
 import { isResumableWorktreeRun } from "../runs";
 import type { RunRow, CwdStrategy, AppendStreamEvent } from "../runs";
 import { isTerminalStatus } from "../types";
+import { listRunSubscriptions } from "../run-event-subscriptions";
 import type { SessionStatus } from "../types";
 import { listProfiles } from "../profiles";
 import type { OrchestratorTool, OrchestratorToolResult } from "../orchestrator-tools";
@@ -520,6 +521,9 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
           JSON.stringify(
             {
               run_id: newRun.id,
+              attempt: newRun.attempt,
+              subscription_id: (await listRunSubscriptions(runId)).find((s) => s.sourceRunId === newRun.id && s.keepOpen)?.id ?? null,
+              event_delivery: "Child outcomes and questions arrive automatically; no wait call is required.",
               status: newRun.status,
               parent_run_id: newRun.parentRunId,
               depth: newChildDepth,
@@ -542,7 +546,7 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
       name: "spawn__get_run",
       label: "Get Run",
       description:
-        "Look up a run by id and return its current status, outcome, and last agent text. Used to poll a previously spawned child.",
+        "Look up a run by id and return its current status, outcome, and last agent text. Use to inspect authoritative current state; event messages notify you automatically.",
       parameters: Type.Object({ id: Type.Integer({ minimum: 1 }) }),
       execute: async ({ id }: { id: number }, _ctx) => {
         const run = await runs.get(id);
@@ -593,7 +597,7 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
       name: "spawn__append_message",
       label: "Append Message",
       description:
-        "Send a user message to an existing run, resuming its SDK session, and return immediately (non-blocking) with status 'running'. Uses the same per-run lock as the UI composer, so this is safe to call concurrently with the UI. To wait for the resumed child's reply, call await_session on it (or spawn__get_run to poll) — it parks your run and the child's terminal event wakes you; do NOT hold a turn open waiting here. Refuses on closed/cancelled runs, and on completed/failed/budget_exhausted runs that are NOT resumable worktree (implement-style) children — those can be resumed even after they land 'completed'. Cannot target your own run or a mid-turn ancestor (that would deadlock). Same tree-budget cap as spawn__spawn_agent.",
+        "Send a user message to an existing run, resuming its SDK session, and return immediately (non-blocking) with status 'running'. Uses the same per-run lock as the UI composer, so this is safe to call concurrently with the UI. The resumed child's completion arrives automatically as an event message. For an ongoing chat reply, subscribe to run.turn_finished. Continue other work or end your turn; no wait call is needed. Refuses on closed/cancelled runs, and on completed/failed/budget_exhausted runs that are NOT resumable worktree (implement-style) children — those can be resumed even after they land 'completed'. Cannot target your own run or a mid-turn ancestor (that would deadlock). Same tree-budget cap as spawn__spawn_agent.",
       parameters: Type.Object({
         run_id: Type.Integer({ minimum: 1 }),
         text: Type.String({ minLength: 1 }),
