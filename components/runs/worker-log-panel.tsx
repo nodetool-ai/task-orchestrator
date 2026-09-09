@@ -11,12 +11,7 @@ interface WorkerLogResponse {
   error?: string;
 }
 
-// The raw output of a run's worker (a local docker container's logs, or a Fly
-// worker's runner.log) — the place to look when a run fails without anything
-// useful in the transcript (OOM kill, crash before the agent started, git/auth
-// trouble). "live" = read from the running container just now; "stored" = the
-// tail captured/flushed onto the run row (at container death, or during/at the
-// end of a Fly run).
+// Raw worker stdout/stderr, read from the provider or from a captured tail.
 export function WorkerLogPanel({ runId }: { runId: number }) {
   const [data, setData] = useState<WorkerLogResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -46,7 +41,7 @@ export function WorkerLogPanel({ runId }: { runId: number }) {
         <span className="font-semibold text-foreground">Worker log</span>
         {data?.source && (
           <span className="rounded bg-muted/60 px-1.5 py-0.5 font-mono">
-            {data.source === "live" ? "live container" : "captured at exit"}
+            {data.source === "live" ? "live worker" : "captured log"}
           </span>
         )}
         {data?.exitCode != null && (
@@ -72,6 +67,9 @@ export function WorkerLogPanel({ runId }: { runId: number }) {
           refresh
         </button>
       </div>
+      {data?.error && (
+        <p role="alert" className="px-3 pt-2 text-[11px] text-state-blocked">{data.error}</p>
+      )}
       <pre className="max-h-80 overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-[11px] leading-5 text-foreground/90">
         {error ? (
           <span className="text-state-blocked">failed to load: {error}</span>
@@ -81,8 +79,7 @@ export function WorkerLogPanel({ runId }: { runId: number }) {
           data.log
         ) : (
           <span className="text-muted-foreground/60">
-            No worker log for this run — it either predates log capture or its
-            worker never produced any output.
+            No worker output available for this run.
           </span>
         )}
       </pre>

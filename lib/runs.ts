@@ -5104,17 +5104,37 @@ export async function handleWorkerDeath(
  */
 export async function getWorkerLog(
   runId: number
-): Promise<{ log: string | null; exitCode: number | null; scope: string | null } | null> {
+): Promise<{
+  log: string | null;
+  exitCode: number | null;
+  scope: string | null;
+  provider: string | null;
+  spriteName: string | null;
+  serviceName: string | null;
+} | null> {
   const [row] = await db
     .select({
       log: agentSessions.workerLog,
       exitCode: agentSessions.workerExitCode,
       scope: agentSessions.workerScope,
+      provider: runnerInstances.provider,
+      spriteName: runnerInstances.spriteName,
+      serviceName: runnerInstances.providerServiceName,
+      workerGeneration: runnerInstances.workerGeneration,
     })
     .from(agentSessions)
+    .leftJoin(runnerInstances, eq(runnerInstances.runId, agentSessions.id))
     .where(eq(agentSessions.id, runId));
   if (!row) return null;
-  return { log: row.log ?? null, exitCode: row.exitCode ?? null, scope: row.scope ?? null };
+  return {
+    log: row.log ?? null,
+    exitCode: row.exitCode ?? null,
+    scope: row.scope ?? null,
+    provider: row.provider ?? null,
+    spriteName: row.spriteName ?? null,
+    serviceName: row.serviceName ?? (row.workerGeneration != null && row.workerGeneration > 1
+      ? `worker-g${row.workerGeneration}` : "worker"),
+  };
 }
 
 /**

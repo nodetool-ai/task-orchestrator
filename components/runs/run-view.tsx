@@ -716,7 +716,7 @@ export function RunView({
           <button
             type="button"
             onClick={() => setShowWorkerLog((v) => !v)}
-            title="Worker container log (docker logs)"
+            title="Worker output (stdout and stderr)"
             className={
               "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] transition-colors shrink-0 " +
               (showWorkerLog
