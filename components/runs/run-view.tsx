@@ -9,6 +9,7 @@ import {
   Cpu,
   FolderClosed,
   GitBranch,
+  GitFork,
   Inbox,
   ScrollText,
   Square,
@@ -153,6 +154,7 @@ export function RunView({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [showWorkerLog, setShowWorkerLog] = useState(false);
   const [showInbox, setShowInbox] = useState(false);
+  const [showChildRuns, setShowChildRuns] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -642,6 +644,15 @@ export function RunView({
           ? "This run is closed."
           : "Message the agent…";
 
+  const childRunsTone = childRuns.some((child) => ["failed", "budget_exhausted"].includes(child.status))
+    ? "text-state-blocked"
+    : childRuns.some((child) => ["pending", "preparing", "running"].includes(child.status))
+      ? "text-state-progress"
+      : childRuns.some((child) => child.status === "parked")
+        ? "text-state-review"
+        : childRuns.length > 0 && childRuns.every((child) => child.status === "completed")
+          ? "text-state-done"
+          : "text-muted-foreground";
   const empty = messages.length === 0;
   const greeting = useMemo(() => greetingFor(new Date(), userEmail), [userEmail]);
 
@@ -664,8 +675,8 @@ export function RunView({
   return (
     <div className="flex h-full flex-col overflow-hidden">
       {/* Header */}
-      <header className="border-b border-border/60 bg-background px-6 py-3">
-        <div className="flex items-center gap-3 min-w-0">
+      <header className="shrink-0 border-b border-border/60 bg-background px-6 py-3">
+        <div className="flex flex-wrap items-center gap-3 min-w-0">
           {parent && (
             <Tooltip content={`parent: ${parent.title}`}>
               <Link
@@ -700,6 +711,20 @@ export function RunView({
             >
               PR ↗
             </a>
+          )}
+          {childRuns.length > 0 && (
+            <Button
+              variant="outline"
+              size="xs"
+              onClick={() => setShowChildRuns((value) => !value)}
+              aria-expanded={showChildRuns}
+              aria-controls={`spawned-runs-${run.id}`}
+              className={`shrink-0 gap-1 px-2 py-0.5 text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${childRunsTone} ${showChildRuns ? "border-current bg-muted/60" : "bg-background/60"}`}
+            >
+              <GitFork className="size-3" aria-hidden="true" />
+              Spawned runs
+              <span className="ml-1 font-mono tabular-nums">{childRuns.length}</span>
+            </Button>
           )}
           <button
             type="button"
@@ -807,10 +832,13 @@ export function RunView({
         {showWorkerLog && <WorkerLogPanel runId={run.id} />}
       </header>
 
-      {/* Message stream */}
-      <div className="flex-1 overflow-y-auto bg-background">
-        {childRuns.length > 0 && (
-          <div className="mx-auto max-w-3xl px-4 pt-4">
+      {showChildRuns && childRuns.length > 0 && (
+        <section
+          id={`spawned-runs-${run.id}`}
+          aria-label="Spawned runs"
+          className="max-h-[45vh] shrink-0 overflow-y-auto border-b border-border/60 bg-background"
+        >
+          <div className="mx-auto max-w-3xl px-4 py-3">
             <div className="rounded-md border border-border/60 bg-card/30 overflow-hidden">
               <div className="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground border-b border-border/60">
                 Spawned runs
@@ -846,7 +874,11 @@ export function RunView({
               </div>
             </div>
           </div>
-        )}
+        </section>
+      )}
+
+      {/* Message stream */}
+      <div className="min-h-0 flex-1 overflow-y-auto bg-background">
         {empty ? (
           <div className="mx-auto flex h-full max-w-2xl flex-col items-center justify-center px-6 text-center">
             <h2 className="text-2xl font-semibold tracking-tight">
