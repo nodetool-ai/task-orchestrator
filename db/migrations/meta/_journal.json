@@ -281,6 +281,13 @@
       "when": 1788898000000,
       "tag": "0039_worker_generations",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1788950000000,
+      "tag": "0040_codeact_receipts",
+      "breakpoints": true
     }
   ]
 }

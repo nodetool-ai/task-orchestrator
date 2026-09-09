@@ -28,6 +28,13 @@ import {
 import { newCodeActVariant, loadPackagedWasm, assertWasmMagic } from "./quickjs-variant.ts";
 import { resolveLimits, type ExecutionLimits } from "./limits.ts";
 
+export interface GuestBridge {
+  call(operation: string, input: unknown): Promise<unknown>;
+  onOutput?(kind: "text" | "image", value: unknown): void;
+  onConsole?(level: string, values: unknown[]): void;
+  catalog?: unknown;
+}
+
 export interface EvaluateRequest {
   /** Guest source, interpreted as an async function body (top-level await and
    *  `return` allowed). TypeScript syntax is NOT evaluated in v1. */
@@ -38,12 +45,16 @@ export interface EvaluateRequest {
    *  disk (no network). Passing them lets the caller load once and reuse the
    *  bytes across executions (never guest state — just the immutable bytes). */
   wasmBinary?: ArrayBuffer;
+  bridge?: GuestBridge;
 }
 
 export type EvaluateOutcome =
-  | { status: "ok"; value: unknown; jobsExecuted: number }
-  | { status: "error"; error: GuestError; jobsExecuted: number }
-  | { status: "timeout"; jobsExecuted: number };
+  | { status: "ok"; value: unknown; jobsExecuted: number; outputs?: GuestOutput[]; diagnostics?: GuestDiagnostic[] }
+  | { status: "error"; error: GuestError; jobsExecuted: number; outputs?: GuestOutput[]; diagnostics?: GuestDiagnostic[] }
+  | { status: "timeout"; jobsExecuted: number; outputs?: GuestOutput[]; diagnostics?: GuestDiagnostic[] };
+
+export interface GuestOutput { kind: "text" | "image"; value: unknown }
+export interface GuestDiagnostic { level: string; values: unknown[] }
 
 /** A guest-thrown error, flattened to structured-cloneable primitives so it can
  *  cross the worker boundary. */
@@ -83,6 +94,9 @@ function toGuestError(ctx: QuickJSContext, handle: QuickJSHandle): GuestError {
  */
 export async function evaluateGuest(req: EvaluateRequest): Promise<EvaluateOutcome> {
   const limits = resolveLimits(req.limits);
+  if (new TextEncoder().encode(req.code).byteLength > limits.sourceBytes) {
+    return { status: "error", error: { name: "CodeActSourceTooLarge", message: `source exceeds ${limits.sourceBytes} bytes` }, jobsExecuted: 0 };
+  }
   const wasmBinary = req.wasmBinary ?? (await loadPackagedWasm());
   assertWasmMagic(wasmBinary);
 
@@ -97,6 +111,9 @@ export async function evaluateGuest(req: EvaluateRequest): Promise<EvaluateOutco
 
   const context = runtime.newContext();
   let jobsExecuted = 0;
+  const outputs: GuestOutput[] = [];
+  const diagnostics: GuestDiagnostic[] = [];
+  if (req.bridge) installBridge(context, req.bridge, limits, outputs, diagnostics);
 
   try {
     // Wrap the guest source as an immediately-invoked async function so top-level
@@ -107,8 +124,8 @@ export async function evaluateGuest(req: EvaluateRequest): Promise<EvaluateOutco
     if (evalResult.error) {
       const dump = context.dump(evalResult.error);
       evalResult.error.dispose();
-      if (isInterrupt(dump)) return { status: "timeout", jobsExecuted };
-      return { status: "error", error: normalizeDump(dump), jobsExecuted };
+      if (isInterrupt(dump)) return { status: "timeout", jobsExecuted, outputs, diagnostics };
+      return { status: "error", error: normalizeDump(dump), jobsExecuted, outputs, diagnostics };
     }
 
     const promise = evalResult.value;
@@ -126,13 +143,15 @@ export async function evaluateGuest(req: EvaluateRequest): Promise<EvaluateOutco
         if (pumped.error) {
           const dump = context.dump(pumped.error);
           pumped.error.dispose();
-          if (isInterrupt(dump)) return { status: "timeout", jobsExecuted };
-          return { status: "error", error: normalizeDump(dump), jobsExecuted };
+          if (isInterrupt(dump)) return { status: "timeout", jobsExecuted, outputs, diagnostics };
+          return { status: "error", error: normalizeDump(dump), jobsExecuted, outputs, diagnostics };
         }
         jobsExecuted += pumped.value;
         state = context.getPromiseState(promise);
+        // Let worker-thread message handlers deliver host RPC completions.
+        if (state.type === "pending") await new Promise<void>((resolve) => setImmediate(resolve));
         // Queue drained and still pending → nothing left to make it settle.
-        if (state.type === "pending" && pumped.value === 0) {
+        if (state.type === "pending" && pumped.value === 0 && !req.bridge) {
           return {
             status: "error",
             error: {
@@ -140,7 +159,7 @@ export async function evaluateGuest(req: EvaluateRequest): Promise<EvaluateOutco
               message:
                 "guest promise never settled and no pending jobs remain (missing host async?)",
             },
-            jobsExecuted,
+            jobsExecuted, outputs, diagnostics,
           };
         }
       }
@@ -148,12 +167,12 @@ export async function evaluateGuest(req: EvaluateRequest): Promise<EvaluateOutco
       if (state.type === "fulfilled") {
         const value = context.dump(state.value);
         state.value.dispose();
-        return { status: "ok", value, jobsExecuted };
+        return { status: "ok", value, jobsExecuted, outputs, diagnostics };
       }
       // rejected
       const error = toGuestError(context, state.error);
       state.error.dispose();
-      return { status: "error", error, jobsExecuted };
+      return { status: "error", error, jobsExecuted, outputs, diagnostics };
     } finally {
       promise.dispose();
     }
@@ -162,6 +181,66 @@ export async function evaluateGuest(req: EvaluateRequest): Promise<EvaluateOutco
     context.dispose();
     runtime.dispose();
   }
+}
+
+function installBridge(
+  ctx: QuickJSContext,
+  bridge: GuestBridge,
+  limits: ExecutionLimits,
+  outputs: GuestOutput[],
+  diagnostics: GuestDiagnostic[],
+): void {
+  let operations = 0;
+  let inFlight = 0;
+  let visibleBytes = 0;
+  const queue: Array<() => void> = [];
+  const dispatch = (operation: string, input: unknown) => new Promise<unknown>((resolve, reject) => {
+    const run = () => {
+      inFlight += 1;
+      void bridge.call(operation, input).then(resolve, reject).finally(() => {
+        inFlight -= 1;
+        queue.shift()?.();
+      });
+    };
+    operations += 1;
+    if (operations > limits.maxOperations) reject(new Error("CodeAct operation limit exceeded"));
+    else if (inFlight < limits.maxConcurrentOperations) run();
+    else queue.push(run);
+  });
+  const call = ctx.newFunction("__codeact_call", (operation, input) => {
+    const op = ctx.dump(operation);
+    if (typeof op !== "string") return ctx.newError("operation must be a string");
+    const deferred = ctx.newPromise();
+    void dispatch(op, ctx.dump(input)).then((value) => {
+      const handle = ctx.newString(JSON.stringify(value ?? null));
+      deferred.resolve(handle); handle.dispose();
+    }, (error) => deferred.reject(ctx.newError({ name: "CodeActHostError", message: error instanceof Error ? error.message : String(error) })));
+    return deferred.handle;
+  });
+  ctx.setProp(ctx.global, "__codeact_call", call); call.dispose();
+  const bootstrap = `(function(){
+    const call = (name, input) => __codeact_call(name, input).then(JSON.parse);
+    const make = (prefix) => new Proxy(function(){}, { get: (_, key) => make(prefix + '.' + String(key)), apply: (_, __, args) => call(prefix, args[0] ?? {}) });
+    globalThis.app = make('app'); globalThis.tools = make('tools');
+    const entries = ${JSON.stringify(bridge.catalog ?? [])};
+    globalThis.catalog = { search: ({query=''}={}) => Promise.resolve(entries.filter(x => JSON.stringify(x).toLowerCase().includes(String(query).toLowerCase())).slice(0, 20)), describe: ({names=[]}={}) => Promise.resolve(entries.filter(x => names.includes(x.name) || names.includes(x.sdkPath)).slice(0, 20)) };
+    globalThis.output = { text: value => { __codeact_output('text', value); return value; }, image: value => { __codeact_output('image', value); return value; } };
+  })()`;
+  const result = ctx.evalCode(bootstrap, "codeact-bridge.js");
+  if (result.error) result.error.dispose(); else result.value.dispose();
+  const output = ctx.newFunction("__codeact_output", (kind, value) => {
+    const k = ctx.dump(kind); const v = ctx.dump(value);
+    const size = new TextEncoder().encode(JSON.stringify(v ?? null)).byteLength;
+    if ((k === "text" || k === "image") && outputs.length < 100 && visibleBytes + size <= limits.maxOutputBytes) { outputs.push({ kind: k, value: v }); visibleBytes += size; bridge.onOutput?.(k, v); }
+    return ctx.undefined;
+  });
+  ctx.setProp(ctx.global, "__codeact_output", output); output.dispose();
+  const consoleObject = ctx.newObject();
+  for (const level of ["log", "info", "warn", "error"] as const) {
+    const fn = ctx.newFunction(level, (...args) => { const values = args.map((arg) => ctx.dump(arg)); const size = new TextEncoder().encode(JSON.stringify(values)).byteLength; if (diagnostics.length < 100 && visibleBytes + size <= limits.maxOutputBytes) { diagnostics.push({ level, values }); visibleBytes += size; bridge.onConsole?.(level, values); } return ctx.undefined; });
+    ctx.setProp(consoleObject, level, fn); fn.dispose();
+  }
+  ctx.setProp(ctx.global, "console", consoleObject); consoleObject.dispose();
 }
 
 function normalizeDump(dump: unknown): GuestError {

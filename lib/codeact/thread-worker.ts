@@ -13,6 +13,7 @@
 // import specifiers throughout lib/codeact.
 
 import { parentPort, workerData } from "node:worker_threads";
+import { randomUUID } from "node:crypto";
 import { evaluateGuest, type EvaluateOutcome } from "./evaluate.ts";
 import type { ExecutionLimits } from "./limits.ts";
 
@@ -22,15 +23,36 @@ export interface ThreadWorkerData {
   /** WASM bytes, resolved by the host and transferred in so the worker never
    *  needs node_modules resolution or filesystem access of its own. */
   wasmBinary: ArrayBuffer;
+  catalog?: unknown;
 }
+
+type HostRequest = { type: "host-call"; id: string; operation: string; input: unknown };
+type HostResponse = { type: "host-result"; id: string; ok: boolean; value?: unknown; error?: string };
 
 export type ThreadWorkerMessage =
   | { type: "result"; outcome: EvaluateOutcome }
+  | { type: "host-call"; id: string; operation: string; input: unknown }
   | { type: "host-error"; error: { name: string; message: string; stack?: string } };
 
 async function main(): Promise<void> {
   const { code, limits, wasmBinary } = workerData as ThreadWorkerData;
-  const outcome = await evaluateGuest({ code, limits, wasmBinary });
+  const pending = new Map<string, { resolve(value: unknown): void; reject(error: Error): void }>();
+  parentPort?.on("message", (message: HostResponse) => {
+    if (message.type !== "host-result") return;
+    const waiter = pending.get(message.id); if (!waiter) return;
+    pending.delete(message.id);
+    if (message.ok) waiter.resolve(message.value); else waiter.reject(new Error(message.error ?? "host call failed"));
+  });
+  const outcome = await evaluateGuest({
+    code, limits, wasmBinary,
+    bridge: {
+      catalog: (workerData as ThreadWorkerData).catalog,
+      call: (operation, input) => new Promise((resolve, reject) => {
+        const id = randomUUID(); pending.set(id, { resolve, reject });
+        parentPort?.postMessage({ type: "host-call", id, operation, input } satisfies HostRequest);
+      }),
+    },
+  });
   const message: ThreadWorkerMessage = { type: "result", outcome };
   parentPort?.postMessage(message);
 }

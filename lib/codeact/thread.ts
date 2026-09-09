@@ -16,15 +16,16 @@ import { loadPackagedWasm } from "./quickjs-variant.ts";
 import { resolveLimits, type ExecutionLimits } from "./limits.ts";
 import type { EvaluateOutcome } from "./evaluate.ts";
 import type { ThreadWorkerData, ThreadWorkerMessage } from "./thread-worker.ts";
+import type { GuestOutput, GuestDiagnostic } from "./evaluate.ts";
 
 /** URL of the worker entry, resolved relative to this module so it works from a
  *  source checkout (Node strips the .ts) and from tests alike. */
 const WORKER_URL = new URL("./thread-worker.ts", import.meta.url);
 
 export type ThreadResult =
-  | { status: "ok"; value: unknown; jobsExecuted: number }
-  | { status: "error"; error: { name: string; message: string; stack?: string }; jobsExecuted: number }
-  | { status: "timeout"; jobsExecuted: number }
+  | { status: "ok"; value: unknown; jobsExecuted: number; outputs?: GuestOutput[]; diagnostics?: GuestDiagnostic[] }
+  | { status: "error"; error: { name: string; message: string; stack?: string }; jobsExecuted: number; outputs?: GuestOutput[]; diagnostics?: GuestDiagnostic[] }
+  | { status: "timeout"; jobsExecuted: number; outputs?: GuestOutput[]; diagnostics?: GuestDiagnostic[] }
   | { status: "terminated"; reason: string };
 
 export interface ExecuteInThreadOptions {
@@ -33,6 +34,9 @@ export interface ExecuteInThreadOptions {
   /** Pre-read WASM bytes to reuse across executions. Omit to load the packaged
    *  artifact from disk (no network). */
   wasmBinary?: ArrayBuffer;
+  catalog?: unknown;
+  hostCall?: (operation: string, input: unknown) => Promise<unknown>;
+  signal?: AbortSignal;
 }
 
 /**
@@ -44,7 +48,7 @@ export async function executeInThread(opts: ExecuteInThreadOptions): Promise<Thr
   const limits = resolveLimits(opts.limits);
   const wasmBinary = opts.wasmBinary ?? (await loadPackagedWasm());
 
-  const workerData: ThreadWorkerData = { code: opts.code, limits, wasmBinary };
+  const workerData: ThreadWorkerData = { code: opts.code, limits, wasmBinary, catalog: opts.catalog };
   const worker = new Worker(WORKER_URL, { workerData });
 
   return await new Promise<ThreadResult>((resolve) => {
@@ -53,6 +57,7 @@ export async function executeInThread(opts: ExecuteInThreadOptions): Promise<Thr
       if (settled) return;
       settled = true;
       clearTimeout(hardTimer);
+      opts.signal?.removeEventListener("abort", onAbort);
       // Terminate unconditionally: on the happy path this reaps the one-shot
       // thread; on the timeout path it is the external kill itself.
       void worker.terminate();
@@ -67,9 +72,16 @@ export async function executeInThread(opts: ExecuteInThreadOptions): Promise<Thr
     }, limits.hardDeadlineMs);
     // Don't let the deadline timer keep the event loop alive on its own.
     hardTimer.unref?.();
+    const onAbort = () => finish({ status: "terminated", reason: "execution cancelled; worker thread terminated" });
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
 
     worker.on("message", (msg: ThreadWorkerMessage) => {
-      if (msg.type === "result") {
+      if (msg.type === "host-call") {
+        const reply = (frame: object) => { if (!settled) { try { worker.postMessage(frame); } catch { /* late callback after termination */ } } };
+        void (opts.hostCall ? opts.hostCall(msg.operation, msg.input) : Promise.reject(new Error("host RPC unavailable")))
+          .then((value) => reply({ type: "host-result", id: msg.id, ok: true, value }))
+          .catch((error) => reply({ type: "host-result", id: msg.id, ok: false, error: error instanceof Error ? error.message : String(error) }));
+      } else if (msg.type === "result") {
         finish(toThreadResult(msg.outcome));
       } else {
         finish({ status: "error", error: msg.error, jobsExecuted: 0 });
