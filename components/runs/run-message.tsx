@@ -12,7 +12,7 @@ import type { MessageRow } from "@/lib/runs";
 // ('user' | 'agent' | 'tool') in the unified /runs/[id] view; 'system' is
 // rendered by `<SystemEventRow>` separately.
 //
-// User messages live in a high-contrast pill on the right. Agent
+// User messages live in a subtly shaded pill on the right. Agent
 // messages are bare prose on the canvas — no avatar, no bubble — so
 // markdown reads like a document.
 interface Props {
@@ -44,7 +44,7 @@ export function RunMessage({ role, content, createdAt }: Props) {
   return (
     <HoverTimestamp align="left" timestamp={timestamp}>
       <div className="flex justify-end px-4 py-2">
-        <div className="max-w-[80%] min-w-0 space-y-2 rounded-2xl rounded-br-md bg-foreground text-background px-4 py-2.5 pi-body shadow-md shadow-foreground/5">
+        <div className="max-w-[80%] min-w-0 space-y-2 rounded-2xl rounded-br-md border border-border/60 bg-muted/60 px-4 py-2.5 pi-body text-foreground">
           {content.map((block, i) => (
             <ContentBlock key={i} block={block} role={role} />
           ))}
