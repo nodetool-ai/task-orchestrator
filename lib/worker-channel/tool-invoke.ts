@@ -151,7 +151,7 @@ export async function executeChannelTool(
           );
         }
 
-        const { resolveServerTool } = await import("../worker/server-tools");
+        const { resolveServerTool, executeServerTool } = await import("../worker/server-tools");
         const def = await resolveServerTool(tool);
         if (!def) return structuredError(callId, `Unknown tool: ${tool}`);
         const ctx = await deriveToolContext(runId);
@@ -162,7 +162,7 @@ export async function executeChannelTool(
           slowTimer.unref?.();
         }
         try {
-          const result = await def.execute(payload.arguments, { ...ctx, runId });
+          const result = await executeServerTool(def, payload.arguments, { ...ctx, runId });
           return { callId, result, isError: result.isError ?? false };
         } finally {
           if (slowTimer) clearTimeout(slowTimer);

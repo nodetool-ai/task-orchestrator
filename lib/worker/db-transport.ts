@@ -361,10 +361,10 @@ export const dbTransport: RunTransport = {
   async callTool(runId, tool, params, ctx) {
     // Lazy import: the registry modules statically import runs.ts (see the
     // module docstring's import discipline).
-    const { resolveServerTool } = await import("./server-tools");
+    const { resolveServerTool, executeServerTool } = await import("./server-tools");
     const def = await resolveServerTool(tool);
     if (!def) return { content: [{ type: "text", text: `Unknown tool: ${tool}` }], isError: true };
-    return def.execute(params, { ...ctx, runId });
+    return executeServerTool(def, params, { ...ctx, runId });
   },
 
   async resolveRepo(runId) {
