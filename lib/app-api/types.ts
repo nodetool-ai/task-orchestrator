@@ -37,6 +37,8 @@ export interface OperationDescriptor {
 }
 
 export interface AppApiContext extends OrchestratorToolContext {
+  /** Authenticated product user for user-scoped SDK operations. */
+  userId?: number;
   /** Capability grants for this individual call. Omitted means unrestricted. */
   capabilities?: ReadonlySet<string> | readonly string[];
   runtime?: "server" | "worker" | "control-plane";
