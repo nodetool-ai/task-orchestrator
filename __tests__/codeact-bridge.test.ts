@@ -4,17 +4,14 @@ import {
   extractCodeActLinks,
   MemoryCodeActReceiptStore,
 } from "../lib/codeact/bridge";
+import { executeAppCodeAct } from "../lib/codeact/app-bridge";
 import { presentCodeActReceipt } from "../lib/codeact/presentation";
-import type { AppApiContext } from "../lib/app-api/types";
-
-const context = {} as AppApiContext;
 
 describe("CodeAct execution bridge", () => {
   it("returns bounded structured output and persists the terminal receipt", async () => {
     const receipts = new MemoryCodeActReceiptStore();
     const result = await executeCodeAct({
       code: "console.log('diagnostic'); output.text({ answer: 42 }); return { ok: true };",
-      context,
       receipts,
     });
 
@@ -30,7 +27,7 @@ describe("CodeAct execution bridge", () => {
   it("does not start guest work for an already-aborted signal", async () => {
     const controller = new AbortController();
     controller.abort();
-    const result = await executeCodeAct({ code: "while (true) {}", context, signal: controller.signal });
+    const result = await executeCodeAct({ code: "while (true) {}", signal: controller.signal });
 
     expect(result.receipt.status).toBe("cancelled");
     expect(result.status).toBe("terminated");
@@ -38,7 +35,7 @@ describe("CodeAct execution bridge", () => {
 
   it("re-resolves capability policy for every subcall and records the denied outcome", async () => {
     let resolutions = 0;
-    const result = await executeCodeAct({
+    const result = await executeAppCodeAct({
       code: "return await app.tasks.list({});",
       context: { author: "test", capabilities: ["app:list_tasks"] },
       resolveContext: async () => {

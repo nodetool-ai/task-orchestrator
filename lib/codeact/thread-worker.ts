@@ -27,7 +27,16 @@ export interface ThreadWorkerData {
 }
 
 type HostRequest = { type: "host-call"; id: string; operation: string; input: unknown };
-type HostResponse = { type: "host-result"; id: string; ok: boolean; value?: unknown; error?: string };
+type HostErrorShape = {
+  name: string;
+  message: string;
+  stack?: string;
+  code?: string;
+  operationId?: string;
+  retryable?: boolean;
+  details?: unknown;
+};
+type HostResponse = { type: "host-result"; id: string; ok: boolean; value?: unknown; error?: HostErrorShape };
 
 export type ThreadWorkerMessage =
   | { type: "result"; outcome: EvaluateOutcome }
@@ -41,7 +50,15 @@ async function main(): Promise<void> {
     if (message.type !== "host-result") return;
     const waiter = pending.get(message.id); if (!waiter) return;
     pending.delete(message.id);
-    if (message.ok) waiter.resolve(message.value); else waiter.reject(new Error(message.error ?? "host call failed"));
+    if (message.ok) {
+      waiter.resolve(message.value);
+    } else {
+      const source = message.error ?? { name: "CodeActHostError", message: "host call failed" };
+      const error = new Error(source.message);
+      error.name = source.name;
+      Object.assign(error, source);
+      waiter.reject(error);
+    }
   });
   const outcome = await evaluateGuest({
     code, limits, wasmBinary,

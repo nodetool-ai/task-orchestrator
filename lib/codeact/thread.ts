@@ -14,7 +14,7 @@
 import { Worker } from "node:worker_threads";
 import { loadPackagedWasm } from "./quickjs-variant.ts";
 import { resolveLimits, type ExecutionLimits } from "./limits.ts";
-import type { EvaluateOutcome } from "./evaluate.ts";
+import type { EvaluateOutcome, GuestError } from "./evaluate.ts";
 import type { ThreadWorkerData, ThreadWorkerMessage } from "./thread-worker.ts";
 import type { GuestOutput, GuestDiagnostic } from "./evaluate.ts";
 
@@ -24,7 +24,7 @@ const WORKER_URL = new URL("./thread-worker.ts", import.meta.url);
 
 export type ThreadResult =
   | { status: "ok"; value: unknown; jobsExecuted: number; outputs?: GuestOutput[]; diagnostics?: GuestDiagnostic[] }
-  | { status: "error"; error: { name: string; message: string; stack?: string }; jobsExecuted: number; outputs?: GuestOutput[]; diagnostics?: GuestDiagnostic[] }
+  | { status: "error"; error: GuestError; jobsExecuted: number; outputs?: GuestOutput[]; diagnostics?: GuestDiagnostic[] }
   | { status: "timeout"; jobsExecuted: number; outputs?: GuestOutput[]; diagnostics?: GuestDiagnostic[] }
   | { status: "terminated"; reason: string };
 
@@ -37,6 +37,35 @@ export interface ExecuteInThreadOptions {
   catalog?: unknown;
   hostCall?: (operation: string, input: unknown) => Promise<unknown>;
   signal?: AbortSignal;
+}
+
+interface HostErrorShape {
+  name: string;
+  message: string;
+  stack?: string;
+  code?: string;
+  operationId?: string;
+  retryable?: boolean;
+  details?: unknown;
+}
+
+function serializeHostError(error: unknown): HostErrorShape {
+  if (!(error instanceof Error)) return { name: "Error", message: String(error) };
+  const extended = error as Error & {
+    code?: unknown;
+    operationId?: unknown;
+    retryable?: unknown;
+    details?: unknown;
+  };
+  return {
+    name: error.name,
+    message: error.message,
+    stack: error.stack,
+    ...(typeof extended.code === "string" ? { code: extended.code } : {}),
+    ...(typeof extended.operationId === "string" ? { operationId: extended.operationId } : {}),
+    ...(typeof extended.retryable === "boolean" ? { retryable: extended.retryable } : {}),
+    ...(extended.details !== undefined ? { details: extended.details } : {}),
+  };
 }
 
 /**
@@ -87,7 +116,7 @@ export async function executeInThread(opts: ExecuteInThreadOptions): Promise<Thr
         const reply = (frame: object) => { if (!settled) { try { worker.postMessage(frame); } catch { /* late callback after termination */ } } };
         void (opts.hostCall ? opts.hostCall(msg.operation, msg.input) : Promise.reject(new Error("host RPC unavailable")))
           .then((value) => reply({ type: "host-result", id: msg.id, ok: true, value }))
-          .catch((error) => reply({ type: "host-result", id: msg.id, ok: false, error: error instanceof Error ? error.message : String(error) }));
+          .catch((error) => reply({ type: "host-result", id: msg.id, ok: false, error: serializeHostError(error) }));
       } else if (msg.type === "result") {
         finish(toThreadResult(msg.outcome));
       } else {
