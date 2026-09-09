@@ -137,6 +137,7 @@ export interface RunTurnArgs {
   cwd: string;
   model: { provider: string; id: string };
   thinkingLevel?: "low" | "medium" | "high" | "xhigh";
+  toolCallingMode?: "direct" | "codeact";
   extensions: Extension[];
   /** Optional control-plane invoker used to mount the neutral CodeAct tools.
    * Pi's worker and postgres-context paths provide the same seam; other

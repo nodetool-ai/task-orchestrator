@@ -168,7 +168,7 @@ export class ClaudeBackend implements AgentBackend {
       );
     }
 
-    const collected = withCodeActCapabilities(await collectExtensions(extensions), abort.signal);
+    const collected = withCodeActCapabilities(await collectExtensions(extensions), abort.signal, args.toolCallingMode !== "direct");
     const { query, tool, createSdkMcpServer } = await import("@anthropic-ai/claude-agent-sdk");
 
     // Tools → in-process MCP server.
@@ -190,7 +190,7 @@ export class ClaudeBackend implements AgentBackend {
     const persona = (await composeSystemPrompt("", collected.systemPromptFns)).trim();
     if (persona) parts.push(persona);
     for (const s of collected.skills) parts.push(`# ${s.name}\n${s.description}\n\n${s.body}`);
-    parts.push(CODEACT_BACKEND_GUIDANCE);
+    if (args.toolCallingMode !== "direct") parts.push(CODEACT_BACKEND_GUIDANCE);
     const append = parts.join("\n\n");
 
     // Tool-call interceptors → PreToolUse hook.

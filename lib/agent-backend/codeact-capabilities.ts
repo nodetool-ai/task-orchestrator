@@ -205,7 +205,9 @@ function executionToolResult(result: CodeActExecuteResult): ToolResult {
 export function withCodeActCapabilities(
   collected: CollectedCapabilities,
   signal?: AbortSignal,
+  enabled = true,
 ): CollectedCapabilities {
+  if (!enabled) return collected;
   const directTools = collected.tools.filter(
     (tool) => tool.name !== CODEACT_EXECUTE_TOOL && tool.name !== CODEACT_CATALOG_TOOL,
   );
