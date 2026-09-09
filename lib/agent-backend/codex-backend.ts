@@ -148,7 +148,7 @@ export class CodexBackend implements AgentBackend {
       );
     }
 
-    const collected = withCodeActCapabilities(await collectExtensions(extensions), abort.signal);
+    const collected = withCodeActCapabilities(await collectExtensions(extensions), abort.signal, args.toolCallingMode !== "direct");
     const { Codex } = await importCodexSdk();
 
     // Tools → loopback MCP server. Interceptors run inside it (see module note).
