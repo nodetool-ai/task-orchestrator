@@ -156,6 +156,24 @@ describe("worker channel recovery (plan section 17)", () => {
     await waitFor(async () => (await commandRows(runId, "run.cancel")).every((r) => r.state === "acked"));
   });
 
+  it("re-adopts later channels without waiting for an earlier stalled channel", async () => {
+    const first = await provisionRun("running");
+    const second = await provisionRun("running");
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const attempted: number[] = [];
+    vi.spyOn(runDispatch, "startChannelForRun").mockImplementation(async (runId) => {
+      attempted.push(runId);
+      if (runId === first.runId) await firstBlocked;
+    });
+
+    const reconnecting = reconnectActiveChannels();
+    await waitFor(() => attempted.includes(second.runId));
+    releaseFirst();
+
+    await expect(reconnecting).resolves.toBeGreaterThanOrEqual(2);
+  });
+
   it("boot re-adoption skips instances the provider reports stopped/gone", async () => {
     // A dead worker has nothing to adopt; dialing it would only burn the boot
     // deadline. The run's next turn provisions a fresh worker instead.

@@ -331,6 +331,38 @@ describe("SpritesClient", () => {
     expect(cp.id).toBe("v42");
   });
 
+  it("lists service definitions for baseline quiescence checks", async () => {
+    const fetchImpl = makeFetchMock(async (url) => {
+      expect(url).toBe(`${BASE_URL}/sprites/pool-1/services`);
+      return jsonResponse([{ name: "worker-g2", cmd: "node", state: { status: "stopped" } }]);
+    });
+    const client = makeSpritesClient({ fetchImpl, baseUrl: BASE_URL, token: TOKEN });
+    expect(await client.listServices!("pool-1")).toMatchObject([{ name: "worker-g2", state: { status: "stopped" } }]);
+  });
+
+  it.each([
+    '{"type":"info","data":"restoring"}\n',
+    '{"type":"error","error":"mount failed"}\n{"type":"complete"}\n',
+    '',
+  ])("rejects incomplete or failed restore streams: %s", async (body) => {
+    const fetchImpl = makeFetchMock(async () => new Response(body, { status: 200 }));
+    const client = makeSpritesClient({ fetchImpl, baseUrl: BASE_URL, token: TOKEN });
+    await expect(client.restoreCheckpoint("pool-1", "v1")).rejects.toThrow();
+  });
+
+  it("accepts a completed restore stream", async () => {
+    const fetchImpl = makeFetchMock(async () => new Response('{"type":"complete"}\n', { status: 200 }));
+    const client = makeSpritesClient({ fetchImpl, baseUrl: BASE_URL, token: TOKEN });
+    await expect(client.restoreCheckpoint("pool-1", "v1")).resolves.toBeUndefined();
+  });
+
+  it("does not use an old checkpoint after a streamed checkpoint failure", async () => {
+    const fetchImpl = vi.fn(makeFetchMock(async () => new Response('{"type":"error","error":"disk full"}\n', { status: 200 })));
+    const client = makeSpritesClient({ fetchImpl, baseUrl: BASE_URL, token: TOKEN });
+    await expect(client.checkpoint("pool-1", "baseline new")).rejects.toThrow("disk full");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("getServiceLogs concatenates NDJSON stdout/stderr", async () => {
     const ndjson = `{"type":"stdout","data":"hello\\n","timestamp":1}\n{"type":"stderr","data":"warn\\n","timestamp":2}\n{"type":"complete","timestamp":3}\n`;
     const fetchImpl = makeFetchMock(async () => {

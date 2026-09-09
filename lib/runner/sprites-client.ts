@@ -61,6 +61,8 @@ export interface SpritesClient {
   getSprite(name: string): Promise<Sprite | null>;
   /** A missing service is a normal, typed result rather than an API error. */
   getService(spriteName: string, serviceName: string): Promise<SpriteService | null>;
+  /** Required for warm baselines; optional for legacy provider test doubles. */
+  listServices?(spriteName: string): Promise<SpriteService[]>;
   deleteSprite(name: string): Promise<void>;
   listSprites(input?: { prefix?: string; maxResults?: number; continuationToken?: string }): Promise<{ sprites: Sprite[]; continuationToken?: string }>;
   /** List ALL sprites with prefix, paginating past the 50-item page cap internally. */
@@ -383,6 +385,12 @@ export function makeSpritesClient(input?: SpritesClientOptions): SpritesClient {
       return all;
     },
 
+    async listServices(spriteName: string) {
+      const result = await request<RawSpriteServiceJson[]>("GET", `/sprites/${encodeURIComponent(spriteName)}/services`);
+      if (!Array.isArray(result)) throw new Error("Sprites service listing returned no service array");
+      return result.map(serviceFromJson);
+    },
+
     async putService(spriteName: string, serviceName: string, def: SpriteServiceDef) {
       // Answers an NDJSON event stream (started/complete) and starts the service.
       await requestNdjson("PUT", `/sprites/${encodeURIComponent(spriteName)}/services/${encodeURIComponent(serviceName)}`, def);
@@ -446,6 +454,11 @@ export function makeSpritesClient(input?: SpritesClientOptions): SpritesClient {
 
     async checkpoint(spriteName: string, comment?: string) {
       const events = await requestNdjson("POST", `/sprites/${encodeURIComponent(spriteName)}/checkpoint`, comment ? { comment } : {});
+      const failure = events.find((event) => event.type === "error");
+      if (failure) throw new SpritesApiError(500, String(failure.error ?? failure.data ?? "checkpoint failed"));
+      if (!events.some((event) => event.type === "complete" || typeof event.id === "string")) {
+        throw new SpritesApiError(500, "checkpoint stream ended without completion");
+      }
       // Keep regex as hint only; primary is listCheckpoints (documented JSON shape)
       let hintId: string | undefined;
       for (let i = events.length - 1; i >= 0; i--) {
@@ -476,9 +489,7 @@ export function makeSpritesClient(input?: SpritesClientOptions): SpritesClient {
           const sorted = [...checkpoints].sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
           return sorted[0];
         }
-        // Fallback: newest overall
-        const sorted = [...checkpoints].sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
-        return sorted[0];
+        // Never substitute an unrelated checkpoint for the baseline requested.
       }
       // Fallback to hint if list is empty (e.g. test mock with single NDJSON complete)
       if (hintId) return { id: hintId, comment, createdAt: undefined };
@@ -494,7 +505,12 @@ export function makeSpritesClient(input?: SpritesClientOptions): SpritesClient {
     },
 
     async restoreCheckpoint(spriteName: string, checkpointId: string) {
-      await requestNdjson("POST", `/sprites/${encodeURIComponent(spriteName)}/checkpoints/${encodeURIComponent(checkpointId)}/restore`);
+      const events = await requestNdjson("POST", `/sprites/${encodeURIComponent(spriteName)}/checkpoints/${encodeURIComponent(checkpointId)}/restore`);
+      const failure = events.find((event) => event.type === "error");
+      if (failure) throw new SpritesApiError(500, String(failure.error ?? failure.data ?? "checkpoint restore failed"));
+      if (!events.some((event) => event.type === "complete")) {
+        throw new SpritesApiError(500, "checkpoint restore stream ended without completion");
+      }
     },
 
     async getNetworkPolicy(spriteName: string) {

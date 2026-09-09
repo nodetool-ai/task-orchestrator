@@ -415,6 +415,53 @@ export const runnerInstances = pgTable(
   })
 );
 
+// Provider resources held by the Sprite warm pool. A row is never recycled
+// after assignment: deleting the row is the only path out of the assigned
+// state. The baseline fields are immutable by convention and are protected by
+// the store (a new fingerprint gets a new row).
+export const spritePoolEntries = pgTable(
+  "sprite_pool_entries",
+  {
+    id: serial("id").primaryKey(),
+    provider: text("provider").notNull().default("sprites"),
+    spriteName: text("sprite_name").notNull(),
+    state: text("state").notNull().default("preparing"),
+    baselineClass: text("baseline_class").notNull().default("generic"),
+    fingerprint: text("fingerprint").notNull(),
+    baselineManifest: jsonb("baseline_manifest").notNull(),
+    checkpointId: text("checkpoint_id").notNull(),
+    restoreState: text("restore_state").notNull().default("pending"),
+    baselineRestoredAt: ts("baseline_restored_at"),
+    runId: integer("run_id").references(() => agentSessions.id, { onDelete: "set null" }),
+    leaseToken: uuid("lease_token"),
+    leaseExpiresAt: ts("lease_expires_at"),
+    providerOperationId: uuid("provider_operation_id"),
+    lastError: text("last_error"),
+    deleteRequestedAt: ts("delete_requested_at"),
+    deletedAt: ts("deleted_at"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    spriteNameUnique: uniqueIndex("sprite_pool_entries_sprite_name_uniq").on(t.spriteName),
+    runUnique: uniqueIndex("sprite_pool_entries_run_id_uniq").on(t.runId).where(sql`${t.runId} IS NOT NULL AND ${t.state} NOT IN ('deleted','failed')`),
+    fingerprintStateIdx: index("sprite_pool_entries_fingerprint_state_idx").on(t.fingerprint, t.state),
+    stateUpdatedIdx: index("sprite_pool_entries_state_updated_idx").on(t.state, t.updatedAt),
+    stateCheck: check(
+      "sprite_pool_entries_state_check",
+      sql`${t.state} IN ('preparing', 'ready', 'claimed', 'draining', 'deleting', 'deleted', 'failed')`
+    ),
+    baselineClassCheck: check(
+      "sprite_pool_entries_baseline_class_check",
+      sql`${t.baselineClass} IN ('generic', 'repository')`
+    ),
+    restoreStateCheck: check(
+      "sprite_pool_entries_restore_state_check",
+      sql`${t.restoreState} IN ('pending', 'restoring', 'restored', 'failed')`
+    ),
+  })
+);
+
 export const workerChannelCommands = pgTable(
   "worker_channel_commands",
   {

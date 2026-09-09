@@ -295,6 +295,13 @@
       "when": 1788953600000,
       "tag": "0041_run_event_subscriptions",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1788960800000,
+      "tag": "0043_sprite_pool",
+      "breakpoints": true
     }
   ]
 }

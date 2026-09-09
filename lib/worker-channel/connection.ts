@@ -145,7 +145,7 @@ export class ControllerConnection {
   readonly runId: number;
   readonly instanceId: string;
   readonly workerGeneration: number;
-  readonly provisioningScope?: string;
+  private provisioningScope?: string;
   readonly endpoint: string;
   readonly controllerId: string;
   private readonly onEvent: WorkerEventHandler;
@@ -310,6 +310,9 @@ export class ControllerConnection {
         lease.epoch,
         this.provisioningScope,
       );
+      // The provisioning claim is a one-shot hand-off. Reusing it on a later
+      // reconnect rejects the already-promoted provider scope as stale.
+      this.provisioningScope = undefined;
       await rebasePendingCommands(this.runId, this.instanceId, lease.epoch, this.workerGeneration);
       for (const command of await listPendingCommands(this.runId, this.instanceId, lease.epoch, this.workerGeneration)) this.sendCommandRow(command);
       // Bind the shared coordinator to THIS connection's transport and re-announce

@@ -11,6 +11,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { config, insideWorker } from "../config";
 import { checkoutRepositoryAt } from "../repo-checkout";
 import { validateCwd } from "../run-cwd";
+import { prepareSpriteDependencies } from "./dependencies";
 import type { RunStart } from "../worker-channel/protocol";
 
 export interface PreparedCwd {
@@ -84,6 +85,7 @@ export async function prepareWorkerCwd(start: RunStart): Promise<PreparedCwd> {
     "remote). See docs/agent-caveats.md.";
 
   if (recordedWorktree && existsSync(recordedWorktree)) {
+    await prepareSpriteDependencies(recordedWorktree);
     return { cwd: validateCwd(recordedWorktree, { runId, repoId, hint }) };
   }
 
@@ -105,6 +107,9 @@ export async function prepareWorkerCwd(start: RunStart): Promise<PreparedCwd> {
     configuredPath: config.worker.runnerRepoPath ?? null,
     provider: insideWorker() ? "sprites" : "local",
   });
+  // A dependency baseline is explicitly enabled by the Sprite pool manager.
+  // It runs after checkout so the requested revision is authoritative.
+  await prepareSpriteDependencies(cwd);
   const strategy = field<string>(run, "cwdStrategy") ?? "worktree";
   const reports = strategy === "worktree" || strategy === "worktree_at_pr";
   return {

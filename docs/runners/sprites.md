@@ -187,7 +187,9 @@ URL template there.
 ### Cold start & checkpoints
 
 - **Phase A (correctness first):** `create()` runs the bootstrap above, then `POST /sprites/{name}/checkpoint` with comment `bootstrap <sha>`. Emits `runner_bootstrap_step` agent events per step for the run view.
-- **Phase B (latency):** warm pool of pre-bootstrapped sprites (not yet implemented) — see `docs/sprites-migration-design.md` §6.
+- **Phase B (latency):** opt-in warm pool with immutable environment manifests,
+  fenced first-assignment restore and optional npm dependency baselines. See
+  [warm-pool setup and verification](sprite-warm-pool.md). Default target is zero.
 
 Checkpoints beyond warm boot (pre-turn rollback points, failure archiving) are Phase 8 — optional and not in the migration's critical path.
 
@@ -219,6 +221,8 @@ service starts.
 | `TASK_ORCH_RUNNER_TERMINAL_MS` | `24h` | Retention before destroy |
 | `TASK_ORCH_SPRITES_CLAUDE_BINARY` | `/home/sprite/.local/bin/claude` | Claude Code executable inside the sprite; passed to the worker as `TASK_ORCH_CLAUDE_BINARY` (the bundle has no native binary). |
 | `TASK_ORCH_SPRITES_CODEX_BINARY` | `/home/user/worker/.codex/bin/codex` | Optional pre-provisioned Codex executable. When unset, bootstrap installs pinned `@openai/codex` 0.153.4 with optional platform dependencies. |
+| `TASK_ORCH_SPRITES_NPM_CACHE` | `/home/user/session/.npm-cache` | Persistent npm content cache inherited by agent shell commands across worker generations. |
+| `TASK_ORCH_TURN_TIMEOUT_MS` | `1800000` | Hard wall-clock limit for one backend turn, including built-in shell commands. `0` disables it for supervised debugging. |
 
 Credentials (`GH_TOKEN`, `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`,
 optional pi provider keys) are staged as secrets on the control plane and

@@ -35,6 +35,8 @@ export interface BootstrapOptions {
   bundleUrl: string;
   /** Operator-provided executable already present in the Sprite. */
   codexBinary?: string;
+  /** Leave sealing to a baseline manager when false. */
+  checkpoint?: boolean;
   onStep?: (name: string, status: "running" | "success" | "error", durationMs: number) => void;
 }
 
@@ -86,7 +88,7 @@ export async function bootstrapSprite(
   {
     const start = Date.now();
     onStep?.("fetch-worker", "running", 0);
-    const cmd = `mkdir -p /home/user/worker && curl -fsSL ${JSON.stringify(bundleUrl)} | tar -xz -C /home/user/worker`;
+    const cmd = `mkdir -p /home/user/worker && curl -fsSL ${shellQuote(bundleUrl)} | tar -xz -C /home/user/worker`;
     const result = await client.exec(spriteName, { cmd });
     const durationMs = Date.now() - start;
     if (result.exitCode !== 0) {
@@ -129,7 +131,7 @@ export async function bootstrapSprite(
     const start = Date.now();
     onStep?.("verify-worker", "running", 0);
     const result = await client.exec(spriteName, {
-      cmd: `test -f /home/user/worker/dist/run-worker.js && test -x ${shellQuote(codexBinary)} && ${shellQuote(codexBinary)} --version >/dev/null`,
+      cmd: `test -f /home/user/worker/dist/run-worker.js && sha1sum /home/user/worker/dist/run-worker.js | cut -d' ' -f1 > /home/user/worker/.worker-sha && test -x ${shellQuote(codexBinary)} && ${shellQuote(codexBinary)} --version >/dev/null`,
     });
     const durationMs = Date.now() - start;
     if (result.exitCode !== 0) {
@@ -140,6 +142,7 @@ export async function bootstrapSprite(
     onStep?.("verify-worker", "success", durationMs);
   }
 
+  if (opts.checkpoint === false) return;
   // Step 4: checkpoint
   {
     const start = Date.now();

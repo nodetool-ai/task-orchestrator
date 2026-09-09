@@ -206,7 +206,10 @@ function fakeBackend(text: string) {
 }
 
 describe("driveWorkerRun", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
 
   it("drives a chat turn, writing agent content via transcript.append (no terminal event)", async () => {
     vi.spyOn(backend, "getBackend").mockResolvedValue(fakeBackend("hello"));
@@ -238,6 +241,30 @@ describe("driveWorkerRun", () => {
     await driveWorkerRun({ start, session });
 
     expect(emitted.some((e) => e.type === "run.finished")).toBe(true);
+  });
+
+  it("fails an unbounded backend turn at the hard wall-clock deadline", async () => {
+    vi.stubEnv("TASK_ORCH_TURN_TIMEOUT_MS", "10");
+    let observedAbort: AbortSignal | undefined;
+    vi.spyOn(backend, "getBackend").mockResolvedValue({
+      id: "fake",
+      listProviders: () => [],
+      runTurn: (args: any) => {
+        observedAbort = args.abort.signal;
+        return new Promise(() => undefined);
+      },
+    } as any);
+    const { session, emitted } = recordingSession();
+    const start = makeStart({
+      run: { id: 3, status: "running", goal: "<implement>" },
+      transcript: [msg(1, "user", "run a command forever")],
+    });
+
+    await driveWorkerRun({ start, session });
+
+    expect(observedAbort?.aborted).toBe(true);
+    expect(emitted.find((event) => event.type === "run.failed")?.payload.error)
+      .toContain("wall-clock deadline");
   });
 
   it("fails the turn with an actionable error when the snapshot cwd does not exist in this worker", async () => {

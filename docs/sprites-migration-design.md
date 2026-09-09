@@ -319,6 +319,97 @@ bind them to runs on demand.
 - The per-run repo cache freshness story is unchanged: every turn still
   `git fetch`es, so a stale pool checkout is a seed, not a source of truth.
 
+### Phase 5 implementation requirements (snapshot lifecycle)
+
+The pool is a small, versioned supply of unused environments, not a snapshot
+per run or turn. Start with an opt-in target of 2–4 ready Sprites, bounded
+across fingerprints so repository diversity cannot multiply the pool without
+limit. Keep the existing default of zero until rollout validation passes.
+
+**Snapshot classes:**
+
+- **Baseline:** immutable, created after worker/tool installation and optional
+  project dependency installation finish. Persist the checkpoint ID and a
+  versioned environment manifest; a matching checkpoint comment alone does
+  not prove the live filesystem is ready.
+- **Pre-turn rollback:** optional and disabled initially. Retain only the latest
+  one or two for an active run. Acquire a worker-side quiescence barrier before
+  checkpointing: no turn, package manager, git mutation, or background writer
+  may run until checkpoint creation completes. A turn boundary alone is not
+  proof that spawned subprocesses have stopped.
+- **Failure:** create only on abnormal termination when filesystem inspection
+  is useful, after stopping writers. Use explicit expiry and a cleanup loop;
+  snapshot failure must not prevent recording the run failure. Verify provider
+  deletion/retention behavior before enabling either optional snapshot class.
+
+**Environment identity and dependencies:** hash a canonical, schema-versioned
+manifest containing the worker bundle digest, exact Node and Codex versions,
+platform/architecture, system-tool recipe version, repository identity, and
+dependency inputs. Dependency inputs include lockfile contents, relevant
+package manifests, package-manager version and installation options. Include
+any source inputs needed by install scripts, or invalidate the dependency
+baseline when those inputs change. A lockfile hash alone cannot capture those
+scripts' outputs.
+
+For frequently used repositories, prepare dependencies before the baseline at
+the same stable path the worker will use. Every turn still fetches and checks
+out its requested revision, then validates the dependency manifest. Reuse the
+installed tree only on a match; otherwise install before starting the agent.
+Merely putting `node_modules` in a seed checkout will not help if the worker
+creates a different worktree or unconditionally runs `npm ci`.
+
+For varied repositories, use a generic tool baseline and npm's content cache
+at `/home/user/session/.npm-cache`. The cache persists within that Sprite;
+fresh pool replacements need it seeded to benefit on their first run. Do not
+checkpoint during installation. Temporary repository/registry bootstrap
+credentials must be removed from files, git configuration and service
+definitions before sealing a baseline. Run credentials are injected only
+after baseline restore and verification.
+
+**Durable ownership:** use unique pool Sprite names rather than reusable slot
+names. Extend the proposed `sprite_pool` record with environment fingerprint,
+baseline checkpoint ID, manifest, preparation lease/operation ID, timestamps,
+and failure information. Track `preparing`, `ready`, `claimed`, and `draining`
+states. Atomically claim a ready entry of the exact fingerprint and bind its
+provider handle to the runner in the same database transaction. A retry for
+that run adopts the existing binding. External create/restore/delete steps
+must be recoverable after a control-plane crash; stale preparation leases
+must be reconciled before replacement capacity is allocated.
+
+Pool allocation and cleanup must work across control-plane replicas. Reserve
+capacity transactionally, refill asynchronously with bounded concurrency and
+backoff, and reconcile orphaned provider resources. Replace run-ID parsing
+from Sprite names in lifecycle/cleanup paths with durable ownership lookup.
+Drain stale **unclaimed** fingerprints; keep claimed Sprites bound through the
+run's resumable lifetime. Destroy them after terminal retention and never
+return them to `ready`. On a pool miss, retain the inline bootstrap fallback.
+
+**Restore protocol:** serialize against other lifecycle operations, stop all
+worker services on the Sprite, fence the old channel with a newly allocated
+worker generation, then restore the recorded checkpoint. Verify the worker
+digest, exact tool versions, dependency manifest where applicable, and basic
+filesystem readability/writability. Redefine the generation-scoped service
+with fresh run credentials and channel instance ID; require its authenticated
+channel handshake before marking the runner `running`. A failed restore or
+verification quarantines/drains the entry rather than publishing it ready.
+Verify the provider's service-restoration behavior so no restored definition
+can restart a worker with stale credentials before this sequence finishes.
+
+Restore a baseline only when first assigning an unused Sprite. Ordinary resume
+preserves the run's checkout, unpushed work and SDK transcript. Explicit rollback
+also needs a policy for reconciling durable control-plane turn receipts with
+older filesystem/SDK state; generation fencing alone does not undo external
+effects or make replay safe.
+
+**Validation before rollout:** concurrent claims never share a Sprite;
+crashes between allocation, restore and service start recover one binding;
+fingerprint drift drains only unclaimed entries; generation fencing rejects
+old channels; resume preserves files; terminal cleanup destroys claimed pool
+Sprites; and a matching dependency baseline avoids installation while a
+changed dependency manifest triggers it. Measure pool hit rate, refill errors,
+restore/handshake time and dispatch-to-running p50/p95. The existing ~15s p50
+is a target to validate, not a guarantee from checkpoint latency alone.
+
 **If Fly ships create-from-checkpoint / cross-sprite fork** (spike S1 asks),
 Phase B collapses to a template model — one golden sprite per worker SHA in the
 `environments` table, forked per run — and the pool manager shrinks to a

@@ -333,24 +333,29 @@ export async function sendCommand(runId: number, type: string, payload: unknown,
 export async function reconnectActiveChannels(): Promise<number> {
   const channels = await listReconnectableChannels();
   let reconnected = 0;
-  for (const channel of channels) {
-    try {
-      // startChannelForRun (not a bare connectRun): an adopted channel whose
-      // dispatch died before persisting `run.start` would otherwise sit
-      // connected-but-idle forever — channel liveness keeps bumping the
-      // heartbeat, so the reaper never rescues it. `freshWorker` is omitted
-      // (false): this is a RE-ADOPTION, not a provider create()/resume() — the
-      // worker process may be the same live one from before this control-plane
-      // restart, so an already-started instance gets no re-sent/rebuilt
-      // command, only the one true gap (no run.start ever persisted) is filled.
-      const runDispatch = await import("../run-dispatch");
-      await runDispatch.startChannelForRun(channel.runId, channel.instanceId);
-      reconnected++;
-    } catch {
-      // Worker unreachable (dead process / socket gone): the heartbeat reaper
-      // owns it. Do not fail startup.
+  // Re-adoption used to be fully sequential. One stale channel then consumed
+  // the complete boot-backoff window before any later run was even attempted
+  // (runs 206-208 were stranded behind run 204). A small worker pool bounds
+  // provider pressure while removing that head-of-line failure mode.
+  let next = 0;
+  const adopt = async () => {
+    for (;;) {
+      const index = next++;
+      const channel = channels[index];
+      if (!channel) return;
+      try {
+        // startChannelForRun (not a bare connectRun): an adopted channel whose
+        // dispatch died before persisting `run.start` would otherwise sit
+        // connected-but-idle forever.
+        const runDispatch = await import("../run-dispatch");
+        await runDispatch.startChannelForRun(channel.runId, channel.instanceId);
+        reconnected++;
+      } catch {
+        // Worker unreachable (dead process / socket gone): the reaper owns it.
+      }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, channels.length) }, () => adopt()));
   return reconnected;
 }
 

@@ -37,6 +37,7 @@ import {
   type RunnerAdmissionInput,
 } from "./runner/provider";
 import { recordDispatch, recordRunnerEvent, timeRunnerPhase } from "./runner/telemetry";
+import { SpriteCapacityError } from "./runner/sprites-capacity";
 import { isTerminalStatus } from "./types";
 import { newChannelInstanceId } from "./worker-channel/credential";
 import {
@@ -477,6 +478,7 @@ async function dispatchRunInner(
       providerServiceName: string | null;
       previousProviderServiceName: string | null;
       previousWorkerGeneration: number | null;
+      deferStartedAt: Date;
     }
   >(async () => {
     const run = await runs().get(runId);
@@ -658,7 +660,7 @@ async function dispatchRunInner(
         // transaction so a crash before provider.create still protects the
         // Sprite from the orphan reaper and allows boot adoption.
         spriteName: provider === "sprites"
-          ? `${config.sprites.prefix || "to-run-"}${runId}`
+          ? existing?.spriteName ?? `${config.sprites.prefix || "to-run-"}${runId}`
           : null,
         channelInstanceId,
         channelEndpoint: null,
@@ -684,6 +686,7 @@ async function dispatchRunInner(
         providerServiceName,
         previousProviderServiceName: existing?.providerServiceName ?? null,
         previousWorkerGeneration: existing?.workerGeneration ?? null,
+        deferStartedAt: priorRun?.status === "pending" ? priorRun.pendingSince ?? priorRun.startedAt : new Date(),
       };
     });
     if (!claimed) return { kind: "already-claimed" };
@@ -816,6 +819,23 @@ async function dispatchRunInner(
       return finish(await failCurrent(unsupportedWsProviderMessage(provider)));
     }
   } catch (err) {
+    if (err instanceof SpriteCapacityError) {
+      const deferred = await db.transaction(async (tx) => {
+        const rows = await tx.update(runnerInstances).set({ state: "gone", spriteName: null,
+          generationState: "stopped", providerOperationId: null }).where(and(
+          eq(runnerInstances.runId, runId), eq(runnerInstances.workerGeneration, outcome.workerGeneration),
+          eq(runnerInstances.providerOperationId, outcome.providerOperationId),
+        )).returning({ runId: runnerInstances.runId });
+        if (!rows.length) return false;
+        await tx.update(agentSessions).set({ status: "pending", workerScope: null,
+          pendingSince: outcome.deferStartedAt, pendingReason: err.message }).where(and(
+          eq(agentSessions.id, runId), eq(agentSessions.workerScope, outcome.scope),
+          notInArray(agentSessions.status, HARD_TERMINAL_STATUSES),
+        ));
+        return true;
+      });
+      return finish(deferred ? "deferred" : "already-claimed");
+    }
     return finish(await failCurrent(`run worker failed to spawn: ${err instanceof Error ? err.message : String(err)}`));
   }
   // Condition the post-spawn write on THIS dispatch still owning the claim. A slow

@@ -1,3 +1,4 @@
+import { spriteLog } from "../runner/sprites-log";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { sql as drizzleSql, type SQL } from "drizzle-orm";
@@ -119,6 +120,10 @@ export class WorkerChannelRepositoryError extends Error {
   readonly code: string;
   readonly closeCode?: number;
   readonly expectedSeq?: number;
+  /** Repository fencing failures are deterministic protocol/scope conflicts,
+   * not listener boot races. Retrying them for the full worker boot deadline
+   * only blocks recovery of unrelated runs. */
+  readonly retryable = false;
 
   constructor(message: string, code: string, options: { closeCode?: number; expectedSeq?: number } = {}) {
     super(message);
@@ -627,7 +632,7 @@ export async function markChannelConnected(
       tx,
       drizzleSql`
         UPDATE runner_instances ri
-        SET generation_state = 'active'
+        SET generation_state = 'active', state = 'running'
         WHERE ri.run_id = ${runId}
           AND ri.worker_generation = ${workerGeneration}
           AND ri.channel_instance_id = ${instanceId}
@@ -650,7 +655,9 @@ export async function markChannelConnected(
         UPDATE agent_runs
         SET worker_scope = ${String(rows[0].sprite_name)}
         WHERE id = ${runId}
-          ${provisioningScope == null ? drizzleSql`` : drizzleSql`AND worker_scope = ${provisioningScope}`}
+          ${provisioningScope == null
+            ? drizzleSql``
+            : drizzleSql`AND (worker_scope = ${provisioningScope} OR worker_scope = ${String(rows[0].sprite_name)})`}
           AND status NOT IN ('completed', 'failed', 'cancelled', 'closed', 'budget_exhausted')
         RETURNING id
       `);
@@ -670,6 +677,10 @@ export async function markChannelConnected(
       "INSTANCE_SCOPE_MISMATCH",
       { closeCode: 4403 }
     );
+  }
+  if (registered[0].sprite_name != null) {
+    spriteLog("sprites_worker_handshake_accepted", { runId, instanceId, workerGeneration,
+      spriteName: String(registered[0].sprite_name), outcome: "running" });
   }
 }
 

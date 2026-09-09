@@ -89,11 +89,22 @@ describe("spritesRunnerStateFromStatus", () => {
 });
 
 describe("buildSpritesWorkerEnv", () => {
+  it("forwards diagnostic settings to worker services", async () => {
+    vi.stubEnv("TASK_ORCH_LOG_LEVEL", "debug"); vi.stubEnv("TASK_ORCH_LOG_FORMAT", "json");
+    await expect(buildSpritesWorkerEnv(42)).resolves.toMatchObject({ TASK_ORCH_LOG_LEVEL: "debug", TASK_ORCH_LOG_FORMAT: "json" });
+  });
   it("defaults Codex to full access inside the isolated Sprite worker", async () => {
     vi.stubEnv("TASK_ORCH_CODEX_SANDBOX", undefined);
 
     await expect(buildSpritesWorkerEnv(42)).resolves.toMatchObject({
       TASK_ORCH_CODEX_SANDBOX: "danger-full-access",
+    });
+  });
+
+  it("keeps npm downloads in the persistent Sprite session", async () => {
+    await expect(buildSpritesWorkerEnv(42)).resolves.toMatchObject({
+      NPM_CONFIG_CACHE: "/home/user/session/.npm-cache",
+      NPM_CONFIG_PREFER_OFFLINE: "true",
     });
   });
 
@@ -473,6 +484,7 @@ describe("SpritesRunnerProvider.resume", () => {
     expect(stopSpy).toHaveBeenCalledTimes(1);
     expect(putSpy).toHaveBeenCalledTimes(1);
     const def = (putSpy.mock.calls[0] as unknown as [string, string, { env: Record<string, string> }])[2];
+    expect(def.env.TASK_ORCH_SPRITE_NAME).toBe(spriteName);
     expect(def.env.TASK_ORCH_WORKER_INSTANCE_ID).toBe("wi_cccccccccccccccccccccccccccccccc");
     expect(def.env.TASK_ORCH_WORKER_CHANNEL_CREDENTIAL).toMatch(/^wc1\.wi_cccccccccccccccccccccccccccccccc\./);
   });
@@ -490,7 +502,7 @@ describe("SpritesRunnerProvider.resume", () => {
       getService: vi.fn(async (_s: string, serviceName: string) => ({
         name: serviceName,
         cmd: "node",
-        env: currentEnv,
+        env: { ...currentEnv, TASK_ORCH_SPRITE_NAME: spriteName },
         state: { status: "running", pid: 7, startedAt: "2026-01-01T00:00:00Z" },
       })),
       putService: putSpy,

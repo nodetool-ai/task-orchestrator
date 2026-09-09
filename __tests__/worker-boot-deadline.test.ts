@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { BOOT_DEADLINE_MS } from "../lib/run-dispatch";
+import { WorkerChannelRepositoryError } from "../lib/worker-channel/repository";
 
 // Prod, run 169 (2026-07-21): the run sat in `preparing` and the control plane
 // logged
@@ -21,5 +22,14 @@ describe("worker boot deadline", () => {
   it("keeps meaningful headroom over the observed worst case", () => {
     // A pull slower than the one measured must not immediately re-break it.
     expect(BOOT_DEADLINE_MS).toBeGreaterThanOrEqual(OBSERVED_COLD_FLY_BOOT_MS * 1.5);
+  });
+
+  it("does not classify deterministic channel fencing failures as boot races", () => {
+    const error = new WorkerChannelRepositoryError(
+      "stale provisioning claim",
+      "INSTANCE_SCOPE_MISMATCH",
+      { closeCode: 4403 },
+    );
+    expect(error.retryable).toBe(false);
   });
 });

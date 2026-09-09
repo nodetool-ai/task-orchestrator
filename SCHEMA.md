@@ -254,6 +254,23 @@ refreshes the token here, then forwards it to workers as CODEX_ACCESS_TOKEN,
 since workers hold no database credentials.
 ```
 
+### Sprite pool ownership
+
+`sprite_pool_entries` (migration `0043_sprite_pool`) stores uniquely named
+Sprites, immutable baseline manifests/fingerprints and checkpoint IDs,
+preparation leases, assigned run IDs, restore receipts, and deletion work.
+States are `preparing → ready → claimed` and `draining → deleting → deleted`,
+with `failed` preparation rows held through retry backoff before draining.
+Used environments never return to `ready`. Assigned rows remain associated
+with a run through retention; a deleted/failed row does not prevent a later
+replacement record for the same run.
+
+Pool claims bind `runner_instances` in the same transaction as ownership.
+`restore_state` (`pending | restoring | restored | failed`) distinguishes
+interrupted first assignment from resume. Provider deletion is recorded only
+after success, and pending cleanup survives control-plane restart. See
+[Sprite warm pool](docs/runners/sprite-warm-pool.md) for operator configuration.
+
 ## ID format
 
 - **Plans**: `P-YYYY-MM-DD-slug` (slug is auto-derived from the title on create)

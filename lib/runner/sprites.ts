@@ -4,11 +4,12 @@
 import { and, eq, isNull, sql } from "drizzle-orm";
 
 import { db } from "@/db";
-import { agentEvents, agentSessions, runnerInstances } from "@/db/schema";
+import { agentEvents, agentSessions, repositories, runnerInstances, spritePoolEntries } from "@/db/schema";
 import { agentCredentialEnv } from "../agent-backend/provider-env";
 import { config } from "../config";
 import type { SessionStatus } from "../types";
-import { nextSpritesLifecycleAction } from "./lifecycle";
+import { nextSpritesLifecycleAction, isConversationalTerminal } from "./lifecycle";
+import { isTerminalStatus } from "../run-state";
 import { nestedDispatchMode } from "./provider";
 import { recordRunnerEvent, timeRunnerPhase } from "./telemetry";
 import type { CreateRunnerInput, WorkerGenerationRef, RunnerObservation, RunnerProvider, RunnerRef, RunnerState } from "./provider";
@@ -17,6 +18,13 @@ import { bootstrapSprite, SPRITE_CODEX_BINARY } from "./sprites-bootstrap";
 import { workerBundleId } from "../worker-bundle";
 import { newChannelInstanceId } from "../worker-channel/credential";
 import { spritesDialEndpoint, spritesListenEndpoint, workerChannelDispatchEnv } from "../worker-channel/dispatch-env";
+import { spritesPoolStore, type SpritePoolEntry } from "./sprites-pool-store";
+import { verifyBaseline, dependencyFingerprint, type SpriteBaselineManifest } from "./sprites-baseline";
+import { getConfiguredSpriteBaselines } from "./sprites-pool-config";
+import { SpritePoolManager, createDatabaseSpritePoolStore, requestSpritePoolMaintenance, requestSpritePoolRefill } from "./sprites-pool";
+import { cloneUrlFromRemote } from "../repo-checkout";
+import { SpriteCapacityError } from "./sprites-capacity";
+import { logSpritePhase, spriteLog, spriteErrorFields } from "./sprites-log";
 
 function envValue(key: string): string | undefined {
   const v = process.env[key];
@@ -210,6 +218,8 @@ export async function buildSpritesWorkerEnv(
       ? workerChannelDispatchEnv(runId, opts.channelInstanceId, opts.channelListenEndpoint, opts.workerGeneration ?? 1)
       : {};
   return compactEnv({
+    TASK_ORCH_LOG_LEVEL: envValue("TASK_ORCH_LOG_LEVEL"),
+    TASK_ORCH_LOG_FORMAT: envValue("TASK_ORCH_LOG_FORMAT"),
     GH_TOKEN: envValue("GH_TOKEN"),
     ...(await agentCredentialEnv()),
     TASK_ORCH_AGENT_BACKEND: envValue("TASK_ORCH_AGENT_BACKEND"),
@@ -234,6 +244,11 @@ export async function buildSpritesWorkerEnv(
     ...(opts.workerGeneration != null ? { TASK_ORCH_WORKER_GENERATION: String(opts.workerGeneration) } : {}),
     SESSION_ROOT: "/home/user/session",
     REPO_CACHE_DIR: envValue("TASK_ORCH_REPO_CACHE_DIR") ?? "/opt/repo-cache",
+    // Keep npm's content-addressed cache on the Sprite's persistent session
+    // volume. Worker service replacements can then validate/extract cached
+    // packages instead of cold-fetching the full dependency graph again.
+    NPM_CONFIG_CACHE: envValue("TASK_ORCH_SPRITES_NPM_CACHE") ?? "/home/user/session/.npm-cache",
+    NPM_CONFIG_PREFER_OFFLINE: "true",
     ...channelEnv,
   });
 }
@@ -242,6 +257,142 @@ export class SpritesRunnerProvider implements RunnerProvider {
   readonly kind = "sprites" as const;
 
   constructor(private readonly spritesClient: SpritesClient = makeSpritesClient()) {}
+
+  private poolMaintenance: Promise<void> | null = null;
+
+  private refillPool(): void {
+    if (this.poolMaintenance || !config.sprites.token) return;
+    this.poolMaintenance = (async () => {
+      const workerSha = config.sprites.poolSize > 0 ? await workerBundleId() : "";
+      const specs = config.sprites.poolSize > 0 ? getConfiguredSpriteBaselines(workerSha) : [];
+      if (specs.reduce((total, spec) => total + spec.target, 0) > config.sprites.poolSize) {
+        throw new Error("Sprite baseline targets exceed TASK_ORCH_SPRITE_POOL_SIZE");
+      }
+      const byFingerprint = new Map(specs.map((spec) => [spec.fingerprint, spec]));
+      const manager = new SpritePoolManager({
+        store: createDatabaseSpritePoolStore(), target: config.sprites.poolSize,
+        maxSprites: config.sprites.maxSprites, maxConcurrent: 2, leaseMs: 30 * 60_000,
+        fingerprints: () => specs.filter((spec) => spec.target > 0).map((spec) => spec.fingerprint),
+        fingerprintTargets: (fingerprint) => byFingerprint.get(fingerprint)?.target ?? 0,
+        baseline: (fingerprint) => ({ manifest: byFingerprint.get(fingerprint)!.manifest as unknown as Record<string, unknown> }),
+        requestRefill: async (request) => {
+          const spec = byFingerprint.get(request.reservation.fingerprint);
+          if (!spec || !config.sprites.workerBundleUrl) throw new Error("Sprite baseline configuration unavailable");
+          return requestSpritePoolRefill(this.spritesClient, {
+            baseline: spec.manifest, workerSha, bundleUrl: config.sprites.workerBundleUrl,
+            codexBinary: envValue("TASK_ORCH_SPRITES_CODEX_BINARY"),
+          })!(request);
+        },
+      });
+      await requestSpritePoolMaintenance(this.spritesClient, manager);
+    })().catch((error) => spriteLog("sprites_pool_maintenance_failed", spriteErrorFields(error), "warn"))
+      .finally(() => { this.poolMaintenance = null; });
+  }
+
+  /** Queue deletion in the same transaction that releases generation authority.
+   * A provider outage therefore leaves durable cleanup work, not an orphan. */
+  private async retireInstance(runId: number, spriteName: string,
+    guard: { workerGeneration?: number; providerOperationId?: string } = {}): Promise<boolean> {
+    return db.transaction(async (tx) => {
+      const [retired] = await tx.update(runnerInstances).set({ state: "gone", spriteName: null,
+        generationState: "stopped", providerOperationId: null }).where(and(
+        eq(runnerInstances.runId, runId), eq(runnerInstances.spriteName, spriteName),
+        guard.workerGeneration != null ? eq(runnerInstances.workerGeneration, guard.workerGeneration) : undefined,
+        guard.providerOperationId ? eq(runnerInstances.providerOperationId, guard.providerOperationId) : undefined,
+      )).returning({ runId: runnerInstances.runId });
+      if (!retired) return false;
+      await tx.update(spritePoolEntries).set({ state: "deleting", deleteRequestedAt: new Date(), updatedAt: new Date() })
+        .where(and(eq(spritePoolEntries.spriteName, spriteName), eq(spritePoolEntries.runId, runId)));
+      return true;
+    });
+  }
+
+  private async deleteRetiredSprite(spriteName: string): Promise<void> {
+    await logSpritePhase("retired_sprite_delete", { spriteName }, () => this.spritesClient.deleteSprite(spriteName));
+    const entry = await spritesPoolStore.findBySpriteName(spriteName);
+    if (entry && await spritesPoolStore.markDeleted(entry.id)) spriteLog("sprites_pool_deleted", { spriteName, poolEntryId: entry.id, runId: entry.runId });
+  }
+
+  /** First-assignment recovery is distinct from resume: once this durable
+   * marker exists, a baseline must never overwrite the run's filesystem. */
+  private async restorePoolAssignment(entry: SpritePoolEntry, input: CreateRunnerInput): Promise<void> {
+    const context = { runId: input.runId, spriteName: entry.spriteName, poolEntryId: entry.id, fingerprint: entry.fingerprint,
+      checkpointId: entry.checkpointId, workerGeneration: input.workerGeneration, instanceId: input.channelInstanceId, operationId: input.providerOperationId };
+    if (entry.restoreState === "restored") {
+      spriteLog("sprites_baseline_restore_skipped", { ...context, reason: "already_restored" }); return;
+    }
+    await logSpritePhase("baseline_assignment", context, () => this.restorePoolAssignmentUnchecked(entry, input));
+  }
+
+  private async restorePoolAssignmentUnchecked(entry: SpritePoolEntry, input: CreateRunnerInput): Promise<void> {
+    if (entry.restoreState === "restored") return;
+    if (entry.state !== "claimed" || entry.restoreState === "failed") throw new Error("Sprite pool assignment is not restorable");
+    if (!input.workerGeneration || !input.channelInstanceId) throw new Error("Pool restores require a fenced worker generation and channel instance");
+    const current = await this.getInstance(input.runId);
+    if (current?.workerGeneration !== input.workerGeneration || current.spriteName !== entry.spriteName
+      || (input.providerOperationId && current.providerOperationId !== input.providerOperationId)) {
+      throw new Error("Sprite pool restore was superseded");
+    }
+    if (!this.spritesClient.listServices) throw new Error("Sprite pool restore requires service inspection");
+    const services = await this.spritesClient.listServices(entry.spriteName);
+    for (const service of services) {
+      if (/^worker(?:-g\d+)?$/.test(service.name)) await logSpritePhase("baseline_stop_worker", { runId: input.runId, spriteName: entry.spriteName, serviceName: service.name }, () => this.stopServiceAndConfirm(entry.spriteName, service.name));
+    }
+    await spritesPoolStore.beginRestore(entry.id);
+    await timeRunnerPhase("sprites_baseline_restore", () => logSpritePhase("baseline_restore_checkpoint", { runId: input.runId, spriteName: entry.spriteName, checkpointId: entry.checkpointId, workerGeneration: input.workerGeneration }, () => this.spritesClient.restoreCheckpoint(entry.spriteName, entry.checkpointId)), {
+      provider: "sprites", fields: { runId: input.runId, spriteName: entry.spriteName, fingerprint: entry.fingerprint },
+    });
+    if ((await this.spritesClient.listServices(entry.spriteName)).some((service) => /^worker(?:-g\d+)?$/.test(service.name))) {
+      throw new Error("Restored baseline contains a worker service definition");
+    }
+    await verifyBaseline(this.spritesClient, entry.spriteName, entry.baselineManifest as unknown as SpriteBaselineManifest,
+      envValue("TASK_ORCH_SPRITES_CODEX_BINARY") ?? SPRITE_CODEX_BINARY);
+    if (!await spritesPoolStore.markRestored(entry.id)) throw new Error("Sprite pool restore ownership changed");
+    await emitRunnerEvent(input.runId, "runner_baseline_restored", { spriteName: entry.spriteName, fingerprint: entry.fingerprint });
+  }
+
+  private poolWorkerEnv(entry: SpritePoolEntry | null): Record<string, string> {
+    const manifest = entry?.baselineManifest as unknown as SpriteBaselineManifest | undefined;
+    return manifest?.dependency ? {
+      TASK_ORCH_SPRITE_DEPENDENCY_REUSE: "1",
+      TASK_ORCH_SPRITE_DEPENDENCY_FINGERPRINT: dependencyFingerprint(manifest.dependency),
+      TASK_ORCH_SPRITE_PACKAGE_MANAGER: "npm",
+    } : {};
+  }
+
+  private async claimPoolAssignment(input: CreateRunnerInput): Promise<SpritePoolEntry | null> {
+    if (config.sprites.poolSize <= 0 || !input.workerGeneration || !input.channelInstanceId) return null;
+    const specs = getConfiguredSpriteBaselines(await workerBundleId());
+    const [run] = await db.select({ repoId: agentSessions.repoId, userId: agentSessions.userId, remote: repositories.remote })
+      .from(agentSessions).leftJoin(repositories, eq(repositories.id, agentSessions.repoId))
+      .where(eq(agentSessions.id, input.runId));
+    if (!run) { spriteLog("sprites_pool_claim_skipped", { runId: input.runId, reason: "run_missing" }, "debug"); return null; }
+    // Repository baselines are opt-in for explicitly scoped users. Generic
+    // baselines contain no repository data and are the fallback.
+    const matches = specs.filter((spec) => spec.target > 0 && (spec.manifest.dependency
+      ? spec.repositoryId === run.repoId && cloneUrlFromRemote(spec.remote)?.replace(/\.git$/, "") === cloneUrlFromRemote(run.remote)?.replace(/\.git$/, "")
+        && run.userId != null && spec.allowedUserIds?.includes(run.userId)
+      : !spec.repositoryId));
+    matches.sort((a, b) => Number(Boolean(b.manifest.dependency)) - Number(Boolean(a.manifest.dependency)));
+    for (const spec of matches) {
+      const entry = await spritesPoolStore.claimForRun({
+        runId: input.runId, fingerprint: spec.fingerprint,
+        expectedWorkerGeneration: input.workerGeneration,
+        expectedProviderOperationId: input.providerOperationId,
+      });
+      if (entry) {
+        spriteLog("sprites_pool_claimed", { runId: input.runId, spriteName: entry.spriteName, poolEntryId: entry.id, fingerprint: entry.fingerprint,
+          checkpointId: entry.checkpointId, workerGeneration: input.workerGeneration, instanceId: input.channelInstanceId, operationId: input.providerOperationId });
+        await emitRunnerEvent(input.runId, "runner_pool_hit", { spriteName: entry.spriteName, fingerprint: entry.fingerprint,
+          dependencyBaseline: Boolean(spec.manifest.dependency) });
+        return entry;
+      }
+    }
+    spriteLog("sprites_pool_claim_miss", { runId: input.runId, workerGeneration: input.workerGeneration, operationId: input.providerOperationId,
+      count: matches.length, reason: matches.length ? "no_ready_match" : "no_eligible_baseline" });
+    await emitRunnerEvent(input.runId, "runner_pool_miss");
+    return null;
+  }
 
   async inspect(handle: string): Promise<RunnerObservation> {
     return this.inspectService(handle, "worker");
@@ -317,42 +468,78 @@ export class SpritesRunnerProvider implements RunnerProvider {
   }
 
   async create(input: CreateRunnerInput): Promise<RunnerRef | null> {
-    return serializeSpriteOperation(input.runId, () => this.createUnserialized(input));
+    try { return await serializeSpriteOperation(input.runId, () => this.createUnserialized(input)); }
+    finally { this.refillPool(); }
   }
 
   private async createUnserialized(input: CreateRunnerInput): Promise<RunnerRef | null> {
     const existing = await this.getInstance(input.runId);
+    let poolEntry = existing?.spriteName ? await spritesPoolStore.findBySpriteName(existing.spriteName) : null;
     if (existing?.spriteName) {
-      const resumed = await this.resumeUnserialized(input.runId, input);
-      if (resumed) return resumed;
+      if (!poolEntry || poolEntry.restoreState === "restored") {
+        const resumed = await this.resumeUnserialized(input.runId, input);
+        if (resumed) return resumed;
+        if (poolEntry) throw new Error("Assigned Sprite is unavailable; refusing to replace its resumable filesystem");
+      }
     }
 
-    const spriteName = spriteNameForRun(input.runId);
+    if (!poolEntry) {
+      try { poolEntry = await this.claimPoolAssignment(input); }
+      catch (error) { await emitRunnerEvent(input.runId, "runner_pool_unavailable", { reason: error instanceof Error ? error.message : String(error) }); }
+    }
+    const spriteName = poolEntry?.spriteName ?? spriteNameForRun(input.runId);
     const channelInstanceId = input.channelInstanceId ?? existing?.channelInstanceId ?? newChannelInstanceId();
     const channelListenEndpoint = spritesListenEndpoint();
-    const workerEnv = await buildSpritesWorkerEnv(input.runId, {
+    const workerEnv = { ...await buildSpritesWorkerEnv(input.runId, {
       channelInstanceId,
       channelListenEndpoint,
       workerGeneration: input.workerGeneration,
-    });
+    }), ...this.poolWorkerEnv(poolEntry), TASK_ORCH_SPRITE_NAME: spriteName };
     const serviceName = input.providerServiceName ?? workerServiceName(input.workerGeneration);
 
     // Publish the stable provider handle before any external boot work. A
     // dispatcher crash after create/bootstrap can then be adopted by sweep or
     // the next generation instead of being mistaken for an orphan Sprite.
     if (input.workerGeneration != null) {
-      const mapped = await this.updateInstance(input.runId, {
+      const mapping = {
         provider: "sprites",
         spriteName,
         state: "starting",
         generationState: "booting",
         providerServiceName: serviceName,
-      }, generationGuard(input, null));
+      } as const;
+      const mapped = !poolEntry && config.sprites.maxSprites > 0
+        ? await db.transaction(async (tx) => {
+          await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('sprite-pool-capacity'))`);
+          // Allocating rows have not reserved a provider resource yet. This
+          // lock changes one to booting atomically with the capacity check.
+          const counts = await tx.execute<{ count: number }>(sql`
+            SELECT ((SELECT count(*) FROM sprite_pool_entries WHERE state <> 'deleted') +
+              (SELECT count(*) FROM runner_instances ri LEFT JOIN sprite_pool_entries pe ON pe.sprite_name=ri.sprite_name
+               WHERE ri.provider='sprites' AND ri.run_id <> ${input.runId}
+                 AND ri.state <> 'gone' AND ri.generation_state <> 'allocating' AND pe.id IS NULL))::int AS count`);
+          if (Number(counts[0]?.count ?? 0) >= config.sprites.maxSprites) throw new SpriteCapacityError();
+          const updated = await tx.update(runnerInstances).set(mapping).where(and(
+            eq(runnerInstances.runId, input.runId), eq(runnerInstances.workerGeneration, input.workerGeneration!),
+            input.providerOperationId ? eq(runnerInstances.providerOperationId, input.providerOperationId) : undefined,
+          )).returning({ runId: runnerInstances.runId });
+          return updated.length > 0;
+        }).catch(async (error) => {
+          if (error instanceof SpriteCapacityError) {
+            const unused = await spritesPoolStore.listUnused();
+            if (unused[0]) await spritesPoolStore.requestDrain(Number(unused[0].id), "release capacity for a queued run");
+          }
+          throw error;
+        })
+        : await this.updateInstance(input.runId, mapping, generationGuard(input, null));
       if (!mapped) return null;
     }
 
-    let created = false;
+    let created = Boolean(poolEntry);
     try {
+      if (poolEntry) {
+        await this.restorePoolAssignment(poolEntry, input);
+      } else {
       await timeRunnerPhase(
         "sprites_sprite_create",
         async () => {
@@ -398,6 +585,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
           }),
         { provider: "sprites", fields: { runId: input.runId, spriteName, workerSha } },
       );
+      }
 
       // Define and start the worker service. The base image is standard; the
       // service definition is the sprite's "entrypoint".
@@ -476,6 +664,8 @@ export class SpritesRunnerProvider implements RunnerProvider {
           });
       }
 
+      spriteLog("sprites_worker_awaiting_handshake", { runId: input.runId, spriteName, workerGeneration: input.workerGeneration,
+        instanceId: channelInstanceId, operationId: input.providerOperationId, serviceName });
       await emitRunnerEvent(input.runId, "runner_created", { spriteName });
       return { runId: input.runId, handle: spriteName, provider: "sprites", channelInstanceId, channelEndpoint,
         workerGeneration: input.workerGeneration, providerServiceName: serviceName };
@@ -487,15 +677,10 @@ export class SpritesRunnerProvider implements RunnerProvider {
       // destroy the Sprite already adopted by generation N+1.
       let ownsCleanup = true;
       if (created && input.workerGeneration != null) {
-        ownsCleanup = await this.updateInstance(input.runId, {
-          state: "gone",
-          spriteName: null,
-          generationState: "failed",
-          providerOperationId: null,
-        }, generationGuard(input, null));
+        ownsCleanup = await this.retireInstance(input.runId, spriteName, generationGuard(input, null));
       }
       if (created && ownsCleanup) {
-        await this.spritesClient.deleteSprite(spriteName).catch(() => {});
+        await this.deleteRetiredSprite(spriteName).catch(() => {});
       }
       throw err;
     }
@@ -510,6 +695,12 @@ export class SpritesRunnerProvider implements RunnerProvider {
     const instance = await this.getInstance(runId);
     if (!instance?.spriteName) return null;
     const spriteName = instance.spriteName;
+    const poolEntry = await spritesPoolStore.findBySpriteName(spriteName);
+    if (poolEntry?.restoreState === "restored") spriteLog("sprites_pool_resume", { runId, spriteName, poolEntryId: poolEntry.id,
+      fingerprint: poolEntry.fingerprint, workerGeneration: input.workerGeneration, instanceId: input.channelInstanceId, reason: "preserve_filesystem" });
+    if (poolEntry && poolEntry.restoreState !== "restored") {
+      return this.createUnserialized(input);
+    }
     const requestedGeneration = input.workerGeneration;
     const currentGeneration = generationOf(instance);
     const restarting = input.replacesGeneration != null || (requestedGeneration != null && requestedGeneration > (currentGeneration ?? 0));
@@ -570,11 +761,11 @@ export class SpritesRunnerProvider implements RunnerProvider {
     // Re-define the service with the current env whenever the stored credential
     // no longer matches; that also refreshes provider keys and model settings.
     try {
-      const desiredEnv = await buildSpritesWorkerEnv(runId, {
+      const desiredEnv = { ...await buildSpritesWorkerEnv(runId, {
         channelInstanceId,
         channelListenEndpoint: spritesListenEndpoint(),
         workerGeneration: requestedGeneration ?? currentGeneration ?? undefined,
-      });
+      }), ...this.poolWorkerEnv(poolEntry), TASK_ORCH_SPRITE_NAME: spriteName };
       // A true restart gets a new service and instance. Stop and confirm the
       // prior generation before binding the replacement to port 8787; a delayed
       // stop on the stable `worker` name is otherwise able to kill the new turn.
@@ -593,7 +784,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
       // next start runs the new code.
       let staleBundle = false;
       const bundleUrl = config.sprites.workerBundleUrl;
-      if (bundleUrl && config.sprites.token) {
+      if (!poolEntry && bundleUrl && config.sprites.token) {
         const workerSha = await workerBundleId();
         const checkpoints = await this.spritesClient.listCheckpoints(spriteName).catch(() => []);
         staleBundle = !checkpoints.some((cp) => cp.comment === `bootstrap ${workerSha}`);
@@ -708,7 +899,8 @@ export class SpritesRunnerProvider implements RunnerProvider {
       });
     }
     console.warn(`[SpritesRunnerProvider] stop: no runner row for sprite ${handle}`);
-    const runId = runIdFromSpriteName(handle);
+    const poolEntry = await spritesPoolStore.findBySpriteName(handle);
+    const runId = poolEntry?.runId ?? runIdFromSpriteName(handle);
     if (runId != null) {
       await serializeSpriteOperation(runId, async () => {
         // Re-check under the durable lifecycle lock. A row may have been
@@ -718,11 +910,13 @@ export class SpritesRunnerProvider implements RunnerProvider {
           .from(runnerInstances)
           .where(eq(runnerInstances.spriteName, handle));
         if (mapped) return;
-        await this.spritesClient.deleteSprite(handle).catch(() => {});
+        if (poolEntry) await spritesPoolStore.requestDeletionBySpriteName(handle, "stop without runner binding");
+        await this.deleteRetiredSprite(handle).catch(() => {});
       });
       return;
     }
-    await this.spritesClient.deleteSprite(handle).catch(() => {});
+    if (poolEntry) await spritesPoolStore.requestDeletionBySpriteName(handle, "explicit stop");
+    await this.deleteRetiredSprite(handle).catch(() => {});
   }
 
   /** Destroy a run-scoped Sprite only after atomically claiming the current
@@ -733,20 +927,16 @@ export class SpritesRunnerProvider implements RunnerProvider {
   }
 
   private async destroyGenerationUnserialized(ref: WorkerGenerationRef): Promise<void> {
-    const claimed = await this.updateInstance(ref.runId, {
-      state: "gone",
-      spriteName: null,
-      generationState: "stopped",
-      providerOperationId: null,
-    }, { workerGeneration: ref.generation });
+    const claimed = await this.retireInstance(ref.runId, ref.providerHandle, { workerGeneration: ref.generation });
     if (!claimed) return;
-    await this.spritesClient.deleteSprite(ref.providerHandle).catch(() => {});
+    await this.deleteRetiredSprite(ref.providerHandle).catch(() => {});
     await this.releaseRunClaimIfCurrent(ref.runId, ref.providerHandle);
     await clearSdkSession(ref.runId);
     await emitRunnerEvent(ref.runId, "runner_failed", { spriteName: ref.providerHandle, reason: "stopped", workerGeneration: ref.generation });
   }
 
   async sweep(): Promise<void> {
+    this.refillPool();
     let sprites: Sprite[];
     try {
       const prefix = config.sprites.prefix || "to-run-";
@@ -766,6 +956,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
         archivedUri: runnerInstances.archivedUri,
         workerIncarnation: runnerInstances.workerIncarnation,
         workerGeneration: runnerInstances.workerGeneration,
+        generationState: runnerInstances.generationState,
         providerServiceName: runnerInstances.providerServiceName,
         channelInstanceId: runnerInstances.channelInstanceId,
         runStatus: agentSessions.status,
@@ -830,10 +1021,13 @@ export class SpritesRunnerProvider implements RunnerProvider {
         }
 
         const runnerState = spritesRunnerStateFromStatus(sprite.status);
-        if (runnerState !== row.state) {
+        // Provider VM activity cannot establish worker readiness. Only the
+        // authenticated channel handshake may promote a fenced generation.
+        const reportedState = runnerState === "running" && row.generationState !== "active"
+          ? "starting" : runnerState;
+        if (reportedState !== row.state) {
           await this.updateInstance(row.runId, {
-            state: runnerState,
-            ...(runnerState === "running" ? { lastStartedAt: new Date() } : {}),
+            state: reportedState,
           }, { workerGeneration: row.workerGeneration ?? undefined });
         }
 
@@ -866,6 +1060,17 @@ export class SpritesRunnerProvider implements RunnerProvider {
     const graceMs = config.sprites.orphanGraceMs;
     for (const s of allSprites) {
       if (protectedNames.has(s.name)) continue;
+      if (new RegExp(`^${escapeRegExp(config.sprites.prefix)}pool-[a-f0-9]{12}-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`).test(s.name)) {
+        // A timed-out create can finish after its preparation row was retired.
+        // Unique names make these late resources safe to reconcile by ownership.
+        if (!s.createdAt || nowMs - s.createdAt.getTime() < graceMs) continue;
+        const entry = await spritesPoolStore.findBySpriteName(s.name);
+        if (entry && entry.state !== "deleted") continue;
+        const [bound] = await db.select({ runId: runnerInstances.runId }).from(runnerInstances)
+          .where(eq(runnerInstances.spriteName, s.name));
+        if (!bound) await this.spritesClient.deleteSprite(s.name);
+        continue;
+      }
       if (!isRunSpriteName(s.name)) {
         if (config.worker.debugLog) console.debug(`[SpritesRunnerProvider] skipping non-run sprite ${s.name}`);
         continue;
@@ -920,6 +1125,8 @@ export class SpritesRunnerProvider implements RunnerProvider {
     workerLive: boolean,
   ): Promise<void> {
     if (!row.spriteName) return;
+    const pooled = await spritesPoolStore.findBySpriteName(row.spriteName);
+    if (pooled && (!isTerminalStatus(runStatus) || isConversationalTerminal({ runStatus, goal: row.runGoal }))) return;
     const idleMs = Math.max(0, nowMs - lastActivityMs(row));
     const action = nextSpritesLifecycleAction({
       runStatus,
@@ -938,18 +1145,11 @@ export class SpritesRunnerProvider implements RunnerProvider {
     // Claim terminal ownership before touching the provider. If a newer
     // generation was allocated while this sweep was observing the old one,
     // this CAS fails and the old sweep must not delete the shared Sprite.
-    const cleaned = await this.updateInstance(row.runId, {
-      state: "gone",
-      spriteName: null,
-      generationState: "stopped",
-      providerOperationId: null,
-    }, row.workerGeneration == null
-      ? { spriteName }
-      : { workerGeneration: row.workerGeneration, spriteName });
+    const cleaned = await this.retireInstance(row.runId, spriteName, { workerGeneration: row.workerGeneration ?? undefined });
     if (!cleaned) return;
     await timeRunnerPhase(
       "sprites_sprite_destroy",
-      () => this.spritesClient.deleteSprite(spriteName).catch(() => {}),
+      () => this.deleteRetiredSprite(spriteName),
       { provider: "sprites", fields: { runId: row.runId, spriteName, idleMs } },
     );
     await this.releaseRunClaimIfCurrent(row.runId, spriteName);

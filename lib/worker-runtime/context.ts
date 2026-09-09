@@ -407,6 +407,40 @@ interface TurnResult {
   usage: UsageSnapshot;
 }
 
+function effectiveTurnTimeoutMs(deadline: string | null | undefined): number | null {
+  const configured = config.agent.turnTimeoutMs;
+  const configuredDeadline = configured > 0 ? Date.now() + configured : Number.POSITIVE_INFINITY;
+  const runDeadline = deadline ? Date.parse(deadline) : Number.POSITIVE_INFINITY;
+  const effective = Math.min(configuredDeadline, Number.isFinite(runDeadline) ? runDeadline : Number.POSITIVE_INFINITY);
+  if (!Number.isFinite(effective)) return null;
+  return Math.max(0, effective - Date.now());
+}
+
+async function runBackendWithDeadline<T>(
+  operation: Promise<T>,
+  abort: AbortController,
+  timeoutMs: number | null,
+): Promise<T> {
+  if (timeoutMs == null) return operation;
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`Agent turn exceeded its ${timeoutMs}ms wall-clock deadline`);
+      abort.abort(error);
+      reject(error);
+    }, timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    // A backend that takes a moment to observe AbortSignal must not create an
+    // unhandled rejection after the timeout has already landed the run.
+    void operation.catch(() => undefined);
+  }
+}
+
 /**
  * Run ONE model turn against the loaded context. Invokes the backend exactly as
  * lib/runs.ts does (same seam, same neutral RunEnvelope stream) and routes every
@@ -566,7 +600,11 @@ async function runModelTurn(
       : undefined,
   };
 
-  const outcome = await backend.runTurn(turnArgs);
+  const outcome = await runBackendWithDeadline(
+    backend.runTurn(turnArgs),
+    abort,
+    effectiveTurnTimeoutMs(context.start.policy.deadline),
+  );
   return {
     summary: summary ?? lastAssistantText ?? outcome.summary,
     sdkSessionId: outcome.resumeToken ?? sdkSessionId,

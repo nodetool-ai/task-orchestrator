@@ -132,6 +132,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks(); vi.unstubAllEnvs();
   await db.delete(runEventDeliveryMatches);
   await db.delete(inboxEvents);
   await db.delete(runEventSubscriptions);
@@ -235,6 +236,8 @@ describe("transcript.append", () => {
       })
       .where(eq(runnerInstances.runId, runId));
 
+    vi.stubEnv("TASK_ORCH_LOG_FORMAT", "json");
+    const handshakeLogs = vi.spyOn(console, "log").mockImplementation(() => {});
     // A stale/competing hello may mark the generation only when its captured
     // provisioning claim still matches; it must not steal the run scope.
     await expect(markChannelConnected(runId, instanceId, new Date(), 2, "controller-1", 1, "other-claim"))
@@ -242,11 +245,30 @@ describe("transcript.append", () => {
     const [stillProvisioning] = await db.select({ workerScope: agentSessions.workerScope })
       .from(agentSessions).where(eq(agentSessions.id, runId));
     expect(stillProvisioning.workerScope).toBe(provisioningScope);
+    expect(handshakeLogs).not.toHaveBeenCalled();
 
     await markChannelConnected(runId, instanceId, new Date(), 2, "controller-1", 1, provisioningScope);
-    const [promoted] = await db.select({ workerScope: agentSessions.workerScope })
-      .from(agentSessions).where(eq(agentSessions.id, runId));
+    const [promoted] = await db.select({
+      workerScope: agentSessions.workerScope,
+      runnerState: runnerInstances.state,
+    }).from(agentSessions)
+      .innerJoin(runnerInstances, eq(runnerInstances.runId, agentSessions.id))
+      .where(eq(agentSessions.id, runId));
     expect(promoted.workerScope).toBe(spriteName);
+    expect(promoted.runnerState).toBe("running");
+    expect(handshakeLogs.mock.calls.map(([line]) => JSON.parse(String(line)))).toContainEqual(expect.objectContaining({ event: "sprites_worker_handshake_accepted", runId, spriteName, workerGeneration: 2, instanceId }));
+
+    // Reconnecting the same worker is idempotent even if an in-memory
+    // connection still carries the already-consumed one-time claim.
+    await expect(markChannelConnected(
+      runId,
+      instanceId,
+      new Date(),
+      2,
+      "controller-1",
+      1,
+      provisioningScope,
+    )).resolves.toBeUndefined();
   });
 
   it("does not let a stale-generation acknowledgement ack current commands", async () => {

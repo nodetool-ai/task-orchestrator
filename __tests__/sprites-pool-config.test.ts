@@ -1,0 +1,39 @@
+import { describe, expect, it } from "vitest";
+import { getConfiguredSpriteBaselines } from "../lib/runner/sprites-pool-config";
+
+const sha = "a".repeat(40);
+const digest = "b".repeat(64);
+function generic(extra: Record<string, unknown> = {}) {
+  return { manifest: { schemaVersion: 1, nodeVersion: "v22.14.0", codexVersion: "0.153.4", platform: "linux", architecture: "x64", systemToolsVersion: "sprite-base-v1", ...extra }, target: 1 };
+}
+function repository(extra: Record<string, unknown> = {}) {
+  return { ...generic(), manifest: { ...generic().manifest, dependency: { repository: "https://github.com/acme/project.git", revision: sha, lockfile: { path: "package-lock.json", sha256: digest }, packageManifests: [{ path: "package.json", sha256: digest }], packageManager: "npm", packageManagerVersion: "10.9.2", installOptions: ["--no-audit"] } }, repositoryId: "repo-1", allowedUserIds: [7], ...extra };
+}
+const parse = (value: unknown, worker = sha) => getConfiguredSpriteBaselines(worker, JSON.stringify([value]));
+
+describe("Sprite pool baseline configuration", () => {
+  it("hydrates a valid generic baseline with the deployed worker SHA", () => {
+    const [result] = parse(generic());
+    expect(result.manifest.workerBundleSha).toBe(sha);
+    expect(result.target).toBe(1);
+  });
+  it("changes fingerprint when deployed worker SHA changes", () => {
+    expect(parse(generic(), sha)[0].fingerprint).not.toBe(parse(generic(), "c".repeat(40))[0].fingerprint);
+  });
+  it.each(["nodeVersion", "codexVersion", "architecture", "systemToolsVersion"])("rejects invalid %s", (field) => {
+    const value = generic({ [field]: field === "architecture" ? "mips" : field === "systemToolsVersion" ? "old" : "invalid" });
+    expect(() => parse(value)).toThrow();
+  });
+  it("requires explicit repository scope for dependency baselines", () => {
+    expect(() => parse({ ...repository(), repositoryId: undefined })).toThrow();
+    expect(() => parse({ ...repository(), allowedUserIds: undefined })).toThrow();
+  });
+  it.each(["https://user:pass@github.com/acme/project.git", "https://github.com/acme/project.git?token=x", "../project"])("rejects unsafe remote %s", (remote) => {
+    expect(() => parse({ ...repository(), manifest: { ...repository().manifest, dependency: { ...repository().manifest.dependency, repository: remote } } })).toThrow();
+  });
+  it("rejects path traversal, pinned mismatch, and duplicate fingerprints", () => {
+    expect(() => parse({ ...repository(), manifest: { ...repository().manifest, dependency: { ...repository().manifest.dependency, lockfile: { path: "../package-lock.json", sha256: digest } } } })).toThrow();
+    expect(() => parse({ ...repository(), revision: "c".repeat(40) })).toThrow();
+    expect(() => getConfiguredSpriteBaselines(sha, JSON.stringify([generic(), generic()]))).toThrow();
+  });
+});
