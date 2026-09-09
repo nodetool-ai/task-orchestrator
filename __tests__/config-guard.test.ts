@@ -38,6 +38,11 @@ const ALLOWLIST = new Set([
   "lib/extensions/spawn.ts",
   "lib/run-dispatch.ts",
   "lib/runner/sprites-client.ts",
+  // Validated structured baseline configuration has its own zod parser.
+  "lib/runner/sprites-pool-config.ts",
+  // Run-scoped environment injected into standalone workers, not server config.
+  "lib/runner/sprites-log.ts",
+  "lib/worker-runtime/dependencies.ts",
   "lib/runner/worker-sha.ts",
   "lib/runs.ts",
   "lib/worker/log.ts",

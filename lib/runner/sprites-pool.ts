@@ -11,7 +11,7 @@ import { prepareSpriteBaseline, type SpriteBaselineManifest } from "./sprites-ba
 import type { SpritesClient } from "./sprites-client";
 import { db } from "../../db";
 import { runnerInstances, agentSessions } from "../../db/schema";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull, or } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { spriteLog, spriteErrorFields, logSpritePhase } from "./sprites-log";
 
@@ -362,7 +362,9 @@ export async function requestSpritePoolMaintenance(client: SpritesClient, manage
     }
   }
   const [waiting] = await db.select({ id: agentSessions.id }).from(agentSessions)
-    .where(and(eq(agentSessions.status, "pending"), eq(agentSessions.runtime, "worker"))).limit(1);
+    .leftJoin(runnerInstances, eq(runnerInstances.runId, agentSessions.id))
+    .where(and(eq(agentSessions.status, "pending"), eq(agentSessions.runtime, "worker"),
+      or(isNull(runnerInstances.spriteName), eq(runnerInstances.state, "gone")))).limit(1);
   if (waiting) {
     spriteLog("sprites_pool_refill_skipped", { reason: "queued_run_priority", runId: waiting.id }, "debug");
     return;

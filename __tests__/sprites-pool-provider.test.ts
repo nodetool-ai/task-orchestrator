@@ -40,6 +40,15 @@ beforeEach(async () => { await db.delete(spritePoolEntries); await db.delete(age
 afterEach(async () => { await db.delete(spritePoolEntries); await db.delete(agentSessions); vi.restoreAllMocks(); });
 
 describe("Sprite pool provider integration", () => {
+  it.each([false, true])("reserves foreground priority only for pending runs needing a Sprite (bound=%s)", async (bound) => {
+    const run = await create({ goal: "<implement>", defer: true });
+    await db.update(agentSessions).set({ status: "pending", runtime: "worker" }).where(eq(agentSessions.id, run.id));
+    if (bound) await db.insert(runnerInstances).values({ runId: run.id, provider: "sprites", state: "starting", spriteName: "existing" });
+    const manager = new SpritePoolManager({ store: createDatabaseSpritePoolStore(), target: 0 });
+    const refill = vi.spyOn(manager, "requestRefill").mockResolvedValue(undefined);
+    await requestSpritePoolMaintenance(client(), manager);
+    expect(refill).toHaveBeenCalledTimes(bound ? 1 : 0);
+  });
   it("prepares and checkpoints only after baseline verification", async () => {
     const c = client();
     const refill = requestSpritePoolRefill(c, { baseline: manifest, workerSha: manifest.workerBundleSha, bundleUrl: "https://example/worker.tgz" });

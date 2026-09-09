@@ -24,8 +24,9 @@ primary_region = "ams"
   # Run each agent turn on its own sprite, never in this web process, so a
   # redeploy/restart of the server never kills an in-flight run.
   TASK_ORCH_DETACHED_RUNS = "1"
-  # Cap concurrently-active sprites (cost/quota guard). 0 = unlimited.
-  TASK_ORCH_MAX_SPRITES = "4"
+  # Total Sprite capacity includes retained runs and the unused warm pool.
+  # Existing retained runners plus three warm entries and one foreground slot.
+  TASK_ORCH_MAX_SPRITES = "26"
   TASK_ORCH_SPRITE_POOL_SIZE = "3"
   TASK_ORCH_LOG_FORMAT = "json"
   TASK_ORCH_LOG_LEVEL = "debug"
