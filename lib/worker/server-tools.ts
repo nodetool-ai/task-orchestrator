@@ -26,6 +26,32 @@
 import type { OrchestratorTool } from "../orchestrator-tools";
 import { dispatchTool } from "../app-api/dispatcher";
 import type { AppApiContext, AppApiResult } from "../app-api/types";
+import { Type } from "typebox";
+import { codeActCatalog, executeCodeAct } from "../codeact";
+import { PostgresCodeActReceiptStore } from "../codeact/receipts";
+
+const codeActTools: OrchestratorTool[] = [
+  {
+    name: "codeact_catalog", label: "CodeAct Catalog",
+    description: "Discover the bounded, authorized CodeAct application operation catalogue.",
+    parameters: Type.Object({ query: Type.Optional(Type.String()), names: Type.Optional(Type.Array(Type.String())) }),
+    execute: async (params: { query?: string; names?: string[] }, ctx) => {
+      const catalog = codeActCatalog((ctx as AppApiContext).capabilities);
+      const operations = params.names?.length ? catalog.operations.filter((x) => params.names!.includes(x.name) || params.names!.includes(x.sdkPath)) : params.query ? catalog.operations.filter((x) => JSON.stringify(x).toLowerCase().includes(params.query!.toLowerCase())).slice(0, 20) : catalog.operations;
+      return { content: [{ type: "text", text: JSON.stringify({ ...catalog, operations }) }] };
+    },
+  },
+  {
+    name: "codeact_execute", label: "CodeAct Execute",
+    description: "Execute source in the isolated QuickJS-NG CodeAct runtime.",
+    parameters: Type.Object({ code: Type.String(), title: Type.Optional(Type.String()) }),
+    execute: async (params: { code: string; title?: string }, ctx) => {
+      const context = ctx as AppApiContext;
+      const result = await executeCodeAct({ code: params.code, title: params.title, context, receipts: context.runId ? new PostgresCodeActReceiptStore(context.runId) : undefined });
+      return { content: [{ type: "text", text: JSON.stringify({ executionId: result.executionId, status: result.receipt.status, result: "value" in result ? result.value : undefined, outputs: result.receipt.outputs, diagnostics: result.receipt.diagnostics }) }] };
+    },
+  },
+];
 
 export type { OrchestratorTool };
 
@@ -42,6 +68,7 @@ async function buildRegistry(): Promise<Map<string, OrchestratorTool>> {
     import("../worker-terminal-pr"),
   ]);
   const all: OrchestratorTool[] = [
+    ...codeActTools,
     ...orch.ORCHESTRATOR_TOOLS,
     ...events.EVENT_TOOLS,
     ...planning.PLANNING_TOOLS,

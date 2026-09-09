@@ -484,6 +484,28 @@ export const workerChannelReceipts = pgTable(
   })
 );
 
+export const codeactExecutions = pgTable("codeact_executions", {
+  executionId: uuid("execution_id").primaryKey(),
+  runId: integer("run_id").notNull().references(() => agentSessions.id, { onDelete: "cascade" }),
+  sourceSha256: text("source_sha256").notNull(),
+  status: text("status").notNull(),
+  receipt: jsonb("receipt").notNull().default({}),
+  startedAt: ts("started_at").notNull().defaultNow(),
+  completedAt: ts("completed_at"),
+});
+
+export const codeactSubcalls = pgTable("codeact_subcalls", {
+  subcallId: uuid("subcall_id").primaryKey(),
+  executionId: uuid("execution_id").notNull().references(() => codeactExecutions.executionId, { onDelete: "cascade" }),
+  operation: text("operation").notNull(),
+  input: jsonb("input").notNull().default({}),
+  status: text("status").notNull(),
+  result: jsonb("result"),
+  error: text("error"),
+  startedAt: ts("started_at").notNull().defaultNow(),
+  completedAt: ts("completed_at"),
+});
+
 export const agentMessages = pgTable(
   "agent_messages",
   {
