@@ -166,9 +166,11 @@ export async function executeChannelTool(
           // embedders that only provide resolveServerTool. Production always
           // exports executeServerTool, which applies the shared app-api policy
           // boundary before invoking the definition.
-          const dispatch = (serverTools as typeof serverTools & {
-            executeServerTool?: typeof serverTools.executeServerTool;
-          }).executeServerTool;
+          const dispatch = Object.prototype.hasOwnProperty.call(serverTools, "executeServerTool")
+            ? (serverTools as typeof serverTools & {
+                executeServerTool: typeof serverTools.executeServerTool;
+              }).executeServerTool
+            : undefined;
           const result = dispatch
             ? await dispatch(def, payload.arguments, { ...ctx, runId })
             : await def.execute(payload.arguments, { ...ctx, runId });
