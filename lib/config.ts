@@ -79,6 +79,19 @@ export function floatEnv(key: string, dflt: number): number {
   return Number.isFinite(n) ? n : dflt;
 }
 
+export type ToolCallingMode = "direct" | "codeact";
+
+/** Deterministic cohort selection keeps retries/resumes in the same mode. */
+export function resolveToolCallingMode(seed: string, requested?: ToolCallingMode | null): ToolCallingMode {
+  if (requested === "direct" || requested === "codeact") return requested;
+  if (config.agent.toolCallingDefault === "direct") return "direct";
+  const percent = config.agent.codeactRolloutPercent;
+  if (percent <= 0) return "direct";
+  if (percent >= 100) return "codeact";
+  const digest = createHash("sha256").update(seed).digest();
+  return digest.readUInt32BE(0) % 100 < percent ? "codeact" : "direct";
+}
+
 /** Trimmed string env, or `dflt` (default undefined) when unset/empty. */
 function strEnv(key: string): string | undefined;
 function strEnv(key: string, dflt: string): string;
@@ -354,6 +367,13 @@ export const config = Object.freeze({
     },
     get model(): string | undefined {
       return strEnv("TASK_ORCH_AGENT_MODEL");
+    },
+    /** New runs default to CodeAct; set to direct for rollback. */
+    get toolCallingDefault(): ToolCallingMode {
+      return strEnv("TASK_ORCH_TOOL_CALLING_MODE", "codeact") === "direct" ? "direct" : "codeact";
+    },
+    get codeactRolloutPercent(): number {
+      return Math.max(0, Math.min(100, floatEnv("TASK_ORCH_CODEACT_ROLLOUT_PERCENT", 100)));
     },
     /** Deployment default reasoning level for runs created without one
      *  (personas carry no reasoning level any more — migration 0031). An

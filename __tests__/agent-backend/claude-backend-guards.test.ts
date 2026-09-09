@@ -8,7 +8,12 @@ import type { RunTurnArgs } from "../../lib/agent-backend/types";
 const sdk = vi.hoisted(() => ({ captured: null as any }));
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   createSdkMcpServer: (cfg: any) => ({ ...cfg }),
-  tool: (name: string) => ({ name }),
+  tool: (name: string, description: string, parameters: unknown, execute: unknown) => ({
+    name,
+    description,
+    parameters,
+    execute,
+  }),
   query: (arg: any) => {
     sdk.captured = arg;
     // Empty stream: runTurn finishes immediately and returns its outcome.
@@ -53,6 +58,31 @@ describe("ClaudeBackend.runTurn guards", () => {
     await new ClaudeBackend().runTurn(makeArgs());
     expect(sdk.captured.options.strictMcpConfig).toBe(true);
     expect(Object.keys(sdk.captured.options.mcpServers)).toEqual(["task_orch"]);
+  });
+
+  it("mounts the shared CodeAct contract without disabling Claude's native coding preset", async () => {
+    const direct = (reg: any) => reg.registerTool({
+      name: "task_orch__list_tasks",
+      description: "List tasks",
+      parameters: { type: "object", properties: {} },
+      execute: async () => ({ content: [] }),
+    });
+    sdk.captured = null;
+    await new ClaudeBackend().runTurn(makeArgs({ extensions: [direct] }));
+
+    const tools = sdk.captured.options.mcpServers.task_orch.tools;
+    expect(tools.map((entry: any) => entry.name)).toEqual([
+      "task_orch__list_tasks",
+      "codeact_catalog",
+      "codeact_execute",
+    ]);
+    expect(sdk.captured.options.systemPrompt).toMatchObject({
+      type: "preset",
+      preset: "claude_code",
+    });
+    expect(sdk.captured.options.systemPrompt.append).toContain("Native coding tools remain available");
+    expect(sdk.captured.options).not.toHaveProperty("allowedTools");
+    expect(sdk.captured.options).not.toHaveProperty("disallowedTools");
   });
 
   // Grab the single PreToolUse hook the backend wires from the collected

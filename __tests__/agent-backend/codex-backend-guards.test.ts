@@ -196,7 +196,10 @@ describe("CodexBackend.runTurn CLI configuration", () => {
     const varName = servers.task_orch.bearer_token_env_var;
     expect(sdk.ctorOptions.env[varName]).toHaveLength(64);
     expect(sdk.inputs[0]).toContain("mcp__task_orch__task_orch__create_task");
+    expect(sdk.inputs[0]).toContain("mcp__task_orch__codeact_catalog");
+    expect(sdk.inputs[0]).toContain("mcp__task_orch__codeact_execute");
     expect(sdk.inputs[0]).toContain("ALL_TOOLS");
+    expect(sdk.inputs[0]).toContain("Native coding tools remain available");
 
     sdk.inputs = [];
     sdk.scripts = [[started("th_1"), completed]];
@@ -207,10 +210,12 @@ describe("CodexBackend.runTurn CLI configuration", () => {
     expect(sdk.inputs[0]).toContain("worker has no direct database access");
   });
 
-  it("registers no MCP server when the run contributes no tools", async () => {
+  it("registers a CodeAct-only MCP server when the run contributes no direct tools", async () => {
     sdk.scripts = [[started("th_1"), completed]];
     await new CodexBackend().runTurn(makeArgs());
-    expect(sdk.ctorOptions.config.mcp_servers).toBeUndefined();
+    expect(Object.keys(sdk.ctorOptions.config.mcp_servers)).toEqual(["task_orch"]);
+    expect(sdk.inputs[0]).toContain("mcp__task_orch__codeact_catalog");
+    expect(sdk.inputs[0]).toContain("mcp__task_orch__codeact_execute");
   });
 
   it("confines writes with Codex's own sandbox, overridable per deployment", async () => {
@@ -251,7 +256,11 @@ describe("CodexBackend.runTurn conversation handling", () => {
       makeArgs({ extensions: [persona], resumeToken: "codex:th_1" })
     );
     expect(sdk.resumedFrom).toBe("th_1");
-    expect(sdk.inputs[0]).toBe("do the thing");
+    expect(sdk.inputs[0]).not.toContain("You are the implementor.");
+    expect(sdk.inputs[0]).toContain("do the thing");
+    // CodeAct discovery guidance is repeated because a resumed transcript may
+    // predate CodeAct, while the persona transform remains fresh-thread-only.
+    expect(sdk.inputs[0]).toContain("codeact_execute");
   });
 
   it("folds ambient skills into the same preamble", async () => {

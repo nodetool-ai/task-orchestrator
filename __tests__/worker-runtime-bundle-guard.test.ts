@@ -23,6 +23,12 @@ const REPO_ROOT = join(__dirname, "..");
 // controller) are intentionally excluded — they run on the server and may read.
 const WORKER_BUNDLE_MODULES = [
   "lib/worker-runtime/context.ts",
+  "lib/worker-runtime/tools.ts",
+  // CodeAct is mounted after neutral collection. These worker-loaded modules
+  // may register/forward the outer tools, but must not import the receipt DB or
+  // the control-plane operation registry that owns database-backed executors.
+  "lib/agent-backend/collect.ts",
+  "lib/agent-backend/pi-backend.ts",
   "lib/worker-channel/worker-server.ts",
   "lib/worker-channel/worker-session.ts",
   "lib/worker-channel/spool.ts",
@@ -40,6 +46,9 @@ const FORBIDDEN_STRINGS = [
   "getPersona(",
   "resolveRepo(",
   "subscribeInput(",
+  "codeact/receipts",
+  "worker/server-tools",
+  "app-api/registry",
 ];
 
 /** Strip line comments and block comments so a forbidden token that appears

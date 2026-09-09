@@ -13,6 +13,8 @@ export interface SdkContentBlock {
   tool_use_id?: string;
   data?: string;
   mimeType?: string;
+  /** Rich, bounded CodeAct trace attached to the outer tool result. */
+  codeact?: unknown;
   /** Raw @earendil-works/pi-ai Message metadata for lightweight chat context. */
   piMessage?: unknown;
 }

@@ -36,8 +36,8 @@ Every entry is exactly one of:
 - **`sdk`** — must be reachable from the CodeAct `app` SDK. `sdkNamespace` names
   the proposed method (e.g. `app.tasks.create`). This is the coverage
   obligation later milestones — especially **T-20260908-0005 (complete SDK
-  coverage)** — are measured against. 126 entries / 126 distinct proposed
-  namespaces.
+  coverage)** — are measured against. Every SDK namespace is parity-checked
+  against the runtime descriptor catalogue.
 - **`alias`** — a second *name* for an operation already counted under `sdk`.
   `aliasOf` points at the canonical entry. This captures the heavy overlap
   between surfaces (creating a task is `POST /api/tasks` ≡ tool `create_task` ≡
@@ -49,7 +49,10 @@ Every entry is exactly one of:
   - the `lib/builtin-tools.ts` `RAW_TO_CANONICAL` built-in name aliases
     (`rg`→Grep, `fd`→Glob, …).
 - **`excluded`** — deliberately not given a guest SDK method, with a recorded
-  reason. 34 entries.
+  reason. Transport ingress, authentication callbacks, UI projections, and
+  worker lifecycle remain excluded. Health/metrics, environment-build
+  requests, and event/message operations are SDK operations with explicit
+  diagnostics, environment, run, session, and chat capabilities.
 
 ## Exclusion categories (justified)
 
@@ -60,15 +63,14 @@ Every entry is exactly one of:
 2. **Auth callbacks / credential issuance.** `/api/auth/[...nextauth]`,
    `/api/auth/magic-link` — identity is established out-of-band and must stay
    outside the sandbox.
-3. **Ops/system endpoints.** `/api/health`, `/api/metrics`,
-   `/api/worker-bundle`, `/api/github/webhook` (inbound HMAC webhook),
-   `/api/environments/build` (infra image build) — infrastructure, no product
-   effect an agent initiates.
-4. **SSE / streaming operational endpoints.** `runs/:id/events`,
-   `runs/:id/messages`, `runs/overview/events`, `sessions/:id/events`,
-   `chats/:id/messages` — Server-Sent-Events sockets. The guest consumes run
-   state through `events__poll` / `get_session` and sends messages via
-   `spawn__append_message`, not raw streams.
+3. **Ops/system endpoints.** `/api/worker-bundle` and
+   `/api/github/webhook` (inbound HMAC webhook) remain infrastructure ingress;
+   health, metrics, and environment-build requests are now explicit,
+   capability-gated diagnostics/environment SDK operations.
+4. **SSE / streaming operational endpoints.** The raw SSE transport remains
+   outside the SDK, but the underlying event snapshots and message actions are
+   represented by bounded SDK operations (`app.runs.events`,
+   `app.runs.messages`, `app.sessions.events`, and `app.chats.messages`).
 5. **UI projections.** `runs/overview`, `inbox`, `live-sessions` — aggregate
    views built for the human UI; the guest reads the underlying entities
    directly.

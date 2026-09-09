@@ -62,6 +62,10 @@ export interface GuestError {
   name: string;
   message: string;
   stack?: string;
+  code?: string;
+  operationId?: string;
+  retryable?: boolean;
+  details?: unknown;
 }
 
 /** True when a QuickJS error dump is the interrupt-callback unwinding a runaway
@@ -81,6 +85,10 @@ function toGuestError(ctx: QuickJSContext, handle: QuickJSHandle): GuestError {
       name: typeof dumped.name === "string" ? dumped.name : "Error",
       message: typeof dumped.message === "string" ? dumped.message : String(dumped),
       stack: typeof dumped.stack === "string" ? dumped.stack : undefined,
+      code: typeof dumped.code === "string" ? dumped.code : undefined,
+      operationId: typeof dumped.operationId === "string" ? dumped.operationId : undefined,
+      retryable: typeof dumped.retryable === "boolean" ? dumped.retryable : undefined,
+      details: dumped.details,
     };
   }
   return { name: "Error", message: String(dumped) };
@@ -214,7 +222,21 @@ function installBridge(
     void dispatch(op, ctx.dump(input)).then((value) => {
       const handle = ctx.newString(JSON.stringify(value ?? null));
       deferred.resolve(handle); handle.dispose();
-    }, (error) => deferred.reject(ctx.newError({ name: "CodeActHostError", message: error instanceof Error ? error.message : String(error) })));
+    }, (error) => {
+      const source = error && typeof error === "object" ? error as Record<string, unknown> : {};
+      const err = ctx.newError({
+        name: typeof source.name === "string" ? source.name : "CodeActHostError",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      for (const key of ["code", "operationId", "retryable", "details"] as const) {
+        if (source[key] === undefined) continue;
+        const parsed = ctx.unwrapResult(ctx.evalCode(`JSON.parse(${JSON.stringify(JSON.stringify(source[key]))})`));
+        ctx.setProp(err, key, parsed);
+        parsed.dispose();
+      }
+      deferred.reject(err);
+      err.dispose();
+    });
     return deferred.handle;
   });
   ctx.setProp(ctx.global, "__codeact_call", call); call.dispose();
@@ -222,8 +244,9 @@ function installBridge(
     const call = (name, input) => __codeact_call(name, input).then(JSON.parse);
     const make = (prefix) => new Proxy(function(){}, { get: (_, key) => make(prefix + '.' + String(key)), apply: (_, __, args) => call(prefix, args[0] ?? {}) });
     globalThis.app = make('app'); globalThis.tools = make('tools');
-    const entries = ${JSON.stringify(bridge.catalog ?? [])};
-    globalThis.catalog = { search: ({query=''}={}) => Promise.resolve(entries.filter(x => JSON.stringify(x).toLowerCase().includes(String(query).toLowerCase())).slice(0, 20)), describe: ({names=[]}={}) => Promise.resolve(entries.filter(x => names.includes(x.name) || names.includes(x.sdkPath)).slice(0, 20)) };
+    const supplied = ${JSON.stringify(bridge.catalog ?? [])};
+    const entries = Array.isArray(supplied) ? supplied : (Array.isArray(supplied.operations) ? supplied.operations : []);
+    globalThis.catalog = { search: ({query=''}={}) => Promise.resolve(entries.filter(x => JSON.stringify(x).toLowerCase().includes(String(query).toLowerCase())).slice(0, 20)), describe: ({names=[]}={}) => Promise.resolve(entries.filter(x => names.includes(x.name) || names.includes(x.sdkPath) || (Array.isArray(x.aliases) && x.aliases.some(a => names.includes(a)))).slice(0, 20)) };
     globalThis.output = { text: value => { __codeact_output('text', value); return value; }, image: value => { __codeact_output('image', value); return value; } };
   })()`;
   const result = ctx.evalCode(bootstrap, "codeact-bridge.js");
@@ -250,6 +273,10 @@ function normalizeDump(dump: unknown): GuestError {
       name: typeof d.name === "string" ? d.name : "Error",
       message: typeof d.message === "string" ? d.message : JSON.stringify(dump),
       stack: typeof d.stack === "string" ? d.stack : undefined,
+      code: typeof d.code === "string" ? d.code : undefined,
+      operationId: typeof d.operationId === "string" ? d.operationId : undefined,
+      retryable: typeof d.retryable === "boolean" ? d.retryable : undefined,
+      details: d.details,
     };
   }
   return { name: "Error", message: String(dump) };

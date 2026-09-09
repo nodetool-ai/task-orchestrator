@@ -20,7 +20,7 @@ import {
 import { mapPiEvent, type RunEnvelope } from "../pi-event-mapper";
 import { interceptorToolName } from "../builtin-tools";
 import { resolveCodexAccessToken } from "../codex-oauth-token";
-import { collectExtensions, composeSystemPrompt } from "./collect";
+import { collectExtensions, composeSystemPrompt, withCodeActTools } from "./collect";
 import { createUsageAccumulator } from "./usage";
 import { runPostgresTurn } from "./postgres-turn";
 import type { AgentBackend, AmbientSkill, RunTurnArgs, TurnOutcome } from "./types";
@@ -82,7 +82,10 @@ export class PiBackend implements AgentBackend {
 
     const { cwd, model, thinkingLevel, extensions, abort, prompt, onEvent } = args;
 
-    const collected = await collectExtensions(extensions);
+    const collected = withCodeActTools(
+      await collectExtensions(extensions),
+      args.codeActInvoker,
+    );
 
     // Skills must exist on disk before pi scans .pi/skills during session setup.
     for (const skill of collected.skills) writeSkill(cwd, skill);

@@ -27,6 +27,8 @@ describe("shared app-api registry and dispatcher", () => {
   it("resolves legacy aliases to the canonical operation", () => {
     expect(resolveOperation("task_orch__list_tasks")?.name).toBe("list_tasks");
     expect(resolveOperation("mcp__task_orch__get_task")?.name).toBe("get_task");
+    expect(resolveOperation("tools.list_tasks")?.name).toBe("list_tasks");
+    expect(resolveOperation("app.tasks.list")?.name).toBe("list_tasks");
   });
 
   it("validates arguments and enforces capabilities and resources before execution", async () => {

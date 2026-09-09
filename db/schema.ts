@@ -227,6 +227,8 @@ export const agentSessions = pgTable(
     // default (TASK_ORCH_AGENT_BACKEND). Chosen at run creation; resumes stay on
     // the run's backend so its backend-tagged sdk_session_id remains usable.
     backend: text("backend"),
+    // Resolved at run creation; resumes never silently switch modes.
+    toolCallingMode: text("tool_calling_mode").notNull().default("codeact"),
     branch: text("branch"),
     worktreePath: text("worktree_path"),
     prUrl: text("pr_url"),

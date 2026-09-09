@@ -70,7 +70,7 @@ import {
   isFailedResult,
   resultPrUrl,
 } from "./run-state";
-import { config, runnerProviderKind, type RunnerProviderKind } from "./config";
+import { config, resolveToolCallingMode, runnerProviderKind, type RunnerProviderKind, type ToolCallingMode } from "./config";
 import {
   resolveLiveness,
   serverClaimScope,
@@ -112,6 +112,7 @@ import { personaPromptFactory } from "./extensions/persona-prompt";
 import { buildMemoryInjection, personaMemoryFactory } from "./extensions/persona-memory";
 import { modelWelfareFactory } from "./extensions/model-welfare";
 import { abortBridgeFactory } from "./extensions/abort-bridge";
+import { legacyToolInvoker } from "./extensions/legacy-invoker";
 import { linkSharedWorktreeArtifacts } from "./worktree-env";
 import { applyPrewarmToCheckout } from "./prewarm";
 import {
@@ -211,6 +212,8 @@ export interface CreateRunInput {
   /** Agent backend for this run ('pi'|'claude'|'codex'). Omitted/null inherits the
    *  deployment default (TASK_ORCH_AGENT_BACKEND). */
   backend?: string | null;
+  /** Resolved per-run tool surface; omitted values use the rollout cohort. */
+  toolCallingMode?: ToolCallingMode | null;
   /** Reasoning level for this run. Omitted/null takes the deployment default
    *  (TASK_ORCH_THINKING_LEVEL), which may itself be unset = model default. */
   thinkingLevel?: "low" | "medium" | "high" | "xhigh" | null;
@@ -278,6 +281,8 @@ export interface RunRow {
   /** Agent backend this run executes on ('pi'|'claude'|'codex'), or null for the
    *  deployment default (TASK_ORCH_AGENT_BACKEND). */
   backend: "pi" | "claude" | "codex" | null;
+  /** Optional on synthetic test/legacy rows; persisted runs hydrate to a mode. */
+  toolCallingMode?: ToolCallingMode;
   /** Per-run reasoning level (low|medium|high|xhigh), or null to inherit the persona. */
   thinkingLevel: "low" | "medium" | "high" | "xhigh" | null;
   branch: string | null;
@@ -660,6 +665,10 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   const initialStatus: SessionStatus =
     input.defer || goal === "<chat>" || goal === "<plan>" ? "idle" : "pending";
   const runtime: "worker" | "server" = input.runtime ?? "worker";
+  const toolCallingMode = resolveToolCallingMode(
+    [input.taskId, input.planId, input.repoId, goal, input.parentRunId ?? ""].join(":"),
+    input.toolCallingMode,
+  );
 
   // Server-runtime guardrail (design §3/§6). A server-runtime turn executes in
   // THIS process — no container, no worktree, the server's own uid, DATABASE_URL
@@ -881,6 +890,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     runtime,
     model: effectiveModel,
     backend: persistedBackend,
+    toolCallingMode,
     // Resolved at create, like model and backend, so the run row records the
     // reasoning level it actually ran with. The persona no longer supplies one
     // (migration 0031).
@@ -4126,7 +4136,13 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
       | "high"
       | "xhigh"
       | undefined,
+    toolCallingMode: run.toolCallingMode,
     extensions,
+    codeActInvoker: legacyToolInvoker(run.id, {
+      author,
+      defaultTaskId: run.taskId ?? undefined,
+      defaultPlanId: run.planId ?? undefined,
+    }),
     abort,
     prompt: promptWithMemory,
     onEvent,
@@ -5650,6 +5666,7 @@ export function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     runtime: (row.runtime as "server" | "worker" | null) ?? "worker",
     model: row.model,
     backend: (row.backend as "pi" | "claude" | "codex" | null) ?? null,
+    toolCallingMode: row.toolCallingMode === "direct" ? "direct" : "codeact",
     thinkingLevel: (row.thinkingLevel as "low" | "medium" | "high" | "xhigh" | null) ?? null,
     branch: row.branch,
     baseBranch: row.baseBranch ?? null,
