@@ -137,7 +137,7 @@ export async function evaluateGuest(req: EvaluateRequest): Promise<EvaluateOutco
       // single job.
       let state = context.getPromiseState(promise);
       while (state.type === "pending") {
-        if (Date.now() > guestDeadline) return { status: "timeout", jobsExecuted };
+        if (Date.now() > guestDeadline) return { status: "timeout", jobsExecuted, outputs, diagnostics };
 
         const pumped = runtime.executePendingJobs();
         if (pumped.error) {

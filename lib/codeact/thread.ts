@@ -46,6 +46,9 @@ export interface ExecuteInThreadOptions {
  */
 export async function executeInThread(opts: ExecuteInThreadOptions): Promise<ThreadResult> {
   const limits = resolveLimits(opts.limits);
+  if (opts.signal?.aborted) {
+    return { status: "terminated", reason: "execution cancelled before worker start" };
+  }
   const wasmBinary = opts.wasmBinary ?? (await loadPackagedWasm());
 
   const workerData: ThreadWorkerData = { code: opts.code, limits, wasmBinary, catalog: opts.catalog };
@@ -74,6 +77,10 @@ export async function executeInThread(opts: ExecuteInThreadOptions): Promise<Thr
     hardTimer.unref?.();
     const onAbort = () => finish({ status: "terminated", reason: "execution cancelled; worker thread terminated" });
     opts.signal?.addEventListener("abort", onAbort, { once: true });
+    // AbortSignal may already be aborted before the listener is installed.
+    // Check after all handlers and the deadline have been initialized so the
+    // normal finish path can safely terminate the worker.
+    if (opts.signal?.aborted) onAbort();
 
     worker.on("message", (msg: ThreadWorkerMessage) => {
       if (msg.type === "host-call") {

@@ -36,28 +36,70 @@ export async function executeCodeAct(request: CodeActExecuteRequest): Promise<Co
   };
   await request.receipts?.begin(receipt);
   let cancelled = false;
+  let closed = false;
+  const durability: Promise<void>[] = [];
   const abort = () => { cancelled = true; };
   request.signal?.addEventListener("abort", abort, { once: true });
+  const persistSubcall = (subcall: CodeActSubcallReceipt) => {
+    const write = request.receipts?.subcall(subcall) ?? Promise.resolve();
+    durability.push(write);
+    return write;
+  };
+  const cancelRunning = () => {
+    for (const subcall of receipt.subcalls) {
+      if (subcall.status !== "running") continue;
+      subcall.status = "cancelled";
+      subcall.error = "execution cancelled before the host outcome was durable";
+      void persistSubcall(subcall);
+    }
+  };
+  const closeRunning = (status: "cancelled" | "unknown", message: string) => {
+    for (const subcall of receipt.subcalls) {
+      if (subcall.status !== "running") continue;
+      subcall.status = status;
+      subcall.error = message;
+      void persistSubcall(subcall);
+    }
+  };
+  if (request.signal?.aborted) {
+    cancelled = true;
+    cancelRunning();
+  }
   const hostCall = async (operation: string, input: unknown): Promise<unknown> => {
     if (cancelled) throw new Error("CodeAct execution cancelled");
     const subcallId = randomUUID();
     const subcall: CodeActSubcallReceipt = { executionId, subcallId, operation, input, status: "running" };
     receipt.subcalls.push(subcall);
-    await request.receipts?.subcall(subcall);
+    await persistSubcall(subcall);
+    // Cancellation can race the durable reservation above. Never dispatch an
+    // operation after cancellation, even if the guest had already submitted it.
+    if (cancelled || closed) {
+      subcall.status = "cancelled";
+      subcall.error = "execution cancelled before dispatch";
+      await persistSubcall(subcall);
+      throw new Error("CodeAct execution cancelled");
+    }
     try {
       if (operation === "output.text" || operation === "output.image") return input;
       const result = await dispatchAppOperation(operation.replace(/^(app|tools)\./, ""), input, { ...request.context, executionId, subcallId } as AppApiContext & { executionId: string; subcallId: string });
+      if (closed || cancelled) return result;
       subcall.status = "completed"; subcall.result = normalizeOutput(result, limits.maxOutputBytes);
-      await request.receipts?.subcall(subcall);
+      await persistSubcall(subcall);
       return result;
     } catch (error) {
+      if (closed) throw error;
       subcall.status = cancelled ? "cancelled" : "failed";
       subcall.error = boundedText(error instanceof Error ? error.message : String(error), 4096);
-      await request.receipts?.subcall(subcall);
+      await persistSubcall(subcall);
       throw error;
     }
   };
   const result = await executeInThread({ code: request.code, limits, catalog: codeActCatalog(request.context.capabilities), hostCall, signal: request.signal });
+  closed = true;
+  if (cancelled) cancelRunning();
+  else if (result.status !== "ok") closeRunning("unknown", "execution ended before the host outcome was durable");
+  else closeRunning("unknown", "guest completed with unawaited host work");
+  await Promise.all(durability);
   receipt.outputs = (("outputs" in result ? result.outputs : undefined) ?? []).map((x) => ({ kind: x.kind, value: normalizeOutput(x.value, limits.maxOutputBytes) }));
   receipt.diagnostics = (("diagnostics" in result ? result.diagnostics : undefined) ?? []).map((x) => ({ level: x.level, values: x.values.map((v) => normalizeOutput(v, limits.maxOutputBytes)) }));
   receipt.status = cancelled ? "cancelled" : result.status === "terminated" ? "deadline" : result.status === "ok" ? "completed" : result.status === "timeout" ? "deadline" : "failed";
