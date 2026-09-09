@@ -112,6 +112,7 @@ import { personaPromptFactory } from "./extensions/persona-prompt";
 import { buildMemoryInjection, personaMemoryFactory } from "./extensions/persona-memory";
 import { modelWelfareFactory } from "./extensions/model-welfare";
 import { abortBridgeFactory } from "./extensions/abort-bridge";
+import { legacyToolInvoker } from "./extensions/legacy-invoker";
 import { linkSharedWorktreeArtifacts } from "./worktree-env";
 import { applyPrewarmToCheckout } from "./prewarm";
 import {
@@ -4127,6 +4128,11 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
       | "xhigh"
       | undefined,
     extensions,
+    codeActInvoker: legacyToolInvoker(run.id, {
+      author,
+      defaultTaskId: run.taskId ?? undefined,
+      defaultPlanId: run.planId ?? undefined,
+    }),
     abort,
     prompt: promptWithMemory,
     onEvent,

@@ -61,11 +61,16 @@ export function mapPiEvent(
       return [{ type: "assistant", message: { content } }];
     }
     case "tool_execution_end": {
+      const richCodeAct = ev.result?.details?.codeact ??
+        ev.result?.content?.find?.((candidate: unknown) =>
+          Boolean(candidate && typeof candidate === "object" && "codeact" in candidate)
+        )?.codeact;
       const block: RunEnvelopeContentBlock = {
         type: "tool_result",
         tool_use_id: ev.toolCallId,
         content: ev.result?.content ?? [],
         is_error: ev.isError === true,
+        ...(richCodeAct ? { codeact: richCodeAct } : {}),
       };
       return [{ type: "user", message: { content: [block] } }];
     }

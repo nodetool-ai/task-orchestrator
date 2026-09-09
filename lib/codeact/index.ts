@@ -23,9 +23,10 @@ export {
   assertWasmMagic,
 } from "./quickjs-variant.ts";
 export { DEFAULT_LIMITS, resolveLimits, type ExecutionLimits } from "./limits.ts";
-export { codeActCatalog, describeCodeActCatalog, type CatalogLimits } from "./catalog.ts";
+export { codeActCatalog, codeActCatalogForContext, describeCodeActCatalog, type CatalogLimits } from "./catalog.ts";
 export { boundedText, normalizeOutput, type CodeActHandle, type CodeActOutput } from "./output.ts";
-export { executeCodeAct, recoverCodeActExecution, MemoryCodeActReceiptStore, type CodeActExecuteRequest, type CodeActExecuteResult, type CodeActReceiptStore, type CodeActExecutionReceipt, type CodeActSubcallReceipt } from "./bridge.ts";
+export { executeCodeAct, extractCodeActLinks, recoverCodeActExecution, MemoryCodeActReceiptStore, type CodeActExecuteRequest, type CodeActExecuteResult, type CodeActReceiptStore, type CodeActExecutionReceipt, type CodeActSubcallReceipt, type CodeActLink } from "./bridge.ts";
+export { codeActModelText, isCodeActPresentation, presentCodeActReceipt, type CodeActPresentation, type CodeActPresentationSubcall } from "./presentation.ts";
 export {
   evaluateGuest,
   type EvaluateRequest,

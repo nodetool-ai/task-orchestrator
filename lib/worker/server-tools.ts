@@ -27,8 +27,39 @@ import type { OrchestratorTool } from "../orchestrator-tools";
 import { dispatchTool } from "../app-api/dispatcher";
 import type { AppApiContext, AppApiResult } from "../app-api/types";
 import { Type } from "typebox";
-import { codeActCatalog, executeCodeAct } from "../codeact";
+import {
+  codeActCatalogForContext,
+  codeActModelText,
+  executeCodeAct,
+  presentCodeActReceipt,
+} from "../codeact";
 import { PostgresCodeActReceiptStore } from "../codeact/receipts";
+import { allowedServerTools, appCapabilitiesForTools } from "./server-policy";
+
+/** Refresh mutable run policy for a CodeAct catalogue/subcall. Capabilities
+ * supplied by the worker channel came from its immutable run.start policy and
+ * remain authoritative; in-process chats derive the equivalent set from the
+ * current persisted profile. */
+async function currentCodeActContext(base: AppApiContext): Promise<AppApiContext> {
+  if (!base.runId) return base;
+  const { dbTransport } = await import("./db-transport");
+  const run = await dbTransport.getRun(base.runId);
+  if (!run) throw new Error(`Run ${base.runId} not found while resolving CodeAct policy.`);
+  let capabilities = base.capabilities;
+  if (!capabilities) {
+    const persona = await dbTransport.getPersona(run.personaId ?? "implementor");
+    if (!persona) throw new Error(`Persona '${run.personaId ?? "implementor"}' not found.`);
+    capabilities = appCapabilitiesForTools(
+      await allowedServerTools(run.toolsProfile || persona.toolsProfile),
+    );
+  }
+  return {
+    ...base,
+    capabilities,
+    runtime: run.runtime === "server" ? "server" : "worker",
+    planningStage: run.planningStage ?? undefined,
+  };
+}
 
 const codeActTools: OrchestratorTool[] = [
   {
@@ -36,7 +67,9 @@ const codeActTools: OrchestratorTool[] = [
     description: "Discover the bounded, authorized CodeAct application operation catalogue.",
     parameters: Type.Object({ query: Type.Optional(Type.String()), names: Type.Optional(Type.Array(Type.String())) }),
     execute: async (params: { query?: string; names?: string[] }, ctx) => {
-      const catalog = codeActCatalog((ctx as AppApiContext).capabilities);
+      const catalog = codeActCatalogForContext(
+        await currentCodeActContext(ctx as AppApiContext),
+      );
       const operations = params.names?.length ? catalog.operations.filter((x) => params.names!.includes(x.name) || params.names!.includes(x.sdkPath)) : params.query ? catalog.operations.filter((x) => JSON.stringify(x).toLowerCase().includes(params.query!.toLowerCase())).slice(0, 20) : catalog.operations;
       return { content: [{ type: "text", text: JSON.stringify({ ...catalog, operations }) }] };
     },
@@ -46,9 +79,26 @@ const codeActTools: OrchestratorTool[] = [
     description: "Execute source in the isolated QuickJS-NG CodeAct runtime.",
     parameters: Type.Object({ code: Type.String(), title: Type.Optional(Type.String()) }),
     execute: async (params: { code: string; title?: string }, ctx) => {
-      const context = ctx as AppApiContext;
-      const result = await executeCodeAct({ code: params.code, title: params.title, context, receipts: context.runId ? new PostgresCodeActReceiptStore(context.runId) : undefined });
-      return { content: [{ type: "text", text: JSON.stringify({ executionId: result.executionId, status: result.receipt.status, result: "value" in result ? result.value : undefined, outputs: result.receipt.outputs, diagnostics: result.receipt.diagnostics }) }] };
+      const baseContext = ctx as AppApiContext;
+      const context = await currentCodeActContext(baseContext);
+      const result = await executeCodeAct({
+        code: params.code,
+        title: params.title,
+        context,
+        resolveContext: () => currentCodeActContext(baseContext),
+        receipts: context.runId
+          ? new PostgresCodeActReceiptStore(context.runId)
+          : undefined,
+      });
+      const presentation = presentCodeActReceipt(result.receipt);
+      return {
+        content: [{
+          type: "text",
+          text: codeActModelText(presentation),
+          codeact: presentation,
+        }],
+        isError: result.receipt.status !== "completed",
+      };
     },
   },
 ];

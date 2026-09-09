@@ -54,8 +54,8 @@ export interface OrchestratorToolContext {
 // pi runtime accept `image` blocks (base64 + mime), so get_attachment can hand
 // an actual image back to the model rather than a link it can't open.
 export type OrchestratorContentBlock =
-  | { type: "text"; text: string }
-  | { type: "image"; data: string; mimeType: string };
+  | { type: "text"; text: string; [key: string]: unknown }
+  | { type: "image"; data: string; mimeType: string; [key: string]: unknown };
 
 export interface OrchestratorToolResult {
   content: OrchestratorContentBlock[];

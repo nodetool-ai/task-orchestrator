@@ -45,6 +45,10 @@ describe("buildRunStart", () => {
     expect(Array.isArray(start.transcript)).toBe(true);
     expect(typeof start.memoryContext).toBe("string");
     expect(start.policy.allowedTools.length).toBeGreaterThan(0);
+    expect(start.policy.allowedTools).toEqual(expect.arrayContaining([
+      "codeact_catalog",
+      "codeact_execute",
+    ]));
     // The profile flags contribute their tool families.
     expect(start.policy.allowedTools).toEqual([...start.policy.allowedTools].sort());
   });
