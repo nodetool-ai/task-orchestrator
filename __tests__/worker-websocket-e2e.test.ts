@@ -126,9 +126,23 @@ describe("worker websocket e2e", () => {
       }
     });
 
-    it("wakes on a follow-up input command and drains it into a second turn", async () => {
+    it("drains a legacy follow-up delivered during the first turn into a second turn", async () => {
       const run = await create({ goal: "<chat>", defer: true });
-      vi.spyOn(backend, "getBackend").mockResolvedValue(fakeChatBackend("first"));
+      // This harness sends legacy run.input directly and exercises the
+      // keep-open loop. V2 inputs require scheduler receipts and park decisions.
+      await db.update(agentSessions).set({ deliveryVersion: 1 }).where(eq(agentSessions.id, run.id));
+      let firstStarted!: () => void;
+      let releaseFirst!: () => void;
+      const started = new Promise<void>((resolve) => { firstStarted = resolve; });
+      const released = new Promise<void>((resolve) => { releaseFirst = resolve; });
+      const fake = fakeChatBackend("first");
+      const originalTurn = fake.runTurn.bind(fake);
+      let turns = 0;
+      fake.runTurn = async (args: any) => {
+        if (++turns === 1) { firstStarted(); await released; }
+        return originalTurn(args);
+      };
+      vi.spyOn(backend, "getBackend").mockResolvedValue(fake);
       // The worker keeps waiting for further follow-ups; a short idle window
       // lets the drive return once the second turn is done.
       process.env.TASK_ORCH_CHAT_IDLE_MS = "6000";
@@ -136,6 +150,10 @@ describe("worker websocket e2e", () => {
       const { server, connection } = await bootWorkerChannel(run.id);
       try {
         const drive = (driveWorkerRun as any)({ session: server.session } as any);
+
+        // Hold the first model turn until the follow-up is delivered. This
+        // proves the snapshot has loaded, without racing the idle disconnect.
+        await started;
 
         // Mirror sendMessageToRun's contract: the control plane persists the
         // user row FIRST, then bridges it as run.input carrying that row id.
@@ -155,6 +173,7 @@ describe("worker websocket e2e", () => {
           messages: [{ id: userRow.id, role: "user", content: [{ type: "text", text: "follow-up" }] }],
         });
 
+        releaseFirst();
         await drive;
 
         const msgs = await listMessages(run.id);
@@ -163,6 +182,7 @@ describe("worker websocket e2e", () => {
         // the snapshot kickoff, one for the drained follow-up.
         expect(msgs.filter((m) => m.role === "agent").length).toBeGreaterThanOrEqual(2);
       } finally {
+        releaseFirst();
         delete process.env.TASK_ORCH_CHAT_IDLE_MS;
         await disconnectRun(run.id);
         await server.close();
