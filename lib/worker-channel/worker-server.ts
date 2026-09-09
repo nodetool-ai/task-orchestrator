@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server } from "node:http";
-import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
@@ -318,7 +318,24 @@ class WorkerServerImpl implements WorkerServer {
     if (!Number.isSafeInteger(config.runId) || config.runId <= 0) throw new TypeError("runId must be a positive integer");
     if (!/^wi_[a-f0-9]{32}$/.test(config.instanceId)) throw new TypeError("instanceId is invalid");
     const listener = parseEndpoint(config);
-    const root = config.outboxRoot ?? config.sessionRoot ?? process.env.SESSION_ROOT ?? process.cwd();
+    // Repository and SDK session files survive worker replacement; transport
+    // receipts and sequence numbers belong only to this worker incarnation.
+    // An explicit outboxRoot remains available for recovery and test harnesses.
+    let root = config.outboxRoot ?? join(
+      config.sessionRoot ?? process.env.SESSION_ROOT ?? process.cwd(),
+      "workers", config.instanceId,
+    );
+    // Existing deployments keep their spool when restarting the same worker.
+    // A replacement must never open another incarnation's legacy state.
+    if (!config.outboxRoot) {
+      const legacyRoot = config.sessionRoot ?? process.env.SESSION_ROOT ?? process.cwd();
+      try {
+        const legacy = JSON.parse(await readFile(join(legacyRoot, "channel", "state.json"), "utf8"));
+        if (legacy.runId === config.runId && legacy.instanceId === config.instanceId) root = legacyRoot;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
     const session =
       config.session ??
       (await WorkerSession.open({

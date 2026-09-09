@@ -41,9 +41,11 @@ already cost real time once.
 
 ## Worker channel
 
-- Each worker instance needs a **fresh `SESSION_ROOT` and channel
-  instanceId** — reusing them makes the durable spool replay the prior
-  completed run.
+- Each replacement worker needs a **fresh channel instanceId**. Transport
+  state lives under `SESSION_ROOT/workers/<instanceId>/channel`; restarting
+  the same incarnation reuses its spool. Keep `SESSION_ROOT` stable to preserve
+  the repository and SDK sessions. Explicit `outboxRoot` overrides must also
+  be isolated per incarnation.
 - The worker verifies its channel credential by **exact string compare**
   (any opaque token works in harnesses; no HMAC secret needed worker-side).
 - Unix socket paths must stay under the 108-char `sun_path` limit —

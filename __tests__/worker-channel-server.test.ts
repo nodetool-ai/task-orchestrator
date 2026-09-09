@@ -315,3 +315,41 @@ describe("worker WebSocket supervisor", () => {
     expect(await closed(socket)).toBe(1000);
   });
 });
+
+
+describe("persistent session root across worker replacements", () => {
+  it("preserves a matching legacy spool and ignores it for a replacement", async () => {
+    const root = await mkdtemp(join(tmpdir(), "worker-legacy-"));
+    roots.push(root);
+    const legacy = await makeServer({ outboxRoot: root });
+    expect((await legacy.server.emit("agent.event", { value: "legacy" })).seq).toBe(1);
+    await legacy.server.close();
+    const restarted = await makeServer({ outboxRoot: undefined, sessionRoot: root });
+    expect((await restarted.server.emit("agent.event", { value: "restart" })).seq).toBe(2);
+    await restarted.server.close();
+    const replacement = await makeServer({
+      outboxRoot: undefined, sessionRoot: root,
+      instanceId: `wi_${"b".repeat(32)}`, workerGeneration: 2,
+    });
+    expect((await replacement.server.emit("agent.event", { value: "replacement" })).seq).toBe(1);
+  });
+
+  it("isolates replacement spools and replays the same incarnation after restart", async () => {
+    const root = await mkdtemp(join(tmpdir(), "worker-replacement-"));
+    roots.push(root);
+    const first = await makeServer({ outboxRoot: undefined, sessionRoot: root });
+    expect((await first.server.emit("agent.event", { value: "old" })).seq).toBe(1);
+    await first.server.close();
+    const replacement = await makeServer({
+      outboxRoot: undefined, sessionRoot: root,
+      instanceId: `wi_${"b".repeat(32)}`, workerGeneration: 2,
+    });
+    expect((await replacement.server.emit("agent.event", { value: "new" })).seq).toBe(1);
+    await replacement.server.close();
+    const restarted = await makeServer({
+      outboxRoot: undefined, sessionRoot: root,
+      instanceId: `wi_${"b".repeat(32)}`, workerGeneration: 2,
+    });
+    expect((await restarted.server.emit("agent.event", { value: "restart" })).seq).toBe(2);
+  });
+});
