@@ -1,8 +1,9 @@
 import { type NextRequest } from "next/server";
 import { verifyToken } from "@/lib/api-tokens";
 import { getUserById } from "@/lib/users";
+import { ORCHESTRATOR_TOOLS } from "@/lib/orchestrator-tools";
 import type { OrchestratorContentBlock } from "@/lib/orchestrator-tools";
-import { AppApiError, dispatchAppOperation, discoverOperations } from "@/lib/app-api";
+import { AppApiError, descriptorForTool, dispatchAppOperation } from "@/lib/app-api";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -96,13 +97,16 @@ async function handleInitialize() {
 
 function handleToolsList() {
   return {
-    tools: discoverOperations().map((t) => ({
+    tools: ORCHESTRATOR_TOOLS.map((tool) => {
+      const t = descriptorForTool(tool);
+      return {
       name: t.name,
       description: t.description,
       // TypeBox schemas are JSON Schema-shaped; the MCP `inputSchema` field
       // expects a JSON Schema. Pass through as-is.
       inputSchema: t.schema as unknown,
-    })),
+      };
+    }),
   };
 }
 
