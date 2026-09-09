@@ -17,6 +17,7 @@ export interface CodeActPresentation {
   executionId: string;
   title?: string;
   source: string;
+  error?: CodeActExecutionReceipt["error"];
   status: CodeActExecutionReceipt["status"];
   durationMs?: number;
   result?: unknown;
@@ -44,6 +45,7 @@ export function presentCodeActReceipt(receipt: CodeActExecutionReceipt): CodeAct
     executionId: receipt.executionId,
     ...(receipt.title ? { title: receipt.title } : {}),
     source: receipt.source,
+    ...(receipt.error ? { error: receipt.error } : {}),
     status: receipt.status,
     durationMs: receipt.durationMs,
     ...(receipt.result === undefined
@@ -72,6 +74,7 @@ export function codeActModelText(presentation: CodeActPresentation): string {
     {
       executionId: presentation.executionId,
       status: presentation.status,
+      error: presentation.error,
       partial: presentation.partial,
       durationMs: presentation.durationMs,
       result: presentation.result,

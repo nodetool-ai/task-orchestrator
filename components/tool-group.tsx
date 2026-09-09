@@ -140,6 +140,7 @@ function CodeActInteraction({
       {open && (
         <div className="space-y-3 border-t border-border/40 px-3 py-3">
           <ToolPayload title="Source" value={presentation.source} />
+          {presentation.error && <ToolPayload title="Error" value={presentation.error} />}
           {presentation.result !== undefined && <ToolPayload title="Result" value={presentation.result} />}
           {presentation.outputs.length > 0 && <ToolPayload title="Outputs" value={presentation.outputs} />}
           {presentation.diagnostics.length > 0 && <ToolPayload title="Diagnostics" value={presentation.diagnostics} />}

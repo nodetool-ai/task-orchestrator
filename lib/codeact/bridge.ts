@@ -22,6 +22,7 @@ export interface CodeActExecutionReceipt {
   title?: string;
   source: string;
   sourceSha256: string;
+  error?: { name: string; message: string; stack?: string };
   status: "running" | "completed" | "failed" | "cancelled" | "deadline" | "unknown";
   result?: unknown;
   subcalls: CodeActSubcallReceipt[];
@@ -34,6 +35,8 @@ export interface CodeActExecutionReceipt {
 }
 
 export interface CodeActReceiptStore {
+  /** Hold ownership before publishing a running receipt, through its final write. */
+  withOwnership?<T>(executionId: string, execute: () => Promise<T>): Promise<T>;
   begin(receipt: CodeActExecutionReceipt): Promise<void>;
   subcall(receipt: CodeActSubcallReceipt): Promise<void>;
   finish(executionId: string, patch: Partial<CodeActExecutionReceipt>): Promise<void>;
@@ -64,8 +67,15 @@ export interface CodeActExecuteRequest {
 export type CodeActExecuteResult = ThreadResult & { executionId: string; receipt: CodeActExecutionReceipt };
 
 export async function executeCodeAct(request: CodeActExecuteRequest): Promise<CodeActExecuteResult> {
-  const limits = resolveLimits(request.limits);
   const executionId = randomUUID();
+  const execute = () => executeOwnedCodeAct(request, executionId);
+  return request.receipts?.withOwnership
+    ? request.receipts.withOwnership(executionId, execute)
+    : execute();
+}
+
+async function executeOwnedCodeAct(request: CodeActExecuteRequest, executionId: string): Promise<CodeActExecuteResult> {
+  const limits = resolveLimits(request.limits);
   const startedAtMs = Date.now();
   const receipt: CodeActExecutionReceipt = {
     executionId,
@@ -169,6 +179,15 @@ export async function executeCodeAct(request: CodeActExecuteRequest): Promise<Co
   receipt.outputs = (("outputs" in result ? result.outputs : undefined) ?? []).map((x) => ({ kind: x.kind, value: normalizeOutput(x.value, limits.maxOutputBytes) }));
   receipt.diagnostics = (("diagnostics" in result ? result.diagnostics : undefined) ?? []).map((x) => ({ level: x.level, values: x.values.map((v) => normalizeOutput(v, limits.maxOutputBytes)) }));
   if ("value" in result) receipt.result = normalizeOutput(result.value, limits.maxOutputBytes);
+  if ("error" in result) receipt.error = {
+    name: boundedText(result.error.name, 256),
+    message: boundedText(result.error.message, 4096),
+    ...(result.error.stack ? { stack: boundedText(result.error.stack, 4096) } : {}),
+  };
+  else if (result.status === "terminated" || result.status === "timeout") receipt.error = {
+    name: cancelled ? "CodeActCancelled" : "CodeActDeadline",
+    message: result.status === "terminated" ? boundedText(result.reason, 4096) : "Guest execution deadline exceeded",
+  };
   receipt.status = cancelled ? "cancelled" : result.status === "terminated" ? "deadline" : result.status === "ok" ? "completed" : result.status === "timeout" ? "deadline" : "failed";
   receipt.completedAt = new Date().toISOString();
   receipt.durationMs = Date.now() - startedAtMs;

@@ -246,7 +246,7 @@ function installBridge(
     globalThis.app = make('app'); globalThis.tools = make('tools');
     const supplied = ${JSON.stringify(bridge.catalog ?? [])};
     const entries = Array.isArray(supplied) ? supplied : (Array.isArray(supplied.operations) ? supplied.operations : []);
-    globalThis.catalog = { search: ({query=''}={}) => Promise.resolve(entries.filter(x => JSON.stringify(x).toLowerCase().includes(String(query).toLowerCase())).slice(0, 20)), describe: ({names=[]}={}) => Promise.resolve(entries.filter(x => names.includes(x.name) || names.includes(x.sdkPath) || (Array.isArray(x.aliases) && x.aliases.some(a => names.includes(a)))).slice(0, 20)) };
+    globalThis.catalog = { search: ({query=''}={}) => supplied.remoteDiscovery ? call('catalog.search', {query}) : Promise.resolve(entries.filter(x => JSON.stringify(x).toLowerCase().includes(String(query).toLowerCase())).slice(0, 20)), describe: ({names=[]}={}) => supplied.remoteDiscovery ? call('catalog.describe', {names}) : Promise.resolve(entries.filter(x => names.includes(x.name) || names.includes(x.sdkPath) || (Array.isArray(x.aliases) && x.aliases.some(a => names.includes(a)))).slice(0, 20)) };
     globalThis.output = { text: value => { __codeact_output('text', value); return value; }, image: value => { __codeact_output('image', value); return value; } };
   })()`;
   const result = ctx.evalCode(bootstrap, "codeact-bridge.js");

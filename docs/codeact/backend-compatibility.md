@@ -38,6 +38,27 @@ or parking operations (`report_result`, `raise`, `ask_parent`, and
 `timer__sleep`) close further dispatch even if guest code catches the resulting
 error.
 
+## Discovery and interrupted executions
+
+Catalogue query/name filters are applied to the complete authorized registry
+before entry and byte limits. Guest `catalog.search` and `catalog.describe`
+resolve against current host policy, so operations omitted from the initial
+catalogue remain discoverable. Responses remain bounded.
+
+Guest errors retain their name, message, and bounded stack in the durable
+receipt, model response, and transcript. Deadline and cancellation responses
+also include a reason.
+
+The server and pipe reconcile interrupted CodeAct executions at startup; the
+pending-run pump also retries reconciliation. Each new persisted execution
+holds a PostgreSQL advisory transaction lock from before its initial receipt
+through its final write. Ownership uses a separate pool of up to four
+connections per process, leaving the ordinary query pool available for host
+operations. Recovery skips locked executions, including those in other live
+processes. For an unlocked running execution, it loads the independently
+persisted subcalls, preserves completed outcomes, and atomically marks remaining
+running work and the execution `unknown`. Recovery never replays guest source.
+
 ## Resume and unsupported behavior
 
 Claude session IDs and Codex thread IDs remain the only conversation-persistence

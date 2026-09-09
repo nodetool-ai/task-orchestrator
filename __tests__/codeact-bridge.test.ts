@@ -5,9 +5,23 @@ import {
   MemoryCodeActReceiptStore,
 } from "../lib/codeact/bridge";
 import { executeAppCodeAct } from "../lib/codeact/app-bridge";
-import { presentCodeActReceipt } from "../lib/codeact/presentation";
+import { codeActModelText, presentCodeActReceipt } from "../lib/codeact/presentation";
 
 describe("CodeAct execution bridge", () => {
+  it.each([
+    ['throw new Error("specific failure")', "Error", "specific failure"],
+    ['const = ;', "SyntaxError", undefined],
+  ])("preserves guest errors in receipts and model output: %s", async (code, name, message) => {
+    const receipts = new MemoryCodeActReceiptStore();
+    const result = await executeCodeAct({ code: code!, receipts });
+    const model = JSON.parse(codeActModelText(presentCodeActReceipt(result.receipt)));
+    expect(model.status).toBe("failed");
+    expect(model.error.name).toBe(name);
+    expect(model.error.message).toBeTruthy();
+    if (message) expect(model.error.message).toBe(message);
+    expect(receipts.executions.get(result.executionId)?.error).toEqual(result.receipt.error);
+  });
+
   it("returns bounded structured output and persists the terminal receipt", async () => {
     const receipts = new MemoryCodeActReceiptStore();
     const result = await executeCodeAct({

@@ -1204,6 +1204,12 @@ function pumpIntervalMs(): number {
 }
 
 async function pumpTick(): Promise<void> {
+  try {
+    const { recoverOrphanedCodeActExecutions } = await import("./codeact/receipts");
+    await recoverOrphanedCodeActExecutions();
+  } catch (error) {
+    console.error("[codeact] receipt recovery failed:", error);
+  }
   // Half 0: reconcile against the REAL runner state — fast death detection +
   // log capture/state repair for anything the provider watcher missed.
   try {

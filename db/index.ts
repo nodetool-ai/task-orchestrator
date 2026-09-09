@@ -36,6 +36,8 @@ declare global {
   var __tasksPg: Client | undefined;
   // eslint-disable-next-line no-var
   var __tasksGenerationPg: Client | undefined;
+  // eslint-disable-next-line no-var
+  var __tasksCodeActPg: Client | undefined;
 }
 
 // Optional per-connection schema. Tests set TASK_ORCH_PG_SCHEMA to a unique name
@@ -188,6 +190,14 @@ export const generationAuthoritySql: Client = new Proxy(function () {} as unknow
   },
 });
 
+/** CodeAct holds execution ownership across host calls. Use a separate pool
+ * so ownership transactions cannot exhaust connections needed by those calls. */
+export function codeActOwnershipDb(): DB {
+  ensureClient(); // Enforce the same worker/database access guard.
+  globalThis.__tasksCodeActPg ??= createClient(4);
+  return drizzle(globalThis.__tasksCodeActPg, { schema });
+}
+
 export function workerGenerationAuthorityKey(runId: number): string {
   return `worker-generation:${runId}`;
 }
@@ -203,16 +213,19 @@ export { schema };
 export async function closeDb(): Promise<void> {
   const client = globalThis.__tasksPg;
   const generationClient = globalThis.__tasksGenerationPg;
-  if (!client && !generationClient) return;
+  const codeActClient = globalThis.__tasksCodeActPg;
+  if (!client && !generationClient && !codeActClient) return;
   try {
     await Promise.all([
       client?.end({ timeout: 5 }),
       generationClient?.end({ timeout: 5 }),
+      codeActClient?.end({ timeout: 5 }),
     ]);
   } finally {
     globalThis.__tasksPg = undefined;
     globalThis.__tasksDb = undefined;
     globalThis.__tasksGenerationPg = undefined;
+    globalThis.__tasksCodeActPg = undefined;
   }
 }
 

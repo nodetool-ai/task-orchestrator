@@ -69,9 +69,10 @@ const codeActTools: OrchestratorTool[] = [
     execute: async (params: { query?: string; names?: string[] }, ctx) => {
       const catalog = codeActCatalogForContext(
         await currentCodeActContext(ctx as AppApiContext),
+        { maxEntries: params.query && !params.names?.length ? 20 : 100 },
+        { query: params.query, ...(params.names?.length ? { names: params.names } : {}) },
       );
-      const operations = params.names?.length ? catalog.operations.filter((x) => params.names!.includes(x.name) || params.names!.includes(x.sdkPath)) : params.query ? catalog.operations.filter((x) => JSON.stringify(x).toLowerCase().includes(params.query!.toLowerCase())).slice(0, 20) : catalog.operations;
-      return { content: [{ type: "text", text: JSON.stringify({ ...catalog, operations }) }] };
+      return { content: [{ type: "text", text: JSON.stringify(catalog) }] };
     },
   },
   {

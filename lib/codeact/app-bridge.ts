@@ -32,10 +32,17 @@ export async function executeAppCodeAct(request: AppCodeActExecuteRequest): Prom
   let acceptingCalls = true;
   return executeCodeAct({
     ...rest,
-    catalog: codeActCatalogForContext(catalogContext),
+    catalog: { ...codeActCatalogForContext(catalogContext), remoteDiscovery: true },
     dispatch: async (operation, input, metadata) => {
       if (!acceptingCalls) {
         throw new Error("CodeAct execution was closed by a successful lifecycle operation");
+      }
+      if (operation === "catalog.search" || operation === "catalog.describe") {
+        const params = input as { query?: unknown; names?: unknown } | null;
+        const filter = operation === "catalog.search"
+          ? { query: typeof params?.query === "string" ? params.query : "" }
+          : { names: Array.isArray(params?.names) ? params.names.filter((name): name is string => typeof name === "string") : [] };
+        return codeActCatalogForContext(await currentContext(), { maxEntries: 20 }, filter).operations;
       }
       const result = await dispatchAppOperation(
         operation,

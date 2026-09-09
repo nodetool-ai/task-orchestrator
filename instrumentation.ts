@@ -38,6 +38,8 @@ export async function register(): Promise<void> {
       // connects lazily), so apply them here before anything touches the DB.
       const dbMod = await import("./db");
       await dbMod.initDb();
+      const codeActMod = await import("./lib/codeact/receipts");
+      await codeActMod.recoverOrphanedCodeActExecutions();
       const runsMod = await import("./lib/runs");
       const dispatchMod = await import("./lib/run-dispatch");
       const providerMod = await import("./lib/runner/provider");

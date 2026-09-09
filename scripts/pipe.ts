@@ -68,6 +68,8 @@ async function main() {
   // Awaited so stuck runs are healed before the bridge accepts messages; a
   // transient DB failure must not crash the process as an unhandled rejection.
   try {
+    const { recoverOrphanedCodeActExecutions } = await import("../lib/codeact/receipts");
+    await recoverOrphanedCodeActExecutions();
     await reconcileOrphanedRuns();
   } catch (err) {
     console.error("[pipe] orphaned-run reconciliation failed:", err);
