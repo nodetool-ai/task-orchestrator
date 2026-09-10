@@ -187,6 +187,7 @@ describe("runs.resumeExecutorRun (fork a fresh generation)", () => {
     expect(next.goal).toBe("<execute>");
     expect(next.planId).toBe(plan.id);
     expect(next.parentRunId).toBe(prior.id);
+    expect(next.resumeOf).toBe(prior.id);
     await waitFor(next.id, ["completed", "failed"]);
 
     // The kickoff prompt carries the resume note (prior run + its error) as
@@ -195,6 +196,18 @@ describe("runs.resumeExecutorRun (fork a fresh generation)", () => {
     expect(kickoff).toContain(`#${prior.id}`);
     expect(kickoff).toContain("worker died");
     expect(kickoff).toContain("list_tasks");
+  });
+
+  it("retains a nested executor's supervisor and registers the replacement there", async () => {
+    const plan = await repo.createPlan({ title: "Nested executor", date: "2026-07-19" });
+    const [parent] = await db.insert(agentSessions).values({ goal: "<chat>", status: "running", workerScope: "test-supervisor" }).returning();
+    const [prior] = await db.insert(agentSessions).values({ goal: "<execute>", planId: plan.id, status: "failed", parentRunId: parent.id }).returning();
+    const next = await runs.resumeExecutorRun(prior.id);
+    expect(next.parentRunId).toBe(parent.id);
+    expect(next.resumeOf).toBe(prior.id);
+    const [subscription] = await db.select().from(runEventSubscriptions).where(eq(runEventSubscriptions.sourceRunId, next.id));
+    expect(subscription.subscriberRunId).toBe(parent.id);
+    await waitFor(next.id, ["completed", "failed"]);
   });
 
   it("refuses to fork while the prior generation is not settled", async () => {
@@ -235,6 +248,7 @@ describe("POST /api/sessions/[id]/resume on an executor", () => {
     const body = (await res.json()) as { id: number; goal: string; parentRunId: number };
     expect(body.goal).toBe("<execute>");
     expect(body.parentRunId).toBe(prior.id);
+    expect(body).toHaveProperty("resumeOf", prior.id);
     // Let the forked generation's kickoff turn settle before the test ends.
     await waitFor(body.id, ["completed", "failed"]);
   });

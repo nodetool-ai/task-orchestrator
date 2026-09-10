@@ -208,6 +208,8 @@ export interface CreateRunInput {
   planId?: string | null;
   prUrl?: string | null;
   parentRunId?: number | null;
+  /** Prior run being replaced; independent of the supervising parent. */
+  resumeOf?: number | null;
   model?: string | null;
   /** Agent backend for this run ('pi'|'claude'|'codex'). Omitted/null inherits the
    *  deployment default (TASK_ORCH_AGENT_BACKEND). */
@@ -262,6 +264,8 @@ export interface RunRow {
   planId: string | null;
   repoId: string | null;
   parentRunId: number | null;
+  /** Optional for snapshots written before replacement lineage was exposed. */
+  resumeOf?: number | null;
   toolsProfile: string;
   cwdStrategy: CwdStrategy;
   /** Execution placement, chosen per run at create time (design §3).
@@ -882,6 +886,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
     autoMerge: input.autoMerge ?? true,
     repoId,
     parentRunId: input.parentRunId ?? null,
+    resumeOf: input.resumeOf ?? null,
     toolsProfile,
     cwdStrategy,
     // Placement is a per-run property again (design §3): 'worker' (the default,
@@ -3648,7 +3653,10 @@ export async function resumeExecutorRun(
     model: overrides.model ?? prior.model ?? undefined,
     backend: overrides.backend ?? prior.backend,
     thinkingLevel: prior.thinkingLevel,
-    parentRunId: priorId,
+    // Nested executors retain their supervisor. A root executor stays in its
+    // prior tree so it can still observe children from the previous generation.
+    parentRunId: prior.parentRunId ?? priorId,
+    resumeOf: priorId,
     userId: prior.userId,
     title: prior.title,
     budget: {
@@ -5661,6 +5669,7 @@ export function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     planId: row.planId,
     repoId: row.repoId,
     parentRunId: row.parentRunId,
+    resumeOf: row.resumeOf,
     toolsProfile: row.toolsProfile,
     cwdStrategy: row.cwdStrategy as CwdStrategy,
     runtime: (row.runtime as "server" | "worker" | null) ?? "worker",
@@ -5739,7 +5748,8 @@ export function toAgentSessionFull(row: RunRow): AgentSessionFull {
     inputTokens: row.inputTokens,
     outputTokens: row.outputTokens,
     sdkSessionId: row.sdkSessionId,
-    resumeOf: row.parentRunId,
+    resumeOf: row.resumeOf ?? null,
+    parentRunId: row.parentRunId,
     repoId: row.repoId,
     startedAt: row.startedAt,
     completedAt: row.completedAt,

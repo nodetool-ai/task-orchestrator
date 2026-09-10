@@ -41,6 +41,15 @@ already cost real time once.
 
 ## Worker channel
 
+- Replacement run lineage is not supervision. A retry must keep the failed
+  run's `parent_run_id` and record the predecessor in `resume_of`. Run 221's
+  Sprites 502 led another root (218) to start replacement 222 under itself,
+  leaving the actual supervisor (219) unable to observe it across trees.
+  `start_session` now preserves supervision after a failed task session and
+  accepts `resume_of` for explicit replacements. For an existing misplaced
+  leaf, `scripts/repair-run-supervision.ts` defaults to a dry run and atomically
+  repairs the parent plus durable subscription with current-state replay.
+
 - Each replacement worker needs a **fresh channel instanceId**. Transport
   state lives under `SESSION_ROOT/workers/<instanceId>/channel`; restarting
   the same incarnation reuses its spool. Keep `SESSION_ROOT` stable to preserve

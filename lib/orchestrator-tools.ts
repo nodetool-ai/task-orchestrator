@@ -231,6 +231,8 @@ function summariseSession(s: AgentSessionFull) {
   return {
     id: s.id,
     task_id: s.taskId,
+    parent_run_id: s.parentRunId ?? null,
+    resume_of: s.resumeOf,
     status: s.status,
     model: s.model,
     branch: s.branch,
@@ -1053,7 +1055,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "start_session",
     label: "Start Session",
     description:
-      "Kick off a background Claude agent to implement a task. Creates a worktree, runs the agent, opens a PR when done, and moves the task to review. Returns immediately and automatically subscribes your run to the child. Completion and questions arrive as event messages; continue other work or end your turn without a wait call.",
+      "Start an agent to implement a task. After a failed session, the replacement retains that session's supervising parent. Use resume_of to explicitly replace a settled session. New tasks are supervised by your run. Returns the supervising parent and subscription; completion and questions arrive there automatically.",
     parameters: Type.Object({
       task_id: Type.String({ minLength: 1 }),
       model: Type.Optional(Type.String()),
@@ -1063,8 +1065,9 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
         })
       ),
       base_branch: Type.Optional(Type.String()),
+      resume_of: Type.Optional(Type.Integer({ minimum: 1, description: "Prior settled session to replace, preserving its supervising parent." })),
     }),
-    execute: async ({ task_id, model, reasoning, base_branch }, ctx) => {
+    execute: async ({ task_id, model, reasoning, base_branch, resume_of }, ctx) => {
       const userId = await resolveSpawnerUserId(ctx);
       const result = await safe(() =>
         agentLib.startSession({
@@ -1072,16 +1075,23 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
           model,
           thinkingLevel: reasoning ?? null,
           baseBranch: base_branch,
+          resumeOf: resume_of,
           parentRunId: ctx.runId ?? null,
           userId,
         })
       );
       if ("_error" in result) return errResult(`Error: ${result._error}`);
-      const subscriptions = ctx.runId ? await listRunSubscriptions(ctx.runId) : [];
+      const parentRunId = result.parentRunId ?? null;
+      const subscriptions = parentRunId != null ? await listRunSubscriptions(parentRunId) : [];
       const subscription = subscriptions.find((s) => s.sourceRunId === result.id && s.keepOpen);
       return jsonResult({ session_id: result.id, task_id: result.taskId, model: result.model,
+        parent_run_id: parentRunId, resume_of: result.resumeOf,
         subscription_id: subscription?.id ?? null, attempt: subscription?.resolvedAttempt ?? 1,
-        message: "Started. Child events arrive automatically in your conversation; no wait call is needed." });
+        message: parentRunId == null
+          ? "Started without a supervising run."
+          : parentRunId === ctx.runId
+            ? "Started. Child events arrive automatically in your conversation; no wait call is needed."
+            : `Replacement started under supervising run #${parentRunId}. Child events arrive in that run's conversation.` });
     },
   },
 

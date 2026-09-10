@@ -187,6 +187,7 @@ export interface AgentSessionFull {
   outputTokens: number | null;
   sdkSessionId: string | null;
   resumeOf: number | null;
+  parentRunId?: number | null;
   repoId: string | null;
   startedAt: Date;
   completedAt: Date | null;

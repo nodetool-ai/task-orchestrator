@@ -238,8 +238,8 @@ export interface StartSessionInput {
   thinkingLevel?: "low" | "medium" | "high" | "xhigh" | null;
   baseBranch?: string;
   resumeOf?: number;
-  /** Lineage parent (e.g. the plan executor that spawned this). Used for UI
-   *  grouping and the tree budget cap. `resumeOf` takes precedence. */
+  /** Supervisor for a new task session. Replacements retain the prior
+   *  session's supervisor, including when another run requests the retry. */
   parentRunId?: number | null;
   /** User the session is attributed to; spawned children inherit the
    *  spawner's userId so attribution survives across the run tree. */
@@ -266,26 +266,33 @@ export async function startSession(input: StartSessionInput): Promise<AgentSessi
   // re-wrap this call in a transaction taking that lock — create()'s inner
   // transaction runs on a different pooled connection and would deadlock.
   let backend = input.backend ?? null;
-  if (input.resumeOf) {
-    const prior = await runs.get(input.resumeOf);
+  let prior: runs.RunRow | null = null;
+  if (input.resumeOf != null) {
+    prior = await runs.get(input.resumeOf);
     if (!prior) throw new repo.RepoError(`Prior session #${input.resumeOf} not found`, 404);
     if (prior.taskId !== input.taskId) {
       throw new repo.RepoError(`Session #${input.resumeOf} belongs to a different task`, 400);
     }
-    if (!prior.sdkSessionId) {
+    if (!isTerminalStatus(prior.status)) {
       throw new repo.RepoError(
-        `Session #${input.resumeOf} has no SDK session id — nothing to resume`,
-        400
+        `Session #${input.resumeOf} is still '${prior.status}' — wait for it to settle before replacing it`,
+        409
       );
     }
-    // A resume stays on the prior session's backend unless overridden: its
-    // resume token is backend-tagged, so a different backend starts fresh.
-    backend = backend ?? prior.backend;
+  } else {
+    // A start immediately after a failed task run is a replacement even if
+    // the caller omitted resumeOf. Keep its existing supervisor: run 218's
+    // recovery of run 221 otherwise moved run 222 outside run 219's tree.
+    const [latest] = await runs.list({ taskId: input.taskId, goal: "<implement>", limit: 1 });
+    if (latest?.status === "failed") prior = latest;
   }
+  // Spawn failures may have no SDK token. A replacement starts a fresh worker
+  // on the task's canonical branch; resume lineage is separate from ownership.
+  backend = backend ?? prior?.backend ?? null;
 
   // Resolve the selected persona once. Model may inherit from it in
   // runs.create(), while permissions and budgets inherit here fieldwise.
-  const personaId = input.personaId ?? "implementor";
+  const personaId = input.personaId ?? prior?.personaId ?? "implementor";
   const persona = await repo.getPersona(personaId);
   if (!persona) throw new repo.RepoError(`Persona ${personaId} not found`, 404);
   const created = await runs.create({
@@ -293,24 +300,26 @@ export async function startSession(input: StartSessionInput): Promise<AgentSessi
     cwdStrategy: "worktree",
     // gh_pr/gh_ci let the agent inspect its own PR and fetch CI results
     // (e.g. when reacting to webhook-driven CI failures).
-    toolsProfile: input.toolsProfile ?? persona.toolsProfile,
+    toolsProfile: input.toolsProfile ?? prior?.toolsProfile ?? persona.toolsProfile,
     taskId: input.taskId,
     scheduleOccurrenceId: input.scheduleOccurrenceId ?? null,
-    autoMerge: input.autoMerge ?? true,
+    autoMerge: input.autoMerge ?? prior?.autoMerge ?? true,
+    prUrl: prior?.prUrl ?? null,
     repoId: task.repoId ?? null,
-    model: input.model ?? undefined,
+    model: input.model ?? prior?.model ?? undefined,
     backend,
-    thinkingLevel: input.thinkingLevel ?? null,
+    thinkingLevel: input.thinkingLevel ?? prior?.thinkingLevel ?? null,
     // Undefined deliberately reaches ensureWorktreeBranch(), which resolves the
     // registered repository default branch instead of assuming `main`.
-    baseBranch: input.baseBranch,
-    parentRunId: input.resumeOf ?? input.parentRunId ?? null,
-    userId: input.userId ?? null,
+    baseBranch: input.baseBranch ?? prior?.baseBranch ?? undefined,
+    parentRunId: prior ? prior.parentRunId : input.parentRunId ?? null,
+    resumeOf: prior?.id ?? null,
+    userId: prior ? prior.userId : input.userId ?? null,
     personaId,
     budget: {
-      maxTurns: input.budget?.maxTurns ?? persona.budgetMaxTurns ?? undefined,
-      maxUsd: input.budget?.maxUsd ?? undefined,
-      maxSeconds: input.budget?.maxSeconds ?? persona.budgetMaxSeconds ?? undefined,
+      maxTurns: input.budget?.maxTurns ?? prior?.budgetMaxTurns ?? persona.budgetMaxTurns ?? undefined,
+      maxUsd: input.budget?.maxUsd ?? prior?.budgetMaxUsd ?? undefined,
+      maxSeconds: input.budget?.maxSeconds ?? prior?.budgetMaxSeconds ?? persona.budgetMaxSeconds ?? undefined,
     },
     defer: input.defer,
   });
