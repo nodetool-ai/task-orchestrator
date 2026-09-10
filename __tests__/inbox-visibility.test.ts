@@ -7,7 +7,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { db } from "../db";
-import { agentSessions, inboxEvents, runTimers } from "../db/schema";
+import { agentSessions, inboxEvents, runEventSubscriptions, runSourceEvents, runTimers } from "../db/schema";
 import { seedPersonas } from "../db/seed-personas";
 import {
   createTimer,
@@ -40,6 +40,8 @@ beforeEach(async () => {
   await seedPersonas();
   await db.delete(runTimers);
   await db.delete(inboxEvents);
+  await db.delete(runEventSubscriptions);
+  await db.delete(runSourceEvents);
   await db.delete(agentSessions);
 });
 
@@ -57,8 +59,8 @@ describe("listRunInboxEvents", () => {
     });
     const b = await emitInboxEvent({
       targetRunId: run,
-      type: "child.result",
-      sourceKind: "run",
+      type: "gh.ci.completed",
+      sourceKind: "github",
       sourceId: "99",
       attempt: 1,
       noWake: true,
@@ -100,8 +102,7 @@ describe("pendingOwnerCounts", () => {
     const parent = await insertRun({});
     const run = await insertRun({ parentRunId: parent });
 
-    // Two owner events for `run`; gh.* also fans a supervisor copy to the
-    // parent, which must NOT count toward the parent's badge.
+    // Two owned inputs for `run`; neither grants its parent a subscription.
     await emitInboxEvent({
       targetRunId: run,
       type: "gh.pr.merged",

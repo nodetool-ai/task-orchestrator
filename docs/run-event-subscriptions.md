@@ -29,6 +29,22 @@ observe another attempt. `all` requires `until_unsubscribed` lifetime.
 Queued inputs remain unless `discard_pending: true`; executing inputs cannot be
 retracted, and another matching subscription preserves its delivery.
 
+Event visibility is checked against the recorded recipient/source/type/attempt
+match at polling, claim, materialization, worker input, history, and SSE boundaries.
+Parent pointers do not grant visibility, and events are never copied to ancestors.
+A run's own timers, question answers, resource notifications and platform notices
+remain directly addressed inputs. To send `custom.ready` to another run, that
+run must first subscribe to the sender and that exact custom event type.
+PR/CI, task/plan state, and budget-warning notices can also be subscribed to
+explicitly by source run. Use `until_unsubscribed` for PR notices that must
+arrive after the implementation attempt finishes.
+
+The chat conversation uses the same admitted deliveries as the model. Legacy
+unsolicited copies are hidden, and a v2 delivery renders once instead of also
+showing an eager inbox mirror. Discarding a queued subscription delivery retracts
+its card over SSE. Finished subscriptions and already consumed deliveries stay in
+conversation history; unsubscribe does not erase what the run already observed.
+
 Explicit subscriptions default to `keep_open: false`. Default child supervision
 sets it to true. Self-subscriptions, cross-tree subscriptions, and cycles between
 keep-open interests are rejected. Registration is capped at 100 active interests
@@ -67,8 +83,11 @@ compare-and-set; timer firing and its inbox delivery also commit together.
 ## Compatibility and rollout
 
 Migration `0041_run_event_subscriptions.sql` retains delivery version 1 on existing
-runs and defaults newly inserted runs to version 2. Existing runs retain the
-legacy parent-event route. Their wait interface stays available. On version 2,
+runs and defaults newly inserted runs to version 2. Migration `0044` registers
+future-only default interests for live legacy parents and their live direct
+children, without replaying history or restoring cancelled interests. Legacy runs
+keep their digest format but obey the same subscription boundary. Their wait
+interface stays available. On version 2,
 `await_session` is a compatibility subscription alias, and `events__poll` is
 read-only inspection, not acknowledgment.
 
@@ -81,9 +100,9 @@ subscriptions or deliveries.
 The initial implementation uses one short graph advisory lock before per-source
 locks to serialize publication and observation-cycle changes safely. This is a
 throughput tradeoff; no model or provider call executes while holding it.
-`run.worker_failed` is a reserved subscription type; attempt failures are delivered
-through `run.attempt_finished`. Infrastructure-specific diagnostic publication and
-operational retention dashboards are separate extensions.
+`run.worker_failed` carries worker-death diagnostics for explicit subscribers;
+terminal attempt failures are delivered through `run.attempt_finished` to default
+child supervision. Operational retention dashboards are a separate extension.
 
 See [the design](run-event-subscriptions-design.md) for the broader architecture
 and [MCP tools](mcp-server.md) for the tool catalogue. Regression coverage includes

@@ -16,7 +16,7 @@ vi.mock("../auth", () => ({
 }));
 
 import { db } from "../db";
-import { agentSessions, inboxEvents, runTimers } from "../db/schema";
+import { agentSessions, inboxEvents, runEventSubscriptions, runSourceEvents, runTimers } from "../db/schema";
 import { seedPersonas } from "../db/seed-personas";
 import {
   emitInboxEvent,
@@ -65,6 +65,8 @@ beforeEach(async () => {
   await seedPersonas();
   await db.delete(runTimers);
   await db.delete(inboxEvents);
+  await db.delete(runEventSubscriptions);
+  await db.delete(runSourceEvents);
   await db.delete(agentSessions);
 });
 
@@ -106,15 +108,16 @@ describe("GET /api/inbox", () => {
       prUrl: "https://github.com/o/r/pull/312",
     });
 
-    const first = await emitInboxEvent({
+    // Historical inbox rows remain available in the operational audit view,
+    // even when they would no longer be admitted to a run's conversation.
+    const [first] = await db.insert(inboxEvents).values({
       targetRunId: a,
       type: "child.exception",
       sourceKind: "run",
       sourceId: "99",
       attempt: 1,
       payload: { message: "merge conflict in lib/repo.ts" },
-      noWake: true,
-    });
+    }).returning({ eventId: inboxEvents.id });
     const second = await emitInboxEvent({
       targetRunId: b,
       type: "gh.pr.review_submitted",

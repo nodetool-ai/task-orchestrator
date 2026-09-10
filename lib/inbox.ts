@@ -2,18 +2,9 @@
 //
 // Core of the agent event system (docs/agent-events.md): the durable inbox.
 //
-// Exactly two mutation paths touch inbox_events rows:
-//   - emitInboxEvent()   — producers write facts; addressing (owner +
-//                          supervisor copies + exception routing +
-//                          supersession + dedupe) lives HERE, in one place.
-//   - claimInboxEvents() — the single claim primitive. Turn-boundary digest
-//                          injection and mid-turn events__poll both go
-//                          through it. Control-class events are excluded
-//                          inside the primitive, not by caller convention.
-//
-// This module depends only on db/schema and lib/types; anything that needs
-// the runner (waking a parked run) goes through a lazy dynamic import so
-// runs.ts / run-dispatch.ts can import us without a cycle.
+// Owned inputs use emitInboxEvent; cross-run facts use run-source-events and
+// durable subscriptions. Legacy digest claims and v2 materialization enforce
+// the same admission predicate. Wake imports stay lazy to avoid runner cycles.
 
 import { and, asc, desc, eq, inArray, lt, notInArray, sql } from "drizzle-orm";
 
@@ -29,7 +20,9 @@ import {
 } from "@/db/schema";
 import { TERMINAL_STATUSES } from "./run-state";
 import { isTerminalStatus, type SessionStatus } from "./types";
-import { lockSourceTx, publishSourceEventTx } from "./run-source-events";
+import { lockSourceTx, publishSourceEventTx, RESOURCE_EVENT_TYPES } from "./run-source-events";
+import { admittedInboxEvent, discardUnsubscribedEventsTx } from "./run-event-visibility";
+import { randomUUID } from "node:crypto";
 
 // ────────────────────────────────────────
 // Taxonomy & classes
@@ -50,8 +43,7 @@ export const CONTROL_TYPES = new Set<string>([
 ]);
 
 /**
- * Terminal child events (§4.3): exactly one per (run, attempt), and a newer
- * attempt's terminal event supersedes older still-pending ones at emit time.
+ * Legacy terminal type names retained for historical envelope rendering.
  */
 export const TERMINAL_CHILD_TYPES = new Set<string>([
   "child.result",
@@ -59,21 +51,6 @@ export const TERMINAL_CHILD_TYPES = new Set<string>([
   "child.died",
   "child.cancelled",
 ]);
-
-/**
- * Parent-visible types (§5.2): when the direct target has a live parent,
- * these get an informational `supervisor` copy (which does NOT wake).
- */
-const SUPERVISOR_COPY_PREFIXES = ["gh.", "task.", "plan."];
-const SUPERVISOR_COPY_TYPES = new Set<string>(["budget.warning"]);
-
-function wantsSupervisorCopy(type: string): boolean {
-  return (
-    SUPERVISOR_COPY_TYPES.has(type) ||
-    TERMINAL_CHILD_TYPES.has(type) ||
-    SUPERVISOR_COPY_PREFIXES.some((p) => type.startsWith(p))
-  );
-}
 
 // Payloads bigger than this are quarantined at claim time (§6.5) rather than
 // injected — one runaway payload must not wedge prompt construction.
@@ -133,38 +110,6 @@ async function getTargetRow(id: number): Promise<TargetRow | null> {
   return row ?? null;
 }
 
-/** Walk parent_run_id upward to the nearest NON-terminal ancestor (§5.3). */
-async function nearestLiveAncestor(startParentId: number | null, maxSteps = 8): Promise<TargetRow | null> {
-  let cursor = startParentId;
-  let steps = 0;
-  const seen = new Set<number>();
-  let last: TargetRow | null = null;
-  while (cursor != null && steps < maxSteps) {
-    if (seen.has(cursor)) break;
-    seen.add(cursor);
-    const row = await getTargetRow(cursor);
-    if (!row) break;
-    last = row;
-    if (!isTerminalStatus(row.status as SessionStatus)) return row;
-    cursor = row.parentRunId;
-    steps++;
-  }
-  // No live ancestor: return the topmost we saw (the root) so the caller can
-  // still flag an unhandled tree failure — events must never vanish.
-  return last;
-}
-
-async function insertEvent(
-  values: typeof inboxEvents.$inferInsert
-): Promise<number | null> {
-  const rows = await db
-    .insert(inboxEvents)
-    .values(values)
-    .onConflictDoNothing()
-    .returning({ id: inboxEvents.id });
-  return rows[0]?.id ?? null;
-}
-
 async function mirrorInboxEventMessage(input: {
   targetRunId: number;
   eventId: number;
@@ -197,85 +142,39 @@ async function mirrorInboxEventMessage(input: {
   });
 }
 
-/**
- * Emit one logical event. Handles, in order:
- *  1. target resolution through superseded_by chains (§9.1)
- *  2. supersession of stale pending terminal events from the same child (§4.3)
- *  3. the owner insert (deduped)
- *  4. exception re-routing past a terminal parent (§5.3)
- *  5. a supervisor copy to the live parent for parent-visible types, which
- *     also wakes a parked parent (§5.2)
- *  6. waking a parked target for owner-audience notify events (§6.2)
- */
+/** Emit an owned input or a subscribed custom fact. Cross-run lifecycle facts
+ * are published transactionally by their source; there is no ancestor fan-out. */
 export async function emitInboxEvent(input: EmitInput): Promise<EmitResult> {
   const resolved = await getTargetRow(input.targetRunId);
   if (!resolved) return { eventId: null, targetRunId: input.targetRunId, woke: false };
 
-  let target: TargetRow = resolved;
-  let bubbledFrom: number | null = null;
-
-  // Exception routing (§5.3): child.exception / child.died addressed to a
-  // terminal parent re-route to the nearest live ancestor as SUPERVISOR
-  // (informed, not conscripted). Other types stay put — a terminal target's
-  // pending events are simply never claimed, which is correct and auditable.
-  let audience: Audience = "owner";
-  if (
-    (input.type === "child.exception" || input.type === "child.died") &&
-    isTerminalStatus(target.status as SessionStatus)
-  ) {
-    const ancestor = await nearestLiveAncestor(target.parentRunId);
-    if (ancestor && ancestor.id !== target.id) {
-      bubbledFrom = target.id;
-      target = ancestor;
-      audience = "supervisor";
-    }
+  const target = resolved;
+  const bubbledFrom = null;
+  const audience: Audience = "owner";
+  // Cross-run notifications enter through the source journal and a matching
+  // subscription. Never infer observation from ancestry or an addressed inbox.
+  if (input.type.startsWith("custom.") && input.sourceKind === "run") {
+    const sourceRunId = Number(input.sourceId);
+    if (!Number.isSafeInteger(sourceRunId) || sourceRunId < 1) throw new Error("Custom events require a source run");
+    const fact = await db.transaction(tx => publishSourceEventTx(tx, {
+      sourceRunId, attempt: input.attempt ?? 1, eventType: input.type,
+      payload: input.payload, producerKey: input.dedupeKey ?? `custom:${randomUUID()}`,
+      recipientRunId: target.id,
+    }));
+    const [delivery] = fact ? await db.select({ id: inboxEvents.id }).from(inboxEvents).where(and(
+      eq(inboxEvents.targetRunId, target.id), eq(inboxEvents.sourceEventId, fact.id),
+    )) : [];
+    if (delivery && !input.noWake) (await import("./run-event-delivery")).hintRunEventDelivery();
+    return { eventId: delivery?.id ?? null, targetRunId: target.id, woke: false };
+  }
+  if (input.type === "run_event" || input.type.startsWith("child.") || input.type.startsWith("custom.") ||
+      (input.sourceKind === "run" && input.sourceId !== String(target.id) && input.type !== "question.answer")) {
+    return { eventId: null, targetRunId: target.id, woke: false };
   }
 
-  // Supersession (§4.3): a newer terminal event from child R invalidates any
-  // still-pending terminal event from R with a lower attempt, atomically with
-  // the insert (same transaction — a parent must never observe the new event
-  // without the stale one being superseded).
   const eventId = await db.transaction(async (tx) => {
-    if (
-      TERMINAL_CHILD_TYPES.has(input.type) &&
-      input.sourceKind === "run" &&
-      input.sourceId != null &&
-      input.attempt != null
-    ) {
-      await tx
-        .update(inboxEvents)
-        .set({ status: "superseded" })
-        .where(
-          and(
-            eq(inboxEvents.targetRunId, target.id),
-            eq(inboxEvents.sourceKind, "run"),
-            eq(inboxEvents.sourceId, String(input.sourceId)),
-            eq(inboxEvents.status, "pending"),
-            inArray(inboxEvents.type, [...TERMINAL_CHILD_TYPES]),
-            lt(inboxEvents.attempt, input.attempt)
-          )
-        );
-      // The stale attempt's supervisor COPY (§5.2) lives on the live grandparent
-      // (target.parentRunId), not on target.id, so the update above misses it —
-      // supersede it too, else a supervising ancestor sees the stale attempt
-      // alongside the newest one.
-      if (target.parentRunId != null) {
-        await tx
-          .update(inboxEvents)
-          .set({ status: "superseded" })
-          .where(
-            and(
-              eq(inboxEvents.targetRunId, target.parentRunId),
-              eq(inboxEvents.audience, "supervisor"),
-              eq(inboxEvents.sourceKind, "run"),
-              eq(inboxEvents.sourceId, String(input.sourceId)),
-              eq(inboxEvents.status, "pending"),
-              inArray(inboxEvents.type, [...TERMINAL_CHILD_TYPES]),
-              lt(inboxEvents.attempt, input.attempt)
-            )
-          );
-      }
-    }
+    const observable = RESOURCE_EVENT_TYPES.some(type => type === input.type);
+    if (observable) await lockSourceTx(tx, target.id);
     const rows = await tx
       .insert(inboxEvents)
       .values({
@@ -293,8 +192,16 @@ export async function emitInboxEvent(input: EmitInput): Promise<EmitResult> {
       })
       .onConflictDoNothing()
       .returning({ id: inboxEvents.id });
+    if (observable && rows[0]) {
+      const [source] = await tx.select({ attempt: agentSessions.attempt }).from(agentSessions).where(eq(agentSessions.id, target.id));
+      await publishSourceEventTx(tx, { sourceRunId: target.id, attempt: source.attempt,
+        eventType: input.type, payload: input.payload, producerKey: `owned-inbox:${rows[0].id}` });
+    }
     return rows[0]?.id ?? null;
   });
+  if (eventId != null && !input.noWake && RESOURCE_EVENT_TYPES.some(type => type === input.type)) {
+    (await import("./run-event-delivery")).hintRunEventDelivery();
+  }
   if (eventId != null) {
     await mirrorInboxEventMessage({
       targetRunId: target.id,
@@ -310,55 +217,7 @@ export async function emitInboxEvent(input: EmitInput): Promise<EmitResult> {
     }).catch(() => {});
   }
 
-  // Supervisor copy (§5.2) — informational AND wakes a parked parent (§5.2a): a
-  // parked coordinator must not sleep through anything it is supervising. The copy
-  // is informational (no action expected — the owning run acts), but its ARRIVAL
-  // wakes, because a completed plan can reach a parked executor ONLY as a
-  // supervisor copy: gh.pr.merged targets the implementor child that owns the PR,
-  // which is terminal by merge time, so the copy to the parent is the sole wake.
-  // Best-effort, mirroring the owner wake below; the pump sweep is the backstop.
-  if (audience === "owner" && wantsSupervisorCopy(input.type) && target.parentRunId != null) {
-    const parent = await getTargetRow(target.parentRunId);
-    if (parent && !isTerminalStatus(parent.status as SessionStatus)) {
-      const copyId = await insertEvent({
-        targetRunId: parent.id,
-        type: input.type,
-        payload: input.payload ?? {},
-        audience: "supervisor",
-        sourceKind: input.sourceKind,
-        sourceId: input.sourceId ?? null,
-        correlationId: input.correlationId ?? null,
-        causationEventId: input.causationEventId ?? null,
-        attempt: input.attempt ?? null,
-        bubbledFrom: target.id,
-        dedupeKey: input.dedupeKey ? `sup:${input.dedupeKey}` : null,
-      }).catch(() => null);
-      if (copyId != null) {
-        await mirrorInboxEventMessage({
-          targetRunId: parent.id,
-          eventId: copyId,
-          type: input.type,
-          payload: input.payload ?? {},
-          audience: "supervisor",
-          sourceKind: input.sourceKind,
-          sourceId: input.sourceId ?? null,
-          correlationId: input.correlationId ?? null,
-          attempt: input.attempt ?? null,
-          bubbledFrom: target.id,
-        }).catch(() => {});
-      }
-      if (copyId != null && !input.noWake && parent.status === "parked") {
-        try {
-          const runDispatch = await import("./run-dispatch");
-          void runDispatch.dispatchRun(parent.id).catch(() => {});
-        } catch {
-          // pump sweep will retry
-        }
-      }
-    }
-  }
-
-  // Wake (§6.2): pending owner-audience notify event + parked target →
+  // Wake: pending owner-audience notify event + parked target →
   // dispatch. Control events never wake through this path (the platform
   // enforcement they mirror has its own machinery). Lazy import to avoid a
   // module cycle; failure is fine — the pump wake sweep is the durable belt.
@@ -366,11 +225,6 @@ export async function emitInboxEvent(input: EmitInput): Promise<EmitResult> {
   if (
     eventId != null &&
     !input.noWake &&
-    // Owner-audience notify events wake their target; a bubbled child.exception /
-    // child.died re-routed to a parked live ancestor (§5.3, audience 'supervisor',
-    // bubbledFrom set) must ALSO wake it at emit time, not only on the next pump
-    // sweep — consistent with the supervisor-copy wake below.
-    (audience === "owner" || bubbledFrom != null) &&
     !CONTROL_TYPES.has(input.type) &&
     target.status === "parked"
   ) {
@@ -420,11 +274,13 @@ export async function claimInboxEventsTx(
   runId: number,
   opts: ClaimOptions = {}
 ): Promise<InboxEvent[]> {
+  await discardUnsubscribedEventsTx(tx, runId);
   const audiences = opts.audiences ?? ["owner", "supervisor"];
   const max = Math.max(1, Math.min(opts.max ?? 200, 500));
   const conditions = [
     eq(inboxEvents.targetRunId, runId),
     eq(inboxEvents.status, "pending"),
+    admittedInboxEvent(),
     inArray(inboxEvents.audience, audiences),
     sql`${inboxEvents.type} NOT IN (${sql.join(
       [...CONTROL_TYPES].map((t) => sql`${t}`),
@@ -566,6 +422,7 @@ export async function hasPendingInboxEvents(runId: number): Promise<boolean> {
       and(
         eq(inboxEvents.targetRunId, runId),
         eq(inboxEvents.status, "pending"),
+        admittedInboxEvent(),
         inArray(inboxEvents.audience, ["owner", "supervisor"]),
         sql`${inboxEvents.type} NOT IN (${sql.join(
           [...CONTROL_TYPES].map((t) => sql`${t}`),
@@ -585,6 +442,7 @@ export async function pendingOwnerCount(runId: number): Promise<number> {
       and(
         eq(inboxEvents.targetRunId, runId),
         eq(inboxEvents.status, "pending"),
+        admittedInboxEvent(),
         eq(inboxEvents.audience, "owner")
       )
     );
@@ -600,7 +458,7 @@ export async function pendingOwnerCounts(): Promise<Map<number, number>> {
   const rows = await db
     .select({ runId: inboxEvents.targetRunId, n: sql<number>`count(*)::int` })
     .from(inboxEvents)
-    .where(and(eq(inboxEvents.status, "pending"), eq(inboxEvents.audience, "owner")))
+    .where(and(eq(inboxEvents.status, "pending"), admittedInboxEvent(), eq(inboxEvents.audience, "owner")))
     .groupBy(inboxEvents.targetRunId);
   return new Map(rows.map((r) => [r.runId, r.n]));
 }
@@ -646,6 +504,7 @@ export async function parkedRunsWithPendingEvents(limit = 50): Promise<number[]>
         sql`EXISTS (SELECT 1 FROM ${inboxEvents}
               WHERE ${inboxEvents.targetRunId} = ${agentSessions.id}
                 AND ${inboxEvents.status} = 'pending'
+                AND ${admittedInboxEvent()}
                 AND ${inboxEvents.audience} IN ('owner', 'supervisor')
                 AND ${inboxEvents.type} NOT IN (${sql.join(
                   [...CONTROL_TYPES].map((t) => sql`${t}`),

@@ -114,12 +114,14 @@ interface StreamEventClient {
     | "user_message"
     | "sdk"
     | "message"
+    | "messages_removed"
     | "done"
     | "error"
     | "status"
     | "_cursor"
     | "_eos";
   message?: MessageRow;
+  messageIds?: number[];
   sdk?: SdkMessageEnvelope;
   status?: SessionStatus;
   error?: string;
@@ -169,6 +171,7 @@ export function RunView({
   // snapshot so the stream forwards only rows written after this render, and
   // advanced by `_cursor` frames so a reconnect can resume without a gap.
   const streamCursorRef = useRef(initialCursor);
+  const removedMessageIds = useRef(new Set<number>());
   // The initial `messages` state already reflects the first `initialMessages`,
   // so skip the reconciliation effect's very first run.
   const initialMessagesSyncedRef = useRef(false);
@@ -215,7 +218,7 @@ export function RunView({
       initialMessagesSyncedRef.current = true;
       return;
     }
-    const serverMsgs = initialMessages.map(toUiMessage);
+    const serverMsgs = initialMessages.filter(m => !removedMessageIds.current.has(m.id)).map(toUiMessage);
     setMessages((prev) => {
       if (sendingRef.current) {
         const have = new Set(prev.map((m) => m.id));
@@ -391,6 +394,11 @@ export function RunView({
   }
 
   function handleSseEvent(event: StreamEventClient) {
+    if (event.type === "messages_removed") {
+      for (const id of event.messageIds ?? []) removedMessageIds.current.add(id);
+      setMessages(prev => prev.filter(m => !removedMessageIds.current.has(m.id)));
+      return;
+    }
     const raw = event as unknown as Record<string, unknown> & { type: string };
     if (event.type === "status" && event.status) {
       setRun((r) => ({ ...r, status: event.status! }));
@@ -420,6 +428,7 @@ export function RunView({
   // /events tail AND the POST reply stream — so the same row arriving twice
   // (the sender receives both streams during a live turn) renders once.
   function appendPersistedRow(row: MessageRow) {
+    if (removedMessageIds.current.has(row.id)) return;
     const ui = toUiMessage(row);
     // The agent has started responding — drop the startup/boot indicator in
     // favour of the streamed content (and plain thinking dots between chunks).

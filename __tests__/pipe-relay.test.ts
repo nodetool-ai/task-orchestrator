@@ -1225,8 +1225,8 @@ describe("inbox-driven milestone turn", () => {
     await db.update(agentSessions).set({ status: "parked" }).where(eq(agentSessions.id, runId));
     await emitInboxEvent({
       targetRunId: runId,
-      type: "child.result",
-      sourceKind: "run",
+      type: "timer.fired",
+      sourceKind: "timer",
       sourceId: "999",
       payload: { run_id: 999, outcome: "success", pr_url: "https://gh/pr/1" },
     });
@@ -1289,8 +1289,8 @@ describe("inbox-driven milestone turn", () => {
     } as any);
     await emitInboxEvent({
       targetRunId: runId,
-      type: "child.result",
-      sourceKind: "run",
+      type: "timer.fired",
+      sourceKind: "timer",
       sourceId: "998",
       payload: { run_id: 998, outcome: "success" },
       noWake: true,
@@ -1346,8 +1346,8 @@ describe("inbox-driven milestone turn", () => {
     } as any);
     await emitInboxEvent({
       targetRunId: runId,
-      type: "child.result",
-      sourceKind: "run",
+      type: "timer.fired",
+      sourceKind: "timer",
       sourceId: "997",
       payload: { run_id: 997, outcome: "success" },
       noWake: true,

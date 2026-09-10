@@ -107,7 +107,8 @@ export const dbTransport: RunTransport = {
       .where(eq(agentMessages.runId, runId))
       .orderBy(agentMessages.id);
     const { hydrateMessage } = await runs();
-    return rows.map(hydrateMessage);
+    const { filterConversationEvents } = await import("../run-event-visibility");
+    return filterConversationEvents(runId, rows.map(hydrateMessage));
   },
 
   async appendMessage(runId, role: MessageRole, content, opts) {

@@ -100,14 +100,16 @@ export async function GET(
       let pending = false;
       const drainOnce = async (): Promise<boolean> => {
         const { frames, cursor: next, terminal } = await readStreamSince(runId, cursor);
+        const advanced = next.msgId !== cursor.msgId || next.evtId !== cursor.evtId;
         cursor = next;
         if (frames.length) {
           for (const f of frames) {
             if (f.kind === "event") send(f.data);
             else send({ type: "message", message: f.message });
           }
-          send({ type: "_cursor", cursor });
         }
+        // Hidden event messages still advance the durable cursor.
+        if (advanced) send({ type: "_cursor", cursor });
         return terminal;
       };
       const drain = async () => {

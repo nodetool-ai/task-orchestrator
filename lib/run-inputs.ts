@@ -9,6 +9,7 @@
 import { randomUUID } from "node:crypto";
 import { sql, type SQL } from "drizzle-orm";
 import { db } from "@/db";
+import { admittedInboxEvent, discardUnsubscribedEventsTx } from "./run-event-visibility";
 import type { MessageSnapshot, RunInput } from "./worker-channel/protocol";
 
 export type InputKind = "user" | "event";
@@ -135,6 +136,7 @@ export async function claimRunTurn(
   const run = rows<Record<string, unknown>>(await tx.execute(sql`SELECT id, status, attempt FROM agent_runs WHERE id = ${runId} FOR UPDATE`))[0];
   if (!run || ['completed', 'failed', 'cancelled', 'closed', 'budget_exhausted'].includes(String(run.status))) return null;
   const currentAttempt = asInt(run.attempt ?? 1);
+  await discardUnsubscribedEventsTx(tx, runId);
   const existing = rows<Record<string, unknown>>(await tx.execute(sql`
     SELECT id, run_id, ordinal, attempt, execution_generation, input_manifest
       FROM run_turns WHERE run_id = ${runId} AND state IN ('active','running')
@@ -273,12 +275,14 @@ export async function materializeInboxEventsTx(tx: RunInputsTx, runId: number, l
     }
     return [];
   }
+  await discardUnsubscribedEventsTx(tx, runId);
   const deliveries = rows<Record<string, unknown>>(await tx.execute(sql`
     SELECT i.id, i.source_event_id, i.type, i.payload, i.source_kind, i.source_id, i.attempt, i.created_at,
            e.source_run_id, e.revision, e.event_type, e.schema_version, e.occurred_at, e.payload AS event_payload
       FROM inbox_events i LEFT JOIN run_source_events e ON e.id = i.source_event_id
      WHERE target_run_id = ${runId} AND status = 'pending'
        AND type NOT IN ('run.cancel_requested', 'run.budget_exhausted')
+       AND ${admittedInboxEvent(sql`i`)}
      ORDER BY i.id LIMIT ${limit} FOR UPDATE OF i SKIP LOCKED
   `));
   const out: RunInputRef[] = [];

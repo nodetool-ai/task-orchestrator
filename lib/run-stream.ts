@@ -9,6 +9,7 @@ import { db } from "../db";
 import { agentMessages, agentEvents } from "../db/schema";
 import { isTerminalStatus, type SessionStatus } from "./types";
 import { hydrateMessage, type MessageRow } from "./runs";
+import { filterConversationEvents } from "./run-event-visibility";
 
 export type StreamCursor = { msgId: number; evtId: number };
 export const ZERO_CURSOR: StreamCursor = { msgId: 0, evtId: 0 };
@@ -54,8 +55,8 @@ export async function readStreamSince(
     }
     frames.push({ kind: "event", id: e.id, at: e.createdAt.getTime(), data });
   }
-  for (const m of msgs) {
-    frames.push({ kind: "message", id: m.id, at: m.createdAt.getTime(), message: hydrateMessage(m) });
+  for (const m of await filterConversationEvents(runId, msgs.map(hydrateMessage))) {
+    frames.push({ kind: "message", id: m.id, at: m.createdAt.getTime(), message: m });
   }
   frames.sort((a, b) => a.at - b.at || (a.kind === b.kind ? a.id - b.id : a.kind === "event" ? -1 : 1));
 

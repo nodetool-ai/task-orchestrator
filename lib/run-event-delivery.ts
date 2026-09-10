@@ -5,13 +5,16 @@ import { agentMessages, agentSessions, runnerInstances } from "@/db/schema";
 import { claimRunTurn, materializeInboxEventsTx, type ClaimedRunTurn } from "./run-inputs";
 import { isServerRuntimeRun } from "./run-runtime";
 import type { RunInput } from "./worker-channel/protocol";
+import { hasPendingInboxEvents } from "./inbox";
+import { discardUnsubscribedEventsTx, filterConversationEvents } from "./run-event-visibility";
 
 export async function turnInputCommand(turn: ClaimedRunTurn): Promise<RunInput> {
   const ids = turn.inputs.map((input) => input.messageId);
   const messages = ids.length ? await db.select().from(agentMessages).where(and(
     eq(agentMessages.runId, turn.runId), inArray(agentMessages.id, ids),
   )) : [];
-  const byId = new Map(messages.map((message) => [message.id, message]));
+  const visible = await filterConversationEvents(turn.runId, messages.map(message => ({ ...message, content: JSON.parse(message.content) })));
+  const byId = new Map(visible.map((message) => [message.id, message]));
   return {
     turnId: turn.id,
     inputIds: turn.inputs.map((input) => input.id),
@@ -19,7 +22,7 @@ export async function turnInputCommand(turn: ClaimedRunTurn): Promise<RunInput> 
     messages: turn.inputs.map((input) => {
       const message = byId.get(input.messageId);
       if (!message) throw new Error(`Missing durable input message ${input.messageId}`);
-      return { id: message.id, runId: turn.runId, role: message.role as "user" | "system", content: JSON.parse(message.content) };
+      return { id: message.id, runId: turn.runId, role: message.role as "user" | "system", content: message.content };
     }),
   };
 }
@@ -28,7 +31,14 @@ export async function turnInputCommand(turn: ClaimedRunTurn): Promise<RunInput> 
 export async function deliverRunEvents(runId: number): Promise<void> {
   const runs = await import("./runs");
   let run = await runs.get(runId);
-  if (!run || run.deliveryVersion !== 2) return;
+  if (!run) return;
+  if (run.deliveryVersion !== 2) {
+    await db.transaction(tx => discardUnsubscribedEventsTx(tx, runId));
+    if (["idle", "parked"].includes(run.status) && await hasPendingInboxEvents(runId)) {
+      await (await import("./run-dispatch")).dispatchRun(runId);
+    }
+    return;
+  }
   await db.transaction((tx) => materializeInboxEventsTx(tx, runId));
   run = await runs.get(runId);
   if (!run || !["idle", "parked"].includes(run.status)) return;
@@ -67,8 +77,7 @@ export async function pumpRunEventDeliveries(limit = 50): Promise<void> {
   const batchLimit = Math.max(1, Math.min(limit, 500));
   const candidates = await db.execute(sql`
     SELECT r.id FROM agent_runs r
-    WHERE r.delivery_version = 2
-      AND (
+    WHERE (
         (r.status IN ('pending','preparing','running') AND EXISTS (
           SELECT 1 FROM inbox_events e WHERE e.target_run_id=r.id
             AND e.status='pending' AND e.type NOT IN ('run.cancel_requested','run.budget_exhausted')

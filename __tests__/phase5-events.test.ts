@@ -136,8 +136,8 @@ describe("5.2 mirror excluded from model context, preserved for the UI", () => {
     // Emit → writes the eager inbox_event mirror row; inject → writes the digest frame.
     await emitInboxEvent({
       targetRunId: parent,
-      type: "child.result",
-      sourceKind: "run",
+      type: "timer.fired",
+      sourceKind: "timer",
       sourceId: String(child),
       attempt: 1,
       dedupeKey: `terminal:${child}:1`,

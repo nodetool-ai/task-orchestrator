@@ -13,7 +13,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { asc, eq } from "drizzle-orm";
 
 import { db } from "../db";
-import { agentMessages, agentSessions, inboxEvents } from "../db/schema";
+import { agentMessages, agentSessions, inboxEvents, runEventSubscriptions, runSourceEvents } from "../db/schema";
+import { registerDefaultChildSubscriptionTx, publishAttemptFinishedTx } from "../lib/run-source-events";
 import { seedPersonas } from "../db/seed-personas";
 import { emitInboxEvent, type EventEnvelope } from "../lib/inbox";
 import {
@@ -314,6 +315,8 @@ describe("injectPendingInboxEvents (integration)", () => {
     await seedPersonas();
     await db.delete(inboxEvents);
     await db.delete(agentMessages);
+    await db.delete(runEventSubscriptions);
+    await db.delete(runSourceEvents);
     await db.delete(agentSessions);
   });
 
@@ -322,65 +325,24 @@ describe("injectPendingInboxEvents (integration)", () => {
     const parent = await insertRun({});
     const child = await insertRun({ parentRunId: parent, status: "completed" });
 
-    // A gh event addressed to the CHILD fans a supervisor copy out to the parent…
-    await emitInboxEvent({
-      targetRunId: child,
-      type: "gh.pr.merged",
-      sourceKind: "github",
-      sourceId: "d1",
-      payload: { pr_url: "https://github.com/o/r/pull/7" },
-      noWake: true,
-    });
-    // …and a terminal child.result is addressed to the parent as owner.
-    await emitInboxEvent({
-      targetRunId: parent,
-      type: "child.result",
-      sourceKind: "run",
-      sourceId: String(child),
-      attempt: 1,
-      dedupeKey: `terminal:${child}:1`,
-      payload: { run_id: child, attempt: 1, implicit: true, summary: "done" },
-      noWake: true,
-    });
-
+    // An owned GitHub notice stays with the child; only subscribed lifecycle
+    // facts reach the parent and become its digest.
+    await emitInboxEvent({ targetRunId: child, type: "gh.pr.merged", sourceKind: "github", noWake: true });
+    await db.transaction(tx => registerDefaultChildSubscriptionTx(tx, { id: child, parentRunId: parent, attempt: 1 }));
+    await db.transaction(tx => publishAttemptFinishedTx(tx, { id: child, attempt: 1, status: "completed" }));
     const digest = await injectPendingInboxEvents(parent);
-    expect(digest).toBeTruthy();
-    // Owner event first even though the supervisor copy has the lower id.
-    expect(digest!.indexOf("child.result")).toBeLessThan(digest!.indexOf("gh.pr.merged"));
-
-    // Inline event frames arrive at event time; the digest frame later records
-    // exactly what the model claimed at wake/turn start.
-    const frames = await db
-      .select()
-      .from(agentMessages)
-      .where(eq(agentMessages.runId, parent))
-      .orderBy(asc(agentMessages.id));
-    expect(frames).toHaveLength(3);
-    const inlineBlocks = frames
-      .map((frame) => JSON.parse(frame.content)[0] as { type: string; event_type?: string })
-      .filter((block) => block.type === "inbox_event");
-    expect(inlineBlocks.map((block) => block.event_type)).toEqual([
-      "gh.pr.merged",
-      "child.result",
-    ]);
-    const digestFrame = frames.find((frame) => JSON.parse(frame.content)[0]?.type === "event_digest")!;
-    expect(digestFrame.role).toBe("system");
-    const blocks = JSON.parse(digestFrame.content) as Array<{ type: string; events: unknown[] }>;
-    expect(blocks).toHaveLength(1);
+    expect(digest).toContain("run.attempt_finished");
+    expect(digest).not.toContain("gh.pr.merged");
+    const frames = await db.select().from(agentMessages).where(eq(agentMessages.runId, parent));
+    expect(frames).toHaveLength(1);
+    const digestFrame = frames[0];
+    const blocks = JSON.parse(digestFrame.content);
     expect(blocks[0].type).toBe("event_digest");
-    expect(blocks[0].events).toHaveLength(2);
-
-    // Claimed rows are 'injected' and stamped with the frame id.
-    const rows = await db
-      .select()
-      .from(inboxEvents)
-      .where(eq(inboxEvents.targetRunId, parent))
-      .orderBy(asc(inboxEvents.id));
-    expect(rows).toHaveLength(2);
-    for (const row of rows) {
-      expect(row.status).toBe("injected");
-      expect(row.runTurnId).toBe(digestFrame.id);
-    }
+    expect(blocks[0].events).toHaveLength(1);
+    const rows = await db.select().from(inboxEvents).where(eq(inboxEvents.targetRunId, parent));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("injected");
+    expect(rows[0].runTurnId).toBe(digestFrame.id);
 
     // Nothing left pending: a second injection is a no-op.
     expect(await injectPendingInboxEvents(parent)).toBeNull();

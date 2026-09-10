@@ -258,10 +258,10 @@ describe("dispatch never gives a server-runtime run a worker", () => {
     // the run a pending event first.
     await emitInboxEvent({
       targetRunId: run.id,
-      type: "child.result",
-      sourceKind: "run",
+      type: "timer.fired",
+      sourceKind: "timer",
       sourceId: String(run.id),
-      payload: { summary: "child finished" },
+      payload: { summary: "timer fired" },
     });
     const result = await dispatch.dispatchRun(run.id, { spawn });
 
@@ -301,10 +301,10 @@ describe("dispatch never gives a server-runtime run a worker", () => {
 
     await emitInboxEvent({
       targetRunId: run.id,
-      type: "child.result",
-      sourceKind: "run",
+      type: "timer.fired",
+      sourceKind: "timer",
       sourceId: String(run.id),
-      payload: { summary: "child finished" },
+      payload: { summary: "timer fired" },
     });
 
     // The emit-time wake calls dispatchRun, which routes a server-runtime row to
@@ -312,7 +312,7 @@ describe("dispatch never gives a server-runtime run a worker", () => {
     await vi.waitFor(async () => expect(await agentTexts(run.id)).toHaveLength(1));
     expect(seen[0].contextKind).toBe("postgres");
     // The digest of the event reached the model as prompt text.
-    expect(seen[0].prompt).toMatch(/child\.result/);
+    expect(seen[0].prompt).toMatch(/timer\.fired/);
     // Background wake: the claim release lands after the turn completes — poll.
     await vi.waitFor(async () => expect((await get(run.id))!.workerScope).toBeNull());
   });
@@ -404,10 +404,10 @@ describe("legacy server-runtime rows with an unsafe tools profile", () => {
     const id = await legacyUnsafeServerRun();
     await emitInboxEvent({
       targetRunId: id,
-      type: "child.result",
-      sourceKind: "run",
+      type: "timer.fired",
+      sourceKind: "timer",
       sourceId: String(id),
-      payload: { summary: "child finished" },
+      payload: { summary: "timer fired" },
     });
 
     const result = await dispatch.dispatchRun(id, { spawn, admit: () => "admit" });
@@ -424,16 +424,16 @@ describe("wakeServerRun is single-owner and event-driven", () => {
     const run = await create(SERVER_CHAT);
     await emitInboxEvent({
       targetRunId: run.id,
-      type: "child.result",
-      sourceKind: "run",
+      type: "timer.fired",
+      sourceKind: "timer",
       sourceId: String(run.id),
-      payload: { summary: "child finished" },
+      payload: { summary: "timer fired" },
     });
 
     // First wake drives a turn, whose digest claim consumes the event.
     await wakeServerRun(run.id);
     expect(seen).toHaveLength(1);
-    expect(seen[0].prompt).toMatch(/child\.result/);
+    expect(seen[0].prompt).toMatch(/timer\.fired/);
     expect(await hasPendingInboxEvents(run.id)).toBe(false);
 
     // Second wake — the ≤15s pump sweep arriving after the emit-time wake, or
@@ -467,10 +467,10 @@ describe("wakeServerRun is single-owner and event-driven", () => {
     const run = await create(SERVER_CHAT);
     await emitInboxEvent({
       targetRunId: run.id,
-      type: "child.result",
-      sourceKind: "run",
+      type: "timer.fired",
+      sourceKind: "timer",
       sourceId: String(run.id),
-      payload: { summary: "child finished" },
+      payload: { summary: "timer fired" },
     });
     await db
       .update(agentSessions)
@@ -497,10 +497,10 @@ describe("wakeServerRun is single-owner and event-driven", () => {
     const run = await create(SERVER_CHAT);
     await emitInboxEvent({
       targetRunId: run.id,
-      type: "child.result",
-      sourceKind: "run",
+      type: "timer.fired",
+      sourceKind: "timer",
       sourceId: String(run.id),
-      payload: { summary: "child finished" },
+      payload: { summary: "timer fired" },
     });
 
     let calls = 0;
@@ -549,10 +549,10 @@ describe("wakeServerRun is single-owner and event-driven", () => {
     const run = await create(SERVER_CHAT);
     await emitInboxEvent({
       targetRunId: run.id,
-      type: "child.result",
-      sourceKind: "run",
+      type: "timer.fired",
+      sourceKind: "timer",
       sourceId: String(run.id),
-      payload: { summary: "child finished" },
+      payload: { summary: "timer fired" },
     });
 
     const both = Promise.all([wakeServerRun(run.id), wakeServerRun(run.id)]);
@@ -640,10 +640,10 @@ describe("a server-runtime append takes the same single-owner claim", () => {
     const run = await create(SERVER_CHAT);
     await emitInboxEvent({
       targetRunId: run.id,
-      type: "child.result",
-      sourceKind: "run",
+      type: "timer.fired",
+      sourceKind: "timer",
       sourceId: String(run.id),
-      payload: { summary: "child finished" },
+      payload: { summary: "timer fired" },
     });
 
     const drain = async () => {

@@ -29,8 +29,9 @@ import { and, asc, eq, inArray, notInArray, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { agentSessions, inboxEvents, runEventSubscriptions, runTimers } from "@/db/schema";
 import { subscribeRunEvents, unsubscribeRunEvents, listRunSubscriptions } from "../run-event-subscriptions";
-import { lockSourceTx, publishSourceEventTx } from "../run-source-events";
+import { lockSourceTx, publishSourceEventTx, RESOURCE_EVENT_TYPES } from "../run-source-events";
 import { hintRunEventDelivery } from "../run-event-delivery";
+import { admittedInboxEvent } from "../run-event-visibility";
 import * as runs from "../runs";
 import * as runDispatch from "../run-dispatch";
 import {
@@ -267,8 +268,9 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
       events: Type.Array(Type.Union([
         Type.Literal("run.attempt_finished"), Type.Literal("run.turn_finished"),
         Type.Literal("run.question_opened"), Type.Literal("run.question_resolved"),
-        Type.Literal("run.worker_failed"),
-      ]), { minItems: 1, maxItems: 5 }),
+        Type.Literal("run.worker_failed"), Type.String({ pattern: "^custom\\.[a-zA-Z0-9_.-]+$", maxLength: 100 }),
+        ...RESOURCE_EVENT_TYPES.map(type => Type.Literal(type)),
+      ]), { minItems: 1, maxItems: 20 }),
       attempt: Type.Optional(Type.Union([Type.Integer({ minimum: 1 }), Type.Literal("current"), Type.Literal("all")])),
       replay: Type.Optional(Type.Union([Type.Literal("current_state"), Type.Literal("future_only")])),
       lifetime: Type.Optional(Type.Union([Type.Literal("attempt"), Type.Literal("until_unsubscribed")])),
@@ -279,7 +281,6 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
       const subscriberRunId = requireRunId(ctx);
       if (!subscriberRunId) return NO_RUN;
       try {
-        if ((await runs.get(subscriberRunId))?.deliveryVersion !== 2) return errResult("Subscriptions require a new event-enabled run; this run retains legacy delivery.");
         const subscription = await subscribeRunEvents({
           subscriberRunId, sourceRunId: args.source_run_id, events: args.events,
           attempt: args.attempt ?? "current", replay: args.replay ?? "current_state",
@@ -404,6 +405,7 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
       const claimed = await db.select().from(inboxEvents).where(and(
         eq(inboxEvents.targetRunId, runId),
         eq(inboxEvents.status, "pending"),
+        admittedInboxEvent(),
         notInArray(inboxEvents.type, [...CONTROL_TYPES]),
         types?.length ? inArray(inboxEvents.type, types) : undefined,
       )).orderBy(asc(inboxEvents.id)).limit(Math.max(1, Math.min(max ?? 200, 500)));
@@ -439,7 +441,7 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
       "Emit a custom.* event to another run WITHIN YOUR OWN TREE (same root). " +
       "The sibling-coordination escape hatch — e.g. tell a sibling implementor " +
       "'the shared interface changed' — without a general cross-tree messaging " +
-      "surface. `type` must start with 'custom.'.",
+      "surface. The target must subscribe to this source and exact event type first. `type` must start with 'custom.'.",
     parameters: Type.Object({
       target_run_id: Type.Integer({ minimum: 1 }),
       type: Type.String({ minLength: 1 }),
@@ -470,14 +472,16 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
         targetRunId: target_run_id,
         type,
         payload: payload ?? {},
-        sourceKind: "user",
+        sourceKind: "run",
         sourceId: String(runId),
+        attempt: (await getRawRunFields(runId))?.attempt ?? 1,
         correlationId: correlation_id ?? null,
       });
       return ok(
         JSON.stringify(
           {
             event_id: result.eventId,
+            delivered: result.eventId != null,
             target_run_id: result.targetRunId,
             woke: result.woke,
           },
@@ -633,21 +637,6 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
           payload: { run_id: runId, question_id: questionId, question, context: context ?? null, deadline: deadline.toISOString() } });
       });
       hintRunEventDelivery();
-
-      if ((await runs.get(self.parentRunId))?.deliveryVersion !== 2) await emitInboxEvent({
-        targetRunId: self.parentRunId,
-        type: "child.question",
-        sourceKind: "run",
-        sourceId: String(runId),
-        correlationId: questionId,
-        attempt,
-        payload: {
-          run_id: runId,
-          question_id: questionId,
-          question,
-          context: context ?? null,
-        },
-      });
 
       return ok(
         `Question sent (id ${questionId}). End your turn now; you'll wake with the answer or at the deadline (${deadline.toISOString()}).`

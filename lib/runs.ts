@@ -4459,26 +4459,9 @@ export async function emitTerminalChildEvent(runId: number): Promise<void> {
   try {
     const row = await get(runId);
     if (!row || row.parentRunId == null) return;
-    const parent = await get(row.parentRunId);
-    if (parent?.deliveryVersion === 2) {
-      // The canonical event was committed with the outcome; only the wake hint
-      // belongs outside that transaction. Do not create a second legacy copy.
-      await cancelTimersByCorrelation(row.parentRunId, `await-session:${row.id}`).catch(() => {});
-      hintRunEventDelivery();
-      return;
-    }
-    const needsLastText = row.status === "completed" && row.result == null;
-    const spec = buildTerminalChildEvent(row, needsLastText ? await lastAgentText(runId) : null);
-    if (!spec) return;
-    await emitInboxEvent({
-      targetRunId: row.parentRunId,
-      type: spec.type,
-      payload: spec.payload,
-      sourceKind: "run",
-      sourceId: String(row.id),
-      attempt: row.attempt,
-      dedupeKey: spec.dedupeKey,
-    });
+    // Terminal facts were committed with the status write. Only subscribed
+    // observers receive them, including legacy runs with default supervision.
+    hintRunEventDelivery();
     // Defuse the await_session backstop (§7): the parent armed a timeout timer
     // (correlationId `await-session:<child>`) when it parked on this child. Now
     // that the child is terminal the parent's wake is delivered by this event, so
@@ -4490,7 +4473,7 @@ export async function emitTerminalChildEvent(runId: number): Promise<void> {
 }
 
 /**
- * Emit `child.died` (§3.1) — the infrastructure failed; the agent never got
+ * Publish `run.worker_failed` for explicit subscribers — the agent never got
  * to speak. Called by handleWorkerDeath and by reconcileOrphanedRuns when it
  * fails a non-resumable orphan. Deduped per (run, worker scope) so the death
  * monitor and the reaper racing each other produce one event.
@@ -4512,13 +4495,11 @@ async function emitChildDied(
     )[0];
     if (!row || row.parentRunId == null) return;
     const attempt = row.attempt ?? 1;
-    await emitInboxEvent({
-      targetRunId: row.parentRunId,
-      type: "child.died",
-      sourceKind: "run",
-      sourceId: String(runId),
+    await db.transaction(tx => publishSourceEventTx(tx, {
+      sourceRunId: runId,
+      eventType: "run.worker_failed",
       attempt,
-      dedupeKey: `died:${runId}:${info.scopeKey}`,
+      producerKey: `died:${runId}:${info.scopeKey}`,
       payload: {
         run_id: runId,
         attempt,
@@ -4527,7 +4508,8 @@ async function emitChildDied(
         resumable: info.resumable,
         worker_log_tail: row.workerLog ? row.workerLog.slice(-2000) : null,
       },
-    });
+    }));
+    hintRunEventDelivery();
   } catch {
     // best-effort
   }

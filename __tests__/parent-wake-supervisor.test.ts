@@ -1,20 +1,14 @@
 // __tests__/parent-wake-supervisor.test.ts
 //
-// A parked PARENT must wake for a child's supervisor-audience events
-// (gh.*, task.*, plan.*, budget.warning, terminal child.*), not just for its
-// own owner-audience events (§5.2a): a parked coordinator must not sleep through
-// anything it supervises. The load-bearing case is gh.pr.merged — it targets the
-// implementor child that owns the PR (terminal by merge time), so the supervisor
-// copy to the parent is the ONLY thing that wakes a parked executor on a merge.
-// Covers both belts:
-//   - emitInboxEvent's emit-time wake on the supervisor copy
-//   - parkedRunsWithPendingEvents, the pump sweep backstop
+// A parked observer wakes only for matching subscriptions. Parent pointers do
+// not grant access. Explicit PR subscriptions still work after the child ends.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 
 import { db } from "../db";
-import { agentSessions, inboxEvents, runTimers } from "../db/schema";
+import { agentSessions, inboxEvents, runEventSubscriptions, runSourceEvents, runTimers } from "../db/schema";
+import { registerSubscriptionTx } from "../lib/run-source-events";
 import { seedPersonas } from "../db/seed-personas";
 import { emitInboxEvent, parkedRunsWithPendingEvents } from "../lib/inbox";
 import * as runDispatch from "../lib/run-dispatch";
@@ -37,22 +31,30 @@ async function insertRun(
   return rows[0].id;
 }
 
+async function subscribe(parent: number, child: number, event: string) {
+  await db.transaction(tx => registerSubscriptionTx(tx, { subscriberRunId: parent, sourceRunId: child,
+    events: [event], attempt: "current", replay: "future_only", lifetime: "until_unsubscribed", keepOpen: true }));
+}
+
 beforeEach(async () => {
   await seedPersonas();
   await db.delete(runTimers);
   await db.delete(inboxEvents);
+  await db.delete(runEventSubscriptions);
+  await db.delete(runSourceEvents);
   await db.delete(agentSessions);
 });
 
 afterEach(() => vi.restoreAllMocks());
 
-describe("parent wake on child (supervisor) events", () => {
+describe("parent wake on subscribed child events", () => {
   it("wakes a parked parent when a gh.pr.merged owner event lands on its child", async () => {
     // The incident-shaped case: the child owns the PR and is terminal by merge
     // time, so its owner event is never claimed — the parked parent learns the
-    // merge ONLY through the supervisor copy, whose arrival must wake it.
+    // merge ONLY through the subscribed delivery, whose arrival must wake it.
     const parent = await insertRun({ status: "parked" });
     const child = await insertRun({ parentRunId: parent, status: "completed" });
+    await subscribe(parent, child, "gh.pr.merged");
 
     const spy = vi.spyOn(runDispatch, "dispatchRun").mockResolvedValue("spawned" as never);
 
@@ -64,17 +66,19 @@ describe("parent wake on child (supervisor) events", () => {
       payload: { pr_url: "https://github.com/o/r/pull/7", merged_by: "octocat" },
     });
 
-    expect(spy).toHaveBeenCalledWith(parent);
+    await vi.waitFor(() => expect(spy).toHaveBeenCalledWith(parent));
 
     const copy = await db.select().from(inboxEvents).where(eq(inboxEvents.targetRunId, parent));
     expect(copy).toHaveLength(1);
-    expect(copy[0].audience).toBe("supervisor");
-    expect(copy[0].type).toBe("gh.pr.merged");
+    expect(copy[0].audience).toBe("owner");
+    expect(copy[0].type).toBe("run_event");
+    expect((copy[0].payload as any).event_type).toBe("gh.pr.merged");
   });
 
   it("wakes a parked parent when a gh.* owner event lands on its child", async () => {
     const parent = await insertRun({ status: "parked" });
     const child = await insertRun({ parentRunId: parent, status: "idle" });
+    await subscribe(parent, child, "gh.pr.review_submitted");
 
     const spy = vi.spyOn(runDispatch, "dispatchRun").mockResolvedValue("spawned" as never);
 
@@ -86,18 +90,20 @@ describe("parent wake on child (supervisor) events", () => {
       payload: { pr_url: "https://github.com/o/r/pull/7", state: "approved" },
     });
 
-    expect(spy).toHaveBeenCalledWith(parent);
+    await vi.waitFor(() => expect(spy).toHaveBeenCalledWith(parent));
 
-    // The supervisor copy did land on the parent.
+    // The subscribed delivery did land on the parent.
     const copy = await db.select().from(inboxEvents).where(eq(inboxEvents.targetRunId, parent));
     expect(copy).toHaveLength(1);
-    expect(copy[0].audience).toBe("supervisor");
-    expect(copy[0].type).toBe("gh.pr.review_submitted");
+    expect(copy[0].audience).toBe("owner");
+    expect(copy[0].type).toBe("run_event");
+    expect((copy[0].payload as any).event_type).toBe("gh.pr.review_submitted");
   });
 
   it("wakes a parked parent when a task.* owner event lands on its child", async () => {
     const parent = await insertRun({ status: "parked" });
     const child = await insertRun({ parentRunId: parent, status: "idle" });
+    await subscribe(parent, child, "task.state_changed");
 
     const spy = vi.spyOn(runDispatch, "dispatchRun").mockResolvedValue("spawned" as never);
 
@@ -109,7 +115,7 @@ describe("parent wake on child (supervisor) events", () => {
       payload: { state: "merged" },
     });
 
-    expect(spy).toHaveBeenCalledWith(parent);
+    await vi.waitFor(() => expect(spy).toHaveBeenCalledWith(parent));
   });
 
   it("does NOT wake (and does not copy) when the parent is terminal", async () => {
@@ -131,9 +137,10 @@ describe("parent wake on child (supervisor) events", () => {
     expect(copy).toHaveLength(0);
   });
 
-  it("does not wake when noWake is set, even though the supervisor copy is written", async () => {
+  it("does not wake when noWake is set, even though the subscribed delivery is written", async () => {
     const parent = await insertRun({ status: "parked" });
     const child = await insertRun({ parentRunId: parent, status: "idle" });
+    await subscribe(parent, child, "gh.pr.merged");
 
     const spy = vi.spyOn(runDispatch, "dispatchRun").mockResolvedValue("spawned" as never);
 
@@ -167,9 +174,10 @@ describe("parent wake on child (supervisor) events", () => {
 });
 
 describe("parkedRunsWithPendingEvents (pump belt)", () => {
-  it("includes a parked parent that has only a pending SUPERVISOR event", async () => {
+  it("includes a parked parent that has only a pending subscribed event", async () => {
     const parent = await insertRun({ status: "parked" });
     const child = await insertRun({ parentRunId: parent, status: "idle" });
+    await subscribe(parent, child, "gh.pr.merged");
 
     await emitInboxEvent({
       targetRunId: child,

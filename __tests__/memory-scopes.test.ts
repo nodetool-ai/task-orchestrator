@@ -516,14 +516,14 @@ describe("auto-recall reaches the model as prompt text only", () => {
 
     await emitInboxEvent({
       targetRunId: run.id,
-      type: "child.result",
-      sourceKind: "run",
+      type: "timer.fired",
+      sourceKind: "timer",
       sourceId: String(run.id),
-      payload: { summary: "child finished" },
+      payload: { summary: "timer fired" },
     });
 
     await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0));
-    expect(seen[0].prompt).toContain("child.result"); // the digest still rides the prompt
+    expect(seen[0].prompt).toContain("timer.fired"); // the digest still rides the prompt
     expect(seen[0].prompt).not.toContain(MEMORY_INJECTION_HEADING);
   });
 });

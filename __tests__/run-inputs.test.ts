@@ -1,7 +1,8 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { db, initDb } from "../db";
-import { agentMessages, agentSessions, inboxEvents, runInputs, runTurns } from "../db/schema";
+import { agentMessages, agentSessions, inboxEvents, runEventSubscriptions, runSourceEvents, runInputs, runTurns } from "../db/schema";
 import { eq } from "drizzle-orm";
+import { registerDefaultChildSubscriptionTx, publishAttemptFinishedTx } from "../lib/run-source-events";
 import { enqueueMessageTx, materializeInboxEventsTx, claimRunTurn, completeRunTurnTx } from "../lib/run-inputs";
 
 async function run(status = "pending") {
@@ -15,7 +16,7 @@ async function message(runId: number, text: string) {
 
 beforeAll(() => initDb());
 beforeEach(async () => {
-  await db.delete(runTurns); await db.delete(runInputs); await db.delete(inboxEvents); await db.delete(agentMessages); await db.delete(agentSessions);
+  await db.delete(runTurns); await db.delete(runInputs); await db.delete(inboxEvents); await db.delete(agentMessages); await db.delete(runEventSubscriptions); await db.delete(runSourceEvents); await db.delete(agentSessions);
 });
 
 describe("durable conversation inputs", () => {
@@ -32,7 +33,9 @@ describe("durable conversation inputs", () => {
   });
   it("materializes one event delivery into one typed message and input", async () => {
     const id = await run();
-    await db.insert(inboxEvents).values({ targetRunId: id, type: "run_event", payload: { event_type: "run.attempt_finished" }, sourceKind: "run" });
+    const [child] = await db.insert(agentSessions).values({ parentRunId: id, status: "pending", goal: "<implement>" }).returning();
+    await db.transaction(tx => registerDefaultChildSubscriptionTx(tx, child));
+    await db.transaction(tx => publishAttemptFinishedTx(tx, { id: child.id, attempt: 1, status: "completed" }));
     const refs = await db.transaction(tx => materializeInboxEventsTx(tx, id));
     expect(refs).toHaveLength(1); expect((await db.select().from(runInputs))).toHaveLength(1);
     expect((await db.select().from(inboxEvents))[0].status).toBe("injected");

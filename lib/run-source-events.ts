@@ -4,6 +4,7 @@ import { db } from "@/db";
 import {
   agentSessions,
   agentMessages,
+  agentEvents,
   inboxEvents,
   runInputs,
   runEventDeliveryMatches,
@@ -16,8 +17,13 @@ import {
 export type SourceEventTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 export type SourceEvent = typeof runSourceEvents.$inferSelect;
+/** Owned resource notices can be observed explicitly, even after the source
+ * attempt finishes (use an until_unsubscribed subscription for PR follow-up). */
+export const RESOURCE_EVENT_TYPES = ["gh.pr.merged", "gh.ci.completed", "gh.pr.review_submitted", "gh.pr.comment", "gh.pr.pushed", "gh.pr.closed", "task.state_changed", "plan.state_changed", "budget.warning"] as const;
 export type PublishSourceEventInput = {
   sourceRunId: number;
+  /** Custom directed events only; lifecycle publication fans out to every match. */
+  recipientRunId?: number;
   attempt: number;
   eventType: string;
   payload?: Record<string, unknown>;
@@ -71,6 +77,7 @@ export async function publishSourceEventTx(tx: SourceEventTx, input: PublishSour
   const event = inserted[0];
   const subscriptions = await tx.select().from(runEventSubscriptions).where(and(eq(runEventSubscriptions.sourceRunId, input.sourceRunId), eq(runEventSubscriptions.status, "active")));
   for (const sub of subscriptions) {
+    if (input.recipientRunId != null && sub.subscriberRunId !== input.recipientRunId) continue;
     if (sub.lifetime === "attempt" && event.eventType === "run.attempt_finished" && event.attempt === sub.resolvedAttempt) {
       await tx.update(runEventSubscriptions).set({ status: "finished", finishedAt: new Date(), endRevision: event.revision }).where(eq(runEventSubscriptions.id, sub.id));
     }
@@ -106,14 +113,12 @@ export async function publishAttemptFinishedTx(tx: SourceEventTx, row: AttemptFi
 
 export async function registerDefaultChildSubscriptionTx(tx: SourceEventTx, child: { id: number; parentRunId: number | null; attempt: number }): Promise<any | null> {
   if (child.parentRunId == null || child.parentRunId === child.id) return null;
-  const [parent] = await tx.select({ version: agentSessions.deliveryVersion }).from(agentSessions).where(eq(agentSessions.id, child.parentRunId));
-  if (parent?.version !== 2) return null; // Existing runs retain legacy parent routing.
   return registerSubscriptionTx(tx, { subscriberRunId: child.parentRunId, sourceRunId: child.id, events: ["run.attempt_finished", "run.question_opened"], attempt: child.attempt, replay: "current_state", lifetime: "attempt", keepOpen: true, clientKey: `default-supervision:${child.id}:${child.attempt}` });
 }
 
 export async function registerSubscriptionTx(tx: SourceEventTx, input: { subscriberRunId: number; sourceRunId: number; events: string[]; attempt: number | "current" | "all"; replay: "current_state" | "future_only"; lifetime: "attempt" | "until_unsubscribed"; keepOpen: boolean; clientKey?: string }): Promise<any> {
-  const allowedEvents = new Set(["run.turn_finished", "run.attempt_finished", "run.question_opened", "run.question_resolved", "run.worker_failed"]);
-  if (!input.events.length || input.events.some(event => !allowedEvents.has(event))) throw new Error("Unsupported subscription event types");
+  const allowedEvents = new Set<string>(["run.turn_finished", "run.attempt_finished", "run.question_opened", "run.question_resolved", "run.worker_failed", ...RESOURCE_EVENT_TYPES]);
+  if (!input.events.length || input.events.some(event => !allowedEvents.has(event) && !/^custom\.[a-zA-Z0-9_.-]{1,93}$/.test(event))) throw new Error("Unsupported subscription event types");
   if (typeof input.attempt === "number" && (!Number.isSafeInteger(input.attempt) || input.attempt < 1)) throw new Error("Invalid attempt");
   if (input.clientKey !== undefined && (!input.clientKey.trim() || input.clientKey.length > 200)) throw new Error("Invalid client_key");
   if (input.subscriberRunId === input.sourceRunId) throw new Error("A run cannot subscribe to its own lifecycle events");
@@ -201,6 +206,12 @@ export async function unsubscribeRunEvents(subscriberRunId: number, subscription
         sql`${inboxEvents.id} IN (SELECT m.delivery_id FROM run_event_delivery_matches m WHERE m.subscription_id = ${subscriptionId} AND NOT EXISTS (SELECT 1 FROM run_event_delivery_matches m2 JOIN run_event_subscriptions s2 ON s2.id=m2.subscription_id WHERE m2.delivery_id=m.delivery_id AND m2.subscription_id<>m.subscription_id AND s2.status IN ('active','finished')))`
       ));
       await tx.execute(sql`UPDATE run_inputs ri SET status='cancelled', cancelled_at=now() WHERE ri.status='pending' AND ri.message_id IN (SELECT am.id FROM agent_messages am WHERE am.event_delivery_id IN (SELECT m.delivery_id FROM run_event_delivery_matches m WHERE m.subscription_id=${subscriptionId} AND NOT EXISTS (SELECT 1 FROM run_event_delivery_matches m2 JOIN run_event_subscriptions s2 ON s2.id=m2.subscription_id WHERE m2.delivery_id=m.delivery_id AND m2.subscription_id<>m.subscription_id AND s2.status IN ('active','finished'))))`);
+      const removed = await tx.execute(sql`SELECT am.id FROM agent_messages am
+        JOIN run_inputs ri ON ri.message_id=am.id
+        JOIN run_event_delivery_matches m ON m.delivery_id=am.event_delivery_id
+        WHERE am.run_id=${subscriberRunId} AND m.subscription_id=${subscriptionId} AND ri.status='cancelled'`);
+      if (removed.length) await tx.insert(agentEvents).values({ sessionId: subscriberRunId,
+        type: "messages_removed", payload: JSON.stringify({ messageIds: removed.map(row => Number(row.id)) }) });
     }
   });
 }
