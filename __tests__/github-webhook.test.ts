@@ -22,6 +22,20 @@ vi.mock("../lib/runs", async (importOriginal) => {
   return { ...actual, followUp: mockFollowUp };
 });
 
+// Spy on the delivery-pump hint. The handler must not wake a matched run
+// before it has decided whether autofix owns it: the wake dispatches an idle
+// run, and a dispatched run reads as live, which used to make autofix skip the
+// follow-up — or find no resumable run and escalate the task to `blocked` —
+// depending on which side of the race won. Kept real (the tests below assert
+// when it fires, not that it does nothing).
+const { mockHintDelivery } = vi.hoisted(() => ({
+  mockHintDelivery: vi.fn(() => {}),
+}));
+vi.mock("../lib/run-event-delivery", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/run-event-delivery")>();
+  return { ...actual, hintRunEventDelivery: mockHintDelivery };
+});
+
 import { db } from "../db";
 import {
   agentEvents,
@@ -282,6 +296,7 @@ describe("handleWebhookEvent CI-autofix targeting", () => {
 
   beforeEach(async () => {
     mockFollowUp.mockClear();
+    mockHintDelivery.mockClear();
     await db.delete(agentEvents);
     await db.delete(taskNotes);
     await db.delete(inboxEvents);
@@ -399,6 +414,27 @@ describe("handleWebhookEvent CI-autofix targeting", () => {
     expect(mockFollowUp.mock.calls[0]?.[0]).toBe(id);
     expect(await eventsOfType(id, "github_autofix")).toBe(1);
     expect(result.actions.some((a) => /autofix triggered/.test(a))).toBe(true);
+    // Autofix owns the run: the handler must NOT also hint the delivery pump,
+    // which would dispatch the same idle run in parallel with the follow-up.
+    expect(mockHintDelivery).not.toHaveBeenCalled();
+  });
+
+  it("defers the delivery-pump wake until after the autofix decision", async () => {
+    // A run autofix will not take (already running), so the matched event still
+    // has to reach it — the wake fires, just after the decision rather than
+    // racing it.
+    const id = await insertRun("running");
+
+    const result = await handleWebhookEvent(
+      ciFailure(),
+      "delivery-wake",
+      fakeFetch(gh({ ciConclusion: "failure" }))
+    );
+
+    expect(result.matched).toBe(1);
+    expect(mockFollowUp).not.toHaveBeenCalled();
+    expect(await eventsOfType(id, "github")).toBe(1);
+    expect(mockHintDelivery).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -410,6 +446,7 @@ describe("handleWebhookEvent drives task state from GitHub", () => {
 
   beforeEach(async () => {
     mockFollowUp.mockClear();
+    mockHintDelivery.mockClear();
     await db.delete(agentEvents);
     await db.delete(taskNotes);
     await db.delete(inboxEvents);
@@ -589,6 +626,7 @@ describe("handleWebhookEvent CI-autofix escalation", () => {
 
   beforeEach(async () => {
     mockFollowUp.mockClear();
+    mockHintDelivery.mockClear();
     await db.delete(agentEvents);
     await db.delete(taskNotes);
     await db.delete(inboxEvents);

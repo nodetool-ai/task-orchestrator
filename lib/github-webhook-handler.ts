@@ -14,6 +14,7 @@ import * as repo from "./repo";
 import * as runs from "./runs";
 import { ownerRepoFromRemote } from "./gh-url";
 import { emitInboxEvent } from "./inbox";
+import { hintRunEventDelivery } from "./run-event-delivery";
 import {
   mapWebhookToInboxType,
   selectMatchingRunIds,
@@ -75,19 +76,41 @@ export async function handleWebhookEvent(
   // Inbox events (§3.2): one owner event per matched run (+ automatic
   // supervisor copy to its parent, handled inside emitInboxEvent). Best-effort
   // — inbox emission must never break the autofix/merge side effects below.
+  //
+  // Emitted with `noWake` and awaited, rather than fired off concurrently: an
+  // emit-time wake hints the delivery pump, which dispatches an idle matched
+  // run, and that dispatch used to race the autofix decision a few lines down.
+  // Whichever won decided the outcome — a claimed run reads as live, so
+  // maybeTriggerAutofix would skip the targeted follow-up, or find no
+  // resumable run at all and escalate the task to `blocked` purely because a
+  // wake got there first. The wake is issued below once that decision is made.
   const mapped = mapWebhookToInboxType(event);
+  let pendingWake = false;
   if (mapped) {
     for (const id of matchedIds) {
-      void emitInboxEvent({
-        targetRunId: id,
-        type: mapped.type,
-        payload: mapped.payload,
-        sourceKind: "github",
-        sourceId: deliveryId,
-        dedupeKey: deliveryId ? `gh:${deliveryId}:${id}` : undefined,
-      }).catch(() => {});
+      try {
+        const emitted = await emitInboxEvent({
+          targetRunId: id,
+          type: mapped.type,
+          payload: mapped.payload,
+          sourceKind: "github",
+          sourceId: deliveryId,
+          dedupeKey: deliveryId ? `gh:${deliveryId}:${id}` : undefined,
+          noWake: true,
+        });
+        if (emitted.eventId != null) pendingWake = true;
+      } catch {
+        // ignore
+      }
     }
   }
+  // The deferred wake. Skipped when autofix owns the run: its follow-up turn
+  // dispatches the run itself and materializes the same pending events, and
+  // the pump's wake sweep (lib/run-dispatch, §6.2 belt) re-hints every tick
+  // regardless, so no event is stranded either way.
+  const wake = (autofixTriggered = false) => {
+    if (pendingWake && !autofixTriggered) hintRunEventDelivery();
+  };
 
   // Side effects operate on full run rows; fetch them newest-first so "the
   // latest run for a task" is easy to pick.
@@ -102,11 +125,13 @@ export async function handleWebhookEvent(
   const matchedTasks = await resolveMatchedTasks(event, matchedRuns);
 
   if (matchedIds.length === 0 && matchedTasks.length === 0) {
+    wake();
     return { matched: 0, actions };
   }
 
   if (event.merged) {
     actions.push(...(await applyMerge(matchedTasks, event)));
+    wake();
     return { matched: matchedIds.length, actions };
   }
 
@@ -131,12 +156,14 @@ export async function handleWebhookEvent(
   const isChangesRequested =
     event.kind === "review" && (event.conclusion ?? "") === "changes_requested";
 
+  let autofixTriggered = false;
   if (isCiFailure || isChangesRequested) {
-    actions.push(
-      ...(await handleNeedsFix(matchedRuns, event, isCiFailure ? "ci" : "review"))
-    );
+    const fix = await handleNeedsFix(matchedRuns, event, isCiFailure ? "ci" : "review");
+    actions.push(...fix.actions);
+    autofixTriggered = fix.triggered;
   }
 
+  wake(autofixTriggered);
   return { matched: matchedIds.length, actions };
 }
 
@@ -271,12 +298,12 @@ async function handleNeedsFix(
   matchedRuns: runs.RunRow[],
   event: NormalizedWebhookEvent,
   reason: "ci" | "review"
-): Promise<string[]> {
+): Promise<{ actions: string[]; triggered: boolean }> {
   // matchedRuns are already sorted newest-first by the caller. Delegate the
   // target selection + gating + follow-up kick to the shared trigger, which the
   // poller also calls — the `github_autofix` events it records dedupe the two
   // paths against each other.
-  const { actions } = await maybeTriggerAutofix(matchedRuns, {
+  const { actions, triggered } = await maybeTriggerAutofix(matchedRuns, {
     reason,
     prUrl: event.prUrls[0] ?? null,
     workflowName: event.workflowName,
@@ -286,7 +313,7 @@ async function handleNeedsFix(
     body: event.body,
     breadcrumb: noteFor(event, reason),
   });
-  return actions;
+  return { actions, triggered };
 }
 
 // ──────────────────────────────────────────────────────────

@@ -9,11 +9,14 @@ import { SignOutButton } from "@/components/sign-out-button";
 import { useIsMobile } from "./use-is-mobile";
 
 const NAV: { id: string; href: string; label: string; icon: React.ComponentProps<typeof Icon>["name"] }[] = [
-  { id: "floor", href: "/", label: "Overview", icon: "factory" },
+  // Home is the concierge conversation — the door for most interactions. The
+  // operational surfaces keep equal-weight, one-click access beside it.
+  { id: "home", href: "/", label: "Home", icon: "chat" },
   { id: "plans", href: "/plans", label: "Plans", icon: "plans" },
   { id: "tasks", href: "/tasks", label: "Tasks", icon: "tasks" },
-  { id: "runs", href: "/runs", label: "Runs", icon: "chat" },
+  { id: "runs", href: "/runs", label: "Runs", icon: "agents" },
   { id: "schedules", href: "/schedules", label: "Schedules", icon: "clock" },
+  { id: "overview", href: "/overview", label: "Overview", icon: "factory" },
   { id: "settings", href: "/settings", label: "Settings", icon: "settings" },
 ];
 
@@ -106,7 +109,11 @@ export function TopNav({ email }: { email?: string }) {
             <Link
               key={n.id}
               href={n.href}
-              className={n.id === "schedules" || n.id === "settings" ? "pi-top-nav-secondary" : undefined}
+              className={
+                n.id === "schedules" || n.id === "overview" || n.id === "settings"
+                  ? "pi-top-nav-secondary"
+                  : undefined
+              }
               style={{
                 display: "inline-flex",
                 alignItems: "center",
