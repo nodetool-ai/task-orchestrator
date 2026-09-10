@@ -109,14 +109,13 @@ export type { OrchestratorTool };
 let registryPromise: Promise<Map<string, OrchestratorTool>> | null = null;
 
 async function buildRegistry(): Promise<Map<string, OrchestratorTool>> {
-  const [orch, events, planning, spawn, memory, welfare, terminalPr] = await Promise.all([
+  const [orch, events, planning, spawn, memory, welfare] = await Promise.all([
     import("../orchestrator-tools"),
     import("../extensions/events"),
     import("../extensions/planning"),
     import("../extensions/spawn"),
     import("../extensions/persona-memory"),
     import("../extensions/model-welfare"),
-    import("../worker-terminal-pr"),
   ]);
   const all: OrchestratorTool[] = [
     ...codeActTools,
@@ -126,7 +125,6 @@ async function buildRegistry(): Promise<Map<string, OrchestratorTool>> {
     ...spawn.SPAWN_TOOLS,
     ...memory.MEMORY_TOOLS,
     ...welfare.WELFARE_TOOLS,
-    ...terminalPr.WORKER_TERMINAL_PR_TOOLS,
   ];
   const map = new Map<string, OrchestratorTool>();
   for (const tool of all) {

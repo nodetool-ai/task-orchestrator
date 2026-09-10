@@ -377,7 +377,7 @@ export interface TurnEndDecisionInput {
   defaultStatus: SessionStatus;
   /** Implement-style runs must not report success until a PR exists. */
   requiresPrUrl?: boolean;
-  /** PR observed either from git sync, the run row, task row, or report_result. */
+  /** PR recorded by the agent on the run row, task row, or report_result. */
   prUrl?: string | null;
   /** A subscription or its unprocessed final delivery still keeps this run open. */
   hasOutstandingSupervision?: boolean;

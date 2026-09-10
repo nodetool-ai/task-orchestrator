@@ -325,6 +325,8 @@ describe("syncPrBackedTasks autofix (webhook-delivery fallback)", () => {
     expect((await repo.getTask(task.id))!.state).toBe("failing");
     expect(mockFollowUp).toHaveBeenCalledTimes(1);
     expect(mockFollowUp.mock.calls[0]?.[0]).toBe(runId);
+    expect(mockFollowUp.mock.calls[0]?.[1]).toContain("push the branch yourself");
+    expect(mockFollowUp.mock.calls[0]?.[1]).not.toContain("they will be pushed");
     expect(await autofixEvents(runId)).toBe(1);
   });
 

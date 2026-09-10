@@ -5,6 +5,7 @@ import {
   buildImplementPrompt,
   buildPlanChatPromptPrefix,
   buildReviewPrompt,
+  implementTemplate,
   extractReviewOutcome,
   parseReviewVerdict,
 } from "../lib/run-templates";
@@ -82,6 +83,30 @@ describe("buildReviewPrompt", () => {
 });
 
 describe("buildImplementPrompt", () => {
+  it("gives implementation agents the GitHub tools needed for delivery", async () => {
+    const template = await implementTemplate(fakeTask());
+    expect(template.toolsProfile.split(",")).toEqual(expect.arrayContaining(["repo_write", "gh_pr", "gh_ci"]));
+  });
+  it("assigns push, conflict recovery, and PR delivery to the agent", async () => {
+    const prompt = await buildImplementPrompt(fakeTask(), { baseBranch: "release" });
+    expect(prompt).toContain("git push -u origin <task-branch>");
+    expect(prompt).toContain("If rejected, fetch and reconcile");
+    expect(prompt).toContain("do not force-push");
+    expect(prompt).toContain("base branch `release`");
+    expect(prompt).toContain("set_task_pr(task_id, pr_url)");
+    expect(prompt).toContain('report_result({ status: "success", summary, pr_url })');
+    expect(prompt).not.toContain("Do NOT push");
+    expect(prompt).not.toContain("then stop");
+  });
+
+  it("keeps delivery with the agent when auto-merge is disabled", async () => {
+    const prompt = await buildImplementPrompt(fakeTask(), { autoMerge: false });
+    expect(prompt).toContain("Auto-merge is disabled for this run");
+    expect(prompt).toContain("git push -u origin <task-branch>");
+    expect(prompt).toContain("set_task_pr(task_id, pr_url)");
+    expect(prompt).not.toContain("arm squash auto-merge");
+  });
+
   it("describes the separate checkout working environment", async () => {
     const prompt = await buildImplementPrompt(fakeTask());
     expect(prompt).toContain("separate checkout");

@@ -130,7 +130,7 @@ export async function buildRunStart(
       kickoffPrompt = buildExecutePrompt(plan, await dbTransport.listTasks({ planId: plan.id }));
     } else if (goal === "<implement>" && task) {
       const { buildImplementPrompt } = await import("../run-templates");
-      kickoffPrompt = await buildImplementPrompt(task, { autoMerge: run.autoMerge !== false });
+      kickoffPrompt = await buildImplementPrompt(task, { autoMerge: run.autoMerge !== false, baseBranch: run.baseBranch });
     } else if (goal && !goal.startsWith("<")) {
       kickoffPrompt = goal;
     }

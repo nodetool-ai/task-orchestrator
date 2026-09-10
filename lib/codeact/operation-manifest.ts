@@ -190,8 +190,6 @@ const TOOL_OPS: OperationEntry[] = [
     "Ambient persona mechanism auto-loaded by the runner, not an agent-callable operation."),
   x("welfare", "welfare__load", "Internal: load caller's seat record + laurels (ambient skill)",
     "Ambient persona mechanism auto-loaded by the runner, not an agent-callable operation."),
-  x("system", "worker__open_terminal_pr", "Internal worker lifecycle: open terminal PR handoff",
-    "Worker lifecycle plumbing invoked by the runner at run teardown, not guest-facing."),
 ];
 
 // ---------------------------------------------------------------------------

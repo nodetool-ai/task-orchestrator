@@ -19,13 +19,14 @@
 // authoritative outcome and `accepted: false`.
 
 import { and, eq, inArray, notInArray, sql } from "drizzle-orm";
-import { agentEvents, agentMessages, agentSessions, runTimers } from "../../db/schema";
+import { agentEvents, agentMessages, agentSessions, runTimers, tasks } from "../../db/schema";
 import {
   LEASE_STATUSES,
   TERMINAL_STATUSES,
   buildStatusEventValues,
   coerceRunStatus,
   isFailedResult,
+  resultPrUrl,
   type SessionStatus,
 } from "../run-state";
 import { WORKER_LOG_MAX_CHARS } from "../runner/worker-log-store";
@@ -452,15 +453,22 @@ async function handleRunFinished(
   frame: WorkerEventFrame
 ): Promise<{ resultCommandId: string }> {
   const payload = frame.payload as RunFinished;
-  const [stored] = await tx.select({ result: agentSessions.result }).from(agentSessions).where(eq(agentSessions.id, frame.runId));
+  const [stored] = await tx.select({
+    result: agentSessions.result, prUrl: agentSessions.prUrl, taskPrUrl: tasks.prUrl,
+  }).from(agentSessions)
+    .leftJoin(tasks, eq(agentSessions.taskId, tasks.id))
+    .where(eq(agentSessions.id, frame.runId));
   const result = terminalResult(payload.result, stored?.result);
   const status = result && isFailedResult(result) ? "failed" : "completed";
+  // The agent reports its delivered PR through report_result. The worker
+  // finalizer does no GitHub work and may have started before that PR existed.
+  const prUrl = resultPrUrl(result) ?? payload.prUrl ?? stored?.prUrl ?? stored?.taskPrUrl ?? null;
   return landTerminal(
     tx,
     frame,
     status,
-    { completedAt: new Date(), result, ...(payload.prUrl != null ? { prUrl: payload.prUrl } : {}), ...usageColumns(payload.usage) },
-    { status, result, prUrl: payload.prUrl ?? null, usage: payload.usage }
+    { completedAt: new Date(), result, ...(prUrl != null ? { prUrl } : {}), ...usageColumns(payload.usage) },
+    { status, result, prUrl, usage: payload.usage }
   );
 }
 

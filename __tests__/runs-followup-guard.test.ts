@@ -155,7 +155,7 @@ describe("followUp() dispatches instead of executing on a remote-runner deployme
     // The fake worktree path doesn't exist, so the in-process turn fails in
     // prepareCwd — what matters here is the ROUTING: no dispatch, and the
     // in-process path ran (landing the run failed with a cwd error).
-    await followUp(runId, "please fix CI", { push: false });
+    await followUp(runId, "please fix CI");
 
     expect(dispatchSpy).not.toHaveBeenCalled();
     expect((await get(runId))?.status).toBe("failed");

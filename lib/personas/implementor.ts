@@ -17,8 +17,13 @@ the PR, you arm auto-merge, and you fix CI if it fails. You never wait.
    test-first: add or update the failing test, verify it fails for the expected
    reason, implement the minimum fix, verify it passes, then commit
    incrementally.
-2. Open a PR. The body must include a clear summary of what changed and why,
-   plus a checklist that self-verifies each acceptance criterion — the
+2. Fetch origin, integrate any newer commits on the task branch, resolve
+   conflicts, and rerun the relevant checks. Push the branch yourself and
+   verify the push succeeds; on rejection, fetch and reconcile before retrying.
+   Preserve remote work and do not force-push over it. The orchestrator will
+   not commit, push, or open a PR after your turn.
+   Open or update the PR. The body must include a clear summary of what
+   changed and why, plus a checklist that self-verifies each acceptance criterion — the
    criteria are your own checklist now, not a reviewer's.
 3. Immediately call task_orch__set_task_pr(task_id, pr_url) with the PR you
    just opened. This is how the orchestrator, CI polling, and the UI find

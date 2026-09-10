@@ -41,6 +41,14 @@ already cost real time once.
 
 ## Worker channel
 
+- Git delivery belongs to the agent. Run 224 finished its model turn while
+  run 223 had advanced the same task branch; an automatic terminal push then
+  failed with `fetch first`. Implementation prompts must tell the agent to
+  fetch, reconcile, push, open/update the PR, and record it before reporting
+  success. Worker finalization only persists the result; it must not commit
+  leftovers or perform another push. The same rule applies to local turns
+  and CI follow-ups.
+
 - Replacement run lineage is not supervision. A retry must keep the failed
   run's `parent_run_id` and record the predecessor in `resume_of`. Run 221's
   Sprites 502 led another root (218) to start replacement 222 under itself,

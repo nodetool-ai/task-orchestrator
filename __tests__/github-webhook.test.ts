@@ -26,6 +26,9 @@ import { db } from "../db";
 import {
   agentEvents,
   agentSessions,
+  inboxEvents,
+  runEventSubscriptions,
+  runSourceEvents,
   plans,
   repositories,
   taskNotes,
@@ -281,6 +284,9 @@ describe("handleWebhookEvent CI-autofix targeting", () => {
     mockFollowUp.mockClear();
     await db.delete(agentEvents);
     await db.delete(taskNotes);
+    await db.delete(inboxEvents);
+    await db.delete(runEventSubscriptions);
+    await db.delete(runSourceEvents);
     await db.delete(agentSessions);
     await db.delete(tasks);
     await db.delete(plans);
@@ -406,6 +412,9 @@ describe("handleWebhookEvent drives task state from GitHub", () => {
     mockFollowUp.mockClear();
     await db.delete(agentEvents);
     await db.delete(taskNotes);
+    await db.delete(inboxEvents);
+    await db.delete(runEventSubscriptions);
+    await db.delete(runSourceEvents);
     await db.delete(agentSessions);
     await db.delete(tasks);
     await db.delete(plans);
@@ -582,6 +591,9 @@ describe("handleWebhookEvent CI-autofix escalation", () => {
     mockFollowUp.mockClear();
     await db.delete(agentEvents);
     await db.delete(taskNotes);
+    await db.delete(inboxEvents);
+    await db.delete(runEventSubscriptions);
+    await db.delete(runSourceEvents);
     await db.delete(agentSessions);
     await db.delete(tasks);
     await db.delete(plans);

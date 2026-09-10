@@ -49,6 +49,7 @@ export function buildMergePrompt(baseRef: string | null): string {
     "   of both sides, don't just delete conflict markers or blindly pick one side.",
     "4. Run typecheck and lint where they apply and fix anything you broke.",
     "5. Commit the merge with a clear message.",
+    "6. Push the task branch yourself and verify the push succeeds before reporting success.",
     "",
     "Do not open a new PR — pushing the existing branch updates it.",
   ].join("\n");
@@ -98,7 +99,7 @@ export function buildExecutePrompt(plan: PlanFull, tasks: TaskFull[]): string {
  * the runner (lib/runs.ts) call into here so what the user sees in the
  * modal is exactly what the agent receives.
  */
-export async function buildImplementPrompt(task: TaskFull, options: { autoMerge?: boolean } = {}): Promise<string> {
+export async function buildImplementPrompt(task: TaskFull, options: { autoMerge?: boolean; baseBranch?: string | null } = {}): Promise<string> {
   const lines: string[] = [];
   lines.push(`You are an autonomous coding agent working on task ${task.id}.`);
   lines.push("");
@@ -226,9 +227,14 @@ export async function buildImplementPrompt(task: TaskFull, options: { autoMerge?
   lines.push("");
   lines.push("# Finish");
   lines.push("- Before you stop, check off every acceptance criterion you satisfied with `mcp__task_orch__check_criterion` (confirm with `list_criteria`). The orchestrator blocks the terminal `merged` transition while any criterion stays open, so an unchecked criterion strands the task. If one genuinely can't be met, leave it open and call it out in your summary.");
-  lines.push("- Commit all intended changes with a clear message, then stop.");
-  lines.push("- Do NOT push and do NOT open a PR. After your turn, the orchestrator detects your commits, pushes the branch, opens or updates the PR, and moves the task forward.");
-  lines.push("- Your final assistant message becomes the PR description/summary. Include:");
+  lines.push("- You own git and PR delivery. Commit all intended changes with a clear message. Fetch origin and inspect the current remote task branch before pushing. If it has advanced, integrate its changes, resolve conflicts, and rerun the relevant checks. Preserve other commits; do not force-push over them.");
+  lines.push("- Push the task branch yourself with `git push -u origin <task-branch>` and verify it succeeds. If rejected, fetch and reconcile the remote changes, then retry. The orchestrator will not commit, push, or open a PR after your turn.");
+  lines.push(`- Open or update the task's PR${options.baseBranch ? ` against base branch \`${options.baseBranch}\`` : " using the run's configured base branch"}. Call \`mcp__task_orch__set_task_pr(task_id, pr_url)\` to record it.`);
+  if (options.autoMerge !== false) {
+    lines.push("- Once all acceptance criteria are satisfied, arm squash auto-merge with `gh_pr__pr_merge(url, method=\"squash\", delete_branch=true, auto=true)`. Do not wait for CI.");
+  }
+  lines.push("- Only after the push and PR delivery succeed, call `report_result({ status: \"success\", summary, pr_url })` and end your turn. If delivery or the task cannot be completed, report_result with status=\"failed\" or status=\"blocked\" and explain the blocker; do not report success for unpushed work.");
+  lines.push("- Include in your PR description and final summary:");
   lines.push("- 1-3 sentences explaining what changed and why.");
   lines.push("- Bullets for main files or behavior changes when non-trivial.");
   lines.push("- Verification run, plus any caveats, follow-ups, or skipped acceptance criteria.");
@@ -242,7 +248,7 @@ export async function buildImplementPrompt(task: TaskFull, options: { autoMerge?
  */
 export interface ImplementTemplate {
   goal: "<implement>";
-  toolsProfile: "orchestrator,repo_write";
+  toolsProfile: "orchestrator,repo_write,gh_pr,gh_ci";
   cwdStrategy: "worktree";
   budget: { maxUsd: number };
   initialPrompt: string;
@@ -252,7 +258,7 @@ export interface ImplementTemplate {
 export async function implementTemplate(task: TaskFull): Promise<ImplementTemplate> {
   return {
     goal: "<implement>",
-    toolsProfile: "orchestrator,repo_write",
+    toolsProfile: "orchestrator,repo_write,gh_pr,gh_ci",
     cwdStrategy: "worktree",
     budget: { maxUsd: IMPLEMENT_DEFAULT_BUDGET_USD },
     initialPrompt: await buildImplementPrompt(task),

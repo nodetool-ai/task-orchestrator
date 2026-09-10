@@ -51,7 +51,6 @@ import {
 } from "./run-templates";
 import { parsePrUrl, ownerRepoFromRemote } from "./gh-url";
 import { checkoutRepositoryAt } from "./repo-checkout";
-import { getOctokit } from "./github-client";
 import { assistantText, toolResults, type SdkContentBlock } from "./sdk-message";
 import type { AgentSessionFull, RepositoryRow } from "./types";
 // The run status vocabulary + state machine live in lib/run-state.ts. Pull the
@@ -67,7 +66,6 @@ import {
   assertTransition,
   buildStatusEventValues,
   decideTurnEndStatus,
-  isFailedResult,
   resultPrUrl,
 } from "./run-state";
 import { config, resolveToolCallingMode, runnerProviderKind, type RunnerProviderKind, type ToolCallingMode } from "./config";
@@ -978,7 +976,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   if (!input.defer && goal !== "<chat>" && cwdStrategy === "worktree") {
     // taskId presence validated before the insert above.
     const task = (await repo.getTask(input.taskId!))!;
-    const prompt = input.initialPrompt ?? await buildImplementPrompt(task, { autoMerge: run.autoMerge });
+    const prompt = input.initialPrompt ?? await buildImplementPrompt(task, { autoMerge: run.autoMerge, baseBranch: run.baseBranch });
     void (async () => {
       const { detachedRunsEnabled } = await import("./run-dispatch");
       // FIX 7 (M20): the detached worker rebuilds its own prompt via
@@ -1483,7 +1481,6 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
     // 'idle'/'parked' through the same finalize.
     let promptForTurn = effectivePrompt;
     let result: TurnResult | null = null;
-    let prUrlUpdate = run.prUrl;
     let observedPrUrl = run.prUrl;
     let nextStatus: SessionStatus = "idle";
     let turnEnd: Awaited<ReturnType<typeof readTurnEndState>> | null = null;
@@ -1589,26 +1586,13 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       const supervisingRunId = run.id;
       const supervising = run.deliveryVersion === 2 && await db.transaction((tx) => hasOutstandingSupervisionTx(tx, supervisingRunId));
 
-      // Worktree runs sync git after each turn: if the branch gained commits,
-      // push them (updating the PR) and open a PR the first time round. A no-op
-      // for chat-only turns (no commits) and for non-worktree runs.
-      if (isImplementWorktree(run) && !supervising) {
-        try {
-          prUrlUpdate = await gitSyncAfterTurn(run, cwd, result.summary, input.baseBranch ?? run.baseBranch ?? undefined);
-        } catch (err) {
-          await persistMessage(run.id, "system", [
-            { type: "text", text: `Push/PR sync failed: ${describe(err)}` },
-          ]);
-        }
-      }
-
       // Worktree runs now require a PR before a success landing. If the agent
       // cannot fulfill the task, it can call raise() or report_result(status:
       // "failed"|"blocked") to land failed instead of continuing.
       const budgetHit = checkBudget(run, result);
       const landsCompleted = isImplementWorktree(run);
       turnEnd = await readTurnEndState(run.id);
-      observedPrUrl = resultPrUrl(turnEnd.result) ?? prUrlUpdate;
+      observedPrUrl = resultPrUrl(turnEnd.result) ?? run.prUrl;
       if (landsCompleted && !observedPrUrl && run.taskId) {
         const task = await (await runTransport()).getTask(run.taskId);
         observedPrUrl = task?.prUrl ?? null;
@@ -1634,51 +1618,9 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
       if (isImplementWorktree(run) && nextStatus === "running") {
         prContinuations += 1;
         const capHit = prContinuations >= MAX_PR_CONTINUATIONS;
-        // The agent believes it finished (a non-failed report_result) but no PR
-        // exists — or the continuation budget is spent. Either way the model's
-        // part is over: SALVAGE mechanically. Commit whatever is left in the
-        // tree, push, and open the PR from what's on the branch, then re-decide
-        // the landing with the salvaged PR. A silent turn end (no result, cap
-        // not hit) skips salvage — the agent gets re-prompted below instead, so
-        // half-done work isn't prematurely wrapped into a PR.
-        const claimedDone = turnEnd.result != null && !isFailedResult(turnEnd.result);
-        if (claimedDone || capHit) {
-          try {
-            const salvaged = await gitSyncAfterTurn(run, cwd, result.summary, input.baseBranch ?? run.baseBranch ?? undefined, {
-              commitLeftovers: true,
-            });
-            if (salvaged) {
-              prUrlUpdate = salvaged;
-              observedPrUrl = salvaged;
-              await persistMessage(run.id, "system", [
-                {
-                  type: "text",
-                  text: `The worker pushed the branch and ensured a PR exists from the work left on it: ${salvaged}`,
-                },
-              ]);
-              nextStatus = decideTurnEndStatus({
-                goal: run.goal,
-                freshStatus: turnEnd.status,
-                parkReason: turnEnd.parkReason,
-                result: turnEnd.result,
-                budgetHit,
-                defaultStatus: "completed",
-                requiresPrUrl: true,
-                prUrl: observedPrUrl,
-              });
-              break;
-            }
-          } catch (err) {
-            await persistMessage(run.id, "system", [
-              { type: "text", text: `Salvage push/PR failed: ${describe(err)}` },
-            ]);
-          }
-        }
-        // Safety stop: the agent has ended this many turns without ever getting
-        // a PR onto the task (and salvage found nothing to ship). Rather than
-        // re-prompt forever, land 'failed' with a structured result so the run
-        // is observable and resumable like any other failure instead of
-        // spinning invisibly.
+        // Keep delivery inside the agent turn. If repeated continuations fail
+        // to produce a PR, stop with a resumable failure instead of committing
+        // or publishing files behind the agent's back.
         if (capHit) {
           await (await runTransport()).patchRun(run.id, {
             result: prContinuationFailureResult(
@@ -1710,9 +1652,10 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
         ]);
         promptForTurn =
           "Continue the same task. Do not stop after investigation or partial edits. " +
-          "Commit all intended changes with a clear message — the orchestrator then pushes the branch, " +
-          "opens or updates the PR, and records it on the task. When your work is committed, " +
-          "report_result({ status: \"success\", summary }). " +
+          "Commit your intended changes, fetch origin and integrate remote branch changes, then push " +
+          "the task branch yourself. Open or update the PR and record it with set_task_pr. " +
+          "Only after the push and PR delivery succeed, " +
+          "report_result({ status: \"success\", summary, pr_url }). " +
           "If you cannot fulfill the task, call raise({ code, message, recoverable, details }) or " +
           "report_result({ status: \"failed\", summary }) and end.";
         run = (await get(run.id)) ?? run;
@@ -1746,7 +1689,7 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
         inputTokens: result.inputTokens ?? run.inputTokens,
         outputTokens: result.outputTokens ?? run.outputTokens,
         outcome: outcomeUpdate,
-        prUrl: observedPrUrl ?? prUrlUpdate,
+        prUrl: observedPrUrl,
         // Keep park_reason only when actually parking; clear a stale one that
         // lost to a result/budget landing. Parked is non-terminal: no completedAt.
         parkReason: nextStatus === "parked" ? turnEnd.parkReason : null,
@@ -2050,7 +1993,7 @@ async function findRivalTaskRun(run: {
  *
  * DISPATCHES, does not execute: on a remote-runner deployment the prompt is
  * persisted and the run handed to dispatchRun (a worker Machine/container runs
- * the turn, pushes the branch, and lands the terminal status). The control
+ * the turn; the agent pushes its changes before the worker reports completion). The control
  * plane must never run the turn itself — it has no SESSION_ROOT/REPO_CACHE_DIR
  * and its image ships without git, so prepareCwd's host/dev branch fails
  * instantly (runs 133/137/140/144: "not a git repository" / spawn git ENOENT,
@@ -2058,7 +2001,7 @@ async function findRivalTaskRun(run: {
  *
  * Host/dev mode (no remote runner) keeps the original in-process turn:
  * re-materialize the worktree on the run's branch, run one agent turn with the
- * given prompt, push the branch (to update the PR and re-trigger CI), and
+ * given prompt (the agent pushes its changes to update the PR and re-trigger CI), and
  * return the run to `completed`. A fresh SDK session is started rather than
  * resuming `sdkSessionId`, because the original session files live inside the
  * (since-cleaned-up) worktree; the prompt + the checked-out code + the gh
@@ -2070,7 +2013,7 @@ async function findRivalTaskRun(run: {
 export async function followUp(
   runId: number,
   prompt: string,
-  opts: { author?: string; addProfiles?: string[]; push?: boolean } = {}
+  opts: { author?: string; addProfiles?: string[] } = {}
 ): Promise<void> {
   const run = await get(runId);
   if (!run) return;
@@ -2178,16 +2121,6 @@ export async function followUp(
     });
 
     if (abort.signal.aborted) return;
-
-    if (opts.push !== false) {
-      try {
-        await sh(["git", "push", "origin", run.branch], cwd);
-      } catch (err) {
-        await persistMessage(runId, "system", [
-          { type: "text", text: `Follow-up: git push failed: ${describe(err)}` },
-        ]);
-      }
-    }
 
     // Atomic completion (status + event) with the terminal no-op guard, so a
     // lost column write can't strand this follow-up as an orphan. Server-side
@@ -2596,11 +2529,6 @@ async function ensureWorktreeBranch(run: RunRow, baseBranch?: string): Promise<R
   } else {
     worktreePath = await localWorktreeFor(run, branch, base);
   }
-  // Publish the branch with upstream tracking the moment it exists, so the
-  // task page can link it on GitHub and a plain `git push` from the agent (or
-  // the salvage sync) targets the right ref without remembering `-u origin`.
-  // Best-effort: offline/credential failures must not block the first turn.
-  await publishBranch(worktreePath, branch);
   await transport.patchRun(run.id, {
     branch,
     worktreePath,
@@ -2681,140 +2609,6 @@ async function worktreePathForBranch(root: string, branch: string): Promise<stri
     // git too old for --porcelain / not a repo — fall through to a fresh add.
   }
   return null;
-}
-
-/**
- * Publish `branch` to origin with upstream tracking (`git push -u`). When the
- * push can't happen (offline, missing credentials), still record the tracking
- * config so a later plain `git push` targets origin/<branch>. Best-effort by
- * design — branch publication must never fail a turn.
- */
-async function publishBranch(cwd: string, branch: string): Promise<void> {
-  try {
-    await timeRunnerPhase(
-      "git_publish_branch",
-      () => sh(["git", "push", "-u", "origin", branch], cwd),
-      { provider: runnerProviderLabel(), fields: { branch } }
-    );
-  } catch {
-    await sh(["git", "config", `branch.${branch}.remote`, "origin"], cwd).catch(() => {});
-    await sh(
-      ["git", "config", `branch.${branch}.merge`, `refs/heads/${branch}`],
-      cwd
-    ).catch(() => {});
-  }
-}
-
-/**
- * Commit everything left in the working tree (`git add -A`), if anything is.
- * The salvage half of "the worker can finish the PR from whatever is on the
- * branch": an agent that stopped without committing still gets its work
- * carried into the push + PR. Returns whether a commit was made.
- */
-export async function commitLeftoverChanges(cwd: string, message: string): Promise<boolean> {
-  const dirty = (await sh(["git", "status", "--porcelain"], cwd)).trim();
-  if (!dirty) return false;
-  await sh(["git", "add", "-A"], cwd);
-  await sh(["git", "commit", "-m", message], cwd);
-  return true;
-}
-
-/**
- * After a worktree turn: if the branch gained commits ahead of its base, push
- * them. The first time (no PR yet) open one and move the task to review;
- * afterwards the push just updates the existing PR. Returns the (possibly new)
- * PR url. A no-op when the turn produced no commits (pure conversation).
- *
- * With `commitLeftovers` (the salvage pass), uncommitted files are committed
- * first so work an agent left in the tree still reaches the branch and PR.
- */
-async function gitSyncAfterTurn(
-  run: RunRow,
-  cwd: string,
-  summary: string | null,
-  baseBranch?: string,
-  opts?: { commitLeftovers?: boolean }
-): Promise<string | null> {
-  if (!run.branch) return run.prUrl;
-  if (opts?.commitLeftovers) {
-    try {
-      const committed = await commitLeftoverChanges(
-        cwd,
-        `chore${run.taskId ? `(${run.taskId})` : ""}: commit remaining agent work from run #${run.id}`
-      );
-      if (committed) {
-        await persistMessage(run.id, "system", [
-          { type: "text", text: "Committed uncommitted changes left in the worktree." },
-        ]);
-      }
-    } catch (err) {
-      await persistMessage(run.id, "system", [
-        { type: "text", text: `Could not commit leftover changes: ${describe(err)}` },
-      ]);
-    }
-  }
-  const base = baseBranch?.trim() || (await repoDefaultBranch(run));
-  // Count the commits this branch added beyond its base. Prefer the
-  // remote-tracking base (origin/<base>): it reflects the branch's real PR base
-  // and isn't thrown off by a stale local checkout of <base>. Fall back to the
-  // local ref when origin/<base> hasn't been fetched.
-  let baseRef = base;
-  try {
-    await sh(["git", "rev-parse", "--verify", "--quiet", `origin/${base}`], cwd);
-    baseRef = `origin/${base}`;
-  } catch {
-    // origin/<base> unavailable; use the local base ref.
-  }
-  let ahead = 0;
-  try {
-    const out = await sh(["git", "rev-list", "--count", `${baseRef}..HEAD`], cwd);
-    ahead = parseInt(out.trim() || "0", 10) || 0;
-  } catch {
-    ahead = 0;
-  }
-  if (ahead <= 0) return run.prUrl;
-
-  await sh(["git", "push", "-u", "origin", run.branch], cwd);
-  if (run.prUrl) return run.prUrl;
-  if (!run.taskId) return null;
-  const transport = await runTransport();
-  const task = await transport.getTask(run.taskId);
-  if (!task) return null;
-  if (task.prUrl) return task.prUrl;
-  const prUrl = await openPr({ task, branch: run.branch, baseBranch: base, worktreePath: cwd, summary });
-  if (prUrl) {
-    const setPr = await transport.callTool(
-      run.id,
-      "set_task_pr",
-      { task_id: run.taskId, pr_url: prUrl },
-      { author: "claude-agent" }
-    );
-    if (setPr.isError) {
-      const text = setPr.content.map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-      await transport.addTaskNote(
-        run.taskId,
-        "claude-agent",
-        `Could not record task PR: ${text || "set_task_pr failed"}`
-      );
-      try {
-        await transport.transitionTask(run.taskId, {
-          state: "testing",
-          note: `Agent finished. PR: ${prUrl}`,
-        });
-      } catch (err) {
-        await transport.addTaskNote(run.taskId, "claude-agent", `Could not transition to testing: ${describe(err)}`);
-      }
-    }
-    if (run.autoMerge !== false) {
-      const armed = await armAutoMerge(prUrl, cwd);
-      await transport.addTaskNote(run.taskId, "claude-agent", armed
-        ? `Fallback PR sync armed auto-merge for ${prUrl}.`
-        : `Opened PR ${prUrl}, but could not arm GitHub auto-merge automatically.`);
-    } else {
-      await transport.addTaskNote(run.taskId, "claude-agent", `Opened PR ${prUrl}; auto-merge is disabled for this run.`);
-    }
-  }
-  return prUrl ?? run.prUrl;
 }
 
 /** Fire a worktree run's first turn through the unified engine, server-side. */
@@ -3777,90 +3571,6 @@ export async function* relayRunStream(
     unsub();
     abort.signal.removeEventListener("abort", onAbort);
   }
-}
-
-interface OpenPrArgs {
-  task: NonNullable<Awaited<ReturnType<typeof repo.getTask>>>;
-  branch: string;
-  baseBranch: string;
-  worktreePath: string;
-  summary: string | null;
-}
-
-async function openPr({ task, branch, baseBranch, worktreePath, summary }: OpenPrArgs): Promise<string | null> {
-  const title = `[${task.id}] ${task.title}`;
-  const body = buildPrBody(task, summary);
-  try {
-    // The gh CLI used to infer owner/repo from the worktree's origin remote;
-    // do the same, then open the PR in-process via Octokit.
-    const remoteUrl = (await sh(["git", "remote", "get-url", "origin"], worktreePath)).trim();
-    const or = ownerRepoFromRemote(remoteUrl);
-    if (!or) {
-      console.warn(`gh pr create failed: could not parse owner/repo from remote '${remoteUrl}'`);
-      return null;
-    }
-    const { data } = await getOctokit().pulls.create({
-      owner: or.owner,
-      repo: or.repo,
-      title,
-      body,
-      base: baseBranch,
-      head: branch,
-    });
-    return data.html_url ?? null;
-  } catch (err) {
-    console.warn(`gh pr create failed: ${describe(err)}`);
-    return null;
-  }
-}
-
-async function armAutoMerge(prUrl: string, _worktreePath: string): Promise<string | null> {
-  try {
-    const parsed = parsePrUrl(prUrl);
-    if (!parsed) {
-      console.warn(`gh pr merge --auto failed: could not parse PR url '${prUrl}'`);
-      return null;
-    }
-    // Auto-merge is a GraphQL-only mutation (no REST equivalent). Arm it with
-    // the squash method, mirroring `gh pr merge --auto --squash`. Head-branch
-    // deletion after merge follows the repo's auto-merge setting.
-    const octokit = getOctokit();
-    const { data: pr } = await octokit.pulls.get({
-      owner: parsed.owner,
-      repo: parsed.repo,
-      pull_number: parsed.number,
-    });
-    await octokit.graphql(
-      `mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
-        enablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId, mergeMethod: $mergeMethod }) {
-          clientMutationId
-        }
-      }`,
-      { pullRequestId: pr.node_id, mergeMethod: "SQUASH" }
-    );
-    return "auto-merge armed";
-  } catch (err) {
-    console.warn(`gh pr merge --auto failed: ${describe(err)}`);
-    return null;
-  }
-}
-
-function buildPrBody(
-  task: NonNullable<Awaited<ReturnType<typeof repo.getTask>>>,
-  summary: string | null
-): string {
-  const sections: string[] = [];
-  if (summary) sections.push(summary);
-  else if (task.body.trim()) sections.push(task.body.trim());
-  sections.push(`---`);
-  sections.push(`Closes task **${task.id}**: ${task.title}.`);
-  if (task.criteria.length > 0) {
-    sections.push(
-      `\n### Acceptance criteria\n` +
-        task.criteria.map((c) => `- [${c.done ? "x" : " "}] ${c.text}`).join("\n")
-    );
-  }
-  return sections.join("\n\n");
 }
 
 // ──────────────────────────────────────────────────────────

@@ -13,8 +13,8 @@ errors, fly runner gotchas, worker-channel invariants).
 1. **Yourself.** Claim it, code it, transition it. The flow below.
 2. **Delegate to a Claude Agent SDK session.** Hit the "Run agent"
    button on the task page or `npm run task -- agent <T-...>`. The
-   orchestrator opens a worktree, runs the agent, pushes the branch,
-   opens a PR, and moves the task to `review`. Skip the rest of this
+   orchestrator opens a worktree and runs the agent. The agent commits,
+   pushes, opens or updates the PR, and records it on the task. Skip the rest of this
    doc unless you need to babysit a failed session.
 
 ## Picking up a task
@@ -65,13 +65,14 @@ Then pick a different task.
 ## Delegating to a Claude Agent session
 
 Each session runs in an isolated git worktree on the task's canonical
-branch (`claude/<taskid>`, pushed with upstream tracking at start and
+branch (`claude/<taskid>`, published by the agent with upstream tracking and
 remembered on the task): every run on a task continues the same branch,
 and only one agent may work a task at a time. When the work is done the
-orchestrator pushes the branch — committing anything the agent left
-uncommitted — opens or updates the PR, and transitions the task to
-`review` (or `blocked` on failure). Sessions run in parallel against
-different tasks.
+agent fetches and integrates remote changes, commits its intended work,
+pushes the branch, opens or updates the PR, and calls `set_task_pr` to record
+it. The lifecycle code does not commit leftovers, push, or create PRs.
+Report success only after delivery succeeds; report a failure or blocker if
+it cannot be completed. Sessions run in parallel against different tasks.
 
 ```bash
 npm run task -- agent T-20260511-0001                 # start + tail

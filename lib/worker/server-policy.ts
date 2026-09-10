@@ -20,10 +20,6 @@ export async function allowedServerTools(profile: string): Promise<string[]> {
     if (tool.name !== "memory__load") names.add(tool.name);
   }
 
-  // The worker driver invokes this after pushing an implementation branch. It
-  // is channel-authorized but intentionally never registered to the model.
-  names.add("worker__open_terminal_pr");
-
   const profiles = new Set(
     profile.split(",").map((value) => value.trim()).filter(Boolean),
   );

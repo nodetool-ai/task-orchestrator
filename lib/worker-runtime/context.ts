@@ -15,7 +15,6 @@
 // semantic-event wiring (plan section 14) and the tool routing (plan section 15)
 // swap the seam implementations without touching this driver's control flow.
 
-import { randomUUID } from "node:crypto";
 
 import type {
   MessageSnapshot,
@@ -36,7 +35,6 @@ import type {
 import type { WorkerSessionCommand } from "../worker-channel/worker-session";
 import { getBackend } from "../agent-backend";
 import { prepareWorkerCwd, workerBranchFor } from "./cwd";
-import { sh } from "../repo-checkout";
 import type { RunTurnArgs } from "../agent-backend/types";
 import type { RunEnvelope } from "../pi-event-mapper";
 import { config } from "../config";
@@ -1008,7 +1006,7 @@ async function driveSingleTurn(context: WorkerRunContext): Promise<void> {
 
   // The scheduler owns every durable turn after its checkpoint. Continue only
   // on a newly assigned run.input; park is the default and finalize explicitly
-  // permits implementation git/PR synchronization.
+  // permits reporting the final outcome.
   let finalize = !context.currentTurnId;
   for (;;) {
     if (queue.hasPending()) {
@@ -1035,93 +1033,18 @@ async function driveSingleTurn(context: WorkerRunContext): Promise<void> {
     return;
   }
 
-  let prUrl: string | null = null;
   const finalTurn = context.lastTurnResult ?? turn;
-  try {
-    prUrl = await syncTerminalImplementation(context, finalTurn.summary);
-  } catch (err) {
-    const fin = await session.emit("run.failed", {
-      error: `Terminal git/PR sync failed: ${err instanceof Error ? err.message : String(err)}`,
-      usage: finalTurn.usage,
-    });
-    await awaitCommit(session, fin.id);
-    inputLoop.stop();
-    return;
-  }
+  // Git and PR delivery belong to the agent. Finalization only reports the
+  // outcome; the control plane retains the PR recorded by the agent.
   // A durable run may have processed several scheduler manifests before the
   // controller grants finalization.  The initial `turn` is only the first
   // invocation; emit the latest model outcome instead.
   const fin = await session.emit("run.finished", {
     result: finalTurn.summary,
     usage: finalTurn.usage,
-    prUrl,
   });
   await awaitCommit(session, fin.id);
   inputLoop.stop();
-}
-
-/**
- * Finalize an implementation branch from inside the worker-owned checkout.
- *
- * Git cannot be delegated to the control plane because a detached Sprite's
- * path is not mounted there. Once the branch is safely pushed, the worker uses
- * the durable tool channel for GitHub/task work; that tool runs control-plane
- * side and returns the PR URL before we emit the terminal outcome.
- */
-async function syncTerminalImplementation(context: WorkerRunContext, summary: string | null): Promise<string | null> {
-  if (runGoal(context.run) !== "<implement>") return null;
-  const taskId = runField<string | null>(context.run, "taskId");
-  const branch = runField<string | null>(context.run, "branch") ?? context.checkpointMeta?.branch;
-  const baseBranch = runField<string | null>(context.run, "baseBranch")
-    ?? runField<string | null>(context.repository, "defaultBranch");
-  const cwd = context.cwd;
-  if (!taskId || !branch || !baseBranch || !cwd) return null;
-
-  // Salvage files an agent left uncommitted so a successful detached run never
-  // strands work in an ephemeral Sprite. Agent-created commits remain intact.
-  const dirty = (await sh(["git", "status", "--porcelain"], cwd)).trim();
-  if (dirty) {
-    await sh(["git", "add", "-A"], cwd);
-    await sh([
-      "git",
-      "-c", "user.name=Task Orchestrator",
-      "-c", "user.email=task-orchestrator@local",
-      "commit",
-      "-m",
-      `chore(${taskId}): commit remaining agent work from run #${context.run.id}`,
-    ], cwd);
-  }
-
-  let baseRef = baseBranch;
-  try {
-    await sh(["git", "rev-parse", "--verify", "--quiet", `origin/${baseBranch}`], cwd);
-    baseRef = `origin/${baseBranch}`;
-  } catch {
-    // The checked-out base is still a valid comparison for local remotes and
-    // newly initialized repositories that have not fetched a tracking ref.
-  }
-  const ahead = Number((await sh(["git", "rev-list", "--count", `${baseRef}..HEAD`], cwd)).trim() || "0");
-  if (!Number.isFinite(ahead) || ahead <= 0) return null;
-
-  await sh(["git", "push", "-u", "origin", branch], cwd);
-  if (!context.session.invokeTool) throw new Error("worker channel cannot request terminal PR creation");
-  const opened = await context.session.invokeTool(
-    "worker__open_terminal_pr",
-    { branch, baseBranch, summary: summary ?? undefined },
-    randomUUID()
-  );
-  if (opened.isError) {
-    const text = opened.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
-    throw new Error(text || "control plane rejected terminal PR creation");
-  }
-  const text = opened.content.find((block) => block.type === "text")?.text;
-  try {
-    const parsed = JSON.parse(text ?? "") as { prUrl?: unknown };
-    if (typeof parsed.prUrl === "string" && parsed.prUrl) return parsed.prUrl;
-  } catch {
-    // fall through to a protocol error below
-  }
-  throw new Error("control plane returned no terminal PR URL");
 }
 
 /** Emit run.cancelled and await its commit. Guards against a closed session (a

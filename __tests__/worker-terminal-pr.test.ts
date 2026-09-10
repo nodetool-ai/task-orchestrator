@@ -28,7 +28,7 @@ import { localDialEndpoint } from "../lib/worker-channel/dispatch-env";
 import { connectRun, disconnectRun } from "../lib/worker-channel/registry";
 import { startChannelForRun } from "../lib/run-dispatch";
 import type { RunStart } from "../lib/worker-channel/protocol";
-import { WORKER_TERMINAL_PR_TOOLS } from "../lib/worker-terminal-pr";
+import type { WorkerDriverSession } from "../lib/worker-runtime/context";
 
 async function command(args: string[], cwd?: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -78,7 +78,7 @@ afterEach(async () => {
 });
 
 describe("detached worker terminal PR lifecycle", () => {
-  it("pushes a release-based branch from the worker, opens a ready PR through the channel, and links the task", async () => {
+  it.each([true, false])("retains the agent-recorded PR without pushing again when origin advances (report URL: %s)", async (reportUrl) => {
     const root = await mkdtemp(join(tmpdir(), "taskorch-terminal-pr-"));
     const bare = join(root, "origin.git");
     const checkout = join(root, "checkout");
@@ -140,6 +140,29 @@ describe("detached worker terminal PR lifecycle", () => {
           await writeFile(join(args.cwd, "scheduled.txt"), "worker change\n");
           await command(["git", "add", "scheduled.txt"], args.cwd);
           await command(["git", "commit", "-m", "scheduled change"], args.cwd);
+          // Delivery happens inside the agent turn, including the durable PR
+          // and result tools. The worker only reports completion afterwards.
+          await command(["git", "push", "-u", "origin", branch], args.cwd);
+          const linked = await (server!.session as WorkerDriverSession).invokeTool!("set_task_pr", {
+            task_id: taskId, pr_url: "https://github.com/acme/scheduled/pull/17",
+          }, randomUUID());
+          expect(linked.isError).not.toBe(true);
+          const reported = await (server!.session as WorkerDriverSession).invokeTool!("report_result", {
+            status: "success", summary: "scheduled change complete",
+            ...(reportUrl ? { pr_url: "https://github.com/acme/scheduled/pull/17" } : {}),
+          }, randomUUID());
+          expect(reported.isError).not.toBe(true);
+
+          // Regression for run 224: another checkout advances the task branch
+          // while this run finishes. A lifecycle-owned push would be rejected.
+          const other = join(root, "other");
+          await command(["git", "clone", "-b", branch, bare, other]);
+          await command(["git", "config", "user.name", "other"], other);
+          await command(["git", "config", "user.email", "other@example.com"], other);
+          await writeFile(join(other, "remote.txt"), "concurrent work\n");
+          await command(["git", "add", "remote.txt"], other);
+          await command(["git", "commit", "-m", "remote advance"], other);
+          await command(["git", "push", "origin", branch], other);
           args.onEvent({ type: "result", is_error: false, result: "scheduled change complete", usage: {} });
           return { envelopes: [], summary: "scheduled change complete", resumeToken: "terminal-session", turns: 1, inputTokens: 0, outputTokens: 0, totalCostUsd: null };
         },
@@ -151,9 +174,8 @@ describe("detached worker terminal PR lifecycle", () => {
 
       expect((await command(["git", "rev-list", "--count", `release..${branch}`], checkout)).trim()).toBe("1");
       expect((await command(["git", "rev-parse", `refs/remotes/origin/${branch}`], checkout)).trim()).not.toBe("");
-      expect(github.create).toHaveBeenCalledWith(expect.objectContaining({
-        owner: "acme", repo: "scheduled", head: branch, base: "release",
-      }));
+      expect((await command(["git", "show", `${branch}:remote.txt`], bare)).trim()).toBe("concurrent work");
+      expect(github.create).not.toHaveBeenCalled();
       expect(github.get).not.toHaveBeenCalled();
       expect(github.graphql).not.toHaveBeenCalled();
       expect((await get(run.id))!).toMatchObject({ status: "completed", prUrl: "https://github.com/acme/scheduled/pull/17", baseBranch: "release" });
@@ -243,25 +265,62 @@ describe("detached worker terminal PR lifecycle", () => {
     }
   }, 30_000);
 
-  it("uses squash auto-merge only for the manual-run default", async () => {
-    github.create.mockResolvedValueOnce({ data: { html_url: "https://github.com/acme/scheduled/pull/18" } });
-    github.get.mockResolvedValueOnce({ data: { node_id: "PR_node" } });
-    const repository = await repo.createRepository({ name: `manual-pr-${randomUUID()}`, remote: "https://github.com/acme/scheduled.git" });
-    const task = await repo.createTask({ planId: null, repoId: repository.id, title: "Manual implementation" });
-    await repo.transitionTask(task.id, { state: "in_progress", assignee: "operator" });
-    const run = await create({ goal: "<implement>", taskId: task.id, repoId: repository.id, baseBranch: "main", defer: true });
-    const branch = (await repo.getTask(task.id))!.branch!;
-    await db.update(agentSessions).set({ branch }).where(eq(agentSessions.id, run.id));
+  it("leaves committed and dirty work untouched when the agent reports delivery blocked", async () => {
+    const root = await mkdtemp(join(tmpdir(), "taskorch-agent-delivery-"));
+    const bare = join(root, "origin.git");
+    const checkout = join(root, "checkout");
+    let runId: number | null = null;
+    let server: WorkerServer | null = null;
+    let agentHead = "";
+    try {
+      await command(["git", "init", "--bare", bare]);
+      await command(["git", "init", "-b", "main", checkout]);
+      await command(["git", "config", "user.name", "test"], checkout);
+      await command(["git", "config", "user.email", "test@example.com"], checkout);
+      await writeFile(join(checkout, "README.md"), "base\n");
+      await command(["git", "add", "."], checkout);
+      await command(["git", "commit", "-m", "base"], checkout);
+      await command(["git", "remote", "add", "origin", bare], checkout);
+      await command(["git", "push", "origin", "main"], checkout);
+      const repository = await repo.createRepository({
+        name: `agent-delivery-${randomUUID()}`, localPath: checkout,
+        remote: "https://github.com/acme/scheduled.git",
+      });
+      const task = await repo.createTask({ planId: null, repoId: repository.id, title: "Agent delivery" });
+      await repo.transitionTask(task.id, { state: "in_progress", assignee: "test" });
+      const run = await create({ goal: "<implement>", taskId: task.id, repoId: repository.id, defer: true });
+      runId = run.id;
+      const branch = (await repo.getTask(task.id))!.branch!;
+      await command(["git", "checkout", "-b", branch], checkout);
+      await db.update(agentSessions).set({ worktreePath: checkout, branch }).where(eq(agentSessions.id, run.id));
+      vi.spyOn(backend, "getBackend").mockResolvedValue({
+        id: "fake", listProviders: () => [],
+        async runTurn() {
+          await writeFile(join(checkout, "committed.txt"), "agent commit\n");
+          await command(["git", "add", "committed.txt"], checkout);
+          await command(["git", "commit", "-m", "agent work"], checkout);
+          agentHead = (await command(["git", "rev-parse", "HEAD"], checkout)).trim();
+          await writeFile(join(checkout, "unfinished.txt"), "keep uncommitted\n");
+          const reported = await (server!.session as WorkerDriverSession).invokeTool!("report_result", {
+            status: "blocked", summary: "Cannot reconcile remote changes safely",
+          }, randomUUID());
+          expect(reported.isError).not.toBe(true);
+          return { envelopes: [], summary: "delivery blocked", resumeToken: "blocked-session", turns: 1, inputTokens: 0, outputTokens: 0, totalCostUsd: null };
+        },
+      } as any);
+      server = await boot(run.id);
+      const start = await server.session.waitForStart!() as RunStart;
+      await driveWorkerRun({ start, session: server.session });
 
-    const response = await WORKER_TERMINAL_PR_TOOLS[0]!.execute(
-      { branch, baseBranch: "main", summary: "manual work" },
-      { author: "claude-agent", runId: run.id }
-    );
-
-    expect(response.isError).not.toBe(true);
-    expect(github.graphql).toHaveBeenCalledWith(
-      expect.stringContaining("PullRequestMergeMethod"),
-      { pullRequestId: "PR_node", mergeMethod: "SQUASH" }
-    );
-  });
+      expect((await get(run.id))!).toMatchObject({ status: "failed", prUrl: null });
+      expect((await command(["git", "rev-parse", "HEAD"], checkout)).trim()).toBe(agentHead);
+      expect((await command(["git", "status", "--porcelain"], checkout)).trim()).toBe("?? unfinished.txt");
+      await expect(command(["git", "show-ref", "--verify", `refs/heads/${branch}`], bare)).rejects.toThrow();
+      expect(github.create).not.toHaveBeenCalled();
+    } finally {
+      if (runId != null) await disconnectRun(runId).catch(() => undefined);
+      if (server) await server.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
