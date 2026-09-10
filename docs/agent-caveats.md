@@ -80,6 +80,13 @@ already cost real time once.
 
 ## Codex on Sprite
 
+- Sprite's base-image Node version floats. Run 220 received Node 24/npm 12
+  despite the repository requiring Node 22, and `npm install` failed with
+  `EALLOWREMOTE` for the SheetJS URL dependency (npm 12 defaults remote
+  tarball fetching to disabled). Bootstrap now installs Node 22.22.3/npm
+  10.9.8 and sets Sprite's NVM default; warm baselines install the exact Node
+  release in their manifest. Verify in a fresh `bash -lc` invocation: an
+  exec-local `nvm use` does not change subsequent services or shells.
 - MCP initialization and MCP execution need separate checks. A required server
   can initialize successfully but reject every call: `approvalPolicy: "never"`
   does not approve MCP tools. The run's bridge needs

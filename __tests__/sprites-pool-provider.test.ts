@@ -10,6 +10,7 @@ import { workerBundleId } from "@/lib/worker-bundle";
 import { createDatabaseSpritePoolStore, requestSpritePoolMaintenance, requestSpritePoolRefill, SpritePoolManager } from "@/lib/runner/sprites-pool";
 import { spritesPoolStore } from "@/lib/runner/sprites-pool-store";
 import type { SpritesClient } from "@/lib/runner/sprites-client";
+import { spriteNodeSetupCommand } from "@/lib/runner/sprites-bootstrap";
 
 const manifest = {
   schemaVersion: 1, workerBundleSha: "a".repeat(40), nodeVersion: "v22.0.0", codexVersion: "0.153.4",
@@ -53,6 +54,7 @@ describe("Sprite pool provider integration", () => {
     const c = client();
     const refill = requestSpritePoolRefill(c, { baseline: manifest, workerSha: manifest.workerBundleSha, bundleUrl: "https://example/worker.tgz" });
     const result = await refill!({ reservation: { id: "r", fingerprint: "fp", leaseToken: "l", spriteName: "pool-fp" } });
+    expect(vi.mocked(c.exec).mock.calls[1][1].cmd).toBe(spriteNodeSetupCommand(manifest.nodeVersion));
     expect(result).toEqual({ spriteName: "pool-fp", checkpointId: "checkpoint-real" });
     expect(c.checkpoint).toHaveBeenCalledWith("pool-fp", expect.stringContaining("baseline"));
     const commands = (c.exec as ReturnType<typeof vi.fn>).mock.invocationCallOrder;

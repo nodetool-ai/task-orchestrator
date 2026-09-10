@@ -18,6 +18,29 @@ import type { SpritesClient } from "./sprites-client";
 export const SPRITE_CODEX_VERSION = "0.153.4";
 export const SPRITE_CODEX_BINARY = "/home/user/worker/.codex/bin/codex";
 const SPRITE_CODEX_ROOT = "/home/user/worker/.codex";
+// Match the repository's Node 22 toolchain. Sprite's floating default moved to
+// Node 24/npm 12, whose remote-tarball policy rejects the SheetJS dependency.
+export const SPRITE_NODE_VERSION = "v22.22.3";
+
+export function spriteBootstrapComment(workerSha: string, nodeVersion = SPRITE_NODE_VERSION): string {
+  return `bootstrap ${workerSha} node ${nodeVersion}`;
+}
+
+export function spriteNodeSetupCommand(version = SPRITE_NODE_VERSION): string {
+  if (!/^v\d+\.\d+\.\d+$/.test(version)) throw new Error("Sprite Node version must be an exact vX.Y.Z release");
+  // Sprite's node/npm/npx shims activate this NVM default on every invocation,
+  // including fresh execs and agent login shells. An exec-local `nvm use` alone
+  // would leave later commands on the base image's Node/npm versions.
+  return `bash -c ${shellQuote([
+    "set -e",
+    'export NVM_DIR="/.sprite/languages/node/nvm"',
+    '. "$NVM_DIR/nvm.sh" --no-use',
+    `nvm install ${shellQuote(version)}`,
+    `nvm alias default ${shellQuote(version)}`,
+    `test "$(node --version)" = ${shellQuote(version)}`,
+    "npm --version",
+  ].join("\n"))}`;
+}
 
 export class SpritesBootstrapError extends Error {
   constructor(
@@ -35,6 +58,8 @@ export interface BootstrapOptions {
   bundleUrl: string;
   /** Operator-provided executable already present in the Sprite. */
   codexBinary?: string;
+  /** Exact runtime for a warm baseline; cold Sprites default to Node 22. */
+  nodeVersion?: string;
   /** Leave sealing to a baseline manager when false. */
   checkpoint?: boolean;
   onStep?: (name: string, status: "running" | "success" | "error", durationMs: number) => void;
@@ -65,7 +90,9 @@ export async function bootstrapSprite(
   const codexBinary = opts.codexBinary || SPRITE_CODEX_BINARY;
   const installCodex = !opts.codexBinary;
   const bundleUrl = expandBundleUrl(bundleUrlTemplate, workerSha);
-  const expectedComment = `bootstrap ${workerSha}`;
+  const nodeVersion = opts.nodeVersion ?? SPRITE_NODE_VERSION;
+  const nodeSetupCommand = spriteNodeSetupCommand(nodeVersion);
+  const expectedComment = spriteBootstrapComment(workerSha, nodeVersion);
 
   // Idempotency: if a checkpoint for this SHA already exists, skip bootstrap.
   // This covers the 409 "sprite already exists" path where a previous create()
@@ -74,6 +101,7 @@ export async function bootstrapSprite(
     const checkpoints = await client.listCheckpoints(spriteName);
     if (checkpoints.some((cp) => cp.comment === expectedComment)) {
       onStep?.("fetch-worker", "success", 0);
+      onStep?.("install-node", "success", 0);
       if (installCodex) onStep?.("install-codex", "success", 0);
       onStep?.("verify-worker", "success", 0);
       onStep?.("checkpoint", "success", 0);
@@ -99,7 +127,20 @@ export async function bootstrapSprite(
     onStep?.("fetch-worker", "success", durationMs);
   }
 
-  // Step 2: install-codex. A custom binary is useful for operators running a
+  // Select the runtime before any npm invocation or service is started.
+  {
+    const start = Date.now();
+    onStep?.("install-node", "running", 0);
+    const result = await client.exec(spriteName, { cmd: nodeSetupCommand, timeoutMs: 10 * 60_000 });
+    const durationMs = Date.now() - start;
+    if (result.exitCode !== 0) {
+      onStep?.("install-node", "error", durationMs);
+      throw new SpritesBootstrapError("install-node", `install-node failed with exit ${result.exitCode}: ${tailKb(result.stderr || result.stdout || "")}`);
+    }
+    onStep?.("install-node", "success", durationMs);
+  }
+
+  // install-codex. A custom binary is useful for operators running a
   // pre-provisioned image and must not be overwritten by bootstrap.
   if (installCodex) {
     const start = Date.now();

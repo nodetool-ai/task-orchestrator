@@ -1,3 +1,4 @@
+import { SPRITE_NODE_VERSION } from "../lib/runner/sprites-bootstrap";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 
@@ -465,7 +466,7 @@ describe("SpritesRunnerProvider.resume", () => {
       })),
       putService: putSpy,
       stopService: stopSpy,
-      listCheckpoints: vi.fn(async () => [{ id: "cp", comment: `bootstrap ${await workerBundleId()}` }]),
+      listCheckpoints: vi.fn(async () => [{ id: "cp", comment: `bootstrap ${await workerBundleId()} node ${SPRITE_NODE_VERSION}` }]),
     });
     const provider = new SpritesRunnerProvider(client);
     const run = await create({ goal: "<implement>", defer: true });
@@ -506,7 +507,7 @@ describe("SpritesRunnerProvider.resume", () => {
         state: { status: "running", pid: 7, startedAt: "2026-01-01T00:00:00Z" },
       })),
       putService: putSpy,
-      listCheckpoints: vi.fn(async () => [{ id: "cp", comment: `bootstrap ${await workerBundleId()}` }]),
+      listCheckpoints: vi.fn(async () => [{ id: "cp", comment: `bootstrap ${await workerBundleId()} node ${SPRITE_NODE_VERSION}` }]),
     });
     const provider = new SpritesRunnerProvider(client);
     await db.insert(runnerInstances).values({ runId: run.id, provider: "sprites", spriteName, state: "running", channelInstanceId: instanceId });
@@ -539,7 +540,7 @@ describe("SpritesRunnerProvider.resume", () => {
 
     await provider.resume(run.id);
 
-    expect(checkpointSpy).toHaveBeenCalledWith(spriteName, `bootstrap ${await workerBundleId()}`);
+    expect(checkpointSpy).toHaveBeenCalledWith(spriteName, `bootstrap ${await workerBundleId()} node ${SPRITE_NODE_VERSION}`);
     expect(putSpy).toHaveBeenCalledTimes(1);
   });
 

@@ -18,7 +18,7 @@ values must not exceed the pool size. Start with one generic baseline:
     "target": 2,
     "manifest": {
       "schemaVersion": 1,
-      "nodeVersion": "v22.14.0",
+      "nodeVersion": "v22.22.3",
       "codexVersion": "0.153.4",
       "platform": "linux",
       "architecture": "x64",
@@ -28,8 +28,9 @@ values must not exceed the pool size. Start with one generic baseline:
 ]
 ```
 
-The Node version above is an example: use the exact version on the Sprite base
-image. Architecture uses Node's `x64`/`arm64` names. Codex uses its numeric
+Bootstrap installs the exact Node version in the manifest using Sprite’s NVM
+and makes it the default for services and new shells. The deployment pins
+Node 22.22.3 (bundled npm 10.9.8), matching the repository’s Node 22 requirement. Architecture uses Node's `x64`/`arm64` names. Codex uses its numeric
 version, without the `codex-cli` prefix. The v1 system recipe checks the base
 image's git, curl, tar and npm; custom system package installation is not part
 of this recipe. Worker SHA is filled from the shipped bundle. An explicit
@@ -63,7 +64,7 @@ For a frequent repository, add a spec with `repositoryId`, a nonempty
     { "path": "package.json", "sha256": "<64-character SHA-256>" }
   ],
   "packageManager": "npm",
-  "packageManagerVersion": "10.9.2",
+  "packageManagerVersion": "10.9.8",
   "installOptions": ["--no-audit", "--no-fund"]
 }
 ```

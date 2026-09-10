@@ -158,20 +158,21 @@ It **deliberately omits**:
 
 ## Bootstrap
 
-The standard base image (Ubuntu + Node 22, Python 3.13, Claude Code) has **no
+The standard base image (Ubuntu with language runtimes and Claude Code) has **no
 bring-your-own-Docker-image**. The worker bundle is installed into the sprite at runtime
 via `lib/runner/sprites-bootstrap.ts`.
 
 **What is installed and where:**
 - The prebuilt worker bundle is fetched from `TASK_ORCH_SPRITES_WORKER_BUNDLE_URL` (default: `${TASK_ORCH_PUBLIC_URL}/api/worker-bundle`) and extracted to `/home/user/worker`. The tarball is produced by `npm run build:worker:standalone` (`scripts/build-worker-standalone.mjs`) and contains `dist/run-worker.js` plus its `node_modules`.
+- Bootstrap installs Node 22.22.3 with its bundled npm 10.9.8 through Sprite’s NVM and sets the persistent default. Warm baselines use their manifest’s exact Node version. This also selects the runtime in agent login shells.
 - The worker service is then defined with `dir: /home/user/worker` and `cmd: node dist/run-worker.js <runId>`.
-- No `git clone` and no `npm ci` are done in the sprite during bootstrap; the worker does its own blobless checkout per turn via `containerCheckoutAt`. This keeps bootstrap to a single `curl | tar` plus a `test -f` and a checkpoint.
+- No `git clone` and no `npm ci` are done in the sprite during bootstrap; the worker does its own blobless checkout per turn via `containerCheckoutAt`. Bootstrap installs and verifies the worker, Node runtime, and pinned Codex CLI before checkpointing.
 
 **How the bundle is served (default):** the control plane image ships
 `dist/run-worker.standalone.js` (Dockerfile.server). The unauthenticated route
 `GET /api/worker-bundle` packs it as `dist/run-worker.js` on the fly. With
 `TASK_ORCH_PUBLIC_URL` set, no bundle URL config is needed. The bootstrap
-checkpoint is keyed by the bundle id (sha1 of the shipped file), so a deploy
+checkpoint is keyed by the bundle id (sha1 of the shipped file) and Node version, so a deploy
 with a new bundle re-bootstraps and a deploy with the same bundle skips. No
 build arg or git sha is involved.
 

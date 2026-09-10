@@ -14,7 +14,7 @@ import { nestedDispatchMode } from "./provider";
 import { recordRunnerEvent, timeRunnerPhase } from "./telemetry";
 import type { CreateRunnerInput, WorkerGenerationRef, RunnerObservation, RunnerProvider, RunnerRef, RunnerState } from "./provider";
 import { SpritesApiError, makeSpritesClient, type NetworkPolicy, type SpritesClient, type Sprite } from "./sprites-client";
-import { bootstrapSprite, SPRITE_CODEX_BINARY } from "./sprites-bootstrap";
+import { bootstrapSprite, spriteBootstrapComment, SPRITE_CODEX_BINARY } from "./sprites-bootstrap";
 import { workerBundleId } from "../worker-bundle";
 import { newChannelInstanceId } from "../worker-channel/credential";
 import { spritesDialEndpoint, spritesListenEndpoint, workerChannelDispatchEnv } from "../worker-channel/dispatch-env";
@@ -787,7 +787,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
       if (!poolEntry && bundleUrl && config.sprites.token) {
         const workerSha = await workerBundleId();
         const checkpoints = await this.spritesClient.listCheckpoints(spriteName).catch(() => []);
-        staleBundle = !checkpoints.some((cp) => cp.comment === `bootstrap ${workerSha}`);
+        staleBundle = !checkpoints.some((cp) => cp.comment === spriteBootstrapComment(workerSha));
         if (staleBundle) {
           console.warn(`[SpritesRunnerProvider] worker bundle on ${spriteName} predates ${workerSha}; re-bootstrapping`);
           await this.stopServiceAndConfirm(spriteName, serviceName, serviceName !== "worker");

@@ -132,7 +132,7 @@ export async function prepareSpriteBaseline(client: SpritesClient, spriteName: s
   if (!client.listServices) throw new Error("Sprite baselines require service inspection");
   if ((await client.listServices(spriteName)).length) throw new Error("Baseline Sprite must have no service definitions");
   await logSpritePhase("baseline_bootstrap", { spriteName, fingerprint: baselineFingerprint(opts.manifest) }, () =>
-    bootstrapSprite(client, spriteName, { workerSha: opts.manifest.workerBundleSha, bundleUrl: opts.bundleUrl, codexBinary: opts.codexBinary, checkpoint: false }));
+    bootstrapSprite(client, spriteName, { workerSha: opts.manifest.workerBundleSha, bundleUrl: opts.bundleUrl, nodeVersion: opts.manifest.nodeVersion, codexBinary: opts.codexBinary, checkpoint: false }));
   await execChecked(client, spriteName, `mkdir -p ${SPRITE_BASELINE_DIR} ${SPRITE_NPM_CACHE_PATH}`, "baseline directory creation");
   const dependency = opts.manifest.dependency;
   if (dependency) {
