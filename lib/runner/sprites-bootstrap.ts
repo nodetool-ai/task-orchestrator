@@ -52,6 +52,50 @@ export class SpritesBootstrapError extends Error {
   }
 }
 
+export function spriteSwapSetupCommand(swapMb: number): string {
+  if (!Number.isSafeInteger(swapMb) || swapMb <= 0) throw new Error("Sprite swap size must be a positive integer MiB value");
+  // Sprite's persistent root is overlayfs, which rejects swap files even after
+  // mkswap. /tmp is a dedicated ext4 volume and supports swapon. Use dd rather
+  // than fallocate so every block is materialized (validated on a live Sprite).
+  const swapFile = "/tmp/task-orchestrator.swap";
+  return [
+    "set -eu",
+    `swap_file=${shellQuote(swapFile)}`,
+    `swap_mb=${swapMb}`,
+    'expected_bytes=$((swap_mb * 1024 * 1024))',
+    'actual_bytes=$(stat -c %s "$swap_file" 2>/dev/null || echo 0)',
+    'if [ "$actual_bytes" -ne "$expected_bytes" ]; then',
+    '  sudo -n swapoff "$swap_file" 2>/dev/null || true',
+    '  sudo -n rm -f "$swap_file"',
+    '  sudo -n dd if=/dev/zero of="$swap_file" bs=1M count="$swap_mb" conv=fsync status=none',
+    '  sudo -n chmod 600 "$swap_file"',
+    '  sudo -n mkswap "$swap_file" >/dev/null',
+    "fi",
+    'if ! awk -v file="$swap_file" \'$1 == file { found=1 } END { exit(found ? 0 : 1) }\' /proc/swaps; then',
+    '  sudo -n swapon "$swap_file"',
+    "fi",
+    'awk -v file="$swap_file" \'$1 == file { found=1 } END { exit(found ? 0 : 1) }\' /proc/swaps',
+  ].join("\n");
+}
+
+/** Create or reactivate the configured disk-backed swap. This runs after any
+ * checkpoint restore and again before resumed services, because swap activation
+ * is kernel state and does not survive a VM reboot even though the file does. */
+export async function configureSpriteSwap(
+  client: SpritesClient,
+  spriteName: string,
+  swapMb: number,
+): Promise<void> {
+  if (swapMb <= 0) return;
+  const result = await client.exec(spriteName, { cmd: spriteSwapSetupCommand(swapMb), timeoutMs: 10 * 60_000 });
+  if (result.exitCode !== 0) {
+    throw new SpritesBootstrapError(
+      "configure-swap",
+      `configure-swap failed with exit ${result.exitCode}: ${tailKb(result.stderr || result.stdout || "")}`,
+    );
+  }
+}
+
 export interface BootstrapOptions {
   /** Bundle identity (sha1 of the shipped bundle); keys the checkpoint. */
   workerSha: string;

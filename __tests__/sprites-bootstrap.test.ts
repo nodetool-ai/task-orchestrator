@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { bootstrapSprite, SPRITE_NODE_VERSION, spriteNodeSetupCommand, SpritesBootstrapError } from "../lib/runner/sprites-bootstrap";
+import {
+  bootstrapSprite,
+  configureSpriteSwap,
+  SPRITE_NODE_VERSION,
+  spriteNodeSetupCommand,
+  spriteSwapSetupCommand,
+  SpritesBootstrapError,
+} from "../lib/runner/sprites-bootstrap";
 import type { SpritesClient } from "../lib/runner/sprites-client";
 
 function fakeClient(overrides: Partial<SpritesClient> = {}): SpritesClient {
@@ -30,6 +37,31 @@ function fakeClient(overrides: Partial<SpritesClient> = {}): SpritesClient {
 }
 
 describe("bootstrapSprite", () => {
+  it("creates and verifies disk-backed swap idempotently", async () => {
+    const exec = vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" }));
+    const client = fakeClient({ exec });
+
+    await configureSpriteSwap(client, "fixture", 4096);
+
+    expect(exec).toHaveBeenCalledWith("fixture", {
+      cmd: spriteSwapSetupCommand(4096),
+      timeoutMs: 600_000,
+    });
+    const command = (exec.mock.calls[0] as unknown as [string, { cmd: string }])[1].cmd;
+    expect(command).toContain('dd if=/dev/zero of="$swap_file"');
+    expect(command).toContain("mkswap");
+    expect(command).toContain("swapon");
+    expect(() => spriteSwapSetupCommand(0)).toThrow("positive integer");
+  });
+
+  it("surfaces swap activation failures", async () => {
+    const client = fakeClient({ exec: vi.fn(async () => ({ exitCode: 1, stdout: "", stderr: "swapon: denied" })) });
+    await expect(configureSpriteSwap(client, "fixture", 4096)).rejects.toMatchObject({
+      step: "configure-swap",
+      message: expect.stringContaining("swapon: denied"),
+    });
+  });
+
   it("selects Node before npm and invalidates checkpoints from the floating runtime", async () => {
     const client = fakeClient({ listCheckpoints: vi.fn(async () => [{ id: "old", comment: `bootstrap ${"a".repeat(40)}` }]) });
     await bootstrapSprite(client, "fixture", { workerSha: "a".repeat(40), bundleUrl: "https://example.com/worker.tgz" });

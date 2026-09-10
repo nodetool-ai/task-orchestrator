@@ -44,8 +44,10 @@ token (`SPRITES_TOKEN`), a 30s request timeout, and errors surfaced as
 
 Liveness has no clock. `inspect(handle)` reads the sprite and its `worker`
 service and answers `alive` (with incarnation `started_at#pid`), `dead`
-(with the service's `error`), or `unknown`. At channel hello the controller
-records the incarnation only when it matches the PID the worker reports;
+(with the service's `error`), or `unknown`. A missing service stays unknown
+during bootstrap, but becomes `dead/runner-gone` when the generation has a
+stored incarnation proving it previously ran. At channel hello the controller
+records the provider-observed incarnation for the authenticated service handle;
 `resolveLiveness(runId)` later compares the observed incarnation with the
 stored one — a different one means the process was replaced. `unknown` never
 authorises a destructive action. See `docs/plans/liveness-without-clocks.md`.
@@ -218,6 +220,7 @@ service starts.
 | `TASK_ORCH_MAX_SPRITES` | `0` (gate off) | Max concurrent sprites |
 | `TASK_ORCH_SPRITE_POOL_SIZE` | `0` (off) | Warm-pool target (phase 5) |
 | `TASK_ORCH_SPRITE_NET_ALLOW` | — | Extra egress domains (phase 6) |
+| `TASK_ORCH_SPRITES_SWAP_MB` | `0` (off) | Disk-backed swap on Sprite's ext4 `/tmp` volume, created and activated before worker start; production uses `4096`. Sprite RAM itself is platform-managed and cannot be resized by the provider. |
 | `TASK_ORCH_SPRITES_WORKER_BUNDLE_URL` | `${TASK_ORCH_PUBLIC_URL}/api/worker-bundle` | Worker bundle URL; optional `{sha}` expands to the bundle id. |
 | `TASK_ORCH_RUNNER_TERMINAL_MS` | `24h` | Retention before destroy |
 | `TASK_ORCH_SPRITES_CLAUDE_BINARY` | `/home/sprite/.local/bin/claude` | Claude Code executable inside the sprite; passed to the worker as `TASK_ORCH_CLAUDE_BINARY` (the bundle has no native binary). |

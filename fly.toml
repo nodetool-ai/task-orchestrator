@@ -28,6 +28,9 @@ primary_region = "ams"
   # Existing retained runners plus three warm entries and one foreground slot.
   TASK_ORCH_MAX_SPRITES = "26"
   TASK_ORCH_SPRITE_POOL_SIZE = "3"
+  # Sprites manage RAM sizing automatically; add disk-backed headroom for
+  # memory-heavy typechecks/builds and reactivate it before every worker start.
+  TASK_ORCH_SPRITES_SWAP_MB = "4096"
   TASK_ORCH_LOG_FORMAT = "json"
   TASK_ORCH_LOG_LEVEL = "debug"
   TASK_ORCH_SPRITE_POOL_BASELINES = '[{"target":3,"manifest":{"schemaVersion":1,"nodeVersion":"v22.22.3","codexVersion":"0.153.4","platform":"linux","architecture":"x64","systemToolsVersion":"sprite-base-v1"}}]'

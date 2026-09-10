@@ -133,6 +133,7 @@ export async function resolveLiveness(runId: number): Promise<Liveness> {
         instanceId: row.channelInstanceId ?? "legacy",
         providerHandle: handle,
         ...(row.providerServiceName ? { providerServiceName: row.providerServiceName } : {}),
+        ...(row.workerIncarnation ? { storedIncarnation: row.workerIncarnation } : {}),
       });
     } else {
       observed = await provider.inspect(handle);
@@ -145,7 +146,8 @@ export async function resolveLiveness(runId: number): Promise<Liveness> {
   if (observed.status === "unknown") return { verdict: "unknown" };
   if (observed.status === "dead") {
     const detail = observed.detail;
-    const runnerGone = /box\s+is\s+gone|sprite.*gone|not found|404|does not exist/i.test(detail ?? "");
+    const runnerGone = observed.reason === "runner-gone"
+      || /box\s+is\s+gone|sprite.*gone|not found|404|does not exist/i.test(detail ?? "");
     return { verdict: "dead", reason: runnerGone ? "runner-gone" : "exited", ...(detail ? { detail } : {}) };
   }
   // Boot window: the worker exists but has not completed channel.hello, so no

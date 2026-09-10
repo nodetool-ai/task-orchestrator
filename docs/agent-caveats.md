@@ -142,5 +142,9 @@ already cost real time once.
   `resolveLiveness(runId)`: the provider's `inspect()` plus an incarnation
   compare. `unknown` (API down, no credentials in this process) means
   "leave it alone", never "reap".
+- A missing Sprite service is the exception once `worker_incarnation` exists:
+  that durable value proves the exact generation previously ran, so a service
+  404 is `dead/runner-gone`, not another bootstrap window. Without an
+  incarnation the same 404 remains `unknown` (the run-184 guard).
 - `agent_runs.pending_since` and `claimed_at` are bookkeeping (defer bound,
   claim age), not liveness inputs.

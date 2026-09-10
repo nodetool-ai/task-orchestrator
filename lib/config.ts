@@ -525,6 +525,12 @@ export const config = Object.freeze({
     get netAllow(): string | undefined {
       return strEnv("TASK_ORCH_SPRITE_NET_ALLOW");
     },
+    /** Disk-backed swap activated before a worker service starts. Sprites
+     * autoscale RAM and do not expose a machine-size control, so this is the
+     * operator-controlled pressure buffer for memory-heavy builds. */
+    get swapMb(): number {
+      return Math.max(0, intEnv("TASK_ORCH_SPRITES_SWAP_MB", 0));
+    },
     get terminalMs(): number {
       return intEnv("TASK_ORCH_RUNNER_TERMINAL_MS", 24 * 60 * 60 * 1000);
     },

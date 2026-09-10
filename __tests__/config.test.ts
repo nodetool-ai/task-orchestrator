@@ -232,3 +232,14 @@ describe("snapshot() — frozen plain-value dump", () => {
     expect(Object.isFrozen(snap.derived)).toBe(true);
   });
 });
+
+describe("sprites.swapMb", () => {
+  it("is opt-in and rejects negative effective sizes", () => {
+    set("TASK_ORCH_SPRITES_SWAP_MB", undefined);
+    expect(config.sprites.swapMb).toBe(0);
+    set("TASK_ORCH_SPRITES_SWAP_MB", "4096");
+    expect(config.sprites.swapMb).toBe(4096);
+    set("TASK_ORCH_SPRITES_SWAP_MB", "-1");
+    expect(config.sprites.swapMb).toBe(0);
+  });
+});

@@ -14,7 +14,7 @@ import { nestedDispatchMode } from "./provider";
 import { recordRunnerEvent, timeRunnerPhase } from "./telemetry";
 import type { CreateRunnerInput, WorkerGenerationRef, RunnerObservation, RunnerProvider, RunnerRef, RunnerState } from "./provider";
 import { SpritesApiError, makeSpritesClient, type NetworkPolicy, type SpritesClient, type Sprite } from "./sprites-client";
-import { bootstrapSprite, spriteBootstrapComment, SPRITE_CODEX_BINARY } from "./sprites-bootstrap";
+import { bootstrapSprite, configureSpriteSwap, spriteBootstrapComment, SPRITE_CODEX_BINARY } from "./sprites-bootstrap";
 import { workerBundleId } from "../worker-bundle";
 import { newChannelInstanceId } from "../worker-channel/credential";
 import { spritesDialEndpoint, spritesListenEndpoint, workerChannelDispatchEnv } from "../worker-channel/dispatch-env";
@@ -407,10 +407,11 @@ export class SpritesRunnerProvider implements RunnerProvider {
     return this.inspectService(
       ref.providerHandle,
       ref.providerServiceName ?? (ref.generation === 1 ? "worker" : workerServiceName(ref.generation)),
+      ref.storedIncarnation,
     );
   }
 
-  private async inspectService(handle: string, serviceName: string): Promise<RunnerObservation> {
+  private async inspectService(handle: string, serviceName: string, storedIncarnation?: string): Promise<RunnerObservation> {
     try {
       const sprite = await this.spritesClient.getSprite(handle);
       if (!sprite) return { status: "dead", detail: "sprite gone" };
@@ -418,12 +419,13 @@ export class SpritesRunnerProvider implements RunnerProvider {
       if (runnerState === "gone") return { status: "dead", detail: `sprite ${sprite.status}` };
       const service = await this.spritesClient.getService(handle, serviceName);
       const s = service?.state;
-      // Only two things prove a worker dead: the sprite is gone (above) or the
-      // service itself reports `failed`. Everything else — no service yet,
-      // defined-but-not-started, a hibernating (cold) sprite, restart backoff —
-      // is a boot or freeze window in which the process identity is not settled.
-      // Run 184 was reaped mid-bootstrap by calling one of those "dead".
-      if (!service) return { status: "unknown" };
+      // A missing service is unknown only until this generation has been seen
+      // alive. The stored incarnation is durable proof that bootstrap ended;
+      // after that point a 404 means the supervised process disappeared. This
+      // preserves run 184's boot window while allowing run 226 to self-heal.
+      if (!service) return storedIncarnation
+        ? { status: "dead", reason: "runner-gone", detail: `service ${serviceName} disappeared after incarnation ${storedIncarnation}` }
+        : { status: "unknown" };
       if (s!.status === "failed") return { status: "dead", detail: s!.error ?? "failed" };
       if (s!.nextRestartAt) return { status: "unknown" };
       if (s!.status !== "running" || s!.pid == null || !s!.startedAt) return { status: "unknown" };
@@ -588,6 +590,12 @@ export class SpritesRunnerProvider implements RunnerProvider {
         { provider: "sprites", fields: { runId: input.runId, spriteName, workerSha } },
       );
       }
+
+      await timeRunnerPhase(
+        "sprites_swap_configure",
+        () => configureSpriteSwap(this.spritesClient, spriteName, config.sprites.swapMb),
+        { provider: "sprites", fields: { runId: input.runId, spriteName, swapMb: config.sprites.swapMb } },
+      );
 
       // Define and start the worker service. The base image is standard; the
       // service definition is the sprite's "entrypoint".
@@ -763,6 +771,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
     // Re-define the service with the current env whenever the stored credential
     // no longer matches; that also refreshes provider keys and model settings.
     try {
+      await configureSpriteSwap(this.spritesClient, spriteName, config.sprites.swapMb);
       const desiredEnv = { ...await buildSpritesWorkerEnv(runId, {
         channelInstanceId,
         channelListenEndpoint: spritesListenEndpoint(),
@@ -995,6 +1004,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
                 instanceId: row.channelInstanceId ?? "legacy",
                 providerHandle: spriteName,
                 ...(row.providerServiceName ? { providerServiceName: row.providerServiceName } : {}),
+                ...(row.workerIncarnation ? { storedIncarnation: row.workerIncarnation } : {}),
               })
             : await this.inspect(spriteName);
           if (observed.status !== "dead") return;
@@ -1041,6 +1051,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
               instanceId: row.channelInstanceId ?? "legacy",
               providerHandle: spriteName,
               ...(row.providerServiceName ? { providerServiceName: row.providerServiceName } : {}),
+              ...(row.workerIncarnation ? { storedIncarnation: row.workerIncarnation } : {}),
             })
           : await this.inspect(spriteName);
         await this.applyLifecycle(row, runnerState, runStatus, now, observed.status === "dead" ? false : true);

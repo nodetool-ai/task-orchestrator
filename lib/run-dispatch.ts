@@ -1333,6 +1333,7 @@ export async function observeWorkerIncarnations(): Promise<void> {
           instanceId: row.channelInstanceId ?? "legacy",
           providerHandle: handle,
           ...(row.providerServiceName ? { providerServiceName: row.providerServiceName } : {}),
+          ...(row.workerIncarnation ? { storedIncarnation: row.workerIncarnation } : {}),
         });
       } else {
         observed = await provider.inspect(handle);

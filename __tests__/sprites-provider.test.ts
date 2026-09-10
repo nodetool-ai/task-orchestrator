@@ -161,6 +161,25 @@ describe("SpritesRunnerProvider.inspect", () => {
     expect(getService).toHaveBeenCalledWith("to-run-42", "worker-g17");
   });
 
+  it("treats a missing service as dead only after that generation was observed alive", async () => {
+    const provider = new SpritesRunnerProvider(fakeSpritesClient({ getService: vi.fn(async () => null) }));
+    const ref = {
+      runId: 42,
+      generation: 17,
+      instanceId: "wi_0123456789abcdef0123456789abcdef",
+      providerHandle: "to-run-42",
+      providerServiceName: "worker-g17",
+    };
+
+    await expect(provider.inspectGeneration(ref)).resolves.toEqual({ status: "unknown" });
+    await expect(provider.inspectGeneration({ ...ref, storedIncarnation: "2026-09-08T10:00:00Z#17" }))
+      .resolves.toEqual({
+        status: "dead",
+        reason: "runner-gone",
+        detail: "service worker-g17 disappeared after incarnation 2026-09-08T10:00:00Z#17",
+      });
+  });
+
   it("waits for the captured generation service to stop before returning", async () => {
     let stopped = false;
     const stopService = vi.fn(async (_spriteName: string, serviceName: string) => {

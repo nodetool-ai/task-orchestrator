@@ -30,7 +30,7 @@ export type RunnerObservation =
        *  detached process) — not for Docker, where the worker is PID 1. */
       pid?: number;
     }
-  | { status: "dead"; detail?: string }
+  | { status: "dead"; reason?: "runner-gone"; detail?: string }
   | { status: "unknown" };
 
 export interface RunnerRef {
@@ -58,6 +58,10 @@ export interface WorkerGenerationRef {
   processHandle?: string;
   providerServiceName?: string;
   channelEndpoint?: string;
+  /** Durable proof that this exact generation completed provider observation
+   * at least once. Providers may use it to distinguish a missing service in
+   * the boot window from one that existed and subsequently disappeared. */
+  storedIncarnation?: string;
 }
 
 export interface CreateRunnerInput {
