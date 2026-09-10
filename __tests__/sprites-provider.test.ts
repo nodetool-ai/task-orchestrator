@@ -90,6 +90,11 @@ describe("spritesRunnerStateFromStatus", () => {
 });
 
 describe("buildSpritesWorkerEnv", () => {
+  it("forwards both the progress watchdog and an explicit disabled hard cap", async () => {
+    vi.stubEnv("TASK_ORCH_TURN_TIMEOUT_MS", "0");
+    vi.stubEnv("TASK_ORCH_TURN_IDLE_TIMEOUT_MS", "3600000");
+    await expect(buildSpritesWorkerEnv(42)).resolves.toMatchObject({ TASK_ORCH_TURN_TIMEOUT_MS: "0", TASK_ORCH_TURN_IDLE_TIMEOUT_MS: "3600000" });
+  });
   it("forwards diagnostic settings to worker services", async () => {
     vi.stubEnv("TASK_ORCH_LOG_LEVEL", "debug"); vi.stubEnv("TASK_ORCH_LOG_FORMAT", "json");
     await expect(buildSpritesWorkerEnv(42)).resolves.toMatchObject({ TASK_ORCH_LOG_LEVEL: "debug", TASK_ORCH_LOG_FORMAT: "json" });

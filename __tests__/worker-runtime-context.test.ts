@@ -267,6 +267,31 @@ describe("driveWorkerRun", () => {
       .toContain("wall-clock deadline");
   });
 
+  it("routes watchdog warnings and stall failures, and ignores late backend output", async () => {
+    vi.stubEnv("TASK_ORCH_TURN_TIMEOUT_MS", "0");
+    vi.stubEnv("TASK_ORCH_TURN_IDLE_TIMEOUT_MS", "20");
+    let turnArgs: any;
+    vi.spyOn(backend, "getBackend").mockResolvedValue({
+      id: "fake", listProviders: () => [],
+      runTurn(args: any) {
+        turnArgs = args;
+        args.onProgress("Codex command_execution (cmd1): started");
+        return new Promise(() => undefined);
+      },
+    } as any);
+    const { session, emitted } = recordingSession();
+    await driveWorkerRun({ session, start: makeStart({
+      run: { id: 31, status: "running", goal: "<implement>" },
+      transcript: [msg(1, "user", "work")],
+    }) });
+    expect(emitted.some(e => e.type === "agent.event" && e.payload.event?.type === "warning")).toBe(true);
+    expect(emitted.find(e => e.type === "run.failed")?.payload.error).toContain("no backend progress");
+    expect(emitted.find(e => e.type === "run.failed")?.payload.error).toContain("cmd1");
+    const eventCount = emitted.length;
+    await turnArgs.onEvent({ type: "assistant", message: { content: [{ type: "text", text: "too late" }] } });
+    expect(emitted).toHaveLength(eventCount);
+  });
+
   it("fails the turn with an actionable error when the snapshot cwd does not exist in this worker", async () => {
     // Reproduces box runs 26/27: the snapshot's repository.localPath is a
     // CONTROL-PLANE path (e.g. /Users/...) that does not exist inside a remote

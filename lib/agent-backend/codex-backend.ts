@@ -42,6 +42,7 @@
 // depends on loads under the pi or Claude backends.
 
 import { codexErrorMessage, mapCodexEvent } from "./codex-event-mapper";
+import { createBackendProgressReporter } from "./progress";
 import { collectExtensions, composeSystemPrompt } from "./collect";
 import { CODEACT_BACKEND_GUIDANCE, withCodeActCapabilities } from "./codeact-capabilities";
 import { createUsageAccumulator } from "./usage";
@@ -128,6 +129,7 @@ export class CodexBackend implements AgentBackend {
 
   async runTurn(args: RunTurnArgs): Promise<TurnOutcome> {
     const { cwd, model, thinkingLevel, extensions, abort, prompt, onEvent } = args;
+    const progress = createBackendProgressReporter(args.onProgress);
 
     // Postgres mode (the lightweight in-process loop) drives @earendil-works/pi-ai
     // directly and is pi-only; a lightweight-shaped run is always pi-backed, so
@@ -314,6 +316,7 @@ export class CodexBackend implements AgentBackend {
           const { events } = await thread.runStreamed(input, { signal: abort.signal });
           for await (const ev of events) {
             if (abort.signal.aborted) break;
+            progress.codex(ev);
             if (ev.type === "thread.started" && ev.thread_id) observedThreadId = ev.thread_id;
             if (!terminalEvent && ev.type === "turn.completed") {
               terminalEvent = "completed";

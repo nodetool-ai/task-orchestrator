@@ -30,6 +30,8 @@ const KEYS = [
   "TASK_ORCH_PENDING_PUMP_MS",
   "TASK_ORCH_MAX_DEFER_MS",
   "TASK_ORCH_CHAT_IDLE_MS",
+  "TASK_ORCH_TURN_TIMEOUT_MS",
+  "TASK_ORCH_TURN_IDLE_TIMEOUT_MS",
   "TASK_ORCH_CHAT_MAX_TOOL_ROUNDS",
   "TASK_ORCH_EXECUTOR_MAX_TOOL_ROUNDS",
   "AUTH_SECRET",
@@ -155,6 +157,20 @@ describe("lazy reads — a mid-process env flip takes effect", () => {
 });
 
 describe("documented numeric defaults", () => {
+  it("defaults to progress-based timeout with an opt-in total-turn cap", () => {
+    set("TASK_ORCH_TURN_TIMEOUT_MS", undefined);
+    set("TASK_ORCH_TURN_IDLE_TIMEOUT_MS", undefined);
+    expect(config.agent.turnTimeoutMs).toBe(0);
+    expect(config.agent.turnIdleTimeoutMs).toBe(1_800_000);
+    set("TASK_ORCH_TURN_TIMEOUT_MS", "7200000");
+    set("TASK_ORCH_TURN_IDLE_TIMEOUT_MS", "0");
+    expect(config.agent.turnTimeoutMs).toBe(7_200_000);
+    expect(config.agent.turnIdleTimeoutMs).toBe(0);
+    set("TASK_ORCH_TURN_TIMEOUT_MS", "-1");
+    set("TASK_ORCH_TURN_IDLE_TIMEOUT_MS", "-1");
+    expect(config.agent.turnTimeoutMs).toBe(0);
+    expect(config.agent.turnIdleTimeoutMs).toBe(1_800_000);
+  });
   it("matches the defaults used by the runtime consumers", () => {
     for (const key of KEYS) {
       if (key.startsWith("TASK_ORCH_MAX_RUN_") ||

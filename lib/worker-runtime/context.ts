@@ -40,6 +40,7 @@ import { sh } from "../repo-checkout";
 import type { RunTurnArgs } from "../agent-backend/types";
 import type { RunEnvelope } from "../pi-event-mapper";
 import { config } from "../config";
+import { runWithTurnWatchdog } from "./turn-watchdog";
 import { parseProviderQualifiedModel } from "../model-id";
 import { buildWorkerToolInvoker } from "./tools";
 import { coerceRunStatus, isTerminalStatus, type SessionStatus } from "../run-state";
@@ -407,40 +408,6 @@ interface TurnResult {
   usage: UsageSnapshot;
 }
 
-function effectiveTurnTimeoutMs(deadline: string | null | undefined): number | null {
-  const configured = config.agent.turnTimeoutMs;
-  const configuredDeadline = configured > 0 ? Date.now() + configured : Number.POSITIVE_INFINITY;
-  const runDeadline = deadline ? Date.parse(deadline) : Number.POSITIVE_INFINITY;
-  const effective = Math.min(configuredDeadline, Number.isFinite(runDeadline) ? runDeadline : Number.POSITIVE_INFINITY);
-  if (!Number.isFinite(effective)) return null;
-  return Math.max(0, effective - Date.now());
-}
-
-async function runBackendWithDeadline<T>(
-  operation: Promise<T>,
-  abort: AbortController,
-  timeoutMs: number | null,
-): Promise<T> {
-  if (timeoutMs == null) return operation;
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      const error = new Error(`Agent turn exceeded its ${timeoutMs}ms wall-clock deadline`);
-      abort.abort(error);
-      reject(error);
-    }, timeoutMs);
-    timer.unref?.();
-  });
-  try {
-    return await Promise.race([operation, timeout]);
-  } finally {
-    if (timer) clearTimeout(timer);
-    // A backend that takes a moment to observe AbortSignal must not create an
-    // unhandled rejection after the timeout has already landed the run.
-    void operation.catch(() => undefined);
-  }
-}
-
 /**
  * Run ONE model turn against the loaded context. Invokes the backend exactly as
  * lib/runs.ts does (same seam, same neutral RunEnvelope stream) and routes every
@@ -497,6 +464,9 @@ async function runModelTurn(
   const usage: UsageSnapshot = {};
 
   const onEvent = async (env: RunEnvelope): Promise<void> => {
+    // An adapter can finish observing AbortSignal after the watchdog returns.
+    // Never append that late output to an already-failed/committed turn.
+    if (abort.signal.aborted) return;
     if (env.type === "system" && env.subtype === "init" && env.session_id) {
       sdkSessionId = env.session_id;
       return;
@@ -602,10 +572,17 @@ async function runModelTurn(
       : undefined,
   };
 
-  const outcome = await runBackendWithDeadline(
-    backend.runTurn(turnArgs),
-    abort,
-    effectiveTurnTimeoutMs(context.start.policy.deadline),
+  const outcome = await runWithTurnWatchdog(
+    {
+      abort,
+      idleTimeoutMs: config.agent.turnIdleTimeoutMs,
+      hardTimeoutMs: config.agent.turnTimeoutMs,
+      deadline: context.start.policy.deadline,
+      onWarning: (message) => {
+        void session.emit("agent.event", { event: { type: "warning", message } }).catch(() => undefined);
+      },
+    },
+    (onProgress) => backend.runTurn({ ...turnArgs, onProgress }),
   );
   return {
     summary: summary ?? lastAssistantText ?? outcome.summary,

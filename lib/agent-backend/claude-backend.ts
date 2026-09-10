@@ -17,6 +17,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mapClaudeMessage } from "./claude-event-mapper";
+import { createBackendProgressReporter } from "./progress";
 import { collectExtensions, composeSystemPrompt, runInterceptors } from "./collect";
 import { CODEACT_BACKEND_GUIDANCE, withCodeActCapabilities } from "./codeact-capabilities";
 import { createUsageAccumulator } from "./usage";
@@ -129,6 +130,7 @@ export class ClaudeBackend implements AgentBackend {
 
   async runTurn(args: RunTurnArgs): Promise<TurnOutcome> {
     const { cwd, model, thinkingLevel, extensions, abort, prompt, onEvent } = args;
+    const progress = createBackendProgressReporter(args.onProgress);
 
     // Runs 26/27 cost hours because nothing recorded which claude binary a
     // worker actually drove. Record it (and its version) once per backend.
@@ -324,6 +326,7 @@ export class ClaudeBackend implements AgentBackend {
       try {
         for await (const msg of stream) {
           if (abort.signal.aborted) break;
+          progress.claude(msg);
           if (msg.type === "result") {
             turns = (msg as any).num_turns ?? turns;
             // The result envelope also carries the session id; capture it so a

@@ -230,6 +230,8 @@ export async function buildSpritesWorkerEnv(
     // operators who want the local/default workspace-write policy there too.
     TASK_ORCH_CODEX_SANDBOX: envValue("TASK_ORCH_CODEX_SANDBOX") ?? "danger-full-access",
     TASK_ORCH_CHAT_IDLE_MS: envValue("TASK_ORCH_CHAT_IDLE_MS"),
+    TASK_ORCH_TURN_TIMEOUT_MS: envValue("TASK_ORCH_TURN_TIMEOUT_MS"),
+    TASK_ORCH_TURN_IDLE_TIMEOUT_MS: envValue("TASK_ORCH_TURN_IDLE_TIMEOUT_MS"),
     TASK_ORCH_DETACHED_RUNS: "1",
     TASK_ORCH_INSIDE_WORKER: "1",
     TASK_ORCH_NESTED_DISPATCH: nestedDispatchMode(),

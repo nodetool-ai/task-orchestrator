@@ -114,6 +114,17 @@ describe("demuxDockerLog", () => {
 });
 
 describe("buildWorkerContainerConfig", () => {
+  it("forwards backend timeout settings to Docker workers", async () => {
+    vi.stubEnv("TASK_ORCH_TURN_TIMEOUT_MS", "0");
+    vi.stubEnv("TASK_ORCH_TURN_IDLE_TIMEOUT_MS", "3600000");
+    try {
+      const cfg = await buildWorkerContainerConfig(42, "run-42-x") as { Env: string[] };
+      expect(cfg.Env).toContain("TASK_ORCH_TURN_TIMEOUT_MS=0");
+      expect(cfg.Env).toContain("TASK_ORCH_TURN_IDLE_TIMEOUT_MS=3600000");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
   it("labels the container with its run id and keeps it after exit (no AutoRemove)", async () => {
     vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
     const cfg = (await buildWorkerContainerConfig(42, "run-42-x")) as {

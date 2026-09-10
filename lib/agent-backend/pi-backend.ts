@@ -18,6 +18,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import { mapPiEvent, type RunEnvelope } from "../pi-event-mapper";
+import { createBackendProgressReporter } from "./progress";
 import { interceptorToolName } from "../builtin-tools";
 import { resolveCodexAccessToken } from "../codex-oauth-token";
 import { collectExtensions, composeSystemPrompt, withCodeActTools } from "./collect";
@@ -81,6 +82,7 @@ export class PiBackend implements AgentBackend {
     }
 
     const { cwd, model, thinkingLevel, extensions, abort, prompt, onEvent } = args;
+    const progress = createBackendProgressReporter(args.onProgress);
 
     const collected = withCodeActTools(
       await collectExtensions(extensions),
@@ -200,6 +202,7 @@ export class PiBackend implements AgentBackend {
 
     const stop = session.subscribe((rawEv: any) => {
       if (abort.signal.aborted) return;
+      progress.pi(rawEv);
       if (rawEv.type === "turn_end") turns += 1;
 
       for (const env of mapPiEvent(rawEv, session, sessionManager)) {

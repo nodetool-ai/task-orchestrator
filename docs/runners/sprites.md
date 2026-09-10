@@ -115,7 +115,7 @@ never destroyed. A missing sprite → the row goes `gone` and, if the run was
 still active, the death policy runs. The sweep also reaps leaked prefix-owned
 sprites with no live row (after a grace window). A `cold` sprite with an active
 run is **not** a death — hibernation mid-turn is not failure. A wedged-but-alive
-worker is bounded only by the per-turn budget deadline.
+worker is bounded by the backend progress watchdog and any explicit run budget.
 
 ### Lifecycle
 
@@ -223,7 +223,26 @@ service starts.
 | `TASK_ORCH_SPRITES_CLAUDE_BINARY` | `/home/sprite/.local/bin/claude` | Claude Code executable inside the sprite; passed to the worker as `TASK_ORCH_CLAUDE_BINARY` (the bundle has no native binary). |
 | `TASK_ORCH_SPRITES_CODEX_BINARY` | `/home/user/worker/.codex/bin/codex` | Optional pre-provisioned Codex executable. When unset, bootstrap installs pinned `@openai/codex` 0.153.4 with optional platform dependencies. |
 | `TASK_ORCH_SPRITES_NPM_CACHE` | `/home/user/session/.npm-cache` | Persistent npm content cache inherited by agent shell commands across worker generations. |
-| `TASK_ORCH_TURN_TIMEOUT_MS` | `1800000` | Hard wall-clock limit for one backend turn, including built-in shell commands. `0` disables it for supervised debugging. |
+| `TASK_ORCH_TURN_TIMEOUT_MS` | `0` | Optional total wall-clock cap for one backend turn. Explicit run budget deadlines apply even when this cap is disabled. |
+| `TASK_ORCH_TURN_IDLE_TIMEOUT_MS` | `1800000` | Interrupt a backend turn after this long without observed model/tool progress. Warn at half the interval. `0` disables the watchdog for intentionally silent operations. |
+
+The default turn limit measures inactivity, so active work can run longer than
+30 minutes. Model output, tool starts/completions, and changed tool output reset
+the watchdog. Codex item updates and Pi partial tool results count even though
+the transcript mapper omits them; Claude nested-agent output also counts.
+Transport heartbeats, elapsed-time-only tool messages, repeated output snapshots,
+and reconnect errors do not count as progress. A warning appears in the run log
+after 15 minutes of silence; after 30 minutes the worker aborts the turn and
+reports the last observed activity through the normal failure/supervision path.
+
+Silence is not proof that a command is hung. For an intentionally silent long
+operation, increase or disable `TASK_ORCH_TURN_IDLE_TIMEOUT_MS` and choose an
+explicit run budget when a total bound is needed. Progress is not proof of useful
+work either: explicit budgets remain the bound for noisy loops. Sprite and Docker
+dispatch both forward these settings to workers; local workers inherit them.
+An existing explicit `TASK_ORCH_TURN_TIMEOUT_MS=1800000` retains the old hard cap
+until changed to `0` or removed. New defaults take effect with the updated worker
+bundle on the next worker dispatch.
 
 Credentials (`GH_TOKEN`, `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`,
 optional pi provider keys) are staged as secrets on the control plane and

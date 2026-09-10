@@ -159,6 +159,9 @@ export interface RunTurnArgs {
    *  persists the envelope to the DB); backends MUST await it so per-envelope
    *  persistence stays in stream order. */
   onEvent: (env: RunEnvelope) => void | Promise<void>;
+  /** Observed model/tool progress, including SDK events omitted from the
+   * transcript. Heartbeats and retry diagnostics must not count as progress. */
+  onProgress?: (activity: string) => void;
 }
 
 export interface TurnOutcome {

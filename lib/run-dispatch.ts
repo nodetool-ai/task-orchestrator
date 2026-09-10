@@ -1456,6 +1456,8 @@ export async function buildWorkerContainerConfig(
     // Idle timeout for the long-lived chat-session loop (driveChatRun reads it
     // in the worker). Empty => the worker's built-in default.
     pass("TASK_ORCH_CHAT_IDLE_MS"),
+    pass("TASK_ORCH_TURN_TIMEOUT_MS"),
+    pass("TASK_ORCH_TURN_IDLE_TIMEOUT_MS"),
     "TASK_ORCH_DETACHED_RUNS=1",
     // The durable outbox spool lives at $SESSION_ROOT/channel (plan section 6).
     // Without this the worker falls back to process.cwd() = /app (the image

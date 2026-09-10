@@ -92,6 +92,18 @@ afterEach(() => {
 });
 
 describe("CodexBackend.runTurn guards", () => {
+  it("reports in-progress tool events that are deliberately absent from the transcript", async () => {
+    const onProgress = vi.fn();
+    const onEvent = vi.fn();
+    sdk.scripts = [[started("th_progress"),
+      { type: "item.started", item: { id: "cmd1", type: "command_execution", command: "npm test", aggregated_output: "" } },
+      { type: "item.updated", item: { id: "cmd1", type: "command_execution", aggregated_output: "test passed" } },
+      completed,
+    ]];
+    await new CodexBackend().runTurn(makeArgs({ onProgress, onEvent }));
+    expect(onProgress).toHaveBeenCalledTimes(2);
+    expect(onEvent.mock.calls.map(([event]) => event.type)).toEqual(["system", "result"]);
+  });
   it("rejects postgres context (the lightweight loop is pi-only)", async () => {
     await expect(
       new CodexBackend().runTurn(

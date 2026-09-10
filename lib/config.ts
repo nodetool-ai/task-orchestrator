@@ -396,12 +396,16 @@ export const config = Object.freeze({
       const value = intEnv("TASK_ORCH_CHAT_IDLE_MS", 600_000);
       return value > 0 ? value : 600_000;
     },
-    /** Hard wall-clock bound for one backend turn. This is deliberately
-     * independent of the optional per-run budget: an unset budget must not let
-     * a built-in shell command keep a worker and its durable input active
-     * forever. Set to 0 to disable for an explicitly supervised debug run. */
+    /** Optional total wall-clock cap; ordinary turns are bounded by observed
+     * inactivity instead. Explicit per-run budget deadlines still apply. */
     get turnTimeoutMs(): number {
-      const value = intEnv("TASK_ORCH_TURN_TIMEOUT_MS", 30 * 60_000);
+      const value = intEnv("TASK_ORCH_TURN_TIMEOUT_MS", 0);
+      return value >= 0 ? value : 0;
+    },
+    /** No meaningful SDK progress for this long aborts a stuck backend turn.
+     * Zero disables the watchdog for intentionally silent long operations. */
+    get turnIdleTimeoutMs(): number {
+      const value = intEnv("TASK_ORCH_TURN_IDLE_TIMEOUT_MS", 30 * 60_000);
       return value >= 0 ? value : 30 * 60_000;
     },
     get chatMaxToolRounds(): number {

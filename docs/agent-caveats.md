@@ -113,6 +113,15 @@ already cost real time once.
 
 ## Liveness
 
+- Turn progress and worker liveness are separate. The default watchdog aborts
+  after 30 minutes without observed SDK progress, not 30 minutes since turn
+  start. `TASK_ORCH_TURN_TIMEOUT_MS` is now an opt-in hard cap (default `0`);
+  explicit run budgets still apply. Raw Codex item updates, Pi tool output, and
+  Claude nested-agent output must reach `onProgress` even when omitted from
+  transcript mapping. Do not reset it on transport heartbeats or elapsed-time
+  tool messages: a live process can still be stuck. Intentionally silent long
+  operations need an adjusted `TASK_ORCH_TURN_IDLE_TIMEOUT_MS`.
+
 - There is no heartbeat and no stale window. "Is the worker alive" is
   `resolveLiveness(runId)`: the provider's `inspect()` plus an incarnation
   compare. `unknown` (API down, no credentials in this process) means
