@@ -1198,6 +1198,7 @@ export async function sweepWorkerSockets(dir: string = workerSocketDir()): Promi
 const DEFAULT_PUMP_MS = 15_000;
 const DEFAULT_MAX_DEFER_MS = 30 * 60_000;
 const PUMP_KEY = "__taskOrchPendingPump";
+const PUMP_TICK_KEY = "__taskOrchPendingPumpTick";
 
 function pumpIntervalMs(): number {
   return intEnv("TASK_ORCH_PENDING_PUMP_MS", DEFAULT_PUMP_MS);
@@ -1370,7 +1371,19 @@ export function startPendingRunPump(): void {
   if (ms <= 0) return;
   const g = globalThis as Record<string, unknown>;
   if (g[PUMP_KEY]) return;
-  const timer = setInterval(() => void pumpTick().catch(() => {}), ms);
+  const timer = setInterval(() => {
+    // Provider sweeps can legitimately take longer than one interval (for
+    // example while the Sprites API is degraded). Never stack another full
+    // reconciliation pass on top of one that is still running: unbounded
+    // overlap eventually starves the control-plane HTTP server.
+    if (g[PUMP_TICK_KEY]) return;
+    const tick = pumpTick()
+      .catch(() => {})
+      .finally(() => {
+        if (g[PUMP_TICK_KEY] === tick) delete g[PUMP_TICK_KEY];
+      });
+    g[PUMP_TICK_KEY] = tick;
+  }, ms);
   (timer as { unref?: () => void }).unref?.();
   g[PUMP_KEY] = timer;
 }

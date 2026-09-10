@@ -40,47 +40,40 @@ export async function register(): Promise<void> {
       await dbMod.initDb();
       const codeActMod = await import("./lib/codeact/receipts");
       await codeActMod.recoverOrphanedCodeActExecutions();
-      const runsMod = await import("./lib/runs");
-      const dispatchMod = await import("./lib/run-dispatch");
-      const providerMod = await import("./lib/runner/provider");
-      // Sweep the selected runner backend BEFORE reconcile. A worker that died
-      // while the server was down may still be visible to Docker/Sprites: the sweep
-      // applies the death policy so failures are visible rather than blindly
-      // re-dispatched by heartbeat-only reconcile.
-      await providerMod.getRunnerProvider().sweep().catch((e) => {
-        console.error("[instrumentation] boot runner sweep failed:", e);
-      });
-      await dispatchMod.observeWorkerIncarnations().catch((e) => {
-        console.error("[instrumentation] boot liveness observation failed:", e);
-      });
-      await runsMod.reconcileOrphanedRuns();
-      const schedulesMod = await import("./lib/schedules");
-      await schedulesMod.reconcileScheduleOccurrences().catch((e) => {
-        console.error("[instrumentation] schedule recovery failed:", e);
-      });
-      // Start the pending-run pump: it re-dispatches runs the admission gate
-      // deferred for lack of host memory AND reaps stale leases every tick (so an
-      // OOM-killed worker's run recovers without waiting for a restart — the
-      // boot-only reconcile above can't). No-op off the containerized path. Literal
-      // import (no webpackIgnore / variable specifier) so it bundles into the prod
-      // server chunk; see the reconcile note above.
-      dispatchMod.startPendingRunPump();
-      // Re-adopt every active worker WebSocket channel. On the ws transport a
-      // fresh boot (or hot deploy) has no in-memory connections: scan the runner
-      // instances that still carry a dial identity for a non-terminal run,
-      // acquire each controller lease, and reconnect to its stored endpoint so a
-      // mid-run worker keeps streaming instead of stranding on the dropped socket.
-      // No-op off the ws transport. Best-effort — a genuinely dead worker fails to
-      // dial and is left to the reaper above.
-      //
-      // NOT awaited: Next.js holds every request until register() resolves, and
-      // each re-adopt dial retries up to BOOT_DEADLINE_MS (3 min) per channel,
-      // sequentially. Awaiting it kept the server deaf (health check failing,
-      // deploys marked failed) for as long as dead rows existed. Serving traffic
-      // does not depend on re-adoption, so let it finish in the background.
-      const channelMod = await import("./lib/worker-channel/controller");
-      void channelMod.reconnectActiveChannels().catch((e) => {
-        console.error("[instrumentation] worker channel re-adoption failed:", e);
+      // Runner-provider recovery can take minutes when an external API is slow.
+      // Next.js holds every request (including /api/health) until register()
+      // resolves, so only the schema-critical work above belongs on the boot
+      // path. Preserve recovery ordering, but let the control plane serve while
+      // it completes.
+      void (async () => {
+        const runsMod = await import("./lib/runs");
+        const dispatchMod = await import("./lib/run-dispatch");
+        const providerMod = await import("./lib/runner/provider");
+        // Sweep the selected runner backend BEFORE reconcile. A worker that died
+        // while the server was down may still be visible to Docker/Sprites: the sweep
+        // applies the death policy so failures are visible rather than blindly
+        // re-dispatched by heartbeat-only reconcile.
+        await providerMod.getRunnerProvider().sweep().catch((e) => {
+          console.error("[instrumentation] boot runner sweep failed:", e);
+        });
+        await dispatchMod.observeWorkerIncarnations().catch((e) => {
+          console.error("[instrumentation] boot liveness observation failed:", e);
+        });
+        await runsMod.reconcileOrphanedRuns();
+        const schedulesMod = await import("./lib/schedules");
+        await schedulesMod.reconcileScheduleOccurrences().catch((e) => {
+          console.error("[instrumentation] schedule recovery failed:", e);
+        });
+        // Start the pending-run pump only after boot recovery so those two full
+        // reconciliation passes cannot overlap.
+        dispatchMod.startPendingRunPump();
+        // Re-adopt every active worker WebSocket channel after durable recovery.
+        const channelMod = await import("./lib/worker-channel/controller");
+        void channelMod.reconnectActiveChannels().catch((e) => {
+          console.error("[instrumentation] worker channel re-adoption failed:", e);
+        });
+      })().catch((e) => {
+        console.error("[instrumentation] background boot recovery failed:", e);
       });
     } catch (err) {
       console.error("[instrumentation] boot init/reconcile failed:", err);
