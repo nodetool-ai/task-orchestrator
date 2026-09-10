@@ -21,6 +21,8 @@ import {
 import { provisionLocalChannel } from "../lib/run-dispatch";
 import { startWorkerServer, type WorkerServer } from "../lib/worker-channel/worker-server";
 import { __setLocalProcessForTests } from "../lib/runner/local";
+import { buildRunStart } from "../lib/worker-channel/snapshot";
+import { MAX_JSON_FRAME_BYTES } from "../lib/worker-channel/protocol";
 
 const instanceId = "wi_0123456789abcdef0123456789abcdef";
 
@@ -91,6 +93,53 @@ describe("local worker channel end-to-end (no driver)", () => {
       .where(and(eq(workerChannelCommands.runId, id), eq(workerChannelCommands.type, type)));
     return rows.length > 0 && rows.every((r) => r.state === "acked");
   }
+
+  it.each([
+    { delivery: "reconnect replay", count: 20 },
+    { delivery: "direct send", count: 20 },
+    { delivery: "reconnect replay", count: 6 },
+  ])("delivers an old resume command via $delivery ($count history messages)", async ({ delivery, count }) => {
+    const run = await create({ goal: "<chat>", defer: true });
+    runId = run.id;
+    root = await mkdtemp(join(tmpdir(), "worker-resume-"));
+    const channel = await provisionLocalChannel(run.id);
+    const snapshot = await buildRunStart(run.id);
+    snapshot.mode = "resume";
+    snapshot.run.sdkSessionId = "retained-sdk-session";
+    snapshot.transcript = Array.from({ length: count }, (_, i) => ({
+      id: 10_000 + i,
+      role: i % 2 ? "agent" as const : "user" as const,
+      content: [{ type: "text", text: "history".repeat(15_000) }],
+    }));
+    const oversized = Buffer.byteLength(JSON.stringify(snapshot)) > MAX_JSON_FRAME_BYTES;
+    expect(oversized).toBe(count === 20);
+    const lease = await acquireControllerLease(run.id, "old-server", new Date("2026-07-16T00:00:00Z"));
+    server = await startWorkerServer({ runId: run.id, instanceId: channel.instanceId, endpoint: channel.listenEndpoint, outboxRoot: root });
+    const connection = delivery === "direct send" ? await connectRun(run.id) : null;
+    const command = await persistCommand({
+      runId: run.id, instanceId: channel.instanceId, controllerEpoch: connection?.controllerEpoch ?? lease.epoch,
+      type: "run.start", payload: snapshot,
+    });
+    if (connection) await connection.sendPersisted(command);
+    else await connectRun(run.id);
+    await waitFor(() => commandAcked(run.id, "run.start"));
+    const received = await server.session.waitForStart!();
+    if (oversized) expect(received.transcriptOmittedMessages).toBeGreaterThan(0);
+    else expect(received).toEqual(snapshot); // Preserve an older, already-deliverable fingerprint.
+    expect(received.pendingInput).toEqual(snapshot.pendingInput);
+    expect(received.inputManifest).toEqual(snapshot.inputManifest);
+    expect(received.run.sdkSessionId).toBe(snapshot.run.sdkSessionId);
+    const [stored] = await db.select().from(workerChannelCommands).where(eq(workerChannelCommands.id, command.id));
+    expect(stored.payload).toEqual(snapshot);
+
+    // Simulate an ACK lost at the controller, then replay the same durable
+    // command under a new epoch. Its compact wire fingerprint must be stable.
+    await disconnectRun(run.id);
+    await db.update(workerChannelCommands).set({ state: "pending", ackedAt: null }).where(eq(workerChannelCommands.id, command.id));
+    await connectRun(run.id);
+    await waitFor(() => commandAcked(run.id, "run.start"));
+    expect(await server.session.waitForStart!()).toEqual(received);
+  });
 
   it("dispatch -> connectRun -> command -> receipt -> reconnect replay", async () => {
     const run = await create({ goal: "<chat>", defer: true });

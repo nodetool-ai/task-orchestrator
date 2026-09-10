@@ -41,6 +41,14 @@ already cost real time once.
 
 ## Worker channel
 
+- A parked chat can be alive yet unable to resume: run 219 accumulated 1,566
+  messages and its persisted `run.start` exceeded the 1 MiB JSON frame limit.
+  Resume snapshots with an SDK session now bound only the redundant consumed
+  transcript copy; full DB/SDK history, pending inputs, and receipt manifests
+  stay intact. The controller also handles already-persisted oversized starts
+  at replay time. Do not fix these by deleting history, editing command IDs or
+  payloads in place, or raising the transport limit without a bound.
+
 - Git delivery belongs to the agent. Run 224 finished its model turn while
   run 223 had advanced the same task branch; an automatic terminal push then
   failed with `fetch first`. Implementation prompts must tell the agent to

@@ -13,6 +13,7 @@ import type {
   TaskSnapshot,
 } from "./protocol";
 import { allowedServerTools } from "../worker/server-policy";
+import { boundResumeTranscript } from "./resume-transcript";
 
 type SnapshotMode = RunStart["mode"];
 
@@ -170,7 +171,7 @@ export async function buildRunStart(
     ? null
     : new Date(run.startedAt.getTime() + run.budgetMaxSeconds * 1000).toISOString();
 
-  return {
+  return boundResumeTranscript({
     mode: resolvedMode,
     run: wire(run) as unknown as RunSnapshot,
     task: task ? (wire(task) as unknown as TaskSnapshot) : null,
@@ -193,5 +194,5 @@ export async function buildRunStart(
       deadline,
     },
     ...(kickoffPrompt !== undefined ? { kickoffPrompt } : {}),
-  };
+  });
 }

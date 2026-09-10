@@ -10,7 +10,9 @@ import {
   isBlobControlFrame,
   isTransportFrame,
   isWorkerEvent,
+  WorkerChannelProtocolError,
 } from "./codec";
+import { boundResumeTranscript } from "./resume-transcript";
 import { BlobCoordinator, collectBlobRefs, type BlobWireIO } from "./blob-transfer";
 import { mintChannelCredential } from "./credential";
 import {
@@ -530,7 +532,16 @@ export class ControllerConnection {
       sentAt: row.createdAt.toISOString(), payload: row.payload as never,
       ...(replyTo ? { replyTo } : {}),
     } as WorkerCommand;
-    this.send(frame);
+    try {
+      this.send(frame);
+    } catch (error) {
+      // Older servers persisted complete histories before checking the frame
+      // limit (run 219). Recover these otherwise permanently poisoned replays.
+      // Only change a frame that could not have been sent; commands that fit
+      // must retain their original payload fingerprint across reconnects.
+      if (frame.type !== "run.start" || !(error instanceof WorkerChannelProtocolError) || error.closeCode !== 4413) throw error;
+      this.send({ ...frame, payload: boundResumeTranscript(frame.payload) });
+    }
   }
 
   private enqueue(operation: () => Promise<void>): void {

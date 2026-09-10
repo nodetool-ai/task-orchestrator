@@ -5,6 +5,7 @@ import { agentMessages, agentSessions, inboxEvents, personas as personasTable, r
 import * as repo from "../lib/repo";
 import { create } from "../lib/runs";
 import { buildRunStart } from "../lib/worker-channel/snapshot";
+import { RESUME_SNAPSHOT_BYTES } from "../lib/worker-channel/resume-transcript";
 
 const PERSONA_PROMPT = "You are the test implementor persona.";
 
@@ -117,6 +118,26 @@ describe("buildRunStart", () => {
     const run = await create({ goal: "<chat>", defer: true });
     const start = await buildRunStart(run.id, "resume");
     expect(start.mode).toBe("resume");
+  });
+
+  it("bounds resumed history without deleting stored messages or changing pending inputs", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    await db.update(agentSessions).set({ sdkSessionId: "retained-session" }).where(eq(agentSessions.id, run.id));
+    const content = JSON.stringify([{ type: "text", text: "history ".repeat(20_000) }]);
+    await db.insert(agentMessages).values(Array.from({ length: 10 }, (_, i) => ({
+      runId: run.id, role: i % 2 ? "agent" as const : "user" as const, content,
+    })));
+    const [pending] = await db.insert(agentMessages).values({
+      runId: run.id, role: "user", content: JSON.stringify([{ type: "text", text: "whats status" }]),
+    }).returning({ id: agentMessages.id });
+
+    const start = await buildRunStart(run.id);
+    expect(Buffer.byteLength(JSON.stringify(start))).toBeLessThanOrEqual(RESUME_SNAPSHOT_BYTES);
+    expect(start.transcriptOmittedMessages).toBeGreaterThan(0);
+    expect(start.pendingInput.map(message => message.id)).toEqual([pending.id]);
+    const stored = await db.select().from(agentMessages).where(eq(agentMessages.runId, run.id));
+    expect(stored).toHaveLength(11);
+    expect(stored.filter(message => message.content === content)).toHaveLength(10);
   });
 
   it("throws for a missing run", async () => {

@@ -100,6 +100,9 @@ export interface RunStart {
   persona: PersonaSnapshot;
   repository: RepositorySnapshot;
   transcript: MessageSnapshot[];
+  /** Older consumed messages omitted from this bootstrap copy only. The full
+   * transcript and backend session remain durable. */
+  transcriptOmittedMessages?: number;
   inboxDigest: string | null;
   memoryContext: string;
   pendingInput: MessageSnapshot[];
