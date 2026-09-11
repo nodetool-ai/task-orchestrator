@@ -228,6 +228,10 @@ export interface CreateRunInput {
   initialPrompt?: string | null;
   /** If true, do NOT kick off the worker on create; useful for chats. */
   defer?: boolean;
+  /** Enforce one durable session identity for this task, including settled
+   * rows. Used by the task-session API; generic task-associated child runs may
+   * still be separate analytical/review sessions. */
+  stableTaskIdentity?: boolean;
   /**
    * Execution placement for this run. Default 'worker': a detached process /
    * container / Machine, the tier every repo-touching run uses.
@@ -932,13 +936,15 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
               eq(agentSessions.taskId, input.taskId!),
               eq(agentSessions.cwdStrategy, "worktree"),
               sql`${agentSessions.goal} != '<chat>'`,
-              notInArray(agentSessions.status, TERMINAL_STATUS_LIST)
+              ...(input.stableTaskIdentity ? [] : [notInArray(agentSessions.status, TERMINAL_STATUS_LIST)])
             )
           )
           .limit(1);
         if (active.length > 0) {
           throw new repo.RepoError(
-            `Task ${input.taskId} already has an active session (#${active[0].id})`,
+            input.stableTaskIdentity
+              ? `Task ${input.taskId} already has an active session identity (#${active[0].id}); resume that session in place`
+              : `Task ${input.taskId} already has an active session (#${active[0].id})`,
             409
           );
         }
@@ -2000,7 +2006,8 @@ async function findRivalTaskRun(run: {
 async function claimTaskFollowUp(
   run: RunRow,
   status: "pending" | "running",
-  message?: { text: string; toolsProfile?: string }
+  message?: { text: string; toolsProfile?: string },
+  mode: "corrective" | "resume" = "corrective"
 ): Promise<{ accepted: boolean; messageId: number | null }> {
   if (!run.taskId || run.goal === "<chat>" || run.cwdStrategy !== "worktree") {
     if (message?.toolsProfile && message.toolsProfile !== run.toolsProfile) {
@@ -2020,16 +2027,45 @@ async function claimTaskFollowUp(
       notInArray(agentSessions.status, TERMINAL_STATUS_LIST)
     )).limit(1);
     if (rival) return { accepted: false, messageId: null };
-    const renew = run.deliveryVersion === 2 && ["completed", "failed"].includes(run.status);
+    const renew = run.deliveryVersion === 2 && ["completed", "failed", "budget_exhausted"].includes(run.status);
+    const resumedAt = new Date();
     const changed = await tx.update(agentSessions).set({ status,
       ...(message?.toolsProfile ? { toolsProfile: message.toolsProfile } : {}),
-      ...(renew ? { attempt: run.attempt + 1, result: null, parkReason: null, completedAt: null } : {}) })
+      ...(renew ? {
+        attempt: run.attempt + 1,
+        result: null,
+        parkReason: null,
+        completedAt: null,
+        // budgetMaxSeconds is per attempt. Reusing the original timestamp
+        // would make every later attempt begin with an already-expired deadline.
+        startedAt: resumedAt,
+      } : {}) })
       .where(and(eq(agentSessions.id, run.id), isNull(agentSessions.workerScope),
+        eq(agentSessions.attempt, run.attempt),
         inArray(agentSessions.status, ["idle", "completed", "failed", "budget_exhausted"])));
     if (changed.count === 0) return { accepted: false, messageId: null };
-    if (renew) {
-      await registerDefaultChildSubscriptionTx(tx, { ...run, attempt: run.attempt + 1 });
+    if (renew && mode === "resume") {
+      // An infrastructure failure can leave the logical turn and its input
+      // manifest assigned to the old attempt. In-place resume must replay that
+      // durable work. This is deliberately after the attempt CAS above: a
+      // delayed resume request must not mutate a newer attempt's active turn.
+      await tx.execute(sql`
+        UPDATE run_inputs SET status = 'pending', assigned_turn_id = NULL,
+          assigned_at = NULL, completed_at = NULL, cancelled_at = NULL
+        WHERE run_id = ${run.id} AND status = 'assigned'
+          AND assigned_turn_id IN (
+            SELECT id FROM run_turns
+            WHERE run_id = ${run.id} AND state IN ('active', 'running')
+              AND attempt = ${run.attempt}
+          )
+      `);
+      await tx.execute(sql`
+        UPDATE run_turns SET state = 'superseded'
+        WHERE run_id = ${run.id} AND state IN ('active', 'running')
+          AND attempt = ${run.attempt}
+      `);
     }
+    if (renew) await registerDefaultChildSubscriptionTx(tx, { ...run, attempt: run.attempt + 1 });
     if (!message) return { accepted: true, messageId: null };
     const inserted = await tx.insert(agentMessages).values({ runId: run.id, role: "user",
       content: JSON.stringify([{ type: "text", text: message.text }]), createdAt: new Date() })
@@ -2039,6 +2075,78 @@ async function claimTaskFollowUp(
     }
     return { accepted: true, messageId: inserted[0].id };
   });
+}
+
+/**
+ * Resume a settled task session without creating a replacement run row.
+ *
+ * The stable run id is the task's durable identity. On a remote runner the
+ * existing runner_instances row is mandatory: dispatch allocates a fresh
+ * worker generation on that retained environment, while the branch, Sprite,
+ * SDK session, pending inputs, supervision relationship and PR stay attached
+ * to the original run. A missing/gone mapping is therefore an explicit
+ * recovery failure, never permission to create a different environment.
+ */
+export async function resumeTaskRunInPlace(
+  runId: number,
+  opts: { prompt?: string; toolsProfile?: string; defer?: boolean } = {}
+): Promise<RunRow> {
+  const run = await get(runId);
+  if (!run) throw new repo.RepoError(`Session #${runId} not found`, 404);
+  if (!run.taskId || run.goal !== "<implement>" || run.cwdStrategy !== "worktree") {
+    throw new repo.RepoError(`Session #${runId} is not a task implementation session`, 400);
+  }
+  if (run.deliveryVersion !== 2) {
+    throw new repo.RepoError(`Session #${runId} uses the legacy delivery protocol and cannot be resumed in place`, 409);
+  }
+  if (!["idle", "completed", "failed", "budget_exhausted"].includes(run.status)) {
+    throw new repo.RepoError(
+      `Session #${runId} is '${run.status}' and cannot be resumed in place`,
+      409
+    );
+  }
+
+  if (runDispatch.remoteRunnerEnabled() && !opts.defer) {
+    const [runner] = await db.select({
+      provider: runnerInstances.provider,
+      spriteName: runnerInstances.spriteName,
+      state: runnerInstances.state,
+    }).from(runnerInstances).where(eq(runnerInstances.runId, runId)).limit(1);
+    if (!runner || runner.state === "gone" || (runner.provider === "sprites" && !runner.spriteName)) {
+      throw new repo.RepoError(
+        `Session #${runId} has no retained runner to resume; refusing to allocate a replacement environment`,
+        409
+      );
+    }
+  }
+
+  const [pending] = await db.select({ id: runInputs.id }).from(runInputs).where(and(
+    eq(runInputs.runId, runId),
+    inArray(runInputs.status, ["pending", "assigned"])
+  )).limit(1);
+  const prompt = pending
+    ? undefined
+    : opts.prompt?.trim() || "Resume this task in the existing session and continue from the retained worktree and conversation state.";
+  const admission = await claimTaskFollowUp(
+    run,
+    "pending",
+    prompt ? { text: prompt, toolsProfile: opts.toolsProfile } : undefined,
+    "resume"
+  );
+  if (!admission.accepted) {
+    throw new repo.RepoError(
+      `Session #${runId} could not be resumed because this task already has an active writer or the session changed state`,
+      409
+    );
+  }
+
+  if (!opts.defer) {
+    const dispatch = await runDispatch.dispatchRun(runId);
+    if (dispatch === "not-found" || dispatch === "spawn-failed") {
+      throw new repo.RepoError(`Session #${runId} could not resume its retained runner`, 409);
+    }
+  }
+  return (await get(runId))!;
 }
 
 /**

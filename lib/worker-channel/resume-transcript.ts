@@ -4,17 +4,18 @@ import { MAX_JSON_FRAME_BYTES, type RunStart } from "./protocol";
  * channel limit. This is a UTF-8 byte budget, not a message or character count. */
 export const RESUME_SNAPSHOT_BYTES = 512 * 1024;
 
-/** Bound the redundant transcript copy when the backend will resume its own
- * durable session. The database remains the complete conversation record.
- * Never trim fresh starts, recovery without an SDK session, pending input, or
- * the latest agent reply and anything after it (the legacy input cursor).
+/** Bound the transcript copy for a continuation. With an SDK token it is
+ * redundant; without one it is the recovery context, so retain the newest
+ * coherent suffix that fits. The database remains the complete record.
+ * Never trim fresh starts, pending input, or the latest agent reply and
+ * anything after it (the legacy input cursor).
  *
  * Pure and deterministic so an oversized command persisted by an older server
  * can use the same wire representation on every retry without rewriting its
  * durable payload or changing the input manifest.
  */
 export function boundResumeTranscript(start: RunStart): RunStart {
-  if (start.mode !== "resume" || typeof start.run.sdkSessionId !== "string" || !start.run.sdkSessionId) return start;
+  if (start.mode !== "resume") return start;
   if (Buffer.byteLength(JSON.stringify(start), "utf8") <= RESUME_SNAPSHOT_BYTES) return start;
 
   const lastAgent = start.transcript.findLastIndex((message) => message.role === "agent");

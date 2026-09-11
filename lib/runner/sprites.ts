@@ -546,10 +546,19 @@ export class SpritesRunnerProvider implements RunnerProvider {
     const existing = await this.getInstance(input.runId);
     let poolEntry = existing?.spriteName ? await spritesPoolStore.findBySpriteName(existing.spriteName) : null;
     if (existing?.spriteName) {
+      // dispatch pre-seeds the deterministic Sprite name before the very first
+      // provider call, so spriteName alone does not prove an environment ever
+      // existed. replacesGeneration does: it was captured from the mapping
+      // before this allocation. A replacement generation must never fall
+      // through to a new Sprite when its retained environment disappeared.
+      // A not-yet-restored pool assignment continues through the restore path
+      // below; calling resumeUnserialized would recurse back here.
       if (!poolEntry || poolEntry.restoreState === "restored") {
         const resumed = await this.resumeUnserialized(input.runId, input);
         if (resumed) return resumed;
-        if (poolEntry) throw new Error("Assigned Sprite is unavailable; refusing to replace its resumable filesystem");
+        if (input.replacesGeneration != null) {
+          throw new Error("Assigned Sprite is unavailable; refusing to replace its resumable filesystem");
+        }
       }
     }
 

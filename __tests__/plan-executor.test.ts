@@ -120,6 +120,14 @@ describe("executor persona", () => {
     );
     expect(spawnResult.isError).toBe(true);
     expect((spawnResult.content[0] as { text: string }).text).toMatch(/CI repair dispatch is owned/i);
+
+    const start = ORCHESTRATOR_TOOLS.find((entry) => entry.name === "start_session")!;
+    const startResult = await start.execute(
+      { task_id: task.id, resume_of: child },
+      { author: "executor", runId: parent }
+    );
+    expect(startResult.isError).toBe(true);
+    expect((startResult.content[0] as { text: string }).text).toMatch(/CI repair dispatch is owned/i);
   });
 });
 

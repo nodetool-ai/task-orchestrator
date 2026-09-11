@@ -14,9 +14,13 @@ import { startSession } from "../lib/agent";
 // Force defer through the real create so no worker/worktree lifecycle starts
 // (same seam as agent-reaper.test.ts).
 const realCreate = runs.create;
+const realResume = runs.resumeTaskRunInPlace;
 beforeEach(() => {
   vi.restoreAllMocks();
   vi.spyOn(runs, "create").mockImplementation((input) => realCreate({ ...input, defer: true }));
+  vi.spyOn(runs, "resumeTaskRunInPlace").mockImplementation((id, input) =>
+    realResume(id, { ...input, defer: true })
+  );
 });
 
 async function makeTask(title: string): Promise<string> {
@@ -69,7 +73,7 @@ describe("runs.create backend column", () => {
 });
 
 describe("startSession backend inheritance", () => {
-  it("a resume inherits the prior session's backend; an explicit pick overrides", async () => {
+  it("an in-place resume retains the prior backend and rejects changing it", async () => {
     const taskId = await makeTask("Backend inherit");
     const prior = await startSession({ taskId, backend: "pi" });
     expect(prior.backend).toBe("pi");
@@ -81,6 +85,7 @@ describe("startSession backend inheritance", () => {
       .where(eq(agentSessions.id, prior.id));
 
     const resumed = await startSession({ taskId, resumeOf: prior.id });
+    expect(resumed.id).toBe(prior.id);
     expect(resumed.backend).toBe("pi");
 
     await db
@@ -88,7 +93,7 @@ describe("startSession backend inheritance", () => {
       .set({ status: "completed", completedAt: new Date() })
       .where(eq(agentSessions.id, resumed.id));
 
-    const overridden = await startSession({ taskId, resumeOf: prior.id, backend: "claude" });
-    expect(overridden.backend).toBe("claude");
+    await expect(startSession({ taskId, resumeOf: prior.id, backend: "claude" }))
+      .rejects.toMatchObject({ status: 400 });
   });
 });

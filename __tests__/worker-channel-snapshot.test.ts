@@ -114,6 +114,29 @@ describe("buildRunStart", () => {
     expect(start.mode).toBe("resume");
   });
 
+  it("bounds durable recovery history even when the backend has no SDK token", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    const content = JSON.stringify([{ type: "text", text: "tool history ".repeat(15_000) }]);
+    await db.insert(agentMessages).values(Array.from({ length: 12 }, (_, i) => ({
+      runId: run.id,
+      role: i % 3 === 1 ? "agent" as const : i % 3 === 2 ? "tool" as const : "user" as const,
+      content,
+    })));
+    const [pending] = await db.insert(agentMessages).values({
+      runId: run.id,
+      role: "user",
+      content: JSON.stringify([{ type: "text", text: "continue exactly once" }]),
+    }).returning({ id: agentMessages.id });
+
+    const start = await buildRunStart(run.id);
+
+    expect(start.mode).toBe("resume");
+    expect(start.run.sdkSessionId).toBeNull();
+    expect(Buffer.byteLength(JSON.stringify(start))).toBeLessThanOrEqual(RESUME_SNAPSHOT_BYTES);
+    expect(start.transcriptOmittedMessages).toBeGreaterThan(0);
+    expect(start.pendingInput.map(message => message.id)).toEqual([pending.id]);
+  });
+
   it("honors an explicit mode override", async () => {
     const run = await create({ goal: "<chat>", defer: true });
     const start = await buildRunStart(run.id, "resume");

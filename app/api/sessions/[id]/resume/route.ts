@@ -31,8 +31,8 @@ export async function POST(
         : await req.json().catch(() => ({}));
     const input = startSessionSchema.parse(raw);
     // Plan-executor runs have a planId but no taskId, so the task-session path
-    // below can't represent them (agent.getSession used to 404 here). Fork a
-    // fresh executor generation on the same plan instead.
+    // below can't represent them (agent.getSession used to 404 here). They keep
+    // their separate executor-generation behavior for now.
     if (prior.goal === "<execute>") {
       const run = await runs.resumeExecutorRun(priorId, {
         model: input.model ?? null,
@@ -53,7 +53,7 @@ export async function POST(
       baseBranch: input.baseBranch,
       resumeOf: priorId,
     });
-    return NextResponse.json(session, { status: 201 });
+    return NextResponse.json(session, { status: 200 });
   } catch (e) {
     return errorResponse(e);
   }

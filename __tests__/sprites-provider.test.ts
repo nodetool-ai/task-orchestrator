@@ -444,6 +444,36 @@ describe("SpritesRunnerProvider.create", () => {
     expect(createSprite).not.toHaveBeenCalled();
   });
 
+  it("fails closed when a retained Sprite is absent", async () => {
+    const createSprite = vi.fn(async (input: { name: string }) => ({ name: input.name, status: "running" }));
+    const client = fakeSpritesClient({ createSprite, getSprite: vi.fn(async () => null) });
+    const provider = new SpritesRunnerProvider(client);
+    const run = await create({ goal: "<implement>", defer: true });
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      provider: "sprites",
+      spriteName: spriteNameForRun(run.id),
+      state: "running",
+      workerGeneration: 2,
+      generationState: "stopped",
+      providerOperationId: "00000000-0000-4000-8000-000000000012",
+    });
+
+    await expect(provider.create({
+      runId: run.id,
+      scope: `run-${run.id}`,
+      workerGeneration: 3,
+      providerOperationId: "00000000-0000-4000-8000-000000000013",
+      channelInstanceId: "wi_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      providerServiceName: "worker-g3",
+      previousProviderServiceName: "worker-g2",
+      replacesGeneration: 2,
+    })).rejects.toThrow("refusing to replace its resumable filesystem");
+    expect(createSprite).not.toHaveBeenCalled();
+    expect((await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id)))[0].spriteName)
+      .toBe(spriteNameForRun(run.id));
+  });
+
   it("uses a durable per-run lock across provider instances", async () => {
     let releaseBoot!: () => void;
     let enteredBoot!: () => void;

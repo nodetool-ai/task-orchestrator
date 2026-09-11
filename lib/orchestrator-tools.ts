@@ -25,6 +25,7 @@ import { createTimer, TIMER_MAX_MINUTES, TIMER_MIN_MINUTES } from "./inbox";
 import { recordTurnEffect } from "./run-state";
 import { subscribeRunEvents, listRunSubscriptions } from "./run-event-subscriptions";
 import { getRunActivitySnapshot } from "./run-activity";
+import { checkExecutorCiRepairOwnership } from "./extensions/spawn";
 
 // Derived from TASK_TRANSITIONS so the transition_task description can never
 // drift from the actual allowed edges (a hardcoded list silently goes stale
@@ -1058,7 +1059,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "start_session",
     label: "Start Session",
     description:
-      "Start an agent to implement a task. After a failed session, the replacement retains that session's supervising parent. Use resume_of to explicitly replace a settled session. New tasks are supervised by your run. Returns the supervising parent and subscription; completion and questions arrive there automatically.",
+      "Start an agent to implement a task. Use resume_of to renew a settled session in place: the same session id, runner/Sprite, worktree, SDK conversation, pending inputs, PR, and supervisor are retained while a new worker generation starts. New tasks are supervised by your run. Returns the supervising parent and subscription; completion and questions arrive there automatically.",
     parameters: Type.Object({
       task_id: Type.String({ minLength: 1 }),
       model: Type.Optional(Type.String()),
@@ -1068,9 +1069,15 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
         })
       ),
       base_branch: Type.Optional(Type.String()),
-      resume_of: Type.Optional(Type.Integer({ minimum: 1, description: "Prior settled session to replace, preserving its supervising parent." })),
+      resume_of: Type.Optional(Type.Integer({ minimum: 1, description: "Settled session to resume in place on its retained runner/Sprite." })),
     }),
     execute: async ({ task_id, model, reasoning, base_branch, resume_of }, ctx) => {
+      const [caller, task] = await Promise.all([
+        ctx.runId == null ? Promise.resolve(null) : runs.get(ctx.runId),
+        repo.getTask(task_id),
+      ]);
+      const ciOwnershipError = checkExecutorCiRepairOwnership(caller?.personaId ?? null, task?.state ?? null);
+      if (ciOwnershipError) return errResult(ciOwnershipError);
       const userId = await resolveSpawnerUserId(ctx);
       const result = await safe(() =>
         agentLib.startSession({
@@ -1085,16 +1092,21 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       );
       if ("_error" in result) return errResult(`Error: ${result._error}`);
       const parentRunId = result.parentRunId ?? null;
+      const run = await runs.get(result.id);
       const subscriptions = parentRunId != null ? await listRunSubscriptions(parentRunId) : [];
-      const subscription = subscriptions.find((s) => s.sourceRunId === result.id && s.keepOpen);
+      const currentAttempt = run?.attempt ?? 1;
+      const subscription = subscriptions.find((s) =>
+        s.sourceRunId === result.id && s.keepOpen && s.status === "active" && s.resolvedAttempt === currentAttempt
+      );
       return jsonResult({ session_id: result.id, task_id: result.taskId, model: result.model,
-        parent_run_id: parentRunId, resume_of: result.resumeOf,
-        subscription_id: subscription?.id ?? null, attempt: subscription?.resolvedAttempt ?? 1,
+        parent_run_id: parentRunId, resume_of: resume_of ?? null,
+        resumed_in_place: resume_of != null || (run?.attempt ?? 1) > 1,
+        subscription_id: subscription?.id ?? null, attempt: currentAttempt,
         message: parentRunId == null
           ? "Started without a supervising run."
           : parentRunId === ctx.runId
             ? "Started. Child events arrive automatically in your conversation; no wait call is needed."
-            : `Replacement started under supervising run #${parentRunId}. Child events arrive in that run's conversation.` });
+            : `Session resumed in place under supervising run #${parentRunId}. Child events arrive in that run's conversation.` });
     },
   },
 

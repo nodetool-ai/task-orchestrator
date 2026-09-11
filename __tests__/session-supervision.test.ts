@@ -1,7 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
-import { agentMessages, agentSessions, inboxEvents, runEventSubscriptions } from "../db/schema";
+import { agentMessages, agentSessions, inboxEvents, runEventSubscriptions, runInputs, runTurns } from "../db/schema";
 import * as runs from "../lib/runs";
 import * as repo from "../lib/repo";
 import { startSession } from "../lib/agent";
@@ -10,9 +11,13 @@ import { publishAttemptFinishedTx, registerDefaultChildSubscriptionTx } from "..
 import { repairReplacementSupervision } from "../lib/run-supervision-repair";
 
 const realCreate = runs.create;
+const realResume = runs.resumeTaskRunInPlace;
 beforeEach(() => {
   vi.restoreAllMocks();
   vi.spyOn(runs, "create").mockImplementation(input => realCreate({ ...input, defer: true }));
+  vi.spyOn(runs, "resumeTaskRunInPlace").mockImplementation((id, input) =>
+    realResume(id, { ...input, defer: true })
+  );
 });
 
 async function fixture() {
@@ -79,22 +84,22 @@ describe("replacement supervision", () => {
     const response = await tool.execute({ task_id: task.id }, { runId: other.id, author: "test" });
     expect(response.isError).toBeFalsy();
     const result = JSON.parse(response.content[0].text as string);
-    expect(result).toMatchObject({ parent_run_id: parent.id, resume_of: prior.id });
+    expect(result).toMatchObject({ session_id: prior.id, parent_run_id: parent.id, resume_of: null, resumed_in_place: true, attempt: 2 });
     expect(result.message).toContain(`supervising run #${parent.id}`);
     const replacement = (await runs.get(result.session_id))!;
     expect(replacement.parentRunId).toBe(parent.id);
-    expect(replacement.resumeOf).toBe(prior.id);
+    expect(replacement).toMatchObject({ id: prior.id, resumeOf: null, attempt: 2 });
     const [sub] = await db.select().from(runEventSubscriptions).where(eq(runEventSubscriptions.id, result.subscription_id));
     expect(sub.subscriberRunId).toBe(parent.id);
-    await db.transaction(tx => publishAttemptFinishedTx(tx, { id: replacement.id, attempt: 1, status: "completed" }));
+    await db.transaction(tx => publishAttemptFinishedTx(tx, { id: replacement.id, attempt: 2, status: "completed" }));
     const deliveries = await db.select().from(inboxEvents).where(eq(inboxEvents.sourceId, String(replacement.id)));
     expect(deliveries.map(d => d.targetRunId)).toEqual([parent.id]);
   });
 
-  it("explicit resumes retain supervision and record retry lineage independently", async () => {
+  it("explicit resumes retain one session identity and supervision", async () => {
     const { parent, other, task, prior } = await fixture();
     const replacement = await startSession({ taskId: task.id, resumeOf: prior.id, parentRunId: other.id });
-    expect(replacement).toMatchObject({ parentRunId: parent.id, resumeOf: prior.id });
+    expect(replacement).toMatchObject({ id: prior.id, parentRunId: parent.id, resumeOf: null });
     await expect(startSession({ taskId: task.id, resumeOf: replacement.id })).rejects.toMatchObject({ status: 409 });
   });
 
@@ -105,7 +110,8 @@ describe("replacement supervision", () => {
     const another = await repo.createTask({ planId: null, repoId: "R-default", title: "Other task" });
     await expect(startSession({ taskId: another.id, resumeOf: prior.id })).rejects.toMatchObject({ status: 400 });
     const replacement = await startSession({ taskId: task.id });
-    expect(await runs.get(replacement.id)).toMatchObject({ autoMerge: false, baseBranch: "develop", thinkingLevel: "high", budgetMaxTurns: 7 });
+    expect(replacement.id).toBe(prior.id);
+    expect(await runs.get(replacement.id)).toMatchObject({ autoMerge: false, baseBranch: "develop", thinkingLevel: "high", budgetMaxTurns: 7, attempt: 2 });
   });
 
   it("new task sessions use the caller and parentless retries stay parentless", async () => {
@@ -115,7 +121,46 @@ describe("replacement supervision", () => {
     expect(prior.resumeOf).toBeNull();
     await db.update(agentSessions).set({ status: "failed" }).where(eq(agentSessions.id, prior.id));
     const replacement = await startSession({ taskId: task.id, parentRunId: caller.id });
-    expect(replacement.parentRunId).toBeNull();
+    expect(replacement).toMatchObject({ id: prior.id, parentRunId: null });
+  });
+
+  it("requeues the prior attempt's assigned input without changing its identity", async () => {
+    const { task, prior } = await fixture();
+    const [message] = await db.insert(agentMessages).values({
+      runId: prior.id,
+      role: "user",
+      content: JSON.stringify([{ type: "text", text: "preserve me" }]),
+    }).returning();
+    const inputId = randomUUID();
+    const turnId = randomUUID();
+    await db.insert(runTurns).values({
+      id: turnId, runId: prior.id, ordinal: 1, attempt: 1, state: "active",
+      inputManifest: [{ id: inputId, inputSeq: 1, messageId: message.id, kind: "user" }],
+    });
+    await db.insert(runInputs).values({
+      id: inputId, runId: prior.id, inputSeq: 1, messageId: message.id,
+      kind: "user", status: "assigned", assignedTurnId: turnId,
+    });
+    const before = (await runs.get(prior.id))!.startedAt;
+
+    const resumed = await startSession({ taskId: task.id, resumeOf: prior.id });
+
+    expect(resumed.id).toBe(prior.id);
+    const [input] = await db.select().from(runInputs).where(eq(runInputs.id, inputId));
+    const [turn] = await db.select().from(runTurns).where(eq(runTurns.id, turnId));
+    expect(input).toMatchObject({ status: "pending", assignedTurnId: null, messageId: message.id, inputSeq: 1 });
+    expect(turn.state).toBe("superseded");
+    expect((await runs.get(prior.id))!.startedAt.getTime()).toBeGreaterThanOrEqual(before.getTime());
+  });
+
+  it("does not create a second durable session after completion without resume_of", async () => {
+    const task = await repo.createTask({ planId: null, repoId: "R-default", title: "Stable identity" });
+    const prior = await startSession({ taskId: task.id });
+    await db.update(agentSessions).set({ status: "completed", completedAt: new Date() })
+      .where(eq(agentSessions.id, prior.id));
+
+    await expect(startSession({ taskId: task.id })).rejects.toMatchObject({ status: 409 });
+    expect(await runs.list({ taskId: task.id, goal: "<implement>" })).toHaveLength(1);
   });
 
   it("repairs parent and subscriptions atomically without touching the worker", async () => {

@@ -238,8 +238,8 @@ export interface StartSessionInput {
   thinkingLevel?: "low" | "medium" | "high" | "xhigh" | null;
   baseBranch?: string;
   resumeOf?: number;
-  /** Supervisor for a new task session. Replacements retain the prior
-   *  session's supervisor, including when another run requests the retry. */
+  /** Supervisor for a new task session. In-place resumes retain the existing
+   *  supervisor, including when another run requests the retry. */
   parentRunId?: number | null;
   /** User the session is attributed to; spawned children inherit the
    *  spawner's userId so attribution survives across the run tree. */
@@ -265,7 +265,6 @@ export async function startSession(input: StartSessionInput): Promise<AgentSessi
   // endpoint, auto-launch) is covered by one lock on one connection. Do NOT
   // re-wrap this call in a transaction taking that lock — create()'s inner
   // transaction runs on a different pooled connection and would deadlock.
-  let backend = input.backend ?? null;
   let prior: runs.RunRow | null = null;
   if (input.resumeOf != null) {
     prior = await runs.get(input.resumeOf);
@@ -273,26 +272,45 @@ export async function startSession(input: StartSessionInput): Promise<AgentSessi
     if (prior.taskId !== input.taskId) {
       throw new repo.RepoError(`Session #${input.resumeOf} belongs to a different task`, 400);
     }
-    if (!isTerminalStatus(prior.status)) {
+    if (!isTerminalStatus(prior.status) && prior.status !== "idle") {
       throw new repo.RepoError(
-        `Session #${input.resumeOf} is still '${prior.status}' — wait for it to settle before replacing it`,
+        `Session #${input.resumeOf} is still '${prior.status}' — wait for it to settle before resuming it`,
         409
       );
     }
   } else {
-    // A start immediately after a failed task run is a replacement even if
-    // the caller omitted resumeOf. Keep its existing supervisor: run 218's
-    // recovery of run 221 otherwise moved run 222 outside run 219's tree.
+    // A task session is a stable identity. Starting a task again after a
+    // resumable terminal state renews that row rather than accumulating T9.1,
+    // T9.2, ... replacement records for one logical task.
     const [latest] = await runs.list({ taskId: input.taskId, goal: "<implement>", limit: 1 });
-    if (latest?.status === "failed") prior = latest;
+    if (latest && ["failed", "budget_exhausted"].includes(latest.status)) prior = latest;
   }
-  // Spawn failures may have no SDK token. A replacement starts a fresh worker
-  // on the task's canonical branch; resume lineage is separate from ownership.
-  backend = backend ?? prior?.backend ?? null;
+
+  if (prior) {
+    if (input.backend != null && input.backend !== prior.backend) {
+      throw new repo.RepoError("An in-place resume cannot change agent backend", 400);
+    }
+    if (input.model != null && input.model !== prior.model) {
+      throw new repo.RepoError("An in-place resume cannot change model", 400);
+    }
+    if (input.baseBranch != null && input.baseBranch !== prior.baseBranch) {
+      throw new repo.RepoError("An in-place resume cannot change the task's base branch", 400);
+    }
+    if (input.thinkingLevel != null && input.thinkingLevel !== prior.thinkingLevel) {
+      throw new repo.RepoError("An in-place resume cannot change reasoning level", 400);
+    }
+    const resumed = await runs.resumeTaskRunInPlace(prior.id, {
+      toolsProfile: input.toolsProfile ?? prior.toolsProfile,
+      defer: input.defer,
+    });
+    return runs.toAgentSessionFull(resumed);
+  }
+
+  const backend = input.backend ?? null;
 
   // Resolve the selected persona once. Model may inherit from it in
   // runs.create(), while permissions and budgets inherit here fieldwise.
-  const personaId = input.personaId ?? prior?.personaId ?? "implementor";
+  const personaId = input.personaId ?? "implementor";
   const persona = await repo.getPersona(personaId);
   if (!persona) throw new repo.RepoError(`Persona ${personaId} not found`, 404);
   const created = await runs.create({
@@ -300,27 +318,28 @@ export async function startSession(input: StartSessionInput): Promise<AgentSessi
     cwdStrategy: "worktree",
     // gh_pr/gh_ci let the agent inspect its own PR and fetch CI results
     // (e.g. when reacting to webhook-driven CI failures).
-    toolsProfile: input.toolsProfile ?? prior?.toolsProfile ?? persona.toolsProfile,
+    toolsProfile: input.toolsProfile ?? persona.toolsProfile,
     taskId: input.taskId,
     scheduleOccurrenceId: input.scheduleOccurrenceId ?? null,
-    autoMerge: input.autoMerge ?? prior?.autoMerge ?? true,
-    prUrl: prior?.prUrl ?? null,
+    autoMerge: input.autoMerge ?? true,
+    prUrl: null,
     repoId: task.repoId ?? null,
-    model: input.model ?? prior?.model ?? undefined,
+    model: input.model ?? undefined,
     backend,
-    thinkingLevel: input.thinkingLevel ?? prior?.thinkingLevel ?? null,
+    thinkingLevel: input.thinkingLevel ?? null,
     // Undefined deliberately reaches ensureWorktreeBranch(), which resolves the
     // registered repository default branch instead of assuming `main`.
-    baseBranch: input.baseBranch ?? prior?.baseBranch ?? undefined,
-    parentRunId: prior ? prior.parentRunId : input.parentRunId ?? null,
-    resumeOf: prior?.id ?? null,
-    userId: prior ? prior.userId : input.userId ?? null,
+    baseBranch: input.baseBranch ?? undefined,
+    parentRunId: input.parentRunId ?? null,
+    resumeOf: null,
+    userId: input.userId ?? null,
     personaId,
     budget: {
-      maxTurns: input.budget?.maxTurns ?? prior?.budgetMaxTurns ?? persona.budgetMaxTurns ?? undefined,
-      maxUsd: input.budget?.maxUsd ?? prior?.budgetMaxUsd ?? undefined,
-      maxSeconds: input.budget?.maxSeconds ?? prior?.budgetMaxSeconds ?? persona.budgetMaxSeconds ?? undefined,
+      maxTurns: input.budget?.maxTurns ?? persona.budgetMaxTurns ?? undefined,
+      maxUsd: input.budget?.maxUsd ?? undefined,
+      maxSeconds: input.budget?.maxSeconds ?? persona.budgetMaxSeconds ?? undefined,
     },
+    stableTaskIdentity: true,
     defer: input.defer,
   });
 

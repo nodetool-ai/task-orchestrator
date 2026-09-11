@@ -49,13 +49,16 @@ describe("resume transcript byte budget", () => {
     expect(bounded.transcript.slice(-2)).toEqual(start.transcript.slice(-2));
   });
 
-  it("does not trim fresh starts or recovery without a backend session", () => {
+  it("does not trim fresh starts and does bound recovery without a backend session", () => {
     const start = snapshot();
     start.mode = "start";
     expect(boundResumeTranscript(start)).toBe(start);
     start.mode = "resume";
     start.run.sdkSessionId = null;
-    expect(boundResumeTranscript(start)).toBe(start);
+    const bounded = boundResumeTranscript(start);
+    expect(bounded.transcriptOmittedMessages).toBeGreaterThan(0);
+    expect(Buffer.byteLength(JSON.stringify(bounded), "utf8")).toBeLessThanOrEqual(RESUME_SNAPSHOT_BYTES);
+    expect(bounded.pendingInput).toBe(start.pendingInput);
   });
 
   it("never drops oversized pending input or unprocessed first-turn history to fit", () => {

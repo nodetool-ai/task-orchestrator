@@ -78,11 +78,6 @@ export async function buildRunStart(
   const run = await dbTransport.getRun(runId);
   if (!run) throw new Error(`Run ${runId} not found`);
 
-  // Fresh vs resume is decided here (the builder owns it): a run that already
-  // carries a backend SDK session id is resuming a prior turn; otherwise it is a
-  // fresh start. An explicit mode argument overrides the inference.
-  const resolvedMode: SnapshotMode = mode ?? (run.sdkSessionId ? "resume" : "start");
-
   const [initialMessages, task, persona, repository] = await Promise.all([
     dbTransport.listMessages(runId),
     run.taskId ? dbTransport.getTask(run.taskId) : Promise.resolve(null),
@@ -90,6 +85,15 @@ export async function buildRunStart(
     dbTransport.resolveRepo(runId),
   ]);
   if (!persona) throw new Error(`Persona '${run.personaId ?? "implementor"}' not found`);
+  // A backend token is the strongest resume signal, but some adapters/runs do
+  // not persist one. Once an agent reply exists this is still a recovery turn,
+  // not a fresh kickoff: rehydrate a bounded durable transcript rather than
+  // growing run.start without limit (run 261 reached 1,189,269 bytes).
+  const resolvedMode: SnapshotMode = mode ?? (
+    run.sdkSessionId || initialMessages.some((message) => message.role === "agent")
+      ? "resume"
+      : "start"
+  );
 
   const planId = run.planId ?? task?.planId ?? null;
   const plan = planId ? await dbTransport.getPlan(planId) : null;
