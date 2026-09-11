@@ -225,10 +225,11 @@ async function handleRunPhase(tx: WorkerChannelTransaction, frame: WorkerEventFr
     .set(set)
     .where(and(eq(agentSessions.id, frame.runId), notInArray(agentSessions.status, TERMINAL_STATUSES)));
   await tx.insert(agentEvents).values(buildStatusEventValues(frame.runId, target, { phase }));
-  // Sprites: an open proxy tunnel is activity – close the channel when the run
-  // goes idle so the sprite can hibernate. The next dispatchRun will re-dial.
+  // Sprites: an open proxy tunnel is activity – close the channel and retire
+  // the generation when the durable v2 worker has accepted either final
+  // boundary. The next dispatchRun will re-dial a fresh generation.
   // Scheduled after commit so the channel.ack is flushed first.
-  if (target === "idle") {
+  if (target === "idle" || (target === "parked" && durableV2)) {
     const doClose = () => {
       void import("./registry").then((m) => m.maybeCloseSpritesChannel(frame.runId).catch(() => undefined));
     };

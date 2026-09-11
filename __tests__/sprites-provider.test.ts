@@ -21,6 +21,7 @@ import type { SpritesClient } from "../lib/runner/sprites-client";
 
 function fakeSpritesClient(overrides: Partial<SpritesClient> = {}): SpritesClient & { _calls: string[] } {
   const calls: string[] = [];
+  const stoppedServices = new Set<string>();
   const base: SpritesClient = {
     createSprite: vi.fn(async (input: { name: string }) => {
       calls.push(`createSprite:${input.name}`);
@@ -33,21 +34,25 @@ function fakeSpritesClient(overrides: Partial<SpritesClient> = {}): SpritesClien
     getService: vi.fn(async (_spriteName: string, serviceName: string) => ({
       name: serviceName,
       cmd: "node",
-      state: { status: "running", pid: 1, startedAt: "2026-01-01T00:00:00Z" },
+      state: stoppedServices.has(serviceName)
+        ? { status: "stopped" }
+        : { status: "running", pid: 1, startedAt: "2026-01-01T00:00:00Z" },
     })),
     deleteSprite: vi.fn(async (name: string) => {
       calls.push(`deleteSprite:${name}`);
     }),
     listSprites: vi.fn(async () => ({ sprites: [], continuationToken: undefined })),
     listAllSprites: vi.fn(async () => []),
+    listServices: vi.fn(async () => []),
     putService: vi.fn(async () => {
       calls.push("putService");
     }),
     startService: vi.fn(async () => {
       calls.push("startService");
     }),
-    stopService: vi.fn(async () => {
+    stopService: vi.fn(async (_spriteName: string, serviceName: string) => {
       calls.push("stopService");
+      stoppedServices.add(serviceName);
     }),
     restartService: vi.fn(async () => {}),
     getServiceLogs: vi.fn(async () => ""),
@@ -308,6 +313,32 @@ describe("SpritesRunnerProvider.inspect", () => {
     expect(getService).toHaveBeenCalledWith("to-run-42", "worker-g16");
   });
 
+  it.each([
+    ["with a restart timer", "2026-09-11T12:00:00Z"],
+    ["without a restart timer", undefined],
+  ])("does not accept a failed service %s as sticky-stopped", async (_label, nextRestartAt) => {
+    let stops = 0;
+    const stopService = vi.fn(async () => { stops += 1; });
+    const getService = vi.fn(async (_spriteName: string, serviceName: string) => ({
+      name: serviceName,
+      cmd: "node",
+      state: stops < 2
+        ? { status: "failed", ...(nextRestartAt ? { nextRestartAt } : {}) }
+        : { status: "stopped" },
+    }));
+    const provider = new SpritesRunnerProvider(fakeSpritesClient({ getService, stopService }));
+
+    await provider.stopGeneration({
+      runId: 42,
+      generation: 16,
+      instanceId: "wi_0123456789abcdef0123456789abcdef",
+      providerHandle: "to-run-42",
+      providerServiceName: "worker-g16",
+    });
+
+    expect(stopService).toHaveBeenCalledTimes(2);
+  });
+
   it("a hibernating sprite is never dead unless its service proves an exit", async () => {
     const cold = (state: Record<string, unknown>) => new SpritesRunnerProvider(fakeSpritesClient({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -533,6 +564,71 @@ describe("SpritesRunnerProvider.create", () => {
 });
 
 describe("SpritesRunnerProvider.resume", () => {
+  it("quiesces every older owned worker before defining a replacement", async () => {
+    const operationId = "00000000-0000-4000-8000-000000000050";
+    const instanceId = "wi_50505050505050505050505050505050";
+    const states = new Map<string, { status: string; nextRestartAt?: string }>([
+      ["worker", { status: "running" }],
+      ["worker-g44", { status: "running" }],
+      ["worker-g45", { status: "stopped" }],
+      ["worker-g46", { status: "failed", nextRestartAt: "2026-09-11T12:00:00Z" }],
+      ["worker-g49", { status: "failed" }],
+      ["postgres", { status: "running" }],
+    ]);
+    const order: string[] = [];
+    const services = () => [...states].map(([name, state]) => ({ name, cmd: "node", state: { ...state } }));
+    const client = fakeSpritesClient({
+      getSprite: vi.fn(async (name: string) => ({ name, status: "warm" })),
+      listServices: vi.fn(async () => services()),
+      getService: vi.fn(async (_spriteName: string, serviceName: string) => {
+        const state = states.get(serviceName);
+        return state ? { name: serviceName, cmd: "node", state: { ...state } } : null;
+      }),
+      stopService: vi.fn(async (_spriteName: string, serviceName: string) => {
+        order.push(`stop:${serviceName}`);
+        if (states.has(serviceName)) states.set(serviceName, { status: "stopped" });
+      }),
+      putService: vi.fn(async (_spriteName: string, serviceName: string) => { order.push(`put:${serviceName}`); }),
+      startService: vi.fn(async (_spriteName: string, serviceName: string) => { order.push(`start:${serviceName}`); }),
+      listCheckpoints: vi.fn(async () => [{ id: "cp", comment: `bootstrap ${await workerBundleId()} node ${SPRITE_NODE_VERSION}` }]),
+    });
+    const provider = new SpritesRunnerProvider(client);
+    const run = await create({ goal: "<implement>", defer: true });
+    const spriteName = spriteNameForRun(run.id);
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      provider: "sprites",
+      spriteName,
+      state: "starting",
+      workerGeneration: 50,
+      generationState: "allocating",
+      providerOperationId: operationId,
+      providerServiceName: "worker-g50",
+      channelInstanceId: instanceId,
+    });
+
+    await provider.resume(run.id, {
+      runId: run.id,
+      scope: `run-${run.id}`,
+      workerGeneration: 50,
+      providerOperationId: operationId,
+      providerServiceName: "worker-g50",
+      previousProviderServiceName: "worker-g49",
+      replacesGeneration: 49,
+      channelInstanceId: instanceId,
+    });
+
+    expect(order.filter((entry) => entry.startsWith("stop:") && entry !== "stop:worker-g50"))
+      .toEqual(["stop:worker", "stop:worker-g44", "stop:worker-g46", "stop:worker-g49"]);
+    expect(order).not.toContain("stop:postgres");
+    const putIndex = order.indexOf("put:worker-g50");
+    expect(putIndex).toBeGreaterThan(-1);
+    for (const name of ["worker", "worker-g44", "worker-g46", "worker-g49"]) {
+      expect(order.indexOf(`stop:${name}`)).toBeLessThan(putIndex);
+    }
+    expect(order.at(-1)).toBe("start:worker-g50");
+  });
+
   it("on cold sprite sets row state to starting and calls startService once", async () => {
     const startSpy = vi.fn(async () => {});
     const client = fakeSpritesClient({
@@ -590,7 +686,9 @@ describe("SpritesRunnerProvider.resume", () => {
         name: serviceName,
         cmd: "node",
         env: { TASK_ORCH_WORKER_CHANNEL_CREDENTIAL: "wc1.wi_cccccccccccccccccccccccccccccccc.stale" },
-        state: { status: "running", pid: 7, startedAt: "2026-01-01T00:00:00Z" },
+        state: stopSpy.mock.calls.length > 0
+          ? { status: "stopped" }
+          : { status: "running", pid: 7, startedAt: "2026-01-01T00:00:00Z" },
       })),
       putService: putSpy,
       stopService: stopSpy,
@@ -648,6 +746,7 @@ describe("SpritesRunnerProvider.resume", () => {
   it("re-bootstraps and redefines the service when the shipped bundle changed since the sprite was created", async () => {
     const putSpy = vi.fn(async () => {});
     const checkpointSpy = vi.fn(async () => ({ id: "cp2" }));
+    const stopSpy = vi.fn(async () => {});
     const run = await create({ goal: "<implement>", defer: true });
     const spriteName = spriteNameForRun(run.id);
     const instanceId = "wi_abababababababababababababababab";
@@ -657,8 +756,11 @@ describe("SpritesRunnerProvider.resume", () => {
         name: serviceName,
         cmd: "node",
         env: { TASK_ORCH_WORKER_CHANNEL_CREDENTIAL: mintChannelCredential(run.id, instanceId) },
-        state: { status: "running", pid: 7, startedAt: "2026-01-01T00:00:00Z" },
+        state: stopSpy.mock.calls.length > 0
+          ? { status: "stopped" }
+          : { status: "running", pid: 7, startedAt: "2026-01-01T00:00:00Z" },
       })),
+      stopService: stopSpy,
       putService: putSpy,
       checkpoint: checkpointSpy,
       listCheckpoints: vi.fn(async () => [{ id: "old", comment: "bootstrap deadbeef" }]),

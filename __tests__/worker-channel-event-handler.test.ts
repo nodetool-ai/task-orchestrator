@@ -373,6 +373,23 @@ describe("run.phase", () => {
     expect(row.scope).toBe("to-run-1");
   });
 
+  it("schedules Sprite retirement when a v2 worker lands parked", async () => {
+    const registry = await import("../lib/worker-channel/registry");
+    const close = vi.spyOn(registry, "maybeCloseSpritesChannel").mockResolvedValue();
+    const runId = await newRun();
+    await db.update(agentSessions)
+      .set({ deliveryVersion: 2, workerScope: `to-run-${runId}` })
+      .where(eq(agentSessions.id, runId));
+
+    await apply(makeFrame(runId, "run.phase", { phase: "parked" }));
+
+    const [row] = await db.select({ status: agentSessions.status, scope: agentSessions.workerScope })
+      .from(agentSessions).where(eq(agentSessions.id, runId));
+    expect(row.status).toBe("parked");
+    expect(row.scope).toBeNull();
+    expect(close).toHaveBeenCalledWith(runId);
+  });
+
   it("never regresses a run that already landed a terminal outcome", async () => {
     const runId = await newRun();
     await apply(makeFrame(runId, "run.cancelled", { requestId: "r", reason: "stop" }));

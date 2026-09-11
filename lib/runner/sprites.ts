@@ -13,7 +13,7 @@ import { isTerminalStatus } from "../run-state";
 import { nestedDispatchMode } from "./provider";
 import { recordRunnerEvent, timeRunnerPhase } from "./telemetry";
 import type { CreateRunnerInput, WorkerGenerationRef, RunnerObservation, RunnerProvider, RunnerRef, RunnerState } from "./provider";
-import { SpritesApiError, makeSpritesClient, type NetworkPolicy, type SpritesClient, type Sprite } from "./sprites-client";
+import { SpritesApiError, makeSpritesClient, type NetworkPolicy, type SpritesClient, type Sprite, type SpriteService } from "./sprites-client";
 import { bootstrapSprite, configureSpriteSwap, spriteBootstrapComment, SPRITE_CODEX_BINARY } from "./sprites-bootstrap";
 import { workerBundleId } from "../worker-bundle";
 import { newChannelInstanceId } from "../worker-channel/credential";
@@ -77,6 +77,22 @@ function serviceNameOf(row: GenerationRow | null | undefined): string {
   // generation 1 remains compatible until that row is explicitly restarted.
   if (generationOf(row) === 1) return "worker";
   return workerServiceName(generationOf(row));
+}
+
+function ownedWorkerGeneration(serviceName: string): number | null {
+  if (serviceName === "worker") return 0;
+  const match = /^worker-g([1-9]\d*)$/.exec(serviceName);
+  if (!match) return null;
+  const generation = Number(match[1]);
+  if (!Number.isSafeInteger(generation)) {
+    throw new Error(`Invalid owned Sprite worker service name: ${serviceName}`);
+  }
+  return generation;
+}
+
+function serviceIsQuiescent(service: SpriteService | null): boolean {
+  return service == null
+    || (service.state.status === "stopped" && service.state.nextRestartAt === undefined);
 }
 
 /** Keep generation columns optional while the generation migration is rolled
@@ -463,6 +479,45 @@ export class SpritesRunnerProvider implements RunnerProvider {
     return result.count > 0;
   }
 
+  /** A runner row remembers only the newest generation, while provider service
+   * definitions survive independently. Fence replacement startup against the
+   * complete provider inventory so an older supervisor cannot reclaim 8787. */
+  private async quiesceOlderWorkerServices(spriteName: string, targetGeneration: number): Promise<void> {
+    if (!this.spritesClient.listServices) {
+      throw new Error("Sprite replacement requires complete service inventory");
+    }
+    const inventory = await this.spritesClient.listServices(spriteName);
+    const owned = inventory.map((service) => ({ service, generation: ownedWorkerGeneration(service.name) }))
+      .filter((entry): entry is { service: SpriteService; generation: number } => entry.generation != null);
+    const newer = owned.find((entry) => entry.generation > targetGeneration);
+    if (newer) {
+      throw new Error(`Sprite ${spriteName} has newer worker service ${newer.service.name}; refusing stale generation ${targetGeneration}`);
+    }
+    const older = owned
+      .filter((entry) => entry.generation < targetGeneration)
+      .sort((a, b) => a.generation - b.generation);
+    for (const { service } of older) {
+      if (!serviceIsQuiescent(service)) {
+        await this.stopServiceAndConfirm(spriteName, service.name);
+      }
+    }
+    const confirmed = await this.spritesClient.listServices(spriteName);
+    const unsafe = confirmed.find((service) => {
+      const generation = ownedWorkerGeneration(service.name);
+      return generation != null && generation < targetGeneration && !serviceIsQuiescent(service);
+    });
+    if (unsafe) {
+      throw new Error(`Older Sprite worker ${spriteName}/${unsafe.name} remains restartable`);
+    }
+    const laterNewer = confirmed.find((service) => {
+      const generation = ownedWorkerGeneration(service.name);
+      return generation != null && generation > targetGeneration;
+    });
+    if (laterNewer) {
+      throw new Error(`Sprite ${spriteName} acquired newer worker service ${laterNewer.name}; refusing stale generation ${targetGeneration}`);
+    }
+  }
+
   private async releaseRunClaimIfCurrent(runId: number, spriteName: string, workerGeneration?: number | null): Promise<void> {
     const session = db
       .update(agentSessions)
@@ -546,6 +601,10 @@ export class SpritesRunnerProvider implements RunnerProvider {
     try {
       if (poolEntry) {
         await this.restorePoolAssignment(poolEntry, input);
+        if (input.workerGeneration != null) {
+          await this.quiesceOlderWorkerServices(spriteName, input.workerGeneration);
+          if (!(await this.updateInstance(input.runId, { generationState: "booting" }, generationGuard(input, null)))) return null;
+        }
       } else {
       await timeRunnerPhase(
         "sprites_sprite_create",
@@ -564,6 +623,11 @@ export class SpritesRunnerProvider implements RunnerProvider {
         },
         { provider: "sprites", fields: { runId: input.runId, spriteName } },
       );
+
+      if (input.workerGeneration != null) {
+        await this.quiesceOlderWorkerServices(spriteName, input.workerGeneration);
+        if (!(await this.updateInstance(input.runId, { generationState: "booting" }, generationGuard(input, null)))) return null;
+      }
 
       // Phase A bootstrap: fetch the prebuilt worker bundle into the sprite.
       // The checkpoint is keyed by the bundle id (sha1 of the shipped bundle),
@@ -774,18 +838,27 @@ export class SpritesRunnerProvider implements RunnerProvider {
     // Re-define the service with the current env whenever the stored credential
     // no longer matches; that also refreshes provider keys and model settings.
     try {
-      await configureSpriteSwap(this.spritesClient, spriteName, config.sprites.swapMb);
       const desiredEnv = { ...await buildSpritesWorkerEnv(runId, {
         channelInstanceId,
         channelListenEndpoint: spritesListenEndpoint(),
         workerGeneration: requestedGeneration ?? currentGeneration ?? undefined,
       }), ...this.poolWorkerEnv(poolEntry), TASK_ORCH_SPRITE_NAME: spriteName };
       // A true restart gets a new service and instance. Stop and confirm the
-      // prior generation before binding the replacement to port 8787; a delayed
-      // stop on the stable `worker` name is otherwise able to kill the new turn.
-      if (restarting && oldServiceName !== serviceName) {
+      // entire older provider inventory before binding the replacement to
+      // port 8787. The runner row remembers only one predecessor, so targeting
+      // oldServiceName alone can leave an older restartable orphan behind.
+      if (requestedGeneration != null) {
+        await this.quiesceOlderWorkerServices(spriteName, requestedGeneration);
+        const stillCurrent = await this.updateInstance(
+          runId,
+          { generationState: restarting ? "booting" : "connecting" },
+          generationFence,
+        );
+        if (!stillCurrent) return null;
+      } else if (restarting && oldServiceName !== serviceName) {
         await this.stopServiceAndConfirm(spriteName, oldServiceName);
       }
+      await configureSpriteSwap(this.spritesClient, spriteName, config.sprites.swapMb);
       // Provider inspection failures are not proof that the service is absent
       // or stale. Surface the error so resume fails closed instead of starting
       // a second process while the old service may still own the port.
@@ -804,7 +877,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
         staleBundle = !checkpoints.some((cp) => cp.comment === spriteBootstrapComment(workerSha));
         if (staleBundle) {
           console.warn(`[SpritesRunnerProvider] worker bundle on ${spriteName} predates ${workerSha}; re-bootstrapping`);
-          await this.stopServiceAndConfirm(spriteName, serviceName, serviceName !== "worker");
+          await this.stopServiceAndConfirm(spriteName, serviceName);
           await bootstrapSprite(this.spritesClient, spriteName, {
             workerSha,
             bundleUrl,
@@ -819,7 +892,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
       }
       if (staleEnv || staleBundle) {
         console.warn(`[SpritesRunnerProvider] redefining the worker service on ${spriteName} (${staleBundle ? "new bundle" : "worker env changed"})`);
-        await this.stopServiceAndConfirm(spriteName, serviceName, serviceName !== "worker");
+        await this.stopServiceAndConfirm(spriteName, serviceName);
         await this.spritesClient.putService(spriteName, serviceName, {
           cmd: "node",
           args: ["dist/run-worker.js", String(runId)],
@@ -858,17 +931,23 @@ export class SpritesRunnerProvider implements RunnerProvider {
    * reports it running. An API error is treated as an absent service only when
    * the follow-up read confirms that; callers never start a replacement based
    * solely on fire-and-forget stop. */
-  private async stopServiceAndConfirm(spriteName: string, serviceName: string, confirm = true): Promise<void> {
-    await this.spritesClient.stopService(spriteName, serviceName).catch(() => {});
-    if (!confirm) return;
+  private async stopServiceAndConfirm(spriteName: string, serviceName: string): Promise<void> {
     const deadline = Date.now() + 30_000;
     let lastError: unknown;
+    let lastState: SpriteService["state"] | undefined;
     for (;;) {
       try {
-        const service = await this.spritesClient.getService(spriteName, serviceName);
-        const state = service?.state;
-        if (!service || state?.status === "stopped" || state?.status === "failed") return;
+        await this.spritesClient.stopService(spriteName, serviceName);
         lastError = undefined;
+      } catch (err) {
+        // Stop responses are not authoritative by themselves. Preserve the
+        // error for diagnostics, then resolve the outcome with a service GET.
+        lastError = err;
+      }
+      try {
+        const service = await this.spritesClient.getService(spriteName, serviceName);
+        lastState = service?.state;
+        if (serviceIsQuiescent(service)) return;
       } catch (err) {
         // An observation failure is unknown, never proof that teardown
         // completed. Keep polling and fail closed at the deadline.
@@ -876,7 +955,8 @@ export class SpritesRunnerProvider implements RunnerProvider {
       }
       if (Date.now() >= deadline) {
         const detail = lastError instanceof Error ? `: ${lastError.message}` : "";
-        throw new Error(`Sprites service ${spriteName}/${serviceName} did not stop${detail}`);
+        const state = lastState ? ` (last state ${lastState.status}${lastState.nextRestartAt ? `, restart ${lastState.nextRestartAt}` : ""})` : "";
+        throw new Error(`Sprites service ${spriteName}/${serviceName} did not reach sticky stopped state${state}${detail}`);
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
