@@ -93,6 +93,92 @@ function fakeChatBackend(replyText: string) {
 
 describe("worker websocket e2e", () => {
   describe("chat run", () => {
+    it("re-adopts a legacy idle chat without inventing a model turn", async () => {
+      const run = await create({ goal: "<chat>", defer: true });
+      await db.update(agentSessions).set({
+        deliveryVersion: 1,
+        status: "idle",
+        sdkSessionId: "claude:previous-conversation",
+      }).where(eq(agentSessions.id, run.id));
+      await db.insert(agentMessages).values([
+        { runId: run.id, role: "user", content: JSON.stringify([{ type: "text", text: "thanks" }]) },
+        { runId: run.id, role: "agent", content: JSON.stringify([{ type: "text", text: "You're welcome." }]) },
+      ]);
+      const backendSpy = vi.spyOn(backend, "getBackend").mockResolvedValue(fakeChatBackend("unwanted resume"));
+      const { server } = await bootWorkerChannel(run.id);
+      try {
+        const start = (await server.session.waitForStart!()) as RunStart;
+        expect(start.mode).toBe("resume");
+        expect(start.pendingInput).toEqual([]);
+        expect(start.inboxDigest).toBeNull();
+        await driveWorkerRun({ start, session: server.session });
+        expect(backendSpy).not.toHaveBeenCalled();
+        expect((await get(run.id))!.status).toBe("idle");
+        expect(await listMessages(run.id)).toHaveLength(2);
+      } finally {
+        await disconnectRun(run.id);
+        await server.close();
+      }
+    });
+
+    it.each([1, 2])("persists a chat quota failure over the channel (delivery v%i)", async (deliveryVersion) => {
+      const run = await create({ goal: "<chat>", defer: true });
+      await db.update(agentSessions).set({ deliveryVersion }).where(eq(agentSessions.id, run.id));
+      await db.transaction(async (tx) => {
+        const [message] = await tx.insert(agentMessages).values({
+          runId: run.id, role: "user", content: JSON.stringify([{ type: "text", text: "hello" }]),
+        }).returning({ id: agentMessages.id });
+        if (deliveryVersion === 2) {
+          const { enqueueUserInputTx } = await import("../lib/run-inputs");
+          await enqueueUserInputTx(tx, run.id, message.id);
+        }
+      });
+      const quotaError = "Claude Code returned an error result: You've hit your session limit";
+      const fake = fakeChatBackend("unused");
+      fake.runTurn = async () => { throw new Error(quotaError); };
+      vi.spyOn(backend, "getBackend").mockResolvedValue(fake);
+      const { server } = await bootWorkerChannel(run.id);
+      try {
+        const start = (await server.session.waitForStart!()) as RunStart;
+        await driveWorkerRun({ start, session: server.session });
+        const row = (await get(run.id))!;
+        expect(row.status).toBe("failed");
+        expect(row.error).toContain(quotaError);
+        expect(row.completedAt).not.toBeNull();
+      } finally {
+        await disconnectRun(run.id);
+        await server.close();
+      }
+    });
+
+    it("retains a failed Sprite chat for retry instead of destroying its environment", async () => {
+      vi.stubEnv("SPRITES_TOKEN", "test-sprites-token");
+      const { SpritesRunnerProvider } = await import("../lib/runner/sprites");
+      const quiesce = vi.spyOn(SpritesRunnerProvider.prototype, "quiesceIdleGeneration").mockResolvedValue(true);
+      const destroy = vi.spyOn(runDispatch, "stopRunner").mockResolvedValue();
+      const run = await create({ goal: "<chat>", defer: true });
+      await db.update(agentSessions).set({ deliveryVersion: 1, sdkSessionId: "claude:retained" }).where(eq(agentSessions.id, run.id));
+      await db.insert(agentMessages).values({ runId: run.id, role: "user", content: JSON.stringify([{ type: "text", text: "continue" }]) });
+      const fake = fakeChatBackend("unused");
+      fake.runTurn = async () => { throw new Error("session limit"); };
+      vi.spyOn(backend, "getBackend").mockResolvedValue(fake);
+      // Use a local socket to exercise the real terminal callback, then bind
+      // that generation to a Sprite so resource cleanup takes the Sprite path.
+      const { server, instanceId } = await bootWorkerChannel(run.id);
+      try {
+        await db.update(runnerInstances).set({ provider: "sprites", spriteName: "to-run-retained", providerServiceName: "worker" }).where(eq(runnerInstances.runId, run.id));
+        const start = (await server.session.waitForStart!()) as RunStart;
+        await driveWorkerRun({ start, session: server.session });
+        await vi.waitFor(() => expect(quiesce).toHaveBeenCalledWith(expect.objectContaining({ runId: run.id, instanceId, providerHandle: "to-run-retained" })));
+        expect(destroy).not.toHaveBeenCalled();
+        expect((await get(run.id))!.sdkSessionId).toBe("claude:retained");
+      } finally {
+        await disconnectRun(run.id);
+        await server.close();
+        vi.unstubAllEnvs();
+      }
+    });
+
     it("drives an initial turn over the channel with no worker HTTP or DB access", async () => {
       const run = await create({ goal: "<chat>", defer: true });
       await db.insert(agentMessages).values({
@@ -131,6 +217,9 @@ describe("worker websocket e2e", () => {
       // This harness sends legacy run.input directly and exercises the
       // keep-open loop. V2 inputs require scheduler receipts and park decisions.
       await db.update(agentSessions).set({ deliveryVersion: 1 }).where(eq(agentSessions.id, run.id));
+      await db.insert(agentMessages).values({
+        runId: run.id, role: "user", content: JSON.stringify([{ type: "text", text: "start the conversation" }]),
+      });
       let firstStarted!: () => void;
       let releaseFirst!: () => void;
       const started = new Promise<void>((resolve) => { firstStarted = resolve; });
@@ -194,6 +283,9 @@ describe("worker websocket e2e", () => {
       // Exercise the legacy keep-open loop directly. V2 inputs require the
       // scheduler receipt/park handshake and are covered by other cases.
       await db.update(agentSessions).set({ deliveryVersion: 1 }).where(eq(agentSessions.id, run.id));
+      await db.insert(agentMessages).values({
+        runId: run.id, role: "user", content: JSON.stringify([{ type: "text", text: "start the conversation" }]),
+      });
       vi.spyOn(backend, "getBackend").mockResolvedValue(fakeChatBackend("idle-wake"));
       process.env.TASK_ORCH_CHAT_IDLE_MS = "6000";
 

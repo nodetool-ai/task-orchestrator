@@ -5,9 +5,10 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 
 import { db } from "../db";
-import { agentSessions, inboxEvents, runEventSubscriptions, runSourceEvents, runTimers } from "../db/schema";
+import { agentMessages, agentSessions, inboxEvents, runEventSubscriptions, runInputs, runSourceEvents, runTimers } from "../db/schema";
 import { registerSubscriptionTx } from "../lib/run-source-events";
 import { seedPersonas } from "../db/seed-personas";
 import { emitInboxEvent, parkedRunsWithPendingEvents } from "../lib/inbox";
@@ -205,5 +206,23 @@ describe("parkedRunsWithPendingEvents (pump belt)", () => {
 
     const ids = await parkedRunsWithPendingEvents();
     expect(ids).toContain(run);
+  });
+
+  it("recovers a durable pending input after its inbox projection was already injected", async () => {
+    const run = await insertRun({ status: "parked" });
+    const [{ id: messageId }] = await db.insert(agentMessages).values({
+      runId: run,
+      role: "user",
+      content: JSON.stringify([{ type: "text", text: "resume me" }]),
+    }).returning({ id: agentMessages.id });
+    await db.insert(runInputs).values({
+      id: randomUUID(), runId: run, inputSeq: 1, messageId, kind: "user", status: "pending",
+    });
+    await db.insert(inboxEvents).values({
+      targetRunId: run, type: "question.answer", payload: {}, audience: "owner",
+      sourceKind: "user", status: "injected",
+    });
+
+    expect(await parkedRunsWithPendingEvents()).toContain(run);
   });
 });

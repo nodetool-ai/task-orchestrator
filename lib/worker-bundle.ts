@@ -12,15 +12,26 @@ import { gzipSync } from "node:zlib";
 import path from "node:path";
 
 const BUNDLE = path.join(process.cwd(), "dist", "run-worker.standalone.js");
+const CODEACT_WASM = path.join(process.cwd(), "dist", "codeact", "emscripten-module.wasm");
+const CODEACT_WASM_SHA = `${CODEACT_WASM}.sha256`;
+const CODEACT_THREAD_WORKER = path.join(process.cwd(), "dist", "codeact", "thread-worker.js");
 export const BUNDLE_ENTRY_PATH = "dist/run-worker.js";
+export const CODEACT_WASM_ENTRY_PATH = "codeact/emscripten-module.wasm";
 
 let cached: Promise<{ id: string; tarGz: Buffer }> | undefined;
 
 function load(): Promise<{ id: string; tarGz: Buffer }> {
   cached ??= (async () => {
-    const js = await readFile(BUNDLE);
-    const id = createHash("sha1").update(js).digest("hex");
-    return { id, tarGz: gzipSync(tarSingleFile(BUNDLE_ENTRY_PATH, js), { level: 6 }) };
+    const [js, wasm, wasmSha, threadWorker] = await Promise.all([readFile(BUNDLE), readFile(CODEACT_WASM), readFile(CODEACT_WASM_SHA), readFile(CODEACT_THREAD_WORKER)]);
+    const files = [
+      { path: BUNDLE_ENTRY_PATH, content: js, mode: 0o755 },
+      { path: CODEACT_WASM_ENTRY_PATH, content: wasm, mode: 0o644 },
+      { path: `${CODEACT_WASM_ENTRY_PATH}.sha256`, content: wasmSha, mode: 0o644 },
+      { path: "codeact/thread-worker.js", content: threadWorker, mode: 0o644 },
+    ];
+    const identity = createHash("sha1");
+    for (const file of files) identity.update(file.path).update("\0").update(file.content);
+    return { id: identity.digest("hex"), tarGz: gzipSync(tarFiles(files), { level: 6 }) };
   })().catch((err) => {
     cached = undefined;
     throw err;
@@ -38,6 +49,16 @@ export async function workerBundleId(): Promise<string> {
  * for `tar -xz`; avoids a tar dependency for a 30-line format.
  */
 export function tarSingleFile(entryPath: string, content: Buffer, mtimeSec = 0): Buffer {
+  return tarFiles([{ path: entryPath, content, mode: 0o755 }], mtimeSec);
+}
+
+export function tarFiles(files: Array<{ path: string; content: Buffer; mode?: number }>, mtimeSec = 0): Buffer {
+  const entries: Buffer[] = [];
+  for (const file of files) entries.push(tarEntry(file.path, file.content, file.mode ?? 0o644, mtimeSec));
+  return Buffer.concat([...entries, Buffer.alloc(1024, 0)]);
+}
+
+function tarEntry(entryPath: string, content: Buffer, mode: number, mtimeSec: number): Buffer {
   const header = Buffer.alloc(512, 0);
   const put = (off: number, s: string) => header.write(s, off, "latin1");
   const oct = (v: number, len: number) => v.toString(8).padStart(len - 1, "0") + "\0";
@@ -49,7 +70,7 @@ export function tarSingleFile(entryPath: string, content: Buffer, mtimeSec = 0):
   } else {
     put(0, entryPath);
   }
-  put(100, oct(0o755, 8));
+  put(100, oct(mode, 8));
   put(108, oct(0, 8));
   put(116, oct(0, 8));
   put(124, oct(content.length, 12));
@@ -64,7 +85,7 @@ export function tarSingleFile(entryPath: string, content: Buffer, mtimeSec = 0):
   for (const b of header) sum += b;
   put(148, sum.toString(8).padStart(6, "0") + "\0 ");
   const pad = (512 - (content.length % 512)) % 512;
-  return Buffer.concat([header, content, Buffer.alloc(pad, 0), Buffer.alloc(1024, 0)]);
+  return Buffer.concat([header, content, Buffer.alloc(pad, 0)]);
 }
 
 export async function workerBundleTarGz(): Promise<Buffer> {

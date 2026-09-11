@@ -92,7 +92,7 @@ afterEach(() => {
 });
 
 describe("CodexBackend.runTurn guards", () => {
-  it("reports in-progress tool events that are deliberately absent from the transcript", async () => {
+  it("persists a command start before completion while reporting changed progress", async () => {
     const onProgress = vi.fn();
     const onEvent = vi.fn();
     sdk.scripts = [[started("th_progress"),
@@ -102,7 +102,10 @@ describe("CodexBackend.runTurn guards", () => {
     ]];
     await new CodexBackend().runTurn(makeArgs({ onProgress, onEvent }));
     expect(onProgress).toHaveBeenCalledTimes(2);
-    expect(onEvent.mock.calls.map(([event]) => event.type)).toEqual(["system", "result"]);
+    expect(onEvent.mock.calls.map(([event]) => event.type)).toEqual(["system", "assistant", "result"]);
+    expect(onEvent.mock.calls[1][0].message.content[0]).toMatchObject({
+      type: "tool_use", id: "cmd1", name: "Bash", input: { command: "npm test" },
+    });
   });
   it("rejects postgres context (the lightweight loop is pi-only)", async () => {
     await expect(

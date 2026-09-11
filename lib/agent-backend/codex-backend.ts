@@ -282,6 +282,10 @@ export class CodexBackend implements AgentBackend {
       // Whether a system/init has already been handed to onEvent (and persisted).
       // Lives ACROSS attempts so a retry doesn't persist a second init row.
       let persistedInit = false;
+      // Persist command starts immediately. If a command wedges and the idle
+      // watchdog aborts the turn, its identity and command remain visible even
+      // though Codex never produced item.completed.
+      const startedItemIds = new Set<string>();
 
       let resumeLostRetried = false;
       let spawnRetries = 0;
@@ -317,6 +321,9 @@ export class CodexBackend implements AgentBackend {
           for await (const ev of events) {
             if (abort.signal.aborted) break;
             progress.codex(ev);
+            if (ev.type === "item.started" && ev.item?.type === "command_execution" && typeof ev.item.id === "string") {
+              startedItemIds.add(ev.item.id);
+            }
             if (ev.type === "thread.started" && ev.thread_id) observedThreadId = ev.thread_id;
             if (!terminalEvent && ev.type === "turn.completed") {
               terminalEvent = "completed";
@@ -333,7 +340,7 @@ export class CodexBackend implements AgentBackend {
               lastStreamError = codexErrorMessage(ev.message, "Codex stream error");
             }
 
-            for (const env of mapCodexEvent(ev, { lastAgentMessage })) {
+            for (const env of mapCodexEvent(ev, { lastAgentMessage, startedItemIds })) {
               const isInit = env.type === "system" && env.subtype === "init";
               if (isInit && env.session_id) env.session_id = `${TAG}${env.session_id}`;
               envelopes.push(env);

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { access, readFile, writeFile, rm, rename } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
-import { SPRITE_BASELINE_DIR, SPRITE_NPM_CACHE_PATH, dependencyFingerprint, type SpriteDependencyManifest } from "../runner/sprites-baseline";
+import { SPRITE_BASELINE_DIR, SPRITE_NPM_CACHE_PATH, dependencyFingerprint, dependencyVerificationProgram, type SpriteDependencyManifest } from "../runner/sprites-baseline";
 import { sh } from "../repo-checkout";
 import { timeRunnerPhase, recordRunnerEvent } from "../runner/telemetry";
 import { spriteLog, spriteWorkerLogContext, logSpritePhase } from "../runner/sprites-log";
@@ -61,6 +61,7 @@ async function prepareSpriteDependenciesChecked(checkoutDir: string, opts: Depen
   const decision = { ...context, fingerprint, baselineFingerprint: expected, revision: current.revision,
     baselineRevision: template.revision, hasTree, hasReceipt: Boolean(savedMarker.trim()) };
   if (savedMarker.trim() === fingerprint && hasTree) {
+    await sh(["node", "-e", dependencyVerificationProgram(current, checkoutDir)], checkoutDir);
     spriteLog("sprites_dependency_decision", { ...decision, reused: true, reason: "verified_receipt" });
     recordRunnerEvent("sprites_dependency_reused", { provider: "sprites", runId, fields: { ...context, fingerprint } });
     recordRunnerEvent("sprites_project_ready", { provider: "sprites", runId, fields: { ...context, fingerprint, reused: true } });
@@ -78,9 +79,12 @@ async function prepareSpriteDependenciesChecked(checkoutDir: string, opts: Depen
   // before any installation so that a later retry cannot trust partial output.
   await rm(marker, { force: true });
   await rm(receipt, { force: true });
+  for (const command of template.setupCommands ?? []) await sh(["sh", "-lc", command], checkoutDir);
   await timeRunnerPhase("sprites_dependency_install", () =>
     (opts.install ?? (async (dir, args) => { await sh(["npm", "ci", "--cache", SPRITE_NPM_CACHE_PATH, ...args], dir); }))(checkoutDir, template.installOptions),
     { provider: "sprites", fields: { ...context, fingerprint } });
+  for (const command of template.buildCommands ?? []) await sh(["sh", "-lc", command], checkoutDir);
+  await sh(["node", "-e", dependencyVerificationProgram(current, checkoutDir)], checkoutDir);
   const after = await selectedManifest(template, checkoutDir);
   if (dependencyFingerprint(after) !== fingerprint) throw new Error("Dependency inputs changed during installation");
   await writeFile(receipt, JSON.stringify(current));

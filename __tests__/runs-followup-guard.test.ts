@@ -11,7 +11,7 @@ import { installFakeRunnerProvider, setFakeRunLiveness } from "./helpers/fake-ru
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
-import { agentMessages, agentSessions } from "../db/schema";
+import { agentMessages, agentSessions, runInputs, tasks } from "../db/schema";
 import { create, get, followUp, isLive } from "../lib/runs";
 import { seedPersonas } from "../db/seed-personas";
 import * as backend from "../lib/agent-backend";
@@ -30,6 +30,7 @@ function fakeBackend() {
 beforeEach(async () => {
   await seedPersonas();
   await db.delete(agentSessions);
+  await db.delete(tasks);
 });
 
 afterEach(() => {
@@ -44,6 +45,16 @@ async function makeWorktreeRun(): Promise<number> {
     .set({ branch: "claude/x-1", worktreePath: "/tmp/nonexistent-followup-guard" })
     .where(eq(agentSessions.id, run.id));
   return run.id;
+}
+
+async function makeTaskWorktreeRun(status: string, startedAt = new Date()): Promise<number> {
+  await db.insert(tasks).values({ id: "T-followup", title: "Follow-up ownership", repoId: "R-default" })
+    .onConflictDoNothing();
+  const [row] = await db.insert(agentSessions).values({ taskId: "T-followup", status,
+    goal: "<implement>", cwdStrategy: "worktree", branch: "claude/t-followup",
+    worktreePath: "/tmp/followup-task", deliveryVersion: 2, attempt: 1, startedAt })
+    .returning({ id: agentSessions.id });
+  return row.id;
 }
 
 describe("followUp() bails on a cross-process live run (FIX 4)", () => {
@@ -95,6 +106,51 @@ describe("followUp() bails on a cross-process live run (FIX 4)", () => {
 // the run row (the dispatched worker mounts tools from the row, not from
 // per-call options).
 describe("followUp() dispatches instead of executing on a remote-runner deployment", () => {
+  it("atomically queues one v2 input on the incremented attempt", async () => {
+    vi.spyOn(dispatch, "remoteRunnerEnabled").mockReturnValue(true);
+    vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
+    const runId = await makeTaskWorktreeRun("completed");
+
+    expect(await followUp(runId, "repair this head")).toBe(true);
+
+    const row = await get(runId);
+    expect(row?.attempt).toBe(2);
+    expect(row?.status).toBe("pending");
+    expect(await db.select().from(agentMessages).where(eq(agentMessages.runId, runId))).toHaveLength(1);
+    const inputs = await db.select().from(runInputs).where(eq(runInputs.runId, runId));
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0].status).toBe("pending");
+  });
+
+  it("rejects an older terminal run when a newer unowned run is pending without creating input", async () => {
+    vi.spyOn(dispatch, "remoteRunnerEnabled").mockReturnValue(true);
+    const dispatchSpy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
+    const old = await makeTaskWorktreeRun("completed", new Date(Date.now() - 1_000));
+    await makeTaskWorktreeRun("pending", new Date());
+
+    expect(await followUp(old, "must not run")).toBe(false);
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    expect(await db.select().from(agentMessages).where(eq(agentMessages.runId, old))).toHaveLength(0);
+    expect(await db.select().from(runInputs).where(eq(runInputs.runId, old))).toHaveLength(0);
+  });
+
+  it("serializes concurrent run creation and terminal follow-up to one task writer", async () => {
+    vi.spyOn(dispatch, "remoteRunnerEnabled").mockReturnValue(true);
+    vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
+    const old = await makeTaskWorktreeRun("completed", new Date(Date.now() - 1_000));
+
+    const [resumed, created] = await Promise.allSettled([
+      followUp(old, "race repair"),
+      create({ taskId: "T-followup", repoId: "R-default", goal: "<implement>",
+        cwdStrategy: "worktree", defer: true }),
+    ]);
+
+    const rows = await db.select().from(agentSessions).where(eq(agentSessions.taskId, "T-followup"));
+    const owners = rows.filter((r) => !["completed", "failed", "cancelled", "closed", "budget_exhausted"].includes(r.status));
+    expect(owners).toHaveLength(1);
+    expect((resumed.status === "fulfilled" && resumed.value === true) || created.status === "fulfilled").toBe(true);
+  });
+
   it("persists the prompt as a user message, merges profiles onto the row, and calls dispatchRun", async () => {
     const getBackend = vi.spyOn(backend, "getBackend").mockResolvedValue(fakeBackend());
     vi.spyOn(dispatch, "remoteRunnerEnabled").mockReturnValue(true);

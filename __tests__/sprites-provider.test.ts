@@ -1,9 +1,10 @@
 import { SPRITE_NODE_VERSION } from "../lib/runner/sprites-bootstrap";
+import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 
 import { db } from "../db";
-import { agentSessions, runnerInstances } from "../db/schema";
+import { agentMessages, agentSessions, inboxEvents, runInputs, runTurns, runnerInstances } from "../db/schema";
 import { create } from "../lib/runs";
 import {
   buildSpritesWorkerEnv,
@@ -15,6 +16,7 @@ import {
 } from "../lib/runner/sprites";
 import { SpritesApiError } from "../lib/runner/sprites-client";
 import { workerBundleId } from "../lib/worker-bundle";
+import { dbTransport } from "../lib/worker/db-transport";
 import type { SpritesClient } from "../lib/runner/sprites-client";
 
 function fakeSpritesClient(overrides: Partial<SpritesClient> = {}): SpritesClient & { _calls: string[] } {
@@ -127,6 +129,108 @@ describe("buildSpritesWorkerEnv", () => {
     expect(await buildSpritesWorkerEnv(42, { workerGeneration: 17 })).toMatchObject({
       TASK_ORCH_WORKER_GENERATION: "17",
     });
+  });
+});
+
+describe("idle generation quiescence", () => {
+  it.each([null, "worker"])("stops legacy service %s without deleting the Sprite", async (providerServiceName) => {
+    let stopped = false;
+    const client = fakeSpritesClient({
+      getService: vi.fn(async (_sprite: string, name: string) => ({ name, cmd: "node", state: { status: stopped ? "stopped" : "running" } })),
+      stopService: vi.fn(async () => { stopped = true; }),
+    });
+    const run = await create({ goal: "<chat>", defer: true });
+    await db.update(agentSessions).set({ status: "idle", workerScope: "to-run-quiesce", sdkSessionId: "sdk-keep" }).where(eq(agentSessions.id, run.id));
+    const instanceId = "wi_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    await db.insert(runnerInstances).values({ runId: run.id, provider: "sprites", spriteName: "to-run-quiesce", providerServiceName, workerGeneration: 1, channelInstanceId: instanceId, channelEndpoint: "sprite://to-run-quiesce:8787/worker/channel", state: "running" });
+    const provider = new SpritesRunnerProvider(client);
+    await expect(provider.quiesceIdleGeneration({ runId: run.id, generation: 1, instanceId, providerHandle: "to-run-quiesce" })).resolves.toBe(true);
+    expect(client.stopService).toHaveBeenCalledWith("to-run-quiesce", "worker");
+    expect(client.deleteSprite).not.toHaveBeenCalled();
+    const [session] = await db.select().from(agentSessions).where(eq(agentSessions.id, run.id));
+    expect(session.workerScope).toBeNull();
+    expect(session.sdkSessionId).toBe("sdk-keep");
+    const [instance] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id));
+    expect(instance.state).toBe("stopped");
+  });
+
+  it("stops a failed implementor service without deleting its Sprite or SDK state", async () => {
+    const client = fakeSpritesClient({
+      getService: vi.fn(async (_sprite: string, name: string) => ({ name, cmd: "node", state: { status: "stopped" } })),
+    });
+    const provider = new SpritesRunnerProvider(client);
+    const run = await create({ goal: "implement the assigned task", defer: true });
+    await db.update(agentSessions).set({ status: "failed", workerScope: "to-run-failed", sdkSessionId: "sdk-failed" }).where(eq(agentSessions.id, run.id));
+    const instanceId = "wi_dddddddddddddddddddddddddddddddd";
+    await db.insert(runnerInstances).values({ runId: run.id, provider: "sprites", spriteName: "to-run-failed", providerServiceName: "worker", workerGeneration: 1, channelInstanceId: instanceId, channelEndpoint: "sprite://to-run-failed:8787/worker/channel", state: "running" });
+
+    await expect(provider.quiesceIdleGeneration({ runId: run.id, generation: 1, instanceId, providerHandle: "to-run-failed" })).resolves.toBe(true);
+    expect(client.stopService).toHaveBeenCalledWith("to-run-failed", "worker");
+    expect(client.deleteSprite).not.toHaveBeenCalled();
+    const [saved] = await db.select().from(agentSessions).where(eq(agentSessions.id, run.id));
+    expect(saved.sdkSessionId).toBe("sdk-failed");
+  });
+
+  it.each([
+    ["legacy pending user message", "legacy-message"],
+    ["legacy inbox event", "legacy-event"],
+    ["v2 pending input", "v2-input"],
+    ["v2 active turn", "v2-turn"],
+  ])("refuses to stop when there is %s", async (_label, kind) => {
+    const client = fakeSpritesClient();
+    const provider = new SpritesRunnerProvider(client);
+    const run = await create({ goal: "<chat>", defer: true });
+    await db.update(agentSessions).set({
+      status: "idle", deliveryVersion: kind.startsWith("v2") ? 2 : 1,
+      workerScope: "to-run-pending",
+    }).where(eq(agentSessions.id, run.id));
+    const instanceId = "wi_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    await db.insert(runnerInstances).values({ runId: run.id, provider: "sprites", spriteName: "to-run-pending", providerServiceName: "worker", workerGeneration: 1, channelInstanceId: instanceId, channelEndpoint: "sprite://to-run-pending:8787/worker/channel", state: "running" });
+    if (kind === "legacy-message") {
+      await db.insert(agentMessages).values({ runId: run.id, role: "user", content: "[]" });
+    } else if (kind === "legacy-event") {
+      await db.insert(inboxEvents).values({ targetRunId: run.id, type: "run.attempt_finished", sourceKind: "run", payload: {}, status: "pending" });
+    } else if (kind === "v2-input") {
+      const [message] = await db.insert(agentMessages).values({ runId: run.id, role: "user", content: "[]" }).returning({ id: agentMessages.id });
+      await db.insert(runInputs).values({ id: randomUUID(), runId: run.id, messageId: message.id, inputSeq: 1, kind: "user", status: "pending" });
+    } else {
+      await db.insert(runTurns).values({ id: randomUUID(), runId: run.id, ordinal: 1, state: "active" });
+    }
+    const result = await provider.quiesceIdleGeneration({ runId: run.id, generation: 1, instanceId, providerHandle: "to-run-pending" });
+    expect(result).toBe(false);
+    expect(client.stopService).not.toHaveBeenCalled();
+  });
+
+  it("holds the run lock while stopping so a racing append waits", async () => {
+    let releaseStop!: () => void;
+    let stopEntered!: () => void;
+    const stopGate = new Promise<void>((resolve) => { releaseStop = resolve; });
+    const entered = new Promise<void>((resolve) => { stopEntered = resolve; });
+    let stopped = false;
+    const client = fakeSpritesClient({
+      getService: vi.fn(async (_sprite: string, name: string) => ({ name, cmd: "node", state: { status: stopped ? "stopped" : "running" } })),
+      stopService: vi.fn(async () => { stopEntered(); await stopGate; stopped = true; }),
+    });
+    const provider = new SpritesRunnerProvider(client);
+    const run = await create({ goal: "<chat>", defer: true });
+    await db.update(agentSessions).set({ status: "idle", workerScope: "to-run-race" }).where(eq(agentSessions.id, run.id));
+    const instanceId = "wi_cccccccccccccccccccccccccccccccc";
+    await db.insert(runnerInstances).values({ runId: run.id, provider: "sprites", spriteName: "to-run-race", providerServiceName: "worker", workerGeneration: 1, channelInstanceId: instanceId, channelEndpoint: "sprite://to-run-race:8787/worker/channel", state: "running" });
+
+    const quiesce = provider.quiesceIdleGeneration({ runId: run.id, generation: 1, instanceId, providerHandle: "to-run-race" });
+    await entered;
+    let appended = false;
+    const append = dbTransport.appendMessage(run.id, "user", [{ type: "text", text: "racing follow-up" }]).then(() => { appended = true; });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(appended).toBe(false);
+    } finally {
+      releaseStop();
+    }
+    await quiesce;
+    await append;
+    expect(appended).toBe(true);
+    expect(client.stopService).toHaveBeenCalledWith("to-run-race", "worker");
   });
 });
 

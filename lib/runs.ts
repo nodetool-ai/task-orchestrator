@@ -1980,11 +1980,57 @@ async function findRivalTaskRun(run: {
         notInArray(agentSessions.status, TERMINAL_STATUS_LIST)
       )
   );
-  for (const s of siblings) {
-    const v = (await resolveLiveness(s.id)).verdict;
-    if (v === "alive" || v === "unknown") return s.id; // unknown is not permission to spawn a rival
+  // A queued/unowned sibling is still the task's current writer generation.
+  // Waiting for provider liveness here used to revive an older completed run
+  // while its replacement was pending capacity.
+  return siblings[0]?.id ?? null;
+}
+
+/** Atomically reserve a task branch for a follow-up. This shares runs.create's
+ * advisory namespace, so creation cannot slip between the rival check and the
+ * status that makes this run the active writer. */
+async function claimTaskFollowUp(
+  run: RunRow,
+  status: "pending" | "running",
+  message?: { text: string; toolsProfile?: string }
+): Promise<{ accepted: boolean; messageId: number | null }> {
+  if (!run.taskId || run.goal === "<chat>" || run.cwdStrategy !== "worktree") {
+    if (message?.toolsProfile && message.toolsProfile !== run.toolsProfile) {
+      await db.update(agentSessions).set({ toolsProfile: message.toolsProfile })
+        .where(eq(agentSessions.id, run.id));
+    }
+    return { accepted: true, messageId: null };
   }
-  return null;
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${run.taskId!}))`);
+    await lockSourceTx(tx, run.id);
+    await tx.select({ id: agentSessions.id }).from(agentSessions)
+      .where(eq(agentSessions.id, run.id)).for("update");
+    const [rival] = await tx.select({ id: agentSessions.id }).from(agentSessions).where(and(
+      eq(agentSessions.taskId, run.taskId!), sql`${agentSessions.id} <> ${run.id}`,
+      eq(agentSessions.cwdStrategy, "worktree"), sql`${agentSessions.goal} <> '<chat>'`,
+      notInArray(agentSessions.status, TERMINAL_STATUS_LIST)
+    )).limit(1);
+    if (rival) return { accepted: false, messageId: null };
+    const renew = run.deliveryVersion === 2 && ["completed", "failed"].includes(run.status);
+    const changed = await tx.update(agentSessions).set({ status,
+      ...(message?.toolsProfile ? { toolsProfile: message.toolsProfile } : {}),
+      ...(renew ? { attempt: run.attempt + 1, result: null, parkReason: null, completedAt: null } : {}) })
+      .where(and(eq(agentSessions.id, run.id), isNull(agentSessions.workerScope),
+        inArray(agentSessions.status, ["idle", "completed", "failed", "budget_exhausted"])));
+    if (changed.count === 0) return { accepted: false, messageId: null };
+    if (renew) {
+      await registerDefaultChildSubscriptionTx(tx, { ...run, attempt: run.attempt + 1 });
+    }
+    if (!message) return { accepted: true, messageId: null };
+    const inserted = await tx.insert(agentMessages).values({ runId: run.id, role: "user",
+      content: JSON.stringify([{ type: "text", text: message.text }]), createdAt: new Date() })
+      .returning({ id: agentMessages.id });
+    if (run.deliveryVersion === 2) {
+      await enqueueMessageTx(tx, { runId: run.id, messageId: inserted[0].id, kind: "user" });
+    }
+    return { accepted: true, messageId: inserted[0].id };
+  });
 }
 
 /**
@@ -2014,10 +2060,10 @@ export async function followUp(
   runId: number,
   prompt: string,
   opts: { author?: string; addProfiles?: string[] } = {}
-): Promise<void> {
+): Promise<boolean> {
   const run = await get(runId);
-  if (!run) return;
-  if (isLive(runId)) return;
+  if (!run) return false;
+  if (isLive(runId)) return false;
   // FIX 4 (M14): the in-process isLive() check above is blind to a DETACHED worker
   // driving this same run in ANOTHER process. Without a DB check, a webhook autofix
   // would kick off a SECOND concurrent turn against the same branch/worktree. Bail
@@ -2025,14 +2071,14 @@ export async function followUp(
   // owns it — mirrored below on a fresh read after the lock is acquired.
   {
     const v = (await resolveLiveness(runId)).verdict;
-    if (v === "alive" || v === "unknown") return;
+    if (v === "alive" || v === "unknown") return false;
   }
   // BUG 4: one-agent-per-task on resume. Reviving this (terminal, resumable) run
   // while a DIFFERENT live run drives the same task would put two agents on the
   // same canonical branch. Bail quietly — same contract as the same-run liveness
   // check above ("already in flight elsewhere on the task").
-  if ((await findRivalTaskRun(run)) != null) return;
-  if (run.cwdStrategy !== "worktree" || !run.branch || !run.worktreePath) return;
+  if ((await findRivalTaskRun(run)) != null) return false;
+  if (run.cwdStrategy !== "worktree" || !run.branch || !run.worktreePath) return false;
 
   // Remote-runner deployments (Fly Machines / Docker worker image): route the
   // turn through dispatchRun, the same front door every other remote turn uses
@@ -2043,21 +2089,23 @@ export async function followUp(
   // user-role rows — a system row would be silently dropped and the worker
   // would run a bare "resume" turn instead of the CI-fix instructions.
   if (runDispatch.remoteRunnerEnabled()) {
-    if (opts.addProfiles?.length) {
-      // The dispatched worker mounts tools from the run ROW, not from per-call
-      // options — persist the merge so the gh_pr/gh_ci tools the autofix turn
-      // needs actually exist in the worker (and stay for later attempts).
-      await db
-        .update(agentSessions)
-        .set({ toolsProfile: mergeProfiles(run.toolsProfile, opts.addProfiles) })
-        .where(eq(agentSessions.id, runId));
-    }
-    await persistMessage(runId, "user", [{ type: "text", text: prompt }]);
+    const profile = opts.addProfiles?.length
+      ? mergeProfiles(run.toolsProfile, opts.addProfiles) : run.toolsProfile;
+    const admission = await claimTaskFollowUp(run, "pending", { text: prompt, toolsProfile: profile });
+    if (!admission.accepted) return false;
+    // Taskless legacy worktree runs do not need task admission, but still need
+    // the ordinary transport-backed prompt append.
+    const messageId = admission.messageId ??
+      (await persistMessage(runId, "user", [{ type: "text", text: prompt }])).id;
     // dispatchRun is idempotent against races: a claim that landed since the
     // liveness checks above makes it return "already-claimed", and that turn
     // drains the freshly persisted message.
-    await runDispatch.dispatchRun(runId);
-    return;
+    const dispatch = await runDispatch.dispatchRun(runId);
+    if (dispatch === "spawn-failed" || dispatch === "not-found") {
+      await db.delete(agentMessages).where(eq(agentMessages.id, messageId));
+      return false;
+    }
+    return true;
   }
 
   const lock = getLock(runId);
@@ -2090,7 +2138,12 @@ export async function followUp(
   if (!fresh || freshVerdict === "alive" || freshVerdict === "unknown") {
     release();
     lock.busy = null;
-    return;
+    return false;
+  }
+  if (!(await claimTaskFollowUp(fresh, "running")).accepted) {
+    release();
+    lock.busy = null;
+    return false;
   }
 
   const abort = new AbortController();
@@ -2120,7 +2173,7 @@ export async function followUp(
       onSdk: (m) => bus.emit("event", { type: "sdk", sdk: m }),
     });
 
-    if (abort.signal.aborted) return;
+    if (abort.signal.aborted) return false;
 
     // Atomic completion (status + event) with the terminal no-op guard, so a
     // lost column write can't strand this follow-up as an orphan. Server-side
@@ -2144,6 +2197,7 @@ export async function followUp(
     release();
     lock.busy = null;
   }
+  return true;
 }
 
 // ──────────────────────────────────────────────────────────

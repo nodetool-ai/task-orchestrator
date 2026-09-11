@@ -113,4 +113,21 @@ describe("ControllerConnection sprites proxy", () => {
     expect(openTunnel).not.toHaveBeenCalled();
     expect(createSocket).not.toHaveBeenCalled();
   });
+
+  it("destroys an acquired Sprite tunnel when WebSocket construction throws", async () => {
+    saveEnv();
+    process.env.SPRITES_TOKEN = "test-sprites-token";
+    process.env.TASK_ORCH_WORKER_CHANNEL_SECRET = "test-secret";
+    const tunnel = new PassThrough();
+    const destroy = vi.spyOn(tunnel, "destroy");
+    const conn = new ControllerConnection({
+      runId: RUN_ID, instanceId: INSTANCE_ID,
+      endpoint: "sprite://to-run-1:8787/worker/channel", controllerId: "test-controller",
+      openTunnel: async () => tunnel,
+      createSocket: () => { throw new Error("constructor failed"); },
+    });
+    await expect((conn as unknown as { createSpritesProxiedSocket: (cred: string) => Promise<WebSocket> })
+      .createSpritesProxiedSocket(mintChannelCredential(RUN_ID, INSTANCE_ID))).rejects.toThrow("constructor failed");
+    expect(destroy).toHaveBeenCalledOnce();
+  });
 });

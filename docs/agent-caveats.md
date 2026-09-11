@@ -41,6 +41,25 @@ already cost real time once.
 
 ## Worker channel
 
+- Run 188 was an idle chat, but recovery sent six `run.start` snapshots with
+  no pending input or inbox events. The worker treated each bootstrap as a
+  request to continue and burned model turns after the last human message.
+  Transport adoption is not a model-turn trigger: require actual input, an
+  event, or an explicit kickoff. Preserve legitimate event-only wakes.
+  Its Sprite also retained the original worker bundle after the repository
+  checkout fix shipped. A restarted process is not proof that its bundle was
+  refreshed; recovery must retain checkout/SDK state while replacing stale
+  worker code with the proper generation and channel identity.
+- Stopping a Sprite service and destroying a Sprite are different operations.
+  Idle chat cleanup must stop the exact service while preserving the Sprite's
+  filesystem. `stopRunner()` is terminal resource cleanup and can delete the
+  Sprite and clear the SDK session. Check durable inputs and generation
+  ownership when stopping an idle service so a racing follow-up survives.
+- Chat backend errors must publish `run.failed` and complete the channel
+  commit handshake. Logging and exiting alone leaves a run marked `running`:
+  run 188 hit Claude's session limit twice, restarted, and kept that stale
+  status. Cancellation still owns its separate `run.cancelled` outcome.
+
 - A parked chat can be alive yet unable to resume: run 219 accumulated 1,566
   messages and its persisted `run.start` exceeded the 1 MiB JSON frame limit.
   Resume snapshots with an SDK session now bound only the redundant consumed
@@ -148,3 +167,34 @@ already cost real time once.
   incarnation the same 404 remains `unknown` (the run-184 guard).
 - `agent_runs.pending_since` and `claimed_at` are bookkeeping (defer bound,
   claim age), not liveness inputs.
+
+## Repository readiness on Sprite baselines
+
+Repository dependency baselines can opt into project-specific preparation and
+readiness through `TASK_ORCH_SPRITE_POOL_BASELINES`. The dependency manifest
+accepts `setupCommands`, `buildCommands`, `readinessCommands`,
+`minimumGitHistoryDepth`, and `baseRef`. Setup runs before `npm ci`; builds run
+after installation and again when a retained checkout needs dependency repair.
+Readiness checks run before a baseline is sealed and whenever its dependency
+tree is reused. They verify configured history/merge-base requirements,
+declared `typescript`/`tsx`/`vitest` resolution, `better-sqlite3` native loading,
+declared workspace `dist/` entry points, and every configured readiness command.
+
+These expanded checks are opt-in: at least one of the new fields must be present.
+Existing baseline profiles keep their prior behavior until updated, so merely
+deploying this code does not prove their compiler, native bindings, build
+outputs, or test services are ready. Prefer repository-owned commands and the
+persistent baseline npm cache; do not install arbitrary tools globally. For a
+repository whose tests require Postgres, a bounded probe can be configured as:
+
+```json
+{
+  "readinessCommands": [
+    "node -e \"const n=require('net').connect({host:'127.0.0.1',port:5433});n.setTimeout(5000);n.once('connect',()=>{n.end();process.exit(0)});n.once('timeout',()=>process.exit(1));n.once('error',()=>process.exit(1))\""
+  ]
+}
+```
+
+Keep probes non-destructive and bounded. Failures retain only the final 2 KiB
+of command output in the diagnostic, which is enough to identify the missing
+service or tool without flooding the durable runner history.

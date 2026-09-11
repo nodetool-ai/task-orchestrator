@@ -375,6 +375,12 @@ export const config = Object.freeze({
     get codeactRolloutPercent(): number {
       return Math.max(0, Math.min(100, floatEnv("TASK_ORCH_CODEACT_ROLLOUT_PERCENT", 100)));
     },
+    /** Absolute path to the separately bundled CodeAct worker-thread entry.
+     * Standalone runner images set this because worker_threads cannot execute
+     * an entry embedded inside the main esbuild artifact. */
+    get codeactThreadWorker(): string | undefined {
+      return strEnv("TASK_ORCH_CODEACT_THREAD_WORKER");
+    },
     /** Deployment default reasoning level for runs created without one
      *  (personas carry no reasoning level any more — migration 0031). An
      *  unrecognised value is ignored rather than thrown: a typo here must not

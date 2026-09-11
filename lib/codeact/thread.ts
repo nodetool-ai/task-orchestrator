@@ -12,6 +12,8 @@
 // channel/control-plane event loop (plan "Runtime decision").
 
 import { Worker } from "node:worker_threads";
+import { pathToFileURL } from "node:url";
+import { config } from "../config";
 import { loadPackagedWasm } from "./quickjs-variant.ts";
 import { resolveLimits, type ExecutionLimits } from "./limits.ts";
 import type { EvaluateOutcome, GuestError } from "./evaluate.ts";
@@ -20,7 +22,10 @@ import type { GuestOutput, GuestDiagnostic } from "./evaluate.ts";
 
 /** URL of the worker entry, resolved relative to this module so it works from a
  *  source checkout (Node strips the .ts) and from tests alike. */
-const WORKER_URL = new URL("./thread-worker.ts", import.meta.url);
+const configuredThreadWorker = config.agent.codeactThreadWorker;
+const WORKER_URL = configuredThreadWorker
+  ? pathToFileURL(configuredThreadWorker)
+  : new URL("./thread-worker.ts", import.meta.url);
 
 export type ThreadResult =
   | { status: "ok"; value: unknown; jobsExecuted: number; outputs?: GuestOutput[]; diagnostics?: GuestDiagnostic[] }

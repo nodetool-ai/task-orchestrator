@@ -25,11 +25,11 @@
 // Kept free of imports from either entry point so there is no import cycle
 // (the poller must not pull in the webhook route handler).
 
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 
 import { db } from "@/db";
 import { resolveLiveness } from "@/lib/run-liveness";
-import { agentEvents } from "@/db/schema";
+import { agentEvents, agentSessions, runTurns } from "@/db/schema";
 import { CODE_REVIEW_RECEPTION_GUIDANCE } from "./code-review-guidance";
 import * as repo from "./repo";
 import * as runs from "./runs";
@@ -82,6 +82,8 @@ export interface AutofixCandidate {
   cwdStrategy: string;
   status: string;
   prUrl: string | null;
+  startedAt?: Date;
+  attempt?: number;
 }
 
 export interface AutofixContext {
@@ -126,7 +128,7 @@ export async function maybeTriggerAutofix(
   const actions: string[] = [];
   const { reason } = ctx;
 
-  const target =
+  const resumable =
     candidates.find(
       (r) =>
         r.taskId &&
@@ -135,6 +137,14 @@ export async function maybeTriggerAutofix(
         r.cwdStrategy === "worktree" &&
         runs.isResumableWorktreeRun(r.status, r.cwdStrategy)
     ) ?? null;
+  // A newer generation owns the task even while it is queued or starting. Do
+  // not revive an older settled generation underneath it (runs 243/244/245).
+  const newest = candidates[0] ?? null;
+  const target =
+    resumable && newest && newest.id !== resumable.id &&
+    ["pending", "preparing", "running"].includes(newest.status)
+      ? null
+      : resumable;
 
   // Always leave a breadcrumb on the task so it's visible even without autofix.
   // Scoped to a resumable target on purpose: an abandoned run (all candidates
@@ -153,6 +163,10 @@ export async function maybeTriggerAutofix(
     return { target, triggered: false, actions };
   }
   if (!target) {
+    if (newest && ["pending", "preparing", "running"].includes(newest.status)) {
+      actions.push(`autofix skipped: newer run #${newest.id} owns the task (${newest.status})`);
+      return { target: null, triggered: false, actions };
+    }
     // #4 Stranded-run policy: red CI for this task but NO resumable worktree run
     // to fix it in place (the run landed closed/cancelled). Escalate the task to
     // `blocked` so a human takes over, rather than going silent. (Alternative,
@@ -175,7 +189,7 @@ export async function maybeTriggerAutofix(
     actions.push(`autofix skipped: run #${target.id} already in flight`);
     return { target, triggered: false, actions };
   }
-  if ((await countAutofixAttempts(target.id)) >= AUTOFIX_MAX) {
+  if ((await countTaskAutofixAttempts(target.taskId!)) >= AUTOFIX_MAX) {
     actions.push(`autofix skipped: run #${target.id} hit attempt cap (${AUTOFIX_MAX})`);
     // #2 Non-convergence: the loop has retried AUTOFIX_MAX times and CI is still
     // red. Escalate to `blocked` (once) so a human is pulled in instead of
@@ -195,27 +209,14 @@ export async function maybeTriggerAutofix(
       actions.push(`autofix escalated: task ${target.taskId} → blocked (attempt cap)`);
     return { target, triggered: false, actions };
   }
-  if (await recentlyAutofixed(target.id)) {
+  if (await recentlyAutofixedForTask(target.taskId!, failureKey(ctx))) {
     actions.push(`autofix debounced: run #${target.id}`);
     return { target, triggered: false, actions };
   }
 
-  // BUG 11: only record the attempt when the follow-up will ACTUALLY dispatch.
-  // runs.followUp() silently no-ops if the run went live in the race (an
-  // in-process turn started, or a detached worker claimed one cross-process) or
-  // is no longer a resumable worktree run — but the attempt row used to be
-  // inserted BEFORE firing it, so a no-op still consumed AUTOFIX_MAX budget and
-  // armed the debounce. A flappy webhook burst could then exhaust the cap with
-  // zero fix turns actually running and wrongly escalate the task to `blocked`.
-  //
-  // followUp returns void, so it gives no post-hoc dispatch signal; the safe fix
-  // is to re-read the run immediately before recording and mirror followUp's own
-  // gate (isLive / resolveLiveness + resumable-worktree shape). If it
-  // would no-op, consume no budget and do not arm escalation. Residual (tiny)
-  // race: the run could still go live between this re-check and followUp's own
-  // internal re-check a couple of awaits later, in which case the attempt is
-  // recorded but the turn no-ops — vastly narrower than the previous full
-  // cap/debounce window, and the only remaining gap without editing runs.ts.
+  // Avoid provisional claims for an already-live/non-resumable target. The
+  // task-locked followUp admission below is the final authority and reports a
+  // rejection so its exact provisional event can be retracted.
   const fresh = await runs.get(target.id);
   const willDispatch =
     !!fresh &&
@@ -228,27 +229,60 @@ export async function maybeTriggerAutofix(
     actions.push(`autofix skipped: run #${target.id} went live before dispatch`);
     return { target, triggered: false, actions };
   }
+  const claimedRunAttempt = fresh.deliveryVersion !== 2
+    ? null
+    : ["completed", "failed"].includes(fresh.status)
+      ? fresh.attempt + 1
+      : fresh.attempt;
 
-  // The follow-up will dispatch: record the attempt (also powers the cap +
-  // debounce checks) then kick the turn in the background — we don't block the
-  // caller on a full agent turn.
-  await db.insert(agentEvents).values({
-    sessionId: target.id,
-    type: "github_autofix",
-    payload: JSON.stringify({
-      reason,
-      pr_url: ctx.prUrl ?? target.prUrl ?? null,
-      conclusion: ctx.conclusion ?? null,
-      workflow: ctx.workflowName ?? null,
-    }),
-    createdAt: new Date(),
+  // Claim one repair owner atomically across webhook processes and the poller.
+  // The advisory lock shares the task admission namespace used by runs.create.
+  const claimed = await db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${target.taskId!}))`);
+    const siblings = await tx.select({ id: agentSessions.id, status: agentSessions.status })
+      .from(agentSessions).where(eq(agentSessions.taskId, target.taskId!))
+      .orderBy(desc(agentSessions.startedAt), desc(agentSessions.id));
+    const latest = siblings[0];
+    if (latest && latest.id !== target.id && ["pending", "preparing", "running"].includes(latest.status)) return false;
+    const ids = siblings.map((s) => s.id);
+    if (ids.length) {
+      const budgetEvents = await tx.select({ sessionId: agentEvents.sessionId, type: agentEvents.type,
+        payload: agentEvents.payload, createdAt: agentEvents.createdAt })
+        .from(agentEvents).where(and(inArray(agentEvents.sessionId, ids), inArray(agentEvents.type,
+          ["github_autofix", "github_ci_aggregate", "pr_merged"])))
+        .orderBy(desc(agentEvents.id));
+      const begun = await tx.select({ runId: runTurns.runId, attempt: runTurns.attempt })
+        .from(runTurns).where(inArray(runTurns.runId, ids));
+      if (effectiveAttemptCount(budgetEvents, new Set(begun.map((t) => `${t.runId}:${t.attempt}`))) >= AUTOFIX_MAX) return false;
+      const prior = budgetEvents.filter((e) => e.type === "github_autofix");
+      if (prior.some((e) => e.createdAt.getTime() >= Date.now() - AUTOFIX_DEBOUNCE_MS)) return false;
+    }
+    const inserted = await tx.insert(agentEvents).values({
+      sessionId: target.id,
+      type: "github_autofix",
+      payload: JSON.stringify({ reason, pr_url: ctx.prUrl ?? target.prUrl ?? null,
+        conclusion: ctx.conclusion ?? null, workflow: ctx.workflowName ?? null,
+        head_sha: ctx.headSha ?? null, failure_key: failureKey(ctx),
+        ...(claimedRunAttempt == null ? {} : { run_attempt: claimedRunAttempt }) }),
+      createdAt: new Date(),
+    }).returning({ id: agentEvents.id });
+    return inserted[0]?.id ?? null;
   });
+  if (!claimed) {
+    actions.push(`autofix deduped: task ${target.taskId} already has a repair owner`);
+    return { target, triggered: false, actions };
+  }
 
   const prompt = autofixPrompt(ctx, target.prUrl ?? ctx.prUrl ?? null);
-  void runs
-    .followUp(target.id, prompt, {
+  void runs.followUp(target.id, prompt, {
       author: "github-webhook",
       addProfiles: ["gh_pr", "gh_ci"],
+    })
+    .then(async (accepted) => {
+      if (accepted !== false) return;
+      // The final task/run admission gate won a race. Retract only this exact
+      // provisional claim so a turn that never started consumes no budget.
+      await db.delete(agentEvents).where(eq(agentEvents.id, claimed));
     })
     .catch((err) => console.error("ci-autofix: follow-up failed:", err));
 
@@ -257,8 +291,9 @@ export async function maybeTriggerAutofix(
 }
 
 /**
- * Timestamp of the most recent "recovery" signal on a run: a merge, or a green
- * CI webhook (a recorded `github` event with `ci_state === "success"`). The
+ * Timestamp of the most recent authoritative aggregate recovery on a run.
+ * Raw per-check success events are deliberately ignored: one passing check
+ * cannot reset a repair budget while another required check remains red. The
  * attempt cap and the exhausted-escalation guard are scoped to events AFTER
  * this so a PR that went green and then failed again gets a fresh attempt
  * budget — otherwise the all-time count plus the one-shot exhausted guard would
@@ -277,16 +312,96 @@ async function lastRecoveryAt(runId: number): Promise<Date | null> {
     .orderBy(desc(agentEvents.id));
   for (const r of rows) {
     if (r.type === "pr_merged") return r.createdAt;
-    if (r.type === "github") {
-      try {
-        if ((JSON.parse(r.payload) as { ci_state?: unknown }).ci_state === "success")
-          return r.createdAt;
-      } catch {
-        // ignore malformed payloads
-      }
-    }
+    if (r.type === "github_ci_aggregate") return r.createdAt;
   }
   return null;
+}
+
+async function taskRunIds(taskId: string): Promise<number[]> {
+  return (await db.select({ id: agentSessions.id }).from(agentSessions)
+    .where(eq(agentSessions.taskId, taskId))).map((r) => r.id);
+}
+
+/** Task-wide budget survives replacement runs. Infrastructure-only worker
+ * starts are refunded by the durable signal emitted by dispatch recovery. */
+export async function countTaskAutofixAttempts(taskId: string): Promise<number> {
+  const ids = await taskRunIds(taskId);
+  if (!ids.length) return 0;
+  const events = await db.select({ sessionId: agentEvents.sessionId, type: agentEvents.type,
+    payload: agentEvents.payload, createdAt: agentEvents.createdAt })
+    .from(agentEvents).where(and(inArray(agentEvents.sessionId, ids),
+      inArray(agentEvents.type, ["github_autofix", "github_ci_aggregate", "pr_merged"])))
+    .orderBy(desc(agentEvents.id));
+  const begun = await db.select({ runId: runTurns.runId, attempt: runTurns.attempt })
+    .from(runTurns).where(inArray(runTurns.runId, ids));
+  return effectiveAttemptCount(events, new Set(begun.map((t) => `${t.runId}:${t.attempt}`)));
+}
+
+function effectiveAttemptCount(
+  events: Array<{ sessionId: number; type: string; payload?: string; createdAt: Date }>,
+  begunAttempts: ReadonlySet<string>
+): number {
+  const recovery = events.find((e) => e.type === "github_ci_aggregate" || e.type === "pr_merged")?.createdAt.getTime() ?? -Infinity;
+  let attempts = 0;
+  for (const event of [...events].reverse()) {
+    if (event.createdAt.getTime() <= recovery) continue;
+    if (event.type === "github_autofix") {
+      const runAttempt = payloadAttempt(event.payload);
+      // New-format claims become budget attempts only when a logical turn has
+      // actually begun. Legacy claims lack run_attempt and retain old counting.
+      if (runAttempt != null && !begunAttempts.has(`${event.sessionId}:${runAttempt}`)) continue;
+      attempts += 1;
+    }
+  }
+  return attempts;
+}
+
+function payloadAttempt(payload?: string): number | null {
+  try { const n = (JSON.parse(payload ?? "{}") as { run_attempt?: unknown }).run_attempt; return typeof n === "number" ? n : null; }
+  catch { return null; }
+}
+
+function failureKey(ctx: AutofixContext): string {
+  // CI admission is based on the authoritative aggregate re-read, so the
+  // individual workflow delivery that happened to trigger that read is not a
+  // distinct failure. Review feedback retains its actor/body identity.
+  return ctx.reason === "ci"
+    ? ["ci", ctx.headSha ?? "unknown-head", ctx.conclusion ?? "failure"].join(":")
+    : ["review", ctx.headSha ?? "unknown-head", ctx.actor ?? "unknown", ctx.body ?? "changes_requested"].join(":");
+}
+function eventFailureKey(payload: string): string | null {
+  try { return (JSON.parse(payload) as { failure_key?: string }).failure_key ?? null; } catch { return null; }
+}
+
+async function recentlyAutofixedForTask(taskId: string, key: string): Promise<boolean> {
+  if (AUTOFIX_DEBOUNCE_MS <= 0) return false;
+  const ids = await taskRunIds(taskId);
+  if (!ids.length) return false;
+  const cutoff = Date.now() - AUTOFIX_DEBOUNCE_MS;
+  const rows = await db.select({ payload: agentEvents.payload, createdAt: agentEvents.createdAt })
+    .from(agentEvents).where(and(inArray(agentEvents.sessionId, ids), eq(agentEvents.type, "github_autofix")))
+    .orderBy(desc(agentEvents.id));
+  return rows.some((r) => r.createdAt.getTime() >= cutoff && eventFailureKey(r.payload) === key);
+}
+
+/** Record only an authoritative rolled-up green result. A single successful
+ * check webhook never calls this and therefore cannot reset repair budget. */
+export async function recordAggregateCiGreen(taskId: string, headSha: string | null): Promise<void> {
+  const rows = await db.select({ id: agentSessions.id }).from(agentSessions)
+    .where(eq(agentSessions.taskId, taskId)).orderBy(desc(agentSessions.startedAt), desc(agentSessions.id)).limit(1);
+  if (!rows[0]) return;
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${taskId}))`);
+    const ids = await tx.select({ id: agentSessions.id }).from(agentSessions).where(eq(agentSessions.taskId, taskId));
+    const recent = await tx.select({ type: agentEvents.type, payload: agentEvents.payload }).from(agentEvents)
+      .where(and(inArray(agentEvents.sessionId, ids.map((r) => r.id)),
+        inArray(agentEvents.type, ["github_ci_aggregate", "github_autofix"])))
+      .orderBy(desc(agentEvents.id)).limit(1);
+    try { if (recent[0]?.type === "github_ci_aggregate" &&
+      (JSON.parse(recent[0].payload) as { head_sha?: string | null }).head_sha === headSha) return; } catch {}
+    await tx.insert(agentEvents).values({ sessionId: rows[0].id, type: "github_ci_aggregate",
+      payload: JSON.stringify({ ci_state: "success", head_sha: headSha }), createdAt: new Date() });
+  });
 }
 
 export async function countAutofixAttempts(runId: number): Promise<number> {
@@ -338,13 +453,18 @@ async function escalateExhausted(
     // Scope the one-shot guard to events since the last recovery: an exhausted
     // marker recorded BEFORE the PR recovered must not suppress a fresh
     // escalation after it fails again.
-    const since = await lastRecoveryAt(anchorRunId);
+    const runIds = await taskRunIds(taskId);
+    const recoveries = runIds.length ? await db.select({ createdAt: agentEvents.createdAt })
+      .from(agentEvents).where(and(inArray(agentEvents.sessionId, runIds),
+        inArray(agentEvents.type, ["github_ci_aggregate", "pr_merged"])))
+      .orderBy(desc(agentEvents.id)).limit(1) : [];
+    const since = recoveries[0]?.createdAt ?? null;
     const already = await db
       .select({ createdAt: agentEvents.createdAt })
       .from(agentEvents)
       .where(
         and(
-          eq(agentEvents.sessionId, anchorRunId),
+          inArray(agentEvents.sessionId, runIds.length ? runIds : [anchorRunId]),
           eq(agentEvents.type, "github_autofix_exhausted")
         )
       );

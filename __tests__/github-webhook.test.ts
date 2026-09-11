@@ -523,7 +523,7 @@ describe("handleWebhookEvent drives task state from GitHub", () => {
     };
   }
 
-  function ciEvent(ciState: "success" | "failure"): NormalizedWebhookEvent {
+  function ciEvent(ciState: "success" | "failure" | "pending"): NormalizedWebhookEvent {
     return {
       kind: "ci",
       event: "workflow_run",
@@ -600,6 +600,24 @@ describe("handleWebhookEvent drives task state from GitHub", () => {
 
     expect((await repo.getTask(taskId))!.state).toBe("passing");
     expect(result.actions).toContain(`task ${taskId} → passing`);
+    expect(mockFollowUp).not.toHaveBeenCalled();
+  });
+
+  it("keeps pending CI visible without waking a model turn", async () => {
+    await makeTestingTask();
+    const runId = await insertResumableRun();
+
+    await handleWebhookEvent(
+      ciEvent("pending"),
+      "d-ci-pending",
+      fakeFetch(gh({ ciConclusion: "pending", headSha: "abc123" }))
+    );
+
+    expect(await db.select().from(agentEvents).where(and(
+      eq(agentEvents.sessionId, runId), eq(agentEvents.type, "github")
+    ))).toHaveLength(1);
+    expect(await db.select().from(inboxEvents).where(eq(inboxEvents.targetRunId, runId))).toHaveLength(0);
+    expect(mockHintDelivery).not.toHaveBeenCalled();
     expect(mockFollowUp).not.toHaveBeenCalled();
   });
 

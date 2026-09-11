@@ -17,6 +17,7 @@ import { SpritesApiError, makeSpritesClient, type NetworkPolicy, type SpritesCli
 import { bootstrapSprite, configureSpriteSwap, spriteBootstrapComment, SPRITE_CODEX_BINARY } from "./sprites-bootstrap";
 import { workerBundleId } from "../worker-bundle";
 import { newChannelInstanceId } from "../worker-channel/credential";
+import { hasReconnectableWork } from "../worker-channel/repository";
 import { spritesDialEndpoint, spritesListenEndpoint, workerChannelDispatchEnv } from "../worker-channel/dispatch-env";
 import { spritesPoolStore, type SpritePoolEntry } from "./sprites-pool-store";
 import { verifyBaseline, dependencyFingerprint, type SpriteBaselineManifest } from "./sprites-baseline";
@@ -242,6 +243,8 @@ export async function buildSpritesWorkerEnv(
     // architecture-specific binary to this stable path. An override is useful
     // for a custom Sprite image that already provisions Codex elsewhere.
     TASK_ORCH_CODEX_BINARY: envValue("TASK_ORCH_SPRITES_CODEX_BINARY") ?? SPRITE_CODEX_BINARY,
+    TASK_ORCH_QUICKJS_WASM: "/home/user/worker/codeact/emscripten-module.wasm",
+    TASK_ORCH_CODEACT_THREAD_WORKER: "/home/user/worker/codeact/thread-worker.js",
     RUN_ID: String(runId),
     ...(opts.workerGeneration != null ? { TASK_ORCH_WORKER_GENERATION: String(opts.workerGeneration) } : {}),
     SESSION_ROOT: "/home/user/session",
@@ -881,6 +884,40 @@ export class SpritesRunnerProvider implements RunnerProvider {
 
   async stopGeneration(ref: WorkerGenerationRef): Promise<void> {
     return serializeSpriteOperation(ref.runId, () => this.stopGenerationUnserialized(ref));
+  }
+
+  /** Stop an idle worker service while retaining the Sprite and SDK session.
+   * The run-row lock makes an append wait until this generation is fenced. */
+  async quiesceIdleGeneration(ref: WorkerGenerationRef): Promise<boolean> {
+    return serializeSpriteOperation(ref.runId, () => db.transaction(async (tx) => {
+        // Match channel event lock order (channel -> runner -> run). The
+        // outer Sprite lifecycle lock also excludes generation allocation.
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`${ref.runId}:${ref.generation}:${ref.instanceId}`}))`);
+        const [row] = await tx.execute(sql`SELECT sprite_name, provider_service_name, worker_generation, channel_instance_id FROM runner_instances WHERE run_id = ${ref.runId} FOR UPDATE`);
+        const [run] = await tx.execute(sql`SELECT status, goal FROM agent_runs WHERE id = ${ref.runId} FOR UPDATE`);
+        if (!run || !row || row.sprite_name !== ref.providerHandle
+          || Number(row.worker_generation) !== ref.generation || row.channel_instance_id !== ref.instanceId) return false;
+        // Failed runs remain resumable regardless of persona. Stop the service
+        // while retaining the checkout, dependency tree, and SDK state so an
+        // implementor replacement can recover unpublished work.
+        const resumableFailure = run.status === "failed";
+        if (!resumableFailure && !["idle", "parked"].includes(String(run.status))) return false;
+        if (!resumableFailure) {
+          if (await hasReconnectableWork(ref.runId, tx)) return false;
+          const pending = await tx.execute(sql`SELECT 1 FROM worker_channel_commands WHERE run_id=${ref.runId} AND instance_id=${ref.instanceId} AND worker_generation=${ref.generation} AND state='pending' LIMIT 1`);
+          if (pending.length) return false;
+        }
+        const serviceName = row.provider_service_name == null
+          ? (ref.generation === 1 ? "worker" : workerServiceName(ref.generation))
+          : String(row.provider_service_name);
+        // Hold the run lock through the stop. appendMessage locks this same
+        // row before persisting a follow-up, so it resumes only after the old
+        // service is stopped and its claim is released. Never delete the VM.
+        await this.stopServiceAndConfirm(String(row.sprite_name), serviceName);
+        await tx.execute(sql`UPDATE runner_instances SET state='stopped', generation_state='stopped', provider_operation_id=NULL, controller_id=NULL WHERE run_id=${ref.runId}`);
+        await tx.execute(sql`UPDATE agent_runs SET worker_scope=NULL WHERE id=${ref.runId}`);
+        return true;
+    }));
   }
 
   private async stopGenerationUnserialized(ref: WorkerGenerationRef): Promise<void> {

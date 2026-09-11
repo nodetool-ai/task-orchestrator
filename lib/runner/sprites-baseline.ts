@@ -22,6 +22,14 @@ export interface SpriteDependencyManifest {
   installScriptInputs?: Array<{ path: string; sha256: string }>;
   /** Run-local conservative invalidation for tracked source edits. */
   sourceChangesSha?: string;
+  /** Repository-owned preparation/build steps, supplied by the scoped baseline
+   * profile. Commands run only during baseline creation or dependency repair. */
+  setupCommands?: string[];
+  buildCommands?: string[];
+  /** Non-mutating project checks run after preparation and on restore. */
+  readinessCommands?: string[];
+  minimumGitHistoryDepth?: number;
+  baseRef?: string;
 }
 
 export interface SpriteBaselineManifest {
@@ -93,15 +101,32 @@ export async function writeDependencyManifest(client: SpritesClient, spriteName:
 }
 
 /** Validates files and runtime inputs, not an asserted fingerprint marker. */
-export function dependencyVerificationProgram(manifest: SpriteDependencyManifest, checkoutPath = SPRITE_CHECKOUT_PATH): string {
-  return `const fs=require('fs'),crypto=require('crypto'),path=require('path'),cp=require('child_process');
+export function dependencyVerificationProgram(manifest: SpriteDependencyManifest, checkoutPath = SPRITE_CHECKOUT_PATH, readiness = true): string {
+  return `(function(){const fs=require('fs'),crypto=require('crypto'),path=require('path'),cp=require('child_process');
 const m=${JSON.stringify(manifest)},root=${JSON.stringify(checkoutPath)};
 for(const file of [m.lockfile,...m.packageManifests,...(m.installScriptInputs||[])]) {
  const target=path.resolve(root,file.path); if(!target.startsWith(path.resolve(root)+path.sep)) throw Error('invalid dependency path');
  if(crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex')!==file.sha256) throw Error('dependency input mismatch');
 }
 if(m.revision && cp.execFileSync('git',['-C',root,'rev-parse','HEAD'],{encoding:'utf8'}).trim()!==m.revision) throw Error('revision mismatch');
-if(cp.execFileSync('npm',['--version'],{encoding:'utf8'}).trim()!==m.packageManagerVersion) throw Error('npm version mismatch');`;
+if(cp.execFileSync('npm',['--version'],{encoding:'utf8'}).trim()!==m.packageManagerVersion) throw Error('npm version mismatch');
+const depth=Number(cp.execFileSync('git',['-C',root,'rev-list','--count','HEAD'],{encoding:'utf8'}).trim());
+if(m.minimumGitHistoryDepth&&depth<m.minimumGitHistoryDepth) throw Error('git history too shallow: '+depth+' commits, need '+m.minimumGitHistoryDepth);
+if(m.baseRef){try{cp.execFileSync('git',['-C',root,'merge-base','HEAD',m.baseRef],{stdio:'ignore'});}catch{throw Error('merge base unavailable for '+m.baseRef+'; fetch sufficient history');}}
+if(!${JSON.stringify(readiness)}||!(m.setupCommands||m.buildCommands||m.readinessCommands||m.minimumGitHistoryDepth||m.baseRef)) return;
+if(!fs.existsSync(path.join(root,'node_modules'))) throw Error('dependencies missing: node_modules is absent');
+const pkg=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8'));
+const declared={...(pkg.dependencies||{}),...(pkg.devDependencies||{}),...(pkg.optionalDependencies||{})};
+for(const tool of ['typescript','tsx','vitest']) if(declared[tool]) {try{cp.execFileSync('node',['-e','require.resolve('+JSON.stringify(tool+'/package.json')+')'],{cwd:root,stdio:'ignore'});}catch{throw Error('declared tool unavailable: '+tool);}}
+if(declared['better-sqlite3']) {try{cp.execFileSync('node',['-e',"const D=require('better-sqlite3');const d=new D(':memory:');d.close()"],{cwd:root,stdio:'ignore'});}catch{throw Error('native binding unavailable: better-sqlite3 (install scripts may have been skipped)');}}
+for(const rel of m.packageManifests.filter(x=>x.path!=='package.json').map(x=>x.path)) {const p=JSON.parse(fs.readFileSync(path.join(root,rel),'utf8'));for(const field of ['main','module','types']) {const out=p[field];if(typeof out==='string'&&/(^|\\/)dist\\//.test(out)&&!fs.existsSync(path.resolve(path.dirname(path.join(root,rel)),out))) throw Error('workspace build output missing: '+rel+' '+field+' -> '+out);}}
+for(const command of (m.readinessCommands||[])){const result=cp.spawnSync(command,{cwd:root,shell:true,stdio:'pipe',encoding:'utf8',timeout:120000});if(result.status!==0) throw Error('readiness command failed: '+command+'\\n'+String(result.stderr||result.stdout||'').slice(-2000));}})();`;
+}
+
+async function runRepositoryCommands(client: SpritesClient, spriteName: string, commands: string[] | undefined, label: string): Promise<void> {
+  for (const [index, command] of (commands ?? []).entries()) {
+    await execChecked(client, spriteName, `cd ${shellQuote(SPRITE_CHECKOUT_PATH)} && ${command}`, `${label} ${index + 1}`, { timeoutMs: 20 * 60_000 });
+  }
 }
 
 export async function verifyBaseline(client: SpritesClient, spriteName: string, manifest: SpriteBaselineManifest, codexBinary: string): Promise<void> {
@@ -111,7 +136,11 @@ const expected=${JSON.stringify(expected)};
 const canonical=${canonical.toString()};
 const stored=JSON.parse(fs.readFileSync(${JSON.stringify(SPRITE_BASELINE_DIR + '/manifest.json')},'utf8'));
 if(canonical(stored)!==canonical(expected)) throw Error('baseline manifest mismatch');
-if(crypto.createHash('sha1').update(fs.readFileSync('/home/user/worker/dist/run-worker.js')).digest('hex')!==expected.workerBundleSha) throw Error('worker digest mismatch');
+const bundleHash=crypto.createHash('sha1');
+for(const [name,file] of [['dist/run-worker.js','/home/user/worker/dist/run-worker.js'],['codeact/emscripten-module.wasm','/home/user/worker/codeact/emscripten-module.wasm'],['codeact/emscripten-module.wasm.sha256','/home/user/worker/codeact/emscripten-module.wasm.sha256'],['codeact/thread-worker.js','/home/user/worker/codeact/thread-worker.js']]) bundleHash.update(name).update('\\0').update(fs.readFileSync(file));
+if(bundleHash.digest('hex')!==expected.workerBundleSha) throw Error('worker bundle digest mismatch');
+const wasm=fs.readFileSync('/home/user/worker/codeact/emscripten-module.wasm');
+if(!WebAssembly.validate(wasm)) throw Error('CodeAct WASM is not executable');
 if(process.version!==expected.nodeVersion||process.platform!==expected.platform||process.arch!==expected.architecture) throw Error('runtime mismatch');
 const codex=cp.execFileSync(${JSON.stringify(codexBinary)},['--version'],{encoding:'utf8'}).trim();
 if(codex!=='codex-cli '+expected.codexVersion && codex!==expected.codexVersion) throw Error('Codex version mismatch');
@@ -144,9 +173,11 @@ export async function prepareSpriteBaseline(client: SpritesClient, spriteName: s
       `git -C ${shellQuote(SPRITE_CHECKOUT_PATH)} checkout --detach ${shellQuote(dependency.revision!)}`].join("\n");
     await execChecked(client, spriteName, clone, "baseline checkout", { timeoutMs: 10 * 60_000,
       env: process.env.GH_TOKEN ? { GH_TOKEN: process.env.GH_TOKEN } : {} });
-    await execChecked(client, spriteName, nodeCommand(dependencyVerificationProgram(dependency)), "dependency input verification");
+    await execChecked(client, spriteName, nodeCommand(dependencyVerificationProgram(dependency, SPRITE_CHECKOUT_PATH, false)), "dependency input verification");
+    await runRepositoryCommands(client, spriteName, dependency.setupCommands, "repository setup");
     await execChecked(client, spriteName, `cd ${shellQuote(SPRITE_CHECKOUT_PATH)} && npm ci --cache ${shellQuote(SPRITE_NPM_CACHE_PATH)} ${dependency.installOptions.map(shellQuote).join(' ')}`,
       "baseline dependency installation", { timeoutMs: 20 * 60_000 });
+    await runRepositoryCommands(client, spriteName, dependency.buildCommands, "repository build");
     await writeDependencyManifest(client, spriteName, dependency);
   } else if (opts.dependency) throw new Error("Dependency preparation requires a manifest");
   await writeBaselineManifest(client, spriteName, opts.manifest);

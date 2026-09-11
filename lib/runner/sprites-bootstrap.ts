@@ -17,6 +17,7 @@ import type { SpritesClient } from "./sprites-client";
 // @openai/codex-sdk dependency in package.json.
 export const SPRITE_CODEX_VERSION = "0.153.4";
 export const SPRITE_CODEX_BINARY = "/home/user/worker/.codex/bin/codex";
+export const SPRITE_CODEACT_WASM = "/home/user/worker/codeact/emscripten-module.wasm";
 const SPRITE_CODEX_ROOT = "/home/user/worker/.codex";
 // Match the repository's Node 22 toolchain. Sprite's floating default moved to
 // Node 24/npm 12, whose remote-tarball policy rejects the SheetJS dependency.
@@ -216,7 +217,7 @@ export async function bootstrapSprite(
     const start = Date.now();
     onStep?.("verify-worker", "running", 0);
     const result = await client.exec(spriteName, {
-      cmd: `test -f /home/user/worker/dist/run-worker.js && sha1sum /home/user/worker/dist/run-worker.js | cut -d' ' -f1 > /home/user/worker/.worker-sha && test -x ${shellQuote(codexBinary)} && ${shellQuote(codexBinary)} --version >/dev/null`,
+      cmd: `test -f /home/user/worker/dist/run-worker.js && test -f /home/user/worker/codeact/thread-worker.js && test -f ${shellQuote(SPRITE_CODEACT_WASM)} && (cd ${shellQuote(SPRITE_CODEACT_WASM.slice(0, SPRITE_CODEACT_WASM.lastIndexOf("/")))} && sha256sum -c ${shellQuote(SPRITE_CODEACT_WASM.split("/").at(-1)! + ".sha256")}) && TASK_ORCH_QUICKJS_WASM=${shellQuote(SPRITE_CODEACT_WASM)} TASK_ORCH_CODEACT_THREAD_WORKER=/home/user/worker/codeact/thread-worker.js node /home/user/worker/dist/run-worker.js --smoke-codeact && test -x ${shellQuote(codexBinary)} && ${shellQuote(codexBinary)} --version >/dev/null`,
     });
     const durationMs = Date.now() - start;
     if (result.exitCode !== 0) {

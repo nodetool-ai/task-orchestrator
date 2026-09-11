@@ -15,16 +15,20 @@ import { and, eq } from "drizzle-orm";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import WebSocket from "ws";
+import { PassThrough } from "node:stream";
+import WebSocket, { WebSocketServer } from "ws";
 import { db } from "../db";
 import {
   agentSessions,
+  agentEvents,
   runnerInstances,
   workerChannelCommands,
   workerChannelReceipts,
 } from "../db/schema";
 import { create } from "../lib/runs";
 import * as runDispatch from "../lib/run-dispatch";
+import { SpritesRunnerProvider } from "../lib/runner/sprites";
+import { LocalRunnerProvider } from "../lib/runner/local";
 import { provisionLocalChannel } from "../lib/run-dispatch";
 import {
   acquireControllerLease,
@@ -123,6 +127,7 @@ beforeEach(() => {
   process.env.TASK_ORCH_WORKER_CHANNEL_SECRET = SECRET;
   // A short grace/backoff keeps the 60s production window from stalling the run.
   __setReconnectTimingForTests({ graceMs: 1500, backoffMs: 40 });
+  runDispatch.__setStartCleanupRetryDelaysForTests([]);
 });
 
 afterEach(async () => {
@@ -135,12 +140,31 @@ afterEach(async () => {
   roots = [];
   runIds = [];
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   __resetReconnectTimingForTests();
   __resetHeartbeatIntervalForTests();
   delete process.env.TASK_ORCH_WORKER_CHANNEL_SECRET;
+  runDispatch.__setStartCleanupRetryDelaysForTests([1_000, 5_000]);
 });
 
 describe("worker channel recovery (plan section 17)", () => {
+  it("quiesces an idle Sprite on boot without sending another run.start", async () => {
+    vi.stubEnv("SPRITES_TOKEN", "test-token");
+    const { runId, channel } = await provisionRun("idle", "<chat>");
+    await db.update(runnerInstances).set({
+      provider: "sprites", spriteName: `to-run-${runId}`,
+      workerGeneration: 1, generationState: "active", providerServiceName: null,
+    }).where(eq(runnerInstances.runId, runId));
+    const quiesce = vi.spyOn(SpritesRunnerProvider.prototype, "quiesceIdleGeneration").mockResolvedValue(true);
+
+    expect(await reconnectActiveChannels()).toBe(0);
+    expect(quiesce).toHaveBeenCalledWith(expect.objectContaining({
+      runId, generation: 1, instanceId: channel.instanceId, providerHandle: `to-run-${runId}`,
+    }));
+    expect(await commandRows(runId, "run.start")).toHaveLength(0);
+    expect(getConnection(runId)).toBeUndefined();
+  });
+
   it("control-plane restart re-adopts active channels and reconnects", async () => {
     const { runId, channel } = await provisionRun("running");
     await bootServer(runId, channel.instanceId, channel.listenEndpoint, await newRoot());
@@ -154,6 +178,167 @@ describe("worker channel recovery (plan section 17)", () => {
     // The re-adopted channel delivers commands.
     await sendCommand(runId, "run.cancel", { reason: "stop", requestId: "r", deadline: null });
     await waitFor(async () => (await commandRows(runId, "run.cancel")).every((r) => r.state === "acked"));
+  });
+
+  it("bounds an open socket that never sends channel.hello and releases its lease", async () => {
+    const { runId } = await provisionRun("preparing");
+    const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("missing test server address");
+    const identity = await getChannelIdentity(runId);
+    if (!identity) throw new Error("missing channel identity");
+    await (await import("../lib/worker-channel/repository")).setChannelEndpoint(
+      runId, identity.instanceId, `ws://127.0.0.1:${address.port}`, identity.workerGeneration,
+    );
+    try {
+      await expect(connectRun(runId, { handshakeTimeoutMs: 30 })).rejects.toThrow(/channel\.hello.*deadline/);
+      const [row] = await db.select({ controllerId: runnerInstances.controllerId })
+        .from(runnerInstances).where(eq(runnerInstances.runId, runId));
+      expect(row?.controllerId).toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("keeps a failed startup claimed until the old generation is confirmed stopped", async () => {
+    const { runId, channel } = await provisionRun("preparing");
+    let releaseStop!: () => void;
+    const stopped = new Promise<void>((resolve) => { releaseStop = resolve; });
+    const stop = vi.spyOn(LocalRunnerProvider.prototype, "stopGeneration").mockImplementation(async () => stopped);
+
+    const cleanup = runDispatch.handleChannelStartFailure({
+      runId,
+      instanceId: channel.instanceId,
+      workerGeneration: 1,
+      scope: `scope-${runId}`,
+      providerHandle: `scope-${runId}`,
+      error: new Error("no hello"),
+    });
+    await waitFor(() => stop.mock.calls.length === 1);
+
+    // A replacement dispatcher cannot claim while old executable code may
+    // still be alive. This was the unsafe window in the original cleanup.
+    await expect(runDispatch.dispatchRun(runId, { spawn: () => 99 })).resolves.toBe("already-claimed");
+    expect((await db.select().from(agentSessions).where(eq(agentSessions.id, runId)))[0].workerScope)
+      .toBe(`scope-${runId}`);
+
+    releaseStop();
+    await cleanup;
+    const [after] = await db.select().from(agentSessions).where(eq(agentSessions.id, runId));
+    expect(after.status).toBe("pending");
+    expect(after.workerScope).toBeNull();
+    expect(after.attempt).toBe(1);
+  });
+
+  it("does not admit a replacement when failed-generation shutdown is unconfirmed", async () => {
+    const { runId, channel } = await provisionRun("preparing");
+    vi.spyOn(LocalRunnerProvider.prototype, "stopGeneration").mockRejectedValue(new Error("stop unavailable"));
+
+    await expect(runDispatch.handleChannelStartFailure({
+      runId,
+      instanceId: channel.instanceId,
+      workerGeneration: 1,
+      scope: `scope-${runId}`,
+      providerHandle: `scope-${runId}`,
+      error: new Error("no hello"),
+    })).rejects.toThrow("stop unavailable");
+
+    const [after] = await db.select().from(agentSessions).where(eq(agentSessions.id, runId));
+    expect(after.status).toBe("preparing");
+    expect(after.workerScope).toBe(`scope-${runId}`);
+    await expect(runDispatch.dispatchRun(runId, { spawn: () => 99 })).resolves.toBe("already-claimed");
+  });
+
+  it("an exhausted stale failure cannot fail a replacement with the same Sprite handle", async () => {
+    vi.stubEnv("TASK_ORCH_RUNNER", "sprites");
+    vi.stubEnv("SPRITES_TOKEN", "test-token");
+    const { runId, channel } = await provisionRun("preparing");
+    const handle = `to-run-${runId}`;
+    await db.update(runnerInstances).set({ provider: "sprites", spriteName: handle }).where(eq(runnerInstances.runId, runId));
+    await db.insert(agentEvents).values([1, 2].map((n) => ({
+      sessionId: runId,
+      type: "runner_start_failed",
+      payload: JSON.stringify({ run_attempt: 1, infrastructure_attempt: n, worker_generation: n, instance_id: `old-${n}` }),
+    })));
+    let releaseStop!: () => void;
+    const stopping = new Promise<void>((resolve) => { releaseStop = resolve; });
+    const stop = vi.spyOn(SpritesRunnerProvider.prototype, "stopGeneration").mockImplementation(async () => stopping);
+
+    const cleanup = runDispatch.handleChannelStartFailure({
+      runId, instanceId: channel.instanceId, workerGeneration: 1,
+      scope: `scope-${runId}`, providerHandle: handle, error: new Error("no hello"),
+    });
+    await waitFor(() => stop.mock.calls.length > 0);
+
+    const replacementInstance = "wi_ffffffffffffffffffffffffffffffff";
+    await db.update(runnerInstances).set({ workerGeneration: 2, channelInstanceId: replacementInstance }).where(eq(runnerInstances.runId, runId));
+    await db.update(agentSessions).set({ status: "running", workerScope: handle }).where(eq(agentSessions.id, runId));
+    releaseStop();
+    await cleanup;
+
+    const [after] = await db.select().from(agentSessions).where(eq(agentSessions.id, runId));
+    expect(after.status).toBe("running");
+    expect(after.workerScope).toBe(handle);
+    const [generation] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, runId));
+    expect(generation.workerGeneration).toBe(2);
+    expect(generation.channelInstanceId).toBe(replacementInstance);
+  });
+
+  it("a late stop error cannot quarantine a replacement with the same Sprite handle", async () => {
+    vi.stubEnv("TASK_ORCH_RUNNER", "sprites");
+    vi.stubEnv("SPRITES_TOKEN", "test-token");
+    const { runId, channel } = await provisionRun("preparing");
+    const handle = `to-run-${runId}`;
+    await db.update(runnerInstances).set({ provider: "sprites", spriteName: handle }).where(eq(runnerInstances.runId, runId));
+    let rejectStop!: (error: Error) => void;
+    const stopping = new Promise<void>((_resolve, reject) => { rejectStop = reject; });
+    vi.spyOn(SpritesRunnerProvider.prototype, "stopGeneration").mockImplementation(async () => stopping);
+    const cleanup = runDispatch.handleChannelStartFailure({
+      runId, instanceId: channel.instanceId, workerGeneration: 1,
+      scope: `scope-${runId}`, providerHandle: handle, error: new Error("no hello"),
+    });
+    await waitFor(async () => (await db.select().from(agentEvents).where(and(
+      eq(agentEvents.sessionId, runId), eq(agentEvents.type, "runner_start_failed"),
+    ))).length === 1);
+    const replacementInstance = "wi_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    await db.update(runnerInstances).set({ workerGeneration: 2, channelInstanceId: replacementInstance, generationState: "active" }).where(eq(runnerInstances.runId, runId));
+    await db.update(agentSessions).set({ status: "running", workerScope: handle }).where(eq(agentSessions.id, runId));
+    rejectStop(new Error("late stop failure"));
+    await expect(cleanup).rejects.toThrow("late stop failure");
+    const [after] = await db.select().from(agentSessions).where(eq(agentSessions.id, runId));
+    expect(after.status).toBe("running");
+    expect(after.error).toBeNull();
+    const [generation] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, runId));
+    expect(generation.workerGeneration).toBe(2);
+    expect(generation.generationState).toBe("active");
+  });
+
+  it("bounds Sprite tunnel acquisition and closes a tunnel socket that arrives late", async () => {
+    vi.stubEnv("SPRITES_TOKEN", "test-token");
+    const { runId, channel } = await provisionRun("preparing");
+    await db.update(runnerInstances).set({
+      provider: "sprites", spriteName: `to-run-${runId}`,
+      channelEndpoint: `sprite://to-run-${runId}:8787/worker/channel`,
+    }).where(eq(runnerInstances.runId, runId));
+    let releaseTunnel!: (stream: PassThrough) => void;
+    const tunnel = new Promise<PassThrough>((resolve) => { releaseTunnel = resolve; });
+    const terminate = vi.fn();
+    const createSocket = vi.fn(() => ({ terminate }) as unknown as WebSocket);
+
+    await expect(connectRun(runId, {
+      handshakeTimeoutMs: 30,
+      openTunnel: async () => tunnel,
+      createSocket,
+    })).rejects.toThrow(/tunnel.*deadline/);
+    releaseTunnel(new PassThrough());
+    await waitFor(() => createSocket.mock.calls.length === 1);
+    await waitFor(() => terminate.mock.calls.length === 1);
+
+    const [row] = await db.select({ controllerId: runnerInstances.controllerId })
+      .from(runnerInstances).where(eq(runnerInstances.runId, runId));
+    expect(row?.controllerId).toBeNull();
+    expect(channel.instanceId).toBeTruthy();
   });
 
   it("re-adopts later channels without waiting for an earlier stalled channel", async () => {
@@ -430,6 +615,47 @@ describe("worker channel recovery (plan section 17)", () => {
     const secondRow = after.find((r) => r.id !== before[0].id);
     expect(secondRow?.epoch).toBeGreaterThan(firstEpoch);
     expect(getConnection(runId)?.controllerEpoch).toBe(secondRow?.epoch);
+  });
+
+  it("replaces an adopted Sprite whose fresh process reports started=false", async () => {
+    vi.stubEnv("TASK_ORCH_RUNNER", "sprites");
+    vi.stubEnv("SPRITES_TOKEN", "test-token");
+    const { runId, channel } = await provisionRun("running");
+    const firstRoot = await newRoot();
+    const firstServer = await bootServer(runId, channel.instanceId, channel.listenEndpoint, firstRoot);
+
+    // Establish an already-consumed start in the durable command history.
+    await runDispatch.startChannelForRun(runId, channel.instanceId, { freshWorker: true });
+    await waitFor(async () => (await commandRows(runId, "run.start")).every((r) => r.state === "acked"));
+    await disconnectRun(runId);
+    await firstServer.close();
+
+    // A replacement process has the same generation-1 Sprite service identity,
+    // but an empty process state and therefore reports started=false.
+    await bootServer(runId, channel.instanceId, channel.listenEndpoint, await newRoot());
+    await db.update(runnerInstances).set({
+      provider: "sprites",
+      spriteName: `to-run-${runId}`,
+      workerGeneration: 1,
+      generationState: "active",
+      providerServiceName: null,
+    }).where(eq(runnerInstances.runId, runId));
+    const stop = vi.spyOn(SpritesRunnerProvider.prototype, "stopGeneration").mockResolvedValue(undefined);
+    const create = vi.spyOn(SpritesRunnerProvider.prototype, "create").mockResolvedValue(null);
+
+    await expect(runDispatch.startChannelForRun(runId, channel.instanceId)).rejects.toThrow(/Unable to replace Sprite worker/);
+
+    expect(stop).toHaveBeenCalledWith(expect.objectContaining({
+      generation: 1,
+      instanceId: channel.instanceId,
+      providerServiceName: "worker",
+    }));
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      runId,
+      workerGeneration: 2,
+      channelInstanceId: expect.not.stringMatching(channel.instanceId),
+      replacesGeneration: 1,
+    }));
   });
 
   // Counterpart: a plain re-adoption (control-plane restart re-dialing a worker

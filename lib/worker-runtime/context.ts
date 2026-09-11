@@ -792,22 +792,31 @@ async function driveChatRun(context: WorkerRunContext, inputDriven: boolean): Pr
     // real model process would be spawned only to be torn down.
     if (session.abortSignal?.aborted) throw new Error("run cancelled before first turn");
     const seed = context.currentTurnId ? context.pendingInput : unprocessedModelInputs(context.transcript);
-    if (seed.length > 0) {
+    const kickoff = context.start.kickoffPrompt?.trim();
+    // A resume/start command can be replayed after the worker has already
+    // consumed its work.  In particular, legacy chat resumes carry neither a
+    // v2 input receipt nor an inbox digest.  The command itself is not a
+    // reason to ask the model for another turn: only actual input/events or an
+    // explicit kickoff are.
+    const hasInitialWork = seed.length > 0 || (context.start.inputManifest?.length ?? 0) > 0 || Boolean(kickoff) || Boolean(context.start.inboxDigest?.trim());
+    let processedInitialTurn = false;
+    if (hasInitialWork) {
       if (!session.abortSignal?.aborted) {
-        context.currentInputIds = seed.map((m) => (m as any).inputId).filter((id): id is string => typeof id === "string");
-        context.currentTurnId = (seed[0] as any).turnId;
-        const prompt = seed.map(messagePrompt).filter(Boolean).join("\n\n") || RESUME_PROMPT;
+        // A legacy digest or an explicit kickoff can be the only initial
+        // signal. Keep the bootstrap receipt identity in that case; it is
+        // needed if the backend fails before producing a checkpoint.
+        if (seed.length > 0) {
+          context.currentInputIds = seed.map((m) => (m as any).inputId).filter((id): id is string => typeof id === "string");
+          context.currentTurnId = (seed[0] as any).turnId;
+        }
+        const prompt = [kickoff, ...seed.map(messagePrompt).filter(Boolean)].filter(Boolean).join("\n\n") || RESUME_PROMPT;
         const turn = await runModelTurn(context, prompt);
         await emitCheckpoint(context, turn);
+        processedInitialTurn = true;
       }
-    } else {
-      // The run.start snapshot is itself the signal to act; a chat drive with no
-      // pending user message runs one kickoff/resume turn.
-      const t = await runModelTurn(context, RESUME_PROMPT);
-      await emitCheckpoint(context, t);
     }
 
-    if (context.currentTurnId) {
+    if (processedInitialTurn && context.currentTurnId) {
       // Durable chat turns use the same scheduler handshake as task runs. A
       // follow-up manifest is processed at the next safe boundary; idle/park
       // releases the worker instead of relying on a local keep-open loop.
@@ -869,7 +878,16 @@ async function driveChatRun(context: WorkerRunContext, inputDriven: boolean): Pr
       await emitCancelled(context, inputLoop.cancelRequestId());
       return;
     }
-    throw err;
+    // Chat turns are resumable, but a provider failure must still be durable;
+    // otherwise the worker exits and leaves the run marked running forever.
+    // A preceding checkpoint has already persisted the latest SDK token and
+    // turn receipt. Retain the normal commit handshake used by single-turn
+    // runs; the failure itself has no trustworthy partial-turn usage to add.
+    const failure = await session.emit("run.failed", {
+      error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+    });
+    await awaitCommit(session, failure.id);
+    return;
   } finally {
     // Stop routing new commands into the queue. The underlying `for await` over
     // the live session iterator stays parked until the session closes (on worker

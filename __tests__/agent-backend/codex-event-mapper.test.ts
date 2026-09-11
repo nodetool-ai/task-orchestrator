@@ -8,11 +8,14 @@ describe("mapCodexEvent", () => {
     ]);
   });
 
-  it("ignores the in-progress item lifecycle (only item.completed is mapped)", () => {
+  it("persists command starts while ignoring non-command in-progress items", () => {
     const item = { id: "i1", type: "agent_message", text: "partial" };
     expect(mapCodexEvent({ type: "turn.started" })).toEqual([]);
     expect(mapCodexEvent({ type: "item.started", item })).toEqual([]);
     expect(mapCodexEvent({ type: "item.updated", item })).toEqual([]);
+    expect(mapCodexEvent({ type: "item.started", item: { id: "cmd-start", type: "command_execution", command: "npm test" } })).toEqual([
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "cmd-start", name: "Bash", input: { command: "npm test" } }] } },
+    ]);
   });
 
   it("maps an agent_message to an assistant text envelope", () => {
@@ -58,6 +61,17 @@ describe("mapCodexEvent", () => {
         },
       },
     ]);
+  });
+
+  it("closes a previously persisted command start without duplicating its tool_use", () => {
+    const out = mapCodexEvent({
+      type: "item.completed",
+      item: { id: "cmd-start", type: "command_execution", command: "npm test", aggregated_output: "ok", exit_code: 0 },
+    }, { startedItemIds: new Set(["cmd-start"]) });
+    expect(out).toEqual([{
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: "cmd-start", content: [{ type: "text", text: "exit 0\nok" }], is_error: false }] },
+    }]);
   });
 
   it("flags a non-zero exit as a tool error even when the item reports completed", () => {

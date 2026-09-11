@@ -21,7 +21,7 @@ import {
   type CandidateRun,
   type NormalizedWebhookEvent,
 } from "./github-webhook";
-import { maybeTriggerAutofix } from "./ci-autofix";
+import { maybeTriggerAutofix, recordAggregateCiGreen } from "./ci-autofix";
 import {
   applyTaskStateFromPr,
   fetchPrGithubState,
@@ -70,6 +70,20 @@ export async function handleWebhookEvent(
   const repoMap = await buildRepoOwnerMap(candidateRows);
   const matchedIds = selectMatchingRunIds(event, candidateRows, repoMap);
 
+  const matchedRuns = (await Promise.all(matchedIds.map((id) => runs.get(id))))
+    .filter((r): r is NonNullable<typeof r> => r != null)
+    .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
+  // Keep durable UI history, but notify only the newest generation for each
+  // task. Waking every settled historical run caused dozens of redundant
+  // CI-pending turns on one PR.
+  const notifiedTasks = new Set<string>();
+  const notificationIds = matchedRuns.filter((run) => {
+    if (!run.taskId) return true;
+    if (notifiedTasks.has(run.taskId)) return false;
+    notifiedTasks.add(run.taskId);
+    return true;
+  }).map((run) => run.id);
+
   // Record the event on every matched run (durable log + best-effort live push).
   for (const id of matchedIds) await recordEvent(id, event, deliveryId);
 
@@ -84,10 +98,15 @@ export async function handleWebhookEvent(
   // maybeTriggerAutofix would skip the targeted follow-up, or find no
   // resumable run at all and escalate the task to `blocked` purely because a
   // wake got there first. The wake is issued below once that decision is made.
-  const mapped = mapWebhookToInboxType(event);
+  // Pending check fan-out is UI telemetry, not actionable model input. Keep
+  // the durable `github` events above but do not wake a worker for every
+  // unchanged queued/in-progress check notification.
+  const mapped = event.kind === "ci" && event.ciState === "pending"
+    ? null
+    : mapWebhookToInboxType(event);
   let pendingWake = false;
   if (mapped) {
-    for (const id of matchedIds) {
+    for (const id of notificationIds) {
       try {
         const emitted = await emitInboxEvent({
           targetRunId: id,
@@ -111,12 +130,6 @@ export async function handleWebhookEvent(
   const wake = (autofixTriggered = false) => {
     if (pendingWake && !autofixTriggered) hintRunEventDelivery();
   };
-
-  // Side effects operate on full run rows; fetch them newest-first so "the
-  // latest run for a task" is easy to pick.
-  const matchedRuns = (await Promise.all(matchedIds.map((id) => runs.get(id))))
-    .filter((r): r is NonNullable<typeof r> => r != null)
-    .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
 
   // Task state is driven from GitHub via the same prToTaskState mapping the
   // poller uses, matched by the authoritative tasks.pr_url link (run-based
@@ -146,10 +159,12 @@ export async function handleWebhookEvent(
   // one event would spuriously "fix" a run that was merely superseded. The
   // rolled-up state reflects the real picture (new checks pending/green).
   let ciRedAndOpen = false;
+  let authoritativeHeadSha: string | null = null;
   if (event.kind === "ci") {
     const ci = await applyCiState(matchedTasks, event, fetchPrState);
     actions.push(...ci.actions);
     ciRedAndOpen = ci.redAndOpen;
+    authoritativeHeadSha = ci.headSha;
   }
 
   const isCiFailure = event.kind === "ci" && ciRedAndOpen;
@@ -158,7 +173,10 @@ export async function handleWebhookEvent(
 
   let autofixTriggered = false;
   if (isCiFailure || isChangesRequested) {
-    const fix = await handleNeedsFix(matchedRuns, event, isCiFailure ? "ci" : "review");
+    const authoritativeEvent = isCiFailure && authoritativeHeadSha
+      ? { ...event, headSha: authoritativeHeadSha }
+      : event;
+    const fix = await handleNeedsFix(matchedRuns, authoritativeEvent, isCiFailure ? "ci" : "review");
     actions.push(...fix.actions);
     autofixTriggered = fix.triggered;
   }
@@ -255,7 +273,7 @@ async function applyCiState(
   matchedTasks: MatchedTask[],
   event: NormalizedWebhookEvent,
   fetchPrState: PrGithubStateFetcher
-): Promise<{ actions: string[]; redAndOpen: boolean }> {
+): Promise<{ actions: string[]; redAndOpen: boolean; headSha: string | null }> {
   const actions: string[] = [];
   // Whether any matched task's authoritative rolled-up CI is genuinely red on
   // an open PR — used by the caller to gate autofix (rather than the single
@@ -263,6 +281,7 @@ async function applyCiState(
   // check-run). Defaults false, so a failed/absent re-read never fires autofix;
   // the poller re-reads and covers that case.
   let redAndOpen = false;
+  let headSha: string | null = null;
   for (const { task } of matchedTasks) {
     const prUrl = task.prUrl ?? event.prUrls[0] ?? null;
     if (!prUrl) continue;
@@ -274,6 +293,7 @@ async function applyCiState(
       continue;
     }
     if (!ghState) continue;
+    headSha = ghState.headSha ?? event.headSha ?? null;
     const prev = task.state;
     // An already-blocked task with still-red CI has been escalated (or its PR
     // was closed) and is awaiting a human — a stray CI-failure webhook must not
@@ -281,6 +301,9 @@ async function applyCiState(
     const taskRedAndOpen =
       ghState.ciConclusion === "failure" && !ghState.merged && !ghState.closed;
     if (taskRedAndOpen) redAndOpen = true;
+    if (ghState.ciConclusion === "success" && !ghState.merged && !ghState.closed) {
+      await recordAggregateCiGreen(task.id, headSha);
+    }
     if (taskRedAndOpen && prev === "blocked") continue;
     try {
       await applyTaskStateFromPr({ id: task.id, state: task.state }, ghState);
@@ -291,7 +314,7 @@ async function applyCiState(
     const now = await repo.getTask(task.id);
     if (now && now.state !== prev) actions.push(`task ${task.id} → ${now.state}`);
   }
-  return { actions, redAndOpen };
+  return { actions, redAndOpen, headSha };
 }
 
 async function handleNeedsFix(

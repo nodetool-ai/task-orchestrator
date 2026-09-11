@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
-import { tarSingleFile } from "../lib/worker-bundle";
+import { tarFiles, tarSingleFile } from "../lib/worker-bundle";
 
 describe("worker bundle tar", () => {
   it("produces an archive the system tar extracts to the expected path", () => {
@@ -16,6 +16,19 @@ describe("worker bundle tar", () => {
     expect(readFileSync(join(dir, "dist", "run-worker.js"))).toEqual(content);
     expect(execFileSync("tar", ["-tzf", "b.tgz"], { cwd: dir }).toString().trim()).toBe("dist/run-worker.js");
   });
+});
+
+it("packages the worker, CodeAct WASM, and provenance sidecar together", () => {
+  const tgz = gzipSync(tarFiles([
+    { path: "dist/run-worker.js", content: Buffer.from("worker") },
+    { path: "codeact/emscripten-module.wasm", content: Buffer.from([0, 97, 115, 109]) },
+    { path: "codeact/emscripten-module.wasm.sha256", content: Buffer.from("digest") },
+  ]));
+  const dir = mkdtempSync(join(tmpdir(), "wb-assets-"));
+  writeFileSync(join(dir, "b.tgz"), tgz);
+  execFileSync("tar", ["-xzf", "b.tgz"], { cwd: dir });
+  expect(readFileSync(join(dir, "codeact/emscripten-module.wasm"))).toEqual(Buffer.from([0, 97, 115, 109]));
+  expect(execFileSync("tar", ["-tzf", "b.tgz"], { cwd: dir }).toString()).toContain("codeact/emscripten-module.wasm.sha256");
 });
 
 describe("sprites bundle url default", () => {

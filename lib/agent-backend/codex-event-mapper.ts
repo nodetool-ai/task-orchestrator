@@ -29,6 +29,9 @@ export interface CodexMapContext {
   /** Text of the most recent agent_message, used as the turn's result summary
    *  (Codex's turn.completed carries usage only — no final response). */
   lastAgentMessage?: string | null;
+  /** Item ids whose start was already persisted. Completed items then emit
+   * only their result, avoiding a duplicate tool_use. */
+  startedItemIds?: ReadonlySet<string>;
 }
 
 /** Cap on a tool_result body. Codex hands back the FULL aggregated stdout+stderr
@@ -78,7 +81,7 @@ function toolResult(id: string, text: string, isError = false): RunEnvelope {
 }
 
 /** Map one completed thread item to its envelope pair (or single envelope). */
-function mapItem(item: any): RunEnvelope[] {
+function mapItem(item: any, started = false): RunEnvelope[] {
   switch (item?.type) {
     case "agent_message": {
       const text = typeof item.text === "string" ? item.text : "";
@@ -100,7 +103,7 @@ function mapItem(item: any): RunEnvelope[] {
       return [
         // Canonical "Bash" so lib/builtin-tools renders it like every other
         // harness's shell tool instead of an anonymous wrench.
-        toolUse(item.id, "Bash", { command }),
+        ...(started ? [] : [toolUse(item.id, "Bash", { command })]),
         toolResult(item.id, `${exit}${output}`.trim() || "(no output)", failed),
       ];
     }
@@ -184,8 +187,14 @@ export function mapCodexEvent(ev: any, ctx: CodexMapContext = {}): RunEnvelope[]
       if (!ev.thread_id) return [];
       return [{ type: "system", subtype: "init", session_id: ev.thread_id }];
     }
+    case "item.started": {
+      const item = ev.item;
+      if (item?.type !== "command_execution" || typeof item.id !== "string") return [];
+      const command = typeof item.command === "string" ? item.command : "";
+      return [toolUse(item.id, "Bash", { command })];
+    }
     case "item.completed":
-      return mapItem(ev.item);
+      return mapItem(ev.item, ctx.startedItemIds?.has(ev.item?.id));
     case "turn.completed": {
       const usage = ev.usage
         ? { input_tokens: ev.usage.input_tokens, output_tokens: ev.usage.output_tokens }

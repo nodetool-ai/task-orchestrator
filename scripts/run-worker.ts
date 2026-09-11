@@ -19,6 +19,7 @@ import { startWorkerLogFlusher } from "../lib/runner/worker-log-store";
 import { installProcessSafetyNet } from "../lib/transient-errors";
 import { startWorkerServer, type WorkerServer } from "../lib/worker-channel/worker-server";
 import { createLogger } from "../lib/worker/log";
+import { executeInThread } from "../lib/codeact/thread";
 
 const log = createLogger("run-worker");
 
@@ -28,6 +29,12 @@ const log = createLogger("run-worker");
 installProcessSafetyNet({ label: "run-worker" });
 
 async function main() {
+  if (process.argv[2] === "--smoke-codeact") {
+    const result = await executeInThread({ code: "return 6 * 7;" });
+    if (result.status !== "ok" || result.value !== 42) throw new Error(`CodeAct smoke failed: ${JSON.stringify(result)}`);
+    console.log("CodeAct smoke: 42");
+    return;
+  }
   const runId = parseInt(process.argv[2] ?? "", 10);
   if (!Number.isFinite(runId)) {
     console.error("[run-worker] usage: run-worker <runId>");

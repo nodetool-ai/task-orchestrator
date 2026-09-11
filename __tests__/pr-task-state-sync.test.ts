@@ -40,7 +40,7 @@ import {
   syncPrBackedTasks,
   type PrGithubState,
 } from "../lib/pr-task-state";
-import { AUTOFIX_MAX } from "../lib/ci-autofix";
+import { AUTOFIX_MAX, countTaskAutofixAttempts } from "../lib/ci-autofix";
 import type { TaskState } from "../lib/types";
 
 beforeEach(async () => {
@@ -318,6 +318,7 @@ describe("syncPrBackedTasks autofix (webhook-delivery fallback)", () => {
   it("triggers autofix on a red-CI resumable run when no recent webhook autofix exists", async () => {
     const task = await makeTaskInState("testing", "https://github.com/o/r/pull/40");
     const runId = await insertRun(task.id, "https://github.com/o/r/pull/40");
+    await db.update(agentSessions).set({ deliveryVersion: 1 }).where(eq(agentSessions.id, runId));
 
     await syncPrBackedTasks(fixedFetcher(gh({ ciConclusion: "failure" })));
 
@@ -328,6 +329,9 @@ describe("syncPrBackedTasks autofix (webhook-delivery fallback)", () => {
     expect(mockFollowUp.mock.calls[0]?.[1]).toContain("push the branch yourself");
     expect(mockFollowUp.mock.calls[0]?.[1]).not.toContain("they will be pushed");
     expect(await autofixEvents(runId)).toBe(1);
+    // Legacy delivery-v1 runs have no run_turn receipt; their accepted claim
+    // retains event-based budget accounting.
+    expect(await countTaskAutofixAttempts(task.id)).toBe(1);
   });
 
   it("does NOT autofix a green PR", async () => {
@@ -389,6 +393,69 @@ describe("syncPrBackedTasks autofix (webhook-delivery fallback)", () => {
     await syncPrBackedTasks(fixedFetcher(gh({ ciConclusion: "failure" })));
     expect(mockFollowUp).not.toHaveBeenCalled();
     expect(await autofixEvents(runId)).toBe(0);
+  });
+
+  it("atomically gives concurrent pollers one repair owner", async () => {
+    const task = await makeTaskInState("failing", "https://github.com/o/r/pull/451");
+    const runId = await insertRun(task.id, "https://github.com/o/r/pull/451");
+
+    await Promise.all([
+      syncPrBackedTasks(fixedFetcher(gh({ ciConclusion: "failure", headSha: "head-1" }))),
+      syncPrBackedTasks(fixedFetcher(gh({ ciConclusion: "failure", headSha: "head-1" }))),
+    ]);
+
+    expect(mockFollowUp).toHaveBeenCalledTimes(1);
+    expect(await autofixEvents(runId)).toBe(1);
+  });
+
+  it("does not revive an older run while a newer generation is queued", async () => {
+    const task = await makeTaskInState("failing", "https://github.com/o/r/pull/452");
+    const old = await insertRun(task.id, "https://github.com/o/r/pull/452");
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    const newer = await insertRun(task.id, "https://github.com/o/r/pull/452", { status: "pending" });
+
+    await syncPrBackedTasks(fixedFetcher(gh({ ciConclusion: "failure", headSha: "head-2" })));
+
+    expect(mockFollowUp).not.toHaveBeenCalled();
+    expect(await autofixEvents(old)).toBe(0);
+    expect(await autofixEvents(newer)).toBe(0);
+    expect((await repo.getTask(task.id))!.state).toBe("failing");
+  });
+
+  it("shares repair budget across replacements and ignores a queued attempt with no turn", async () => {
+    const task = await makeTaskInState("failing", "https://github.com/o/r/pull/453");
+    const first = await insertRun(task.id, "https://github.com/o/r/pull/453");
+    await db.update(agentSessions).set({ status: "closed" }).where(eq(agentSessions.id, first));
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    const replacement = await insertRun(task.id, "https://github.com/o/r/pull/453");
+    for (let i = 0; i < 2; i++) {
+      await db.insert(agentEvents).values({ sessionId: first, type: "github_autofix", payload: "{}", createdAt: new Date(Date.now() - 600_000 + i) });
+    }
+    await db.insert(agentEvents).values({ sessionId: replacement, type: "github_autofix", payload: '{"run_attempt":1}', createdAt: new Date(Date.now() - 500_000) });
+    await db.insert(agentEvents).values({ sessionId: replacement, type: "runner_start_failed", payload: '{"run_attempt":1}', createdAt: new Date(Date.now() - 499_000) });
+
+    // The replacement claim never began a logical turn, so it consumes no
+    // code-repair budget; the two legacy completed attempts still count.
+    expect(await countTaskAutofixAttempts(task.id)).toBe(2);
+  });
+
+  it("resets budget only on aggregate green and records same-head recovery after new repair", async () => {
+    const task = await makeTaskInState("failing", "https://github.com/o/r/pull/454");
+    const runId = await insertRun(task.id, "https://github.com/o/r/pull/454");
+    await db.insert(agentEvents).values({ sessionId: runId, type: "github_autofix",
+      payload: '{}', createdAt: new Date(Date.now() - 3_000) });
+    await db.insert(agentEvents).values({ sessionId: runId, type: "github", payload:
+      '{"ci_state":"success","head_sha":"same-head"}', createdAt: new Date(Date.now() - 2_000) });
+    expect(await countTaskAutofixAttempts(task.id)).toBe(1);
+
+    await syncPrBackedTasks(fixedFetcher(gh({ ciConclusion: "success", headSha: "same-head" })));
+    expect(await countTaskAutofixAttempts(task.id)).toBe(0);
+    await db.insert(agentEvents).values({ sessionId: runId, type: "github_autofix",
+      payload: '{}', createdAt: new Date() });
+    await syncPrBackedTasks(fixedFetcher(gh({ ciConclusion: "success", headSha: "same-head" })));
+    expect(await countTaskAutofixAttempts(task.id)).toBe(0);
+    expect((await db.select().from(agentEvents).where(and(eq(agentEvents.sessionId, runId),
+      eq(agentEvents.type, "github_ci_aggregate"))))).toHaveLength(2);
   });
 
   it("does NOT autofix a cancelled run (user abandoned it)", async () => {

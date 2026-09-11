@@ -7,11 +7,11 @@ import { lstat, mkdir, readdir, unlink } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
 import { dirname, join } from "node:path";
 import { db, workerGenerationAuthorityKey } from "../db";
-import { agentSessions, runnerInstances } from "../db/schema";
+import { agentEvents, agentSessions, runnerInstances } from "../db/schema";
 import { AGENT_CREDENTIAL_ENV_KEYS, agentCredentialEnv } from "./agent-backend/provider-env";
 // lib/inbox has no static import of this module (its wake path uses a lazy
 // dynamic import), so this edge is cycle-free.
-import { fireDueTimers, parkedRunsWithPendingEvents } from "./inbox";
+import { emitInboxEvent, fireDueTimers, parkedRunsWithPendingEvents } from "./inbox";
 import { pumpRunEventDeliveries } from "./run-event-delivery";
 import { lockSourceTx, registerDefaultChildSubscriptionTx } from "./run-source-events";
 import type { RunRow } from "./runs";
@@ -44,6 +44,7 @@ import {
   getLatestRunStartCommand,
   persistCommand,
   reserveChannelIdentity,
+  releaseChannelForReplacement,
   setChannelEndpoint,
 } from "./worker-channel/repository";
 import { connectRun } from "./worker-channel/controller";
@@ -599,6 +600,19 @@ async function dispatchRunInner(
     // generationState='allocating'; a concurrent dispatcher cannot advance the
     // generation without first acquiring the run row lock.
     const claimed = await db.transaction(async (tx) => {
+      if (run.taskId && run.cwdStrategy === "worktree" && run.goal !== "<chat>") {
+        // Take the task lock first, matching runs.create and CI autofix. Taking
+        // it after the run/generation locks would invert their lock order.
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${run.taskId}))`);
+        const [rival] = await tx.select({ id: agentSessions.id }).from(agentSessions).where(and(
+          eq(agentSessions.taskId, run.taskId),
+          sql`${agentSessions.id} <> ${runId}`,
+          eq(agentSessions.cwdStrategy, "worktree"),
+          sql`${agentSessions.goal} <> '<chat>'`,
+          notInArray(agentSessions.status, ["completed", "failed", "cancelled", "closed", "budget_exhausted"]),
+        )).limit(1);
+        if (rival) return null;
+      }
       // A generation allocation is the exclusive side of the authority fence
       // held by tool execution. It is intentionally distinct from the Sprite
       // lifecycle lock: ordinary channel traffic need not wait on either one.
@@ -759,9 +773,14 @@ async function dispatchRunInner(
       void startChannelForRun(runId, channel.instanceId, {
         freshWorker: true,
         provisioningScope: outcome.scope,
-      }).catch((err) =>
-        console.error(`Worker channel start failed for run ${runId}:`, err)
-      );
+      }).catch((error) => handleChannelStartFailure({
+        runId,
+        instanceId: channel.instanceId,
+        workerGeneration: outcome.workerGeneration,
+        scope: outcome.scope,
+        providerHandle: ref.handle,
+        error,
+      }).catch((cleanupError) => console.error(`Worker channel failure cleanup failed for run ${runId}:`, cleanupError)));
       handle = ref.handle;
     } else if (provider === "sprites") {
       // Sprites channel provisioning (see docs/sprites-migration-design.md §5):
@@ -809,9 +828,15 @@ async function dispatchRunInner(
       void startChannelForRun(runId, ref.channelInstanceId ?? channel.instanceId, {
         freshWorker: true,
         provisioningScope: outcome.scope,
-      }).catch((err) =>
-        console.error(`Worker channel start failed for run ${runId}:`, err),
-      );
+      }).catch((error) => handleChannelStartFailure({
+        runId,
+        instanceId: ref.channelInstanceId ?? channel.instanceId,
+        workerGeneration: outcome.workerGeneration,
+        scope: outcome.scope,
+        providerHandle: ref.handle,
+        providerServiceName: ref.providerServiceName ?? outcome.providerServiceName ?? undefined,
+        error,
+      }).catch((cleanupError) => console.error(`Worker channel failure cleanup failed for run ${runId}:`, cleanupError)));
       handle = ref.handle;
     } else {
       // Any genuinely unknown provider still fails fast rather than silently
@@ -1037,7 +1062,8 @@ async function connectWithBootBackoff(runId: number, opts: { bumpEpoch?: boolean
   const deadline = Date.now() + BOOT_DEADLINE_MS;
   for (let attempt = 0; ; attempt++) {
     try {
-      return await connectRun(runId, opts);
+      const remaining = Math.max(1, deadline - Date.now());
+      return await connectRun(runId, { ...opts, handshakeTimeoutMs: Math.min(10_000, remaining) });
     } catch (err) {
       const nonRetryable =
         typeof err === "object" && err !== null && "retryable" in err &&
@@ -1047,6 +1073,192 @@ async function connectWithBootBackoff(runId: number, opts: { bumpEpoch?: boolean
       await new Promise((r) => setTimeout(r, delay));
     }
   }
+}
+
+const MAX_INFRASTRUCTURE_START_ATTEMPTS = 3;
+let START_CLEANUP_RETRY_DELAYS_MS: readonly number[] = [1_000, 5_000];
+export function __setStartCleanupRetryDelaysForTests(delays: readonly number[]): void {
+  START_CLEANUP_RETRY_DELAYS_MS = delays;
+}
+
+export async function handleChannelStartFailure(input: {
+  runId: number;
+  instanceId: string;
+  workerGeneration: number;
+  scope: string;
+  providerHandle: string;
+  providerServiceName?: string;
+  error: unknown;
+}): Promise<void> {
+  const detail = input.error instanceof Error ? input.error.message : String(input.error);
+  const [run] = await db.select({ attempt: agentSessions.attempt }).from(agentSessions)
+    .innerJoin(runnerInstances, and(
+      eq(runnerInstances.runId, agentSessions.id),
+      eq(runnerInstances.workerGeneration, input.workerGeneration),
+      eq(runnerInstances.channelInstanceId, input.instanceId),
+    ))
+    .where(and(
+      eq(agentSessions.id, input.runId),
+      inArray(agentSessions.workerScope, [input.scope, input.providerHandle]),
+    )).limit(1);
+  if (!run) return;
+
+  const result = await db.transaction(async (tx) => {
+    const lockedGeneration = await tx.execute(sql`SELECT worker_generation, channel_instance_id FROM runner_instances WHERE run_id = ${input.runId} FOR UPDATE`);
+    if (!lockedGeneration[0] || Number(lockedGeneration[0].worker_generation) !== input.workerGeneration
+      || lockedGeneration[0].channel_instance_id !== input.instanceId) return null;
+    await tx.execute(sql`SELECT id FROM agent_runs WHERE id = ${input.runId} FOR UPDATE`);
+    const duplicate = await tx.select({ id: agentEvents.id }).from(agentEvents).where(and(
+      eq(agentEvents.sessionId, input.runId),
+      eq(agentEvents.type, "runner_start_failed"),
+      sql`${agentEvents.payload}::jsonb ->> 'instance_id' = ${input.instanceId}`,
+      sql`(${agentEvents.payload}::jsonb ->> 'worker_generation')::int = ${input.workerGeneration}`,
+    )).limit(1);
+    if (duplicate.length) return null;
+    const prior = await tx.select({ count: sql<number>`count(*)::int` }).from(agentEvents).where(and(
+      eq(agentEvents.sessionId, input.runId),
+      eq(agentEvents.type, "runner_start_failed"),
+      sql`(${agentEvents.payload}::jsonb ->> 'run_attempt')::int = ${run.attempt}`,
+    ));
+    const attempt = Number(prior[0]?.count ?? 0) + 1;
+    const message = `worker startup failed (infrastructure attempt ${attempt}/${MAX_INFRASTRUCTURE_START_ATTEMPTS}): ${detail}`;
+    const generation = await tx.select({ runId: runnerInstances.runId }).from(runnerInstances).where(and(
+      eq(runnerInstances.runId, input.runId),
+      eq(runnerInstances.workerGeneration, input.workerGeneration),
+      eq(runnerInstances.channelInstanceId, input.instanceId),
+    )).limit(1);
+    if (!generation.length) return null;
+    const updated = await tx.update(agentSessions).set({
+      pendingReason: message,
+    }).where(and(
+      eq(agentSessions.id, input.runId),
+      inArray(agentSessions.workerScope, [input.scope, input.providerHandle]),
+      notInArray(agentSessions.status, HARD_TERMINAL_STATUSES),
+    ));
+    if (updated.count === 0) return null;
+    await tx.insert(agentEvents).values({
+      sessionId: input.runId,
+      type: "runner_start_failed",
+      payload: JSON.stringify({ run_attempt: run.attempt, infrastructure_attempt: attempt, worker_generation: input.workerGeneration, instance_id: input.instanceId, error: detail }),
+      createdAt: new Date(),
+    });
+    return { attempt, message };
+  });
+  if (!result) return;
+
+  const { disconnectRun } = await import("./worker-channel/registry");
+  await disconnectRun(input.runId, {
+    release: false,
+    instanceId: input.instanceId,
+    workerGeneration: input.workerGeneration,
+    discardBlobs: true,
+  }).catch(() => undefined);
+  const provider = getRunnerProvider();
+  if (!provider.stopGeneration) throw new Error(`Runner provider ${provider.kind} cannot stop failed worker generation`);
+  const stopExactGeneration = () => provider.stopGeneration!({
+    runId: input.runId,
+    generation: input.workerGeneration,
+    instanceId: input.instanceId,
+    providerHandle: input.providerHandle,
+    ...(input.providerServiceName ? { providerServiceName: input.providerServiceName } : {}),
+  });
+  let stopError: unknown;
+  for (let stopAttempt = 0; stopAttempt <= START_CLEANUP_RETRY_DELAYS_MS.length; stopAttempt++) {
+    try {
+      await stopExactGeneration();
+      stopError = undefined;
+      break;
+    } catch (error) {
+      stopError = error;
+      const delay = START_CLEANUP_RETRY_DELAYS_MS[stopAttempt];
+      if (delay != null) await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  if (stopError != null) {
+    const stopDetail = stopError instanceof Error ? stopError.message : String(stopError);
+    const diagnostic = `${result.message}; old worker shutdown was not confirmed after ${START_CLEANUP_RETRY_DELAYS_MS.length + 1} attempts: ${stopDetail}`;
+    const [blocked] = await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT run_id FROM runner_instances WHERE run_id = ${input.runId} FOR UPDATE`);
+      const fenced = await tx.update(runnerInstances).set({ generationState: "stopping", lastProviderError: diagnostic }).where(and(
+        eq(runnerInstances.runId, input.runId), eq(runnerInstances.workerGeneration, input.workerGeneration),
+        eq(runnerInstances.channelInstanceId, input.instanceId),
+      )).returning({ runId: runnerInstances.runId });
+      if (!fenced.length) return [];
+      const rows = await tx.update(agentSessions).set({ error: diagnostic, workerScope: input.providerHandle }).where(and(
+        eq(agentSessions.id, input.runId), inArray(agentSessions.workerScope, [input.scope, input.providerHandle]),
+        notInArray(agentSessions.status, HARD_TERMINAL_STATUSES),
+      )).returning({ parentRunId: agentSessions.parentRunId });
+      if (rows.length) await tx.insert(agentEvents).values({
+        sessionId: input.runId, type: "runner_start_cleanup_blocked",
+        payload: JSON.stringify({ worker_generation: input.workerGeneration, instance_id: input.instanceId, error: diagnostic }),
+      });
+      return rows;
+    });
+    if (blocked?.parentRunId) {
+      await emitInboxEvent({
+        targetRunId: blocked.parentRunId,
+        type: "run.infrastructure_blocked",
+        sourceKind: "system",
+        sourceId: String(input.runId),
+        payload: { run_id: input.runId, worker_generation: input.workerGeneration, error: diagnostic },
+        dedupeKey: `runner-start-cleanup-blocked:${input.runId}:${input.workerGeneration}:${input.instanceId}`,
+      }).catch(() => undefined);
+    }
+    throw stopError;
+  }
+
+  if (result.attempt >= MAX_INFRASTRUCTURE_START_ATTEMPTS) {
+    const { applyStatusTx } = await import("./runs");
+    await applyStatusTx(input.runId, "failed", {
+      set: { error: result.message, completedAt: new Date(), pendingReason: null },
+      guard: and(
+        inArray(agentSessions.workerScope, [input.scope, input.providerHandle]),
+        notInArray(agentSessions.status, HARD_TERMINAL_STATUSES),
+        exists(db.select({ one: sql`1` }).from(runnerInstances).where(and(
+          eq(runnerInstances.runId, input.runId),
+          eq(runnerInstances.workerGeneration, input.workerGeneration),
+          eq(runnerInstances.channelInstanceId, input.instanceId),
+        ))),
+      ),
+      extra: { error: result.message, infrastructure: true },
+    });
+    await releaseChannelForReplacement(input.runId, {
+      workerGeneration: input.workerGeneration,
+      instanceId: input.instanceId,
+    });
+    console.error(`Worker channel start failed for run ${input.runId}: ${detail}`);
+    return;
+  }
+
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT run_id FROM runner_instances WHERE run_id = ${input.runId} FOR UPDATE`);
+    const retired = await tx.update(runnerInstances).set({
+      generationState: "stopped",
+      state: "stopped",
+      providerOperationId: null,
+      channelInstanceId: null,
+      channelEndpoint: null,
+      controllerId: null,
+    }).where(and(
+      eq(runnerInstances.runId, input.runId),
+      eq(runnerInstances.workerGeneration, input.workerGeneration),
+      eq(runnerInstances.channelInstanceId, input.instanceId),
+    )).returning({ runId: runnerInstances.runId });
+    if (!retired.length) return;
+    const transitioned = await tx.update(agentSessions).set({
+      workerScope: null,
+      status: "pending",
+      pendingReason: result.message,
+      error: null,
+      pendingSince: new Date(),
+    }).where(and(
+      eq(agentSessions.id, input.runId),
+      inArray(agentSessions.workerScope, [input.scope, input.providerHandle]),
+      notInArray(agentSessions.status, HARD_TERMINAL_STATUSES),
+    ));
+    void transitioned;
+  });
+  console.error(`Worker channel start failed for run ${input.runId}: ${detail}`);
 }
 
 /**
@@ -1071,6 +1283,16 @@ export async function startChannelForRun(
     bumpEpoch: opts.freshWorker === true,
     ...(opts.provisioningScope ? { provisioningScope: opts.provisioningScope } : {}),
   });
+  // A worker may complete the transport handshake while still reporting
+  // `started: false` (run 188: the row was running/active after a quota
+  // failure, but the Sprite had an old bootstrap). Re-adoption otherwise
+  // sends run.start straight into that stale process. Tear down the channel,
+  // replace the process through normal dispatch with a new generation.
+  const freshWorker = opts.freshWorker === true;
+  if (!freshWorker && connection.workerHasStart === false) {
+    const replaced = await refreshSpriteWorkerForRecovery(runId, instanceId, false);
+    if (replaced) return;
+  }
   // The command id is scoped to (instanceId, controllerEpoch) — see
   // runStartCommandId — so this lookup spans every epoch ever persisted for
   // this instance, not just the current one.
@@ -1089,7 +1311,7 @@ export async function startChannelForRun(
   const startedInThisEpoch =
     existing != null && existing.controllerEpoch === connection.controllerEpoch && existing.ackedAt != null;
   const needsStart =
-    opts.freshWorker === true ||
+    freshWorker ||
     connection.workerHasStart === false ||
     (connection.workerHasStart === undefined && !startedInThisEpoch);
 
@@ -1146,6 +1368,44 @@ export async function startChannelForRun(
     id: startId,
   });
   await connection.sendPersisted(row);
+}
+
+/** Replace a restarted Sprite process without reusing its old channel spool.
+ * Only the connected worker's hello can establish that it has no active turn. */
+export async function refreshSpriteWorkerForRecovery(
+  runId: number,
+  instanceId: string,
+  workerHasStart?: boolean,
+): Promise<boolean> {
+  if (workerHasStart !== false) return false;
+  const [row] = await db.select().from(runnerInstances)
+    .where(and(eq(runnerInstances.runId, runId), eq(runnerInstances.channelInstanceId, instanceId)));
+  if (!row || row.provider !== "sprites" || !row.spriteName) return false;
+  const priorStart = await getLatestRunStartCommand(runId, instanceId, row.workerGeneration);
+  // No consumed start means first bootstrap; let normal delivery initialize it.
+  if (!priorStart?.ackedAt) return false;
+
+  const { disconnectRun, getConnection } = await import("./worker-channel/registry");
+  // Keep the controller lease until replacement fencing so another adopter
+  // cannot deliver a turn into the process we are about to stop.
+  await disconnectRun(runId, { release: false });
+  const provider = createRunnerProvider("sprites");
+  if (!provider.stopGeneration) throw new Error("Sprite provider cannot stop a worker generation");
+  await provider.stopGeneration({
+    runId,
+    generation: row.workerGeneration,
+    instanceId,
+    providerHandle: row.spriteName,
+    providerServiceName: row.providerServiceName ?? (row.workerGeneration === 1 ? "worker" : undefined),
+  });
+  await releaseChannelForReplacement(runId, { workerGeneration: row.workerGeneration, instanceId });
+  // Existing dispatch owns admission, generation allocation, stale-bundle
+  // refresh, and retaining the repository/SDK files on the same Sprite.
+  const result = await dispatchRun(runId);
+  if (result !== "spawned" && !(result === "already-claimed" && getConnection(runId)?.connected)) {
+    throw new Error(`Unable to replace Sprite worker for run ${runId}: ${result}`);
+  }
+  return true;
 }
 
 /**

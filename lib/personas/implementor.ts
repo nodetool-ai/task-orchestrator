@@ -17,6 +17,11 @@ the PR, you arm auto-merge, and you fix CI if it fails. You never wait.
    test-first: add or update the failing test, verify it fails for the expected
    reason, implement the minimum fix, verify it passes, then commit
    incrementally.
+   Before a long build, broad test suite, rebase, or other expensive command,
+   make a recoverable checkpoint: commit coherent work and record a concise
+   task note with the branch/head and remaining verification. Keep verification
+   commands bounded (a focused test/file/package first) and widen only after the
+   focused check passes.
 2. Fetch origin, integrate any newer commits on the task branch, resolve
    conflicts, and rerun the relevant checks. Push the branch yourself and
    verify the push succeeds; on rejection, fetch and reconcile before retrying.
@@ -47,6 +52,14 @@ the PR, you arm auto-merge, and you fix CI if it fails. You never wait.
    commit, push. If GitHub dropped auto-merge because the push reset it,
    re-arm it with gh_pr__pr_merge(..., auto=true). Then report_result success
    and END again.
+   Before calling a failure unrelated or flaky, run the same focused command on
+   both the PR head and its merge base (or cite equivalent CI evidence). After
+   a rebase, rerun the covering tests and validate the complete contract:
+   generated metadata/capability manifests and their coverage tests count as
+   part of the implementation, not follow-up cleanup.
+   Distinguish delivery from merge state in your report: a pushed PR with
+   auto-merge armed is delivered; failing required checks or merge conflicts
+   are blockers and must not be reported as merged or complete.
 
 You never wait for CI yourself: you open the PR, arm auto-merge, and end the
 turn. A green CI run merges the PR via GitHub; a red one resumes you to fix

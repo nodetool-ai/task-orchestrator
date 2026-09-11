@@ -187,9 +187,11 @@ jobs:
         run: |
           d=$(mktemp -d)
           cp dist/run-worker.standalone.js "$d/run-worker.js"
+          mkdir -p "$d/codeact"
+          cp dist/codeact/emscripten-module.wasm dist/codeact/emscripten-module.wasm.sha256 "$d/codeact/"
+          cp dist/codeact/thread-worker.js "$d/codeact/"
           cd "$d"
-          rc=0; node run-worker.js >/dev/null 2>&1 || rc=$?
-          [ "$rc" -eq 2 ] || { echo "bundle isolation check failed (exit $rc, expected 2)"; exit 1; }
+          TASK_ORCH_QUICKJS_WASM="$d/codeact/emscripten-module.wasm" TASK_ORCH_CODEACT_THREAD_WORKER="$d/codeact/thread-worker.js" node run-worker.js --smoke-codeact
       - name: Checksum + manifest
         run: |
           cd dist
@@ -207,4 +209,7 @@ jobs:
           path: |
             dist/run-worker.standalone.js
             dist/run-worker.standalone.js.sha256
+            dist/codeact/emscripten-module.wasm
+            dist/codeact/emscripten-module.wasm.sha256
+            dist/codeact/thread-worker.js
             dist/worker-bundle.json

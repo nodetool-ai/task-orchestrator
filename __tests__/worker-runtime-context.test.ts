@@ -348,8 +348,8 @@ describe("driveWorkerRun", () => {
       else process.env.TASK_ORCH_CHAT_IDLE_MS = prevIdle;
     }
     const agentAppends = emitted.filter((e) => e.type === "transcript.append" && e.payload.message.role === "agent");
-    // kickoff + two follow-ups, all in one process
-    expect(agentAppends).toHaveLength(3);
+    // The resumed snapshot is already answered; only the two follow-ups run.
+    expect(agentAppends).toHaveLength(2);
     const phases = emitted.filter((e) => e.type === "run.phase").map((e) => e.payload.phase);
     expect(phases[0]).toBe("running");
     expect(phases[phases.length - 1]).toBe("idle");
@@ -404,11 +404,127 @@ describe("driveWorkerRun", () => {
       (e) => e.type === "transcript.append" && e.payload.message.role === "user"
     );
     expect(userAppends).toHaveLength(0);
-    // But the follow-up turn DID run: the kickoff turn plus the follow-up turn
-    // each emit exactly one agent transcript.append (worker-originated output).
+    // The follow-up turn DID run and emits one worker-originated append.
     const agentAppends = emitted.filter(
       (e) => e.type === "transcript.append" && e.payload.message.role === "agent"
     );
-    expect(agentAppends).toHaveLength(2);
+    expect(agentAppends).toHaveLength(1);
+  });
+
+  it("does not invent a resume turn for an empty legacy chat resume", async () => {
+    const runTurn = vi.fn();
+    vi.spyOn(backend, "getBackend").mockResolvedValue({ id: "fake", runTurn } as any);
+    const { session, emitted } = recordingSession();
+    await driveWorkerRun({ session, start: makeStart({
+      mode: "resume",
+      run: { id: 40, status: "idle", goal: "<chat>", sdkSessionId: "resume-40" },
+      transcript: [msg(1, "user", "already answered"), msg(2, "agent", "answer")],
+      inboxDigest: null,
+      pendingInput: [],
+    }) });
+
+    expect(runTurn).not.toHaveBeenCalled();
+    expect(emitted.some((event) => event.type === "run.failed")).toBe(false);
+    expect(emitted.some((event) => event.type === "run.phase" && event.payload.phase === "idle")).toBe(true);
+  });
+
+  it("runs an explicit chat kickoff even without pending input", async () => {
+    const prompts: string[] = [];
+    vi.spyOn(backend, "getBackend").mockResolvedValue({
+      id: "fake",
+      async runTurn(args: any) {
+        prompts.push(args.prompt);
+        await args.onEvent({ type: "assistant", message: { content: [{ type: "text", text: "started" }] } });
+        return { envelopes: [], summary: "started", resumeToken: "kickoff-token", turns: 1 };
+      },
+    } as any);
+    const { session, emitted } = recordingSession();
+    await driveWorkerRun({ session, start: makeStart({
+      run: { id: 42, status: "idle", goal: "<chat>" },
+      transcript: [],
+      pendingInput: [],
+      kickoffPrompt: "Begin the explicitly requested conversation.",
+    }) });
+
+    expect(prompts).toEqual(["Begin the explicitly requested conversation."]);
+    expect(emitted.some((event) => event.type === "run.checkpoint")).toBe(true);
+  });
+
+  it("durably fails a chat when the backend throws and waits for commit", async () => {
+    vi.spyOn(backend, "getBackend").mockResolvedValue({
+      id: "fake",
+      async runTurn() { throw new Error("provider quota exhausted"); },
+    } as any);
+    const emitted: Array<{ type: string; payload: any }> = [];
+    let committed = false;
+    const session: WorkerDriverSession = {
+      async *commands() {},
+      async emit(type, payload) {
+        emitted.push({ type, payload });
+        return { id: `e${emitted.length}` };
+      },
+      async waitForCommit() { committed = true; return { status: "failed" } as any; },
+      abortSignal: new AbortController().signal,
+    };
+    await driveWorkerRun({ session, start: makeStart({
+      mode: "resume",
+      run: { id: 41, status: "idle", goal: "<chat>", sdkSessionId: "resume-41" },
+      transcript: [msg(1, "user", "please continue")],
+      pendingInput: [],
+      inboxDigest: "legacy event",
+      turnId: "turn-41",
+      inputManifest: [{ id: "input-41", inputSeq: 1, messageId: 1, kind: "user" }],
+    }) });
+
+    const failed = emitted.find((event) => event.type === "run.failed");
+    expect(failed?.payload.error).toContain("provider quota exhausted");
+    expect(committed).toBe(true);
+  });
+
+  it("keeps the last checkpoint resume token when a later chat turn fails", async () => {
+    const resumeTokens: Array<string | undefined> = [];
+    let calls = 0;
+    vi.spyOn(backend, "getBackend").mockResolvedValue({
+      id: "fake",
+      async runTurn(args: any) {
+        resumeTokens.push(args.resumeToken);
+        calls += 1;
+        if (calls > 1) throw new Error("provider quota exhausted");
+        await args.onEvent({ type: "assistant", message: { content: [{ type: "text", text: "first" }] } });
+        return {
+          envelopes: [], summary: "first", resumeToken: "checkpoint-token", turns: 1,
+          inputTokens: 7, outputTokens: 9,
+        };
+      },
+    } as any);
+    const emitted: Array<{ type: string; payload: any }> = [];
+    const session: WorkerDriverSession = {
+      async *commands() {
+        yield {
+          messages: [msg(2, "user", "follow up")],
+          inputIds: ["input-2"], inputSeqs: [2], turnId: "turn-2",
+        } as unknown as WorkerSessionCommand;
+      },
+      async emit(type, payload) {
+        emitted.push({ type, payload });
+        return { id: `e${emitted.length}` };
+      },
+      async waitForCommit() { return { status: "failed" } as any; },
+      abortSignal: new AbortController().signal,
+    };
+    await driveWorkerRun({ session, start: makeStart({
+      run: { id: 43, status: "idle", goal: "<chat>" },
+      transcript: [],
+      pendingInput: [msg(1, "user", "first")],
+      turnId: "turn-1",
+      inputManifest: [{ id: "input-1", inputSeq: 1, messageId: 1, kind: "user" }],
+    }) });
+
+    const checkpoint = emitted.find((event) => event.type === "run.checkpoint");
+    const failed = emitted.find((event) => event.type === "run.failed");
+    expect(resumeTokens).toEqual([null, "checkpoint-token"]);
+    expect(checkpoint?.payload.sdkSessionId).toBe("checkpoint-token");
+    expect(failed?.payload.error).toContain("provider quota exhausted");
+    expect(failed?.payload.usage).toBeUndefined();
   });
 });

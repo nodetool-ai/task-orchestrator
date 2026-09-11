@@ -5,11 +5,15 @@ import { create } from "../lib/runs";
 import { connectRun, maybeCloseSpritesChannel, getConnection } from "../lib/worker-channel/registry";
 import { ControllerConnection } from "../lib/worker-channel/connection";
 import { persistCommand } from "../lib/worker-channel/repository";
+import { SpritesRunnerProvider } from "../lib/runner/sprites";
 import { eq } from "drizzle-orm";
 
 describe("sprites channel close at turn end", () => {
   beforeEach(async () => {
     await db.delete(agentSessions);
+    vi.spyOn(await import("../lib/worker-channel/repository"), "hasReconnectableWork").mockResolvedValue(false);
+    vi.spyOn(SpritesRunnerProvider.prototype, "quiesceIdleGeneration").mockResolvedValue(true);
+    vi.stubEnv("SPRITES_TOKEN", "test-token");
     vi.stubEnv("TASK_ORCH_SPRITES_WORKER_BUNDLE_URL", "https://example.com/worker-{sha}.tar.gz");
     vi.stubEnv("TASK_ORCH_WORKER_SHA", "a".repeat(40));
   });
@@ -34,8 +38,8 @@ describe("sprites channel close at turn end", () => {
     const spriteInstanceId = "wi_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const localInstanceId = "wi_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     await db.insert(runnerInstances).values([
-      { runId: spritesRun.id, provider: "sprites", spriteName: "to-run-1", state: "running", channelInstanceId: spriteInstanceId, channelEndpoint: spriteEndpoint },
-      { runId: localRun.id, provider: "local", state: "running", channelInstanceId: localInstanceId, channelEndpoint: localEndpoint },
+      { runId: spritesRun.id, provider: "sprites", spriteName: "to-run-1", state: "running", workerGeneration: 1, providerServiceName: "worker", controllerEpoch: 1, channelInstanceId: spriteInstanceId, channelEndpoint: spriteEndpoint },
+      { runId: localRun.id, provider: "local", state: "running", workerGeneration: 1, controllerEpoch: 1, channelInstanceId: localInstanceId, channelEndpoint: localEndpoint },
     ]);
     // Need to set up channel identity in runner_instances for getChannelIdentity to work
     // getChannelIdentity reads runnerInstances.channelInstanceId and channelEndpoint
@@ -69,8 +73,8 @@ describe("sprites channel close at turn end", () => {
       (globalThis as unknown as Record<symbol, unknown>)[REGISTRY] = registry;
     }
     // Insert supervisors
-    registry.supervisors.set(spritesRun.id, { runId: spritesRun.id, instanceId: spriteInstanceId, connection: spriteConn, stopped: false } as unknown as { runId: number; instanceId: string; connection: ControllerConnection; stopped: boolean });
-    registry.supervisors.set(localRun.id, { runId: localRun.id, instanceId: localInstanceId, connection: localConn, stopped: false } as unknown as { runId: number; instanceId: string; connection: ControllerConnection; stopped: boolean });
+    registry.supervisors.set(spritesRun.id, { runId: spritesRun.id, instanceId: spriteInstanceId, workerGeneration: 1, connection: { ...spriteConn, controllerEpoch: 1 } as unknown as ControllerConnection, stopped: false } as unknown as { runId: number; instanceId: string; workerGeneration: number; connection: ControllerConnection; stopped: boolean });
+    registry.supervisors.set(localRun.id, { runId: localRun.id, instanceId: localInstanceId, workerGeneration: 1, connection: { ...localConn, controllerEpoch: 1 } as unknown as ControllerConnection, stopped: false } as unknown as { runId: number; instanceId: string; workerGeneration: number; connection: ControllerConnection; stopped: boolean });
 
     // Set statuses to idle
     await db.update(agentSessions).set({ status: "idle" }).where(eq(agentSessions.id, spritesRun.id));
@@ -100,6 +104,9 @@ describe("sprites channel close at turn end", () => {
       provider: "sprites",
       spriteName: "to-run-2",
       state: "running",
+      workerGeneration: 1,
+      providerServiceName: "worker",
+      controllerEpoch: 1,
       channelInstanceId: instanceId,
       channelEndpoint: endpoint,
     });
@@ -119,7 +126,7 @@ describe("sprites channel close at turn end", () => {
       };
       (globalThis as unknown as Record<symbol, unknown>)[REGISTRY] = registry;
     }
-    registry.supervisors.set(run.id, { runId: run.id, instanceId, connection: conn, stopped: false } as unknown as { runId: number; instanceId: string; connection: ControllerConnection; stopped: boolean });
+    registry.supervisors.set(run.id, { runId: run.id, instanceId, workerGeneration: 1, connection: { ...conn, controllerEpoch: 1 } as unknown as ControllerConnection, stopped: false } as unknown as { runId: number; instanceId: string; workerGeneration: number; connection: ControllerConnection; stopped: boolean });
 
     // Running should not close
     await db.update(agentSessions).set({ status: "running" }).where(eq(agentSessions.id, run.id));
@@ -133,11 +140,11 @@ describe("sprites channel close at turn end", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(close).toHaveBeenCalledTimes(1);
 
-    // Reset for terminal
+    // Reset with a fresh supervisor for the terminal landing.
+    registry.supervisors.delete(run.id);
     close.mockClear();
-    // Need to re-insert supervisor because previous close may have set stopped? Our helper checks stopped, but we set stopped false, so it will still be there, but after first close, supervisor is still there (we didn't delete). For test, we reset stopped.
-    const sup = registry.supervisors.get(run.id) as unknown as { stopped: boolean; connection: ControllerConnection };
-    if (sup) sup.stopped = false;
+    const terminalConn = { connected: true, controllerEpoch: 1, disconnect: close } as unknown as ControllerConnection;
+    registry.supervisors.set(run.id, { runId: run.id, instanceId, workerGeneration: 1, connection: terminalConn, stopped: false } as unknown as { runId: number; instanceId: string; workerGeneration: number; connection: ControllerConnection; stopped: boolean });
     await db.update(agentSessions).set({ status: "completed" }).where(eq(agentSessions.id, run.id));
     await maybeCloseSpritesChannel(run.id);
     await new Promise((r) => setTimeout(r, 20));

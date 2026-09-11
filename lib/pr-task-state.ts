@@ -15,7 +15,7 @@ import { and, desc, eq, isNotNull, notInArray } from "drizzle-orm";
 import { db } from "@/db";
 import { agentSessions, tasks } from "@/db/schema";
 import * as repo from "./repo";
-import { maybeTriggerAutofix, type AutofixCandidate } from "./ci-autofix";
+import { maybeTriggerAutofix, recordAggregateCiGreen, type AutofixCandidate } from "./ci-autofix";
 import { parsePrUrl } from "./gh-url";
 import { getOctokit, fetchChecksRollupForRef } from "./github-client";
 import { TASK_TRANSITIONS, type TaskState } from "./types";
@@ -31,6 +31,8 @@ export interface PrGithubState {
   closed: boolean;
   /** Rolled-up state of the PR's checks (required + otherwise). */
   ciConclusion: "success" | "failure" | "pending" | "none";
+  /** Authoritative current PR head used to scope repair observations. */
+  headSha?: string | null;
 }
 
 /**
@@ -139,6 +141,7 @@ export async function fetchPrGithubState(prUrl: string): Promise<PrGithubState |
       merged,
       closed,
       ciConclusion: rollupToCiConclusion(checks),
+      headSha: headSha ?? null,
     };
   } catch (err) {
     console.warn(
@@ -235,6 +238,9 @@ export async function syncPrBackedTasks(
       if (!(redAndOpen && row.state === "blocked")) {
         await applyTaskStateFromPr({ id: row.id, state: row.state as TaskState }, ghState);
       }
+      if (ghState.ciConclusion === "success" && !ghState.merged && !ghState.closed) {
+        await recordAggregateCiGreen(row.id, ghState.headSha ?? null);
+      }
       // Belt for a dropped CI-failure webhook: when the PR's rolled-up CI is
       // red (and the PR is neither merged nor closed), drive the SAME capped
       // autofix the webhook would. The shared cap/debounce/in-flight guards
@@ -245,7 +251,7 @@ export async function syncPrBackedTasks(
       // the ~20s poll can't re-escalate. Never fires on a green/merged/closed
       // PR. Best-effort — a failure here must not abort the loop for other tasks.
       if (redAndOpen) {
-        await maybeTriggerAutofixForTask(row.id, row.prUrl);
+        await maybeTriggerAutofixForTask(row.id, row.prUrl, ghState.headSha ?? null);
       }
     } catch (err) {
       console.warn(
@@ -260,7 +266,7 @@ export async function syncPrBackedTasks(
  * Load a task's runs newest-first and hand them to the shared autofix trigger.
  * Kept separate so a throw is contained to the one task in the poller loop.
  */
-async function maybeTriggerAutofixForTask(taskId: string, prUrl: string): Promise<void> {
+async function maybeTriggerAutofixForTask(taskId: string, prUrl: string, headSha: string | null): Promise<void> {
   const candidates = (await db
     .select({
       id: agentSessions.id,
@@ -270,10 +276,11 @@ async function maybeTriggerAutofixForTask(taskId: string, prUrl: string): Promis
       cwdStrategy: agentSessions.cwdStrategy,
       status: agentSessions.status,
       prUrl: agentSessions.prUrl,
+      startedAt: agentSessions.startedAt,
     })
     .from(agentSessions)
     .where(eq(agentSessions.taskId, taskId))
     .orderBy(desc(agentSessions.startedAt))) as AutofixCandidate[];
 
-  await maybeTriggerAutofix(candidates, { reason: "ci", prUrl });
+  await maybeTriggerAutofix(candidates, { reason: "ci", prUrl, headSha, conclusion: "failure" });
 }

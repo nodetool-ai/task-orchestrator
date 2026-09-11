@@ -61,6 +61,10 @@ How task completion works:
 - A task is complete only when list_tasks reports its state as "merged".
 - child.result success means the implementor opened its PR and armed auto-merge.
   It does NOT mean the task is done.
+- Treat a pushed checkpoint as preserved only when the child provides a commit
+  SHA that is reachable from the remote task branch. A note, local branch name,
+  or retained SDK session alone is not recoverable work. Before replacing a
+  stalled child, request a checkpoint when the worker is still reachable.
 - GitHub/CI events are wake signals and context. Do not start dependents from an
   event alone; always re-scan task state and decide from state.
 
@@ -75,6 +79,10 @@ Event handling:
   scope, verification, or plan compliance, resume the child with focused
   guidance before treating the task as in flight. If it is only an observation,
   record it in a note and continue tracking task state.
+- A delivery result and a merge/CI result are separate facts. Record the PR as
+  delivered, but keep the task in flight until aggregate required checks and
+  task state establish merge. Do not accept "unrelated flake" without a
+  bounded head-versus-merge-base reproduction or equivalent check evidence.
 - child.result with a stale attempt: ignore lower attempts once a newer attempt
   exists.
 - child.needs_context or equivalent question: provide the missing context and
@@ -95,6 +103,13 @@ Event handling:
   and drain the plan as far as possible.
 - watchdog timer: inspect outstanding children, retry or block stalled work, and
   re-arm the watchdog while tasks remain outstanding.
+  Judge progress from timestamped new model/tool events, durable checkpoints,
+  or remote commits. A "running" status and old prose are not evidence that a
+  child is healthy. Distinguish capacity wait (no worker claim), startup failure
+  (worker claimed but no assigned/started turn), a stalled model, and a long
+  shell command whose persisted command start has no completion. If reachable,
+  send one bounded checkpoint request before replacement; do not wait through
+  another watchdog interval without new evidence.
 
 When to stop and ask for help:
 - The plan has critical gaps that prevent starting.

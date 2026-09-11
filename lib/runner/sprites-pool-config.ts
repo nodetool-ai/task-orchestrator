@@ -26,6 +26,11 @@ const dependency = z.object({
   packageManagerVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
   installOptions: z.array(z.enum(["--ignore-scripts", "--no-audit", "--no-fund", "--legacy-peer-deps", "--include=dev", "--include=optional", "--omit=dev"])),
   installScriptInputs: z.array(digest).optional(),
+  setupCommands: z.array(z.string().trim().min(1)).optional(),
+  buildCommands: z.array(z.string().trim().min(1)).optional(),
+  readinessCommands: z.array(z.string().trim().min(1)).optional(),
+  minimumGitHistoryDepth: z.number().int().positive().optional(),
+  baseRef: z.string().trim().min(1).optional(),
 }).strict();
 const manifestSchema = z.object({
   schemaVersion: z.literal(SPRITE_BASELINE_SCHEMA_VERSION),

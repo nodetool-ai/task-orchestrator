@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   clearChannelClaim,
   getChannelIdentity,
+  hasReconnectableWork,
   listReconnectableChannels,
   persistCommand,
   releaseChannelForReplacement,
@@ -171,8 +172,12 @@ export async function connectRun(
     await supervisor.connection.connect({ bumpEpoch });
     return supervisor.connection;
   } catch (error) {
-    registry().supervisors.delete(runId);
-    registry().blobs.delete(runId);
+    // A timed-out dial may settle after a replacement generation has already
+    // installed its supervisor. Cleanup is fenced to the object that failed.
+    if (registry().supervisors.get(runId) === supervisor) {
+      registry().supervisors.delete(runId);
+      registry().blobs.delete(runId);
+    }
     if (error instanceof ControllerProtocolError && error.closeCode === CLOSE_CODE_PROTOCOL_MISMATCH) {
       // The worker at this endpoint speaks an incompatible protocol. Replace it
       // with a fresh worker built from the current image before surfacing the
@@ -272,22 +277,84 @@ async function replaceWorker(runId: number): Promise<void> {
  * channel down (without racing the run.commit off the wire — the worker closes
  * its own side after receiving it), stop the provider where appropriate, and
  * clear the controller lease and worker claim. */
-async function finalizeTerminalRun(supervisor: Supervisor, _status: string): Promise<void> {
+async function finalizeTerminalRun(supervisor: Supervisor, status: string): Promise<void> {
   const runId = supervisor.runId;
   if (registry().supervisors.get(runId) !== supervisor || supervisor.stopped) return;
   supervisor.stopped = true;
   if (supervisor.reconnectTimer) clearTimeout(supervisor.reconnectTimer);
   supervisor.connection.neutralize();
-  registry().supervisors.delete(runId);
-  registry().blobs.delete(runId);
+  let cleaned = false;
+  let cleanupError: unknown;
+  if (status === "failed") {
+    const { db } = await import("../../db");
+    const { agentSessions, runnerInstances } = await import("../../db/schema");
+    const { eq } = await import("drizzle-orm");
+    const [run] = await db.select({ provider: runnerInstances.provider })
+      .from(agentSessions).innerJoin(runnerInstances, eq(runnerInstances.runId, agentSessions.id))
+      .where(eq(agentSessions.id, runId));
+    if (run?.provider === "sprites") {
+      // A failed run remains resumable. Stop only its service and retain the
+      // Sprite filesystem, checkout, dependencies, and backend session.
+      for (const delay of [0, 100, 500]) {
+        if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+        try {
+          cleaned = await stopIdleSpriteGeneration(runId, supervisor.instanceId, supervisor.workerGeneration);
+          if (cleaned || registry().supervisors.get(runId) !== supervisor) break;
+        } catch (error) {
+          cleanupError = error;
+        }
+      }
+      if (!cleaned && registry().supervisors.get(runId) === supervisor) {
+        await quarantineTerminalCleanup(supervisor, cleanupError ?? new Error("failed Sprite service was not quiesced"));
+        return;
+      }
+      if (registry().supervisors.get(runId) === supervisor) {
+        registry().supervisors.delete(runId);
+        registry().blobs.delete(runId);
+      }
+      return;
+    }
+  }
   const scope = await currentWorkerScope(runId);
   const runDispatch = await import("../run-dispatch");
-  await runDispatch.stopRunner(scope, {
-    runId,
-    workerGeneration: supervisor.workerGeneration,
-    instanceId: supervisor.instanceId,
-  }).catch(() => undefined);
-  await clearChannelClaim(runId, { workerGeneration: supervisor.workerGeneration, instanceId: supervisor.instanceId }).catch(() => undefined);
+  for (const delay of [0, 100, 500]) {
+    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+    try {
+      await runDispatch.stopRunner(scope, { runId, workerGeneration: supervisor.workerGeneration, instanceId: supervisor.instanceId });
+      await clearChannelClaim(runId, { workerGeneration: supervisor.workerGeneration, instanceId: supervisor.instanceId });
+      cleaned = true;
+      break;
+    } catch (error) {
+      cleanupError = error;
+    }
+  }
+  if (!cleaned) {
+    await quarantineTerminalCleanup(supervisor, cleanupError ?? new Error("terminal provider cleanup was not confirmed"));
+    return;
+  }
+  if (registry().supervisors.get(runId) === supervisor) {
+    registry().supervisors.delete(runId);
+    registry().blobs.delete(runId);
+  }
+}
+
+async function quarantineTerminalCleanup(supervisor: Supervisor, error: unknown): Promise<void> {
+  const { db } = await import("../../db");
+  const { agentEvents, agentSessions, runnerInstances } = await import("../../db/schema");
+  const { and, eq, sql } = await import("drizzle-orm");
+  const detail = error instanceof Error ? error.message : String(error);
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT run_id FROM runner_instances WHERE run_id=${supervisor.runId} FOR UPDATE`);
+    const rows = await tx.update(runnerInstances).set({ generationState: "stopping", lastProviderError: detail }).where(and(
+      eq(runnerInstances.runId, supervisor.runId), eq(runnerInstances.workerGeneration, supervisor.workerGeneration),
+      eq(runnerInstances.channelInstanceId, supervisor.instanceId),
+    )).returning({ spriteName: runnerInstances.spriteName });
+    if (!rows.length) return;
+    if (rows[0].spriteName) await tx.update(agentSessions).set({ workerScope: rows[0].spriteName }).where(eq(agentSessions.id, supervisor.runId));
+    await tx.insert(agentEvents).values({ sessionId: supervisor.runId, type: "runner_terminal_cleanup_blocked",
+      payload: JSON.stringify({ worker_generation: supervisor.workerGeneration, instance_id: supervisor.instanceId, error: detail }) });
+  });
+  console.error(`[worker-channel] terminal cleanup quarantined for run ${supervisor.runId}: ${detail}`);
 }
 
 async function currentWorkerScope(runId: number): Promise<string | null> {
@@ -302,13 +369,21 @@ async function currentWorkerScope(runId: number): Promise<string | null> {
   return rows[0]?.workerScope ?? null;
 }
 
-export async function disconnectRun(runId: number): Promise<void> {
+export async function disconnectRun(runId: number, options: {
+  release?: boolean;
+  instanceId?: string;
+  workerGeneration?: number;
+  discardBlobs?: boolean;
+} = {}): Promise<void> {
   const supervisor = registry().supervisors.get(runId);
+  if (supervisor && ((options.instanceId != null && supervisor.instanceId !== options.instanceId)
+    || (options.workerGeneration != null && supervisor.workerGeneration !== options.workerGeneration))) return;
   registry().supervisors.delete(runId);
+  if (options.discardBlobs) registry().blobs.delete(runId);
   if (!supervisor) return;
   supervisor.stopped = true;
   if (supervisor.reconnectTimer) clearTimeout(supervisor.reconnectTimer);
-  await supervisor.connection.disconnect();
+  await supervisor.connection.disconnect(options.release ?? true);
 }
 
 export async function sendCommand(runId: number, type: string, payload: unknown, id?: string): Promise<void> {
@@ -344,6 +419,16 @@ export async function reconnectActiveChannels(): Promise<number> {
       const channel = channels[index];
       if (!channel) return;
       try {
+        if (channel.status === "idle") {
+          // Boot recovery must quiesce an already-running idle Sprite service;
+          // merely omitting run.start leaves the provider supervisor free to
+          // restart the worker forever.
+          if (!(await hasReconnectableWork(channel.runId))) {
+            if (await stopIdleSpriteGeneration(channel.runId, channel.instanceId, channel.workerGeneration)) continue;
+            // Work may have arrived while quiescence waited for its lock.
+            if (!(await hasReconnectableWork(channel.runId))) continue;
+          }
+        }
         // startChannelForRun (not a bare connectRun): an adopted channel whose
         // dispatch died before persisting `run.start` would otherwise sit
         // connected-but-idle forever.
@@ -357,6 +442,19 @@ export async function reconnectActiveChannels(): Promise<number> {
   };
   await Promise.all(Array.from({ length: Math.min(4, channels.length) }, () => adopt()));
   return reconnected;
+}
+
+async function stopIdleSpriteGeneration(runId: number, instanceId: string, generation: number): Promise<boolean> {
+  const { db } = await import("../../db");
+  const { runnerInstances } = await import("../../db/schema");
+  const { eq, and } = await import("drizzle-orm");
+  const [row] = await db.select({ provider: runnerInstances.provider, spriteName: runnerInstances.spriteName, providerServiceName: runnerInstances.providerServiceName })
+    .from(runnerInstances).where(and(eq(runnerInstances.runId, runId), eq(runnerInstances.channelInstanceId, instanceId))).limit(1);
+  if (!row || row.provider !== "sprites" || !row.spriteName) return false;
+  const { SpritesRunnerProvider } = await import("../runner/sprites");
+  const provider = new SpritesRunnerProvider();
+  const ref = { runId, generation, instanceId, providerHandle: row.spriteName, ...(row.providerServiceName ? { providerServiceName: row.providerServiceName } : {}) };
+  return provider.quiesceIdleGeneration(ref);
 }
 
 /**
@@ -402,6 +500,16 @@ export async function maybeCloseSpritesChannel(runId: number): Promise<void> {
   const rows = await db.select({ status: agentSessions.status }).from(agentSessions).where(eq(agentSessions.id, runId)).limit(1);
   const status = rows[0]?.status;
   if (!status || !["idle", "parked", "completed", "failed", "cancelled", "closed", "budget_exhausted"].includes(status)) return;
+  // A durable input/event or unfinished v2 turn is an actionable wake, even
+  // when the status briefly says idle. Leave the channel and provider alive so
+  // a follow-up racing this callback is delivered to the existing generation.
+  // The repository query is intentionally fail-closed: a transient database
+  // error must not turn an in-flight follow-up into a lost wake.
+  try {
+    if (status === "idle" && await hasReconnectableWork(runId)) return;
+  } catch {
+    return;
+  }
   // A command the worker has not acked yet (its run.start, an input) is in
   // flight on this very channel: closing now loses it, and sendPersisted has
   // nothing to reconnect to. This happens for real — a fresh worker replays
@@ -409,13 +517,36 @@ export async function maybeCloseSpritesChannel(runId: number): Promise<void> {
   // landed here a tick before the new generation's run.start went out
   // (run 187, 2026-08-27). The next idle after delivery closes the tunnel.
   const { listPendingCommands } = await import("./repository");
-  const pending = await listPendingCommands(runId, supervisor.instanceId, supervisor.connection.controllerEpoch, supervisor.workerGeneration).catch(() => []);
+  let pending: Awaited<ReturnType<typeof listPendingCommands>>;
+  try {
+    pending = await listPendingCommands(runId, supervisor.instanceId, supervisor.connection.controllerEpoch, supervisor.workerGeneration);
+  } catch {
+    return;
+  }
   if (pending.length > 0) return;
-  // Close after the final frame's ack is flushed — next tick
+  // Stop after the final frame's ack is flushed. The provider holds the run
+  // and channel locks through the stop; follow-ups cannot reach a service
+  // that cleanup has decided to stop. Keep the filesystem for resume.
   setTimeout(() => {
-    if (supervisor.connection.connected) {
-      void supervisor.connection.disconnect(false).catch(() => undefined);
-    }
+    void (async () => {
+      if (supervisor.stopped || registry().supervisors.get(runId) !== supervisor) return;
+      // Suppress automatic reconnect during the provider stop.
+      supervisor.stopped = true;
+      try {
+        if (["idle", "parked", "failed"].includes(status)) {
+          if (!(await stopIdleSpriteGeneration(runId, supervisor.instanceId, supervisor.workerGeneration))) {
+            supervisor.stopped = false;
+            return;
+          }
+        }
+        if (supervisor.reconnectTimer) clearTimeout(supervisor.reconnectTimer);
+        if (supervisor.connection.connected) await supervisor.connection.disconnect(false);
+        if (registry().supervisors.get(runId) === supervisor) registry().supervisors.delete(runId);
+      } catch (error) {
+        supervisor.stopped = false;
+        console.error(`[worker-channel] unable to quiesce Sprite run ${runId}`, error);
+      }
+    })();
   }, 0);
 }
 

@@ -487,6 +487,43 @@ export async function listReconnectableChannels(): Promise<ChannelInstanceRow[]>
   return result.map(channelInstanceRow);
 }
 
+/** Whether an idle channel still has durable work that must survive recovery.
+ * This is deliberately fail-closed at the caller: a query error must keep the
+ * worker alive rather than risk stopping a generation while a follow-up is
+ * being persisted. */
+export async function hasReconnectableWork(runId: number, executor: SqlExecutor = db): Promise<boolean> {
+  const result = await queryRows(
+    executor,
+    drizzleSql`
+      SELECT 1
+      FROM agent_runs r
+      WHERE r.id = ${runId}
+        AND (
+          r.status IN ('preparing', 'running')
+          OR (
+            r.status IN ('idle', 'parked')
+            AND (
+              EXISTS (SELECT 1 FROM run_inputs i WHERE i.run_id = r.id AND i.status IN ('pending', 'assigned'))
+              OR EXISTS (
+                SELECT 1 FROM inbox_events e
+                WHERE e.target_run_id = r.id AND e.status = 'pending'
+                  AND e.type NOT IN ('run.cancel_requested', 'run.budget_exhausted')
+              )
+              OR EXISTS (SELECT 1 FROM run_turns t WHERE t.run_id = r.id AND t.state IN ('active', 'running'))
+              OR EXISTS (
+                SELECT 1 FROM agent_messages m
+                WHERE r.delivery_version = 1 AND m.run_id = r.id AND m.role = 'user'
+                  AND m.id > COALESCE((SELECT max(a.id) FROM agent_messages a WHERE a.run_id = r.id AND a.role = 'agent'), 0)
+              )
+            )
+          )
+        )
+      LIMIT 1
+    `
+  );
+  return result.length > 0;
+}
+
 /**
  * Abandon a worker instance so the run can be re-dispatched onto a fresh one
  * (protocol-mismatch replacement). Clears the worker claim, heartbeat, controller

@@ -8,9 +8,11 @@
 import { execSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { build } from "esbuild";
+import { packageCodeActWasm } from "../lib/codeact/wasm-fixture.ts";
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 const OUTFILE = "dist/run-worker.standalone.js";
+const CODEACT_THREAD_OUTFILE = "dist/codeact/thread-worker.js";
 
 // This banner is LOAD-BEARING, not cosmetic. CJS dependencies compiled into
 // the ESM bundle (dotenv and others) call require("fs") at runtime, which an
@@ -36,6 +38,25 @@ await build({
   banner: { js: banner },
   outfile: OUTFILE,
 });
+
+// Worker threads resolve from a file URL and therefore cannot live inside the
+// main esbuild output. Ship the CodeAct execution entry as a second standalone
+// artifact; the Sprite service points the host at this exact file.
+await build({
+  entryPoints: ["lib/codeact/thread-worker.ts"],
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  alias: { "@": "." },
+  banner: { js: banner },
+  outfile: CODEACT_THREAD_OUTFILE,
+});
+
+// CodeAct's engine is deliberately a separate, pinned WASM file. esbuild does
+// not copy it and a standalone worker has no node_modules fallback, so package
+// it as part of the worker build rather than relying on a second operator step.
+// The helper verifies size and sha256 before writing the artifact + sidecar.
+await packageCodeActWasm("dist/codeact");
 
 // Bake the sha next to the bundle so the control plane can identify exactly
 // what bytes this artifact contains without a git/ls-remote round-trip at

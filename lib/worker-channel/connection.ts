@@ -96,6 +96,10 @@ export interface ControllerConnectionOptions {
    * reconnect resumes the same durable receiver instead of racing a second one
    * over the shared on-disk blob store. */
   blobs?: BlobCoordinator;
+  /** Bound one complete dial + worker-first hello attempt. The dispatch layer
+   * passes its remaining boot budget so an open socket that never speaks
+   * cannot defeat the outer startup deadline. */
+  handshakeTimeoutMs?: number;
 }
 
 /** Worker events that carry a terminal outcome. Their run.commit reply is the
@@ -155,6 +159,7 @@ export class ControllerConnection {
   private readonly onTerminal?: (info: { status: string }) => void;
   private readonly createSocket: NonNullable<ControllerConnectionOptions["createSocket"]>;
   private readonly openTunnel: NonNullable<ControllerConnectionOptions["openTunnel"]>;
+  private readonly handshakeTimeoutMs: number;
   private socket?: WebSocket;
   private epoch = 0;
   private stopped = false;
@@ -179,6 +184,7 @@ export class ControllerConnection {
     this.onTerminal = options.onTerminal;
     this.createSocket = options.createSocket ?? ((url, protocols, socketOptions) => new WebSocket(url, protocols, socketOptions));
     this.openTunnel = options.openTunnel ?? ((target) => openSpritesProxyTunnel(target));
+    this.handshakeTimeoutMs = Math.max(1, options.handshakeTimeoutMs ?? 10_000);
     // Blob store is anchored per run+instance so a fresh connection after a
     // reconnect resumes a partial transfer from the durable receiver cursor. The
     // coordinator is normally supplied by the registry and shared across
@@ -235,28 +241,47 @@ export class ControllerConnection {
   }
 
   private async connectInner(options: { bumpEpoch?: boolean }): Promise<void> {
+    const handshakeDeadline = Date.now() + this.handshakeTimeoutMs;
     const lease = await acquireControllerLease(this.runId, this.controllerId, new Date(), { bump: options.bumpEpoch, workerGeneration: this.workerGeneration });
     this.epoch = lease.epoch;
+    if (this.stopped) {
+      await releaseControllerLease(this.runId, this.controllerId, lease.epoch, this.workerGeneration).catch(() => undefined);
+      throw new Error("controller connection is shut down");
+    }
     const credential = mintChannelCredential(this.runId, this.instanceId, { workerGeneration: this.workerGeneration });
     let socket: WebSocket;
-    if (isSpritesDialEndpoint(this.endpoint)) {
-      socket = await this.createSpritesProxiedSocket(credential);
-    } else {
-      const { url: dialUrl, headers: proxyHeaders } = resolveDialTarget(this.endpoint);
-      socket = this.createSocket(dialUrl, [WORKER_CHANNEL_SUBPROTOCOL], {
-        headers: { Authorization: `Bearer ${credential}`, ...proxyHeaders },
-        handshakeTimeout: 10_000,
-      });
+    try {
+      if (isSpritesDialEndpoint(this.endpoint)) {
+        socket = await this.acquireSocketWithinDeadline(
+          this.createSpritesProxiedSocket(credential),
+          handshakeDeadline,
+        );
+      } else {
+        const { url: dialUrl, headers: proxyHeaders } = resolveDialTarget(this.endpoint);
+        socket = this.createSocket(dialUrl, [WORKER_CHANNEL_SUBPROTOCOL], {
+          headers: { Authorization: `Bearer ${credential}`, ...proxyHeaders },
+          handshakeTimeout: 10_000,
+        });
+      }
+    } catch (error) {
+      await releaseControllerLease(this.runId, this.controllerId, lease.epoch, this.workerGeneration).catch(() => undefined);
+      throw error;
+    }
+    if (this.stopped) {
+      socket.terminate();
+      await releaseControllerLease(this.runId, this.controllerId, lease.epoch, this.workerGeneration).catch(() => undefined);
+      throw new Error("controller connection is shut down");
     }
     this.socket = socket;
     // The worker speaks first. Its `channel.hello` is frequently coalesced into
     // the same TCP segment as the 101 handshake, so `ws` emits 'open' and then
     // 'message' in the same tick. Capture the first frame synchronously, before
     // awaiting 'open', or the hello is dropped and connect() hangs forever.
-    const firstFrame = this.captureFirstFrame(socket);
+    const remaining = Math.max(1, handshakeDeadline - Date.now());
+    const firstFrame = this.captureFirstFrame(socket, remaining);
     firstFrame.catch(() => undefined);
     try {
-      await once(socket, "open");
+      await this.withHandshakeTimeout(once(socket, "open"), socket, "worker channel did not open before the handshake deadline", remaining);
       const hello = this.readHello(await firstFrame);
       this.lastHello = hello;
       if (hello.protocol.min > WORKER_CHANNEL_PROTOCOL || hello.protocol.max < WORKER_CHANNEL_PROTOCOL) {
@@ -350,11 +375,16 @@ export class ControllerConnection {
     }
     const tunnel = await this.openTunnel(parsed);
     const innerUrl = `ws://localhost:${parsed.port}/worker/channel`;
-    return this.createSocket(innerUrl, [WORKER_CHANNEL_SUBPROTOCOL], {
-      headers: { Authorization: `Bearer ${credential}` },
-      handshakeTimeout: 10_000,
-      createConnection: () => tunnel as unknown as import("node:net").Socket,
-    } as unknown as WebSocket.ClientOptions);
+    try {
+      return this.createSocket(innerUrl, [WORKER_CHANNEL_SUBPROTOCOL], {
+        headers: { Authorization: `Bearer ${credential}` },
+        handshakeTimeout: 10_000,
+        createConnection: () => tunnel as unknown as import("node:net").Socket,
+      } as unknown as WebSocket.ClientOptions);
+    } catch (error) {
+      tunnel.destroy();
+      throw error;
+    }
   }
 
   /** Attach the persistent message/pong/close/error listeners for one socket.
@@ -445,16 +475,59 @@ export class ControllerConnection {
 
   /** Attach the message listener immediately so no worker-first frame is lost
    * between 'open' and the point we start reading. */
-  private captureFirstFrame(socket: WebSocket): Promise<RawData> {
+  private captureFirstFrame(socket: WebSocket, timeoutMs: number): Promise<RawData> {
     return new Promise<RawData>((resolve, reject) => {
       const onMessage = (data: RawData) => { cleanup(); resolve(data); };
       const onError = (error: Error) => { cleanup(); reject(error); };
       const onClose = () => { cleanup(); reject(new ControllerProtocolError("worker closed before hello", CLOSE_CODE_SCOPE_MISMATCH, true)); };
-      const cleanup = () => { socket.off("message", onMessage); socket.off("error", onError); socket.off("close", onClose); };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new ControllerProtocolError("worker did not send channel.hello before the handshake deadline", CLOSE_CODE_SCOPE_MISMATCH, true));
+      }, timeoutMs);
+      timer.unref?.();
+      const cleanup = () => { clearTimeout(timer); socket.off("message", onMessage); socket.off("error", onError); socket.off("close", onClose); };
       socket.once("message", onMessage);
       socket.once("error", onError);
       socket.once("close", onClose);
     });
+  }
+
+  private async acquireSocketWithinDeadline(promise: Promise<WebSocket>, deadline: number): Promise<WebSocket> {
+    let timedOut = false;
+    let timer: NodeJS.Timeout | undefined;
+    // If proxy/tunnel acquisition settles after the deadline, close the socket
+    // it eventually created instead of leaking an unowned live tunnel.
+    promise.then((lateSocket) => { if (timedOut) lateSocket.terminate(); }, () => undefined);
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        reject(new ControllerProtocolError("worker tunnel did not open before the handshake deadline", CLOSE_CODE_SCOPE_MISMATCH, true));
+      }, Math.max(1, deadline - Date.now()));
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async withHandshakeTimeout<T>(promise: Promise<T>, socket: WebSocket, message: string, timeoutMs: number): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        // Fence cleanup to the socket owned by this attempt. A late timer from
+        // an old dial must never terminate a replacement connection.
+        if (this.socket === socket) socket.terminate();
+        reject(new ControllerProtocolError(message, CLOSE_CODE_SCOPE_MISMATCH, true));
+      }, timeoutMs);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private readHello(data: RawData): ChannelHello {

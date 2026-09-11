@@ -14,7 +14,9 @@ import {
   agentSessions,
   inboxEvents,
   personas,
+  runInputs,
   runTimers,
+  runTurns,
   type InboxEvent,
   type RunTimer,
 } from "@/db/schema";
@@ -500,8 +502,9 @@ export async function parkedRunsWithPendingEvents(limit = 50): Promise<number[]>
     .from(agentSessions)
     .where(
       and(
-        eq(agentSessions.status, "parked"),
-        sql`EXISTS (SELECT 1 FROM ${inboxEvents}
+        inArray(agentSessions.status, ["idle", "parked"]),
+        sql`(
+          EXISTS (SELECT 1 FROM ${inboxEvents}
               WHERE ${inboxEvents.targetRunId} = ${agentSessions.id}
                 AND ${inboxEvents.status} = 'pending'
                 AND ${admittedInboxEvent()}
@@ -509,7 +512,14 @@ export async function parkedRunsWithPendingEvents(limit = 50): Promise<number[]>
                 AND ${inboxEvents.type} NOT IN (${sql.join(
                   [...CONTROL_TYPES].map((t) => sql`${t}`),
                   sql`, `
-                )}))`
+                )}))
+          OR EXISTS (SELECT 1 FROM ${runInputs}
+              WHERE ${runInputs.runId} = ${agentSessions.id}
+                AND ${runInputs.status} IN ('pending', 'assigned'))
+          OR EXISTS (SELECT 1 FROM ${runTurns}
+              WHERE ${runTurns.runId} = ${agentSessions.id}
+                AND ${runTurns.state} IN ('active', 'running'))
+        )`
       )
     )
     .limit(limit);
