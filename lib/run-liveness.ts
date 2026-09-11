@@ -103,12 +103,14 @@ export async function resolveLiveness(runId: number): Promise<Liveness> {
   // provider can still tell us that the generation is alive and adoptable. Do
   // not bypass a live/unknown server claim, and do not extend this fallback to
   // local or server-only runs.
+  let deadProvisioningOwner: Extract<Liveness, { verdict: "dead" }> | null = null;
   if (isServerClaimScope(row.workerScope)) {
     const serverClaim = observeServerClaim(row.workerScope);
     const preMappedSprite = row.provider === "sprites"
       && row.spriteName != null
       && row.workerGeneration != null;
     if (serverClaim.verdict !== "dead" || !preMappedSprite) return serverClaim;
+    deadProvisioningOwner = serverClaim;
   }
   // A claim with no runner row at all: nothing to observe. This is NOT "no
   // owner" — a dispatch may be provisioning the runner right now.
@@ -143,7 +145,19 @@ export async function resolveLiveness(runId: number): Promise<Liveness> {
     console.warn(`[liveness] cannot observe run ${runId}: ${err instanceof Error ? err.message : String(err)}`);
     return { verdict: "unknown" };
   }
-  if (observed.status === "unknown") return { verdict: "unknown" };
+  if (observed.status === "unknown") {
+    // A Sprite mapping is persisted before PUT creates its generation service.
+    // If the owning controller dies in that interval, the expected service is
+    // authoritatively absent and can never complete channel.hello. Do not turn
+    // provider/API ambiguity into death, but do recover this exact 404 state.
+    if (deadProvisioningOwner && observed.reason === "not-found") {
+      return {
+        ...deadProvisioningOwner,
+        detail: `${deadProvisioningOwner.detail ?? "provisioning controller exited"}; ${observed.detail ?? "expected worker service is absent"}`,
+      };
+    }
+    return { verdict: "unknown" };
+  }
   if (observed.status === "dead") {
     const detail = observed.detail;
     const runnerGone = observed.reason === "runner-gone"
@@ -163,7 +177,8 @@ export async function resolveLiveness(runId: number): Promise<Liveness> {
 /**
  * Whether a dead run can be resumed by handing it to a FRESH worker, rather than
  * failed. A worktree implement run is resumable — its branch/worktree persist
- * and it has an SDK session to resume from.
+ * and it has durable continuation state: either an SDK token or a v2
+ * transcript/input snapshot.
  *
  * The existence gate (R8 reconciliation): a REMOTE runner (Fly Machine or Docker
  * worker) re-clones from the branch pushed to GitHub, so `hasBranch` is enough —
@@ -181,14 +196,14 @@ export function isResumableDeadRun(i: {
   detached: boolean;
   remote: boolean;
   isImplementWorktree: boolean;
-  hasSdkSession: boolean;
+  hasContinuationState: boolean;
   hasBranch: boolean;
   worktreeOnDisk: boolean;
 }): boolean {
   return (
     i.detached &&
     i.isImplementWorktree &&
-    i.hasSdkSession &&
+    i.hasContinuationState &&
     (i.remote ? i.hasBranch : i.worktreeOnDisk)
   );
 }

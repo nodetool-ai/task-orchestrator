@@ -122,15 +122,16 @@ async function reapOrphans() {
       )
   ).filter((row) => {
     if (!NON_TERMINAL_BUT_DEAD.includes(row.status)) return false;
-    // A resumable worktree implement run (branch + SDK session persist) is the
-    // pump's job, not ours: runs.reconcileOrphanedRuns re-dispatches it to a
-    // fresh worker. Failing it here — and worse, removing its worktree below —
-    // would abandon recoverable work on a plain restart. Defer to the pump.
+    // A resumable worktree implement run is the pump's job, not ours:
+    // runs.reconcileOrphanedRuns re-dispatches it to a fresh worker. v2 has a
+    // durable transcript/input continuation even when a backend did not issue
+    // an opaque SDK token. Failing it here — and worse, removing its worktree
+    // below — would abandon recoverable work on a plain restart.
     if (
       (row.status === "preparing" || row.status === "running") &&
       row.cwdStrategy === "worktree" &&
       !!row.branch &&
-      !!row.sdkSessionId
+      (!!row.sdkSessionId || row.deliveryVersion === 2)
     ) {
       return false;
     }

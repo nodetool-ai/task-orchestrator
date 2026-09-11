@@ -4886,8 +4886,9 @@ export async function reconcileOrphanedRuns(): Promise<number> {
     }
     // Detached mode: a worker that died mid-turn (host reboot / OOM) on a
     // resumable worktree run is handed to a fresh detached worker instead of
-    // being failed. A worktree run is resumable — its branch/worktree persist
-    // and it has an SDK session to resume from — so this mirrors
+    // being failed. A worktree run is resumable when its branch/worktree and
+    // durable continuation persist — an SDK token for v1, or the transcript and
+    // input snapshot for v2 — so this mirrors
     // isResumableWorktreeRun's cwdStrategy="worktree" predicate (evaluated here
     // via isImplementWorktree, since the row is still in a *lease* status and
     // isResumableWorktreeRun only accepts post-reap terminal statuses). Clear
@@ -4902,7 +4903,10 @@ export async function reconcileOrphanedRuns(): Promise<number> {
       detached: runDispatch.detachedRunsEnabled(),
       remote: runDispatch.remoteRunnerEnabled(),
       isImplementWorktree: isImplementWorktree(row),
-      hasSdkSession: !!row.sdkSessionId,
+      // v2 can reconstruct a bounded continuation from durable messages,
+      // turns, and pending inputs even when a backend (notably Codex) did not
+      // issue an opaque SDK session token. Keep v1 on the old token gate.
+      hasContinuationState: !!row.sdkSessionId || row.deliveryVersion === 2,
       hasBranch: !!row.branch,
       worktreeOnDisk: !!row.worktreePath && existsSync(row.worktreePath),
     });
@@ -5070,7 +5074,7 @@ export async function handleWorkerDeath(
     detached: runDispatch.detachedRunsEnabled(),
     remote: runDispatch.remoteRunnerEnabled(),
     isImplementWorktree: isImplementWorktree(row),
-    hasSdkSession: !!row.sdkSessionId,
+    hasContinuationState: !!row.sdkSessionId || row.deliveryVersion === 2,
     hasBranch: !!row.branch,
     worktreeOnDisk: !!row.worktreePath && existsSync(row.worktreePath),
   });

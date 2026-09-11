@@ -131,6 +131,31 @@ describe("reapOrphans (orphan reaper in lib/agent.ts)", () => {
     expect(after?.error).toBeNull();
   });
 
+  it("leaves a tokenless v2 worktree run for transcript-based pump recovery", async () => {
+    const taskId = await createTestTask();
+    const run = await create({
+      goal: "<implement>",
+      defer: true,
+      taskId,
+    });
+    await db
+      .update(agentSessions)
+      .set({
+        status: "preparing",
+        branch: `claude/${taskId.toLowerCase()}`,
+        worktreePath: "/mnt/session/repo",
+        sdkSessionId: null,
+        deliveryVersion: 2,
+      })
+      .where(eq(agentSessions.id, run.id));
+
+    await _reapOrphansForTest();
+
+    const after = await get(run.id);
+    expect(after?.status).toBe("preparing");
+    expect(after?.error).toBeNull();
+  });
+
   it("ignores chat runs (only implement runs are reaped)", async () => {
     // The reaper only targets implement runs. Chat runs are left alone.
     const run = await create({ goal: "<chat>", defer: true });

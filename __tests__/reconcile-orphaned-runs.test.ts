@@ -223,6 +223,38 @@ describe("reconcileOrphanedRuns", () => {
     }
   });
 
+  it("re-dispatches a tokenless v2 Codex worktree run from its durable transcript", async () => {
+    process.env.TASK_ORCH_RUNNER = "sprites";
+    process.env.TASK_ORCH_DETACHED_RUNS = "1";
+    const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
+    try {
+      const run = await create({
+        goal: "<implement>",
+        backend: "codex",
+        model: "openai/gpt-5.6-terra",
+        defer: true,
+      });
+      await db.update(agentSessions)
+        .set({
+          status: "preparing",
+          sdkSessionId: null,
+          deliveryVersion: 2,
+          branch: "claude/tokenless-v2",
+          worktreePath: "/mnt/session/repo",
+        })
+        .where(eq(agentSessions.id, run.id));
+
+      await reconcileOrphanedRuns();
+
+      expect(spy).toHaveBeenCalledWith(run.id);
+      expect((await get(run.id))?.status).not.toBe("failed");
+    } finally {
+      delete process.env.TASK_ORCH_RUNNER;
+      delete process.env.TASK_ORCH_DETACHED_RUNS;
+      vi.restoreAllMocks();
+    }
+  });
+
   it("re-dispatches a stale plan executor instead of failing it", async () => {
     // Regression: a deploy/restart that killed an executor turn used to land the
     // run 'failed' with "Worker heartbeat lost — turn interrupted mid-flight".

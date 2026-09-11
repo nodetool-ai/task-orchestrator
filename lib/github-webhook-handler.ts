@@ -173,8 +173,18 @@ export async function handleWebhookEvent(
 
   let autofixTriggered = false;
   if (isCiFailure || isChangesRequested) {
-    const authoritativeEvent = isCiFailure && authoritativeHeadSha
-      ? { ...event, headSha: authoritativeHeadSha }
+    // The webhook that happens to observe an already-red aggregate can itself
+    // be a queued/in-progress check. The rolled-up re-read above is the
+    // authority for the repair decision, so do not tell the worker that a
+    // queued check was the failure (run 264). Preserve a check name only when
+    // this individual event is itself failed; otherwise describe aggregate CI.
+    const authoritativeEvent = isCiFailure
+      ? {
+          ...event,
+          headSha: authoritativeHeadSha ?? event.headSha,
+          conclusion: "failure",
+          workflowName: event.ciState === "failure" ? event.workflowName : null,
+        }
       : event;
     const fix = await handleNeedsFix(matchedRuns, authoritativeEvent, isCiFailure ? "ci" : "review");
     actions.push(...fix.actions);

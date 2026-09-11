@@ -138,21 +138,65 @@ describe("resolveLiveness — a run being provisioned by this process", () => {
       else process.env.TASK_ORCH_RUNNER = previousRunner;
     }
   });
+
+  it("declares interrupted provisioning dead when its owner exited before the Sprite service was created", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
+    const spriteName = `run-${run.id}-sprite`;
+    const spriteProvider: RunnerProvider = {
+      kind: "sprites",
+      async create() { return null; },
+      async stop() {},
+      async sweep() {},
+      async inspect() { return { status: "unknown" }; },
+      async inspectGeneration() {
+        return { status: "unknown", reason: "not-found", detail: "service worker-g2 does not exist" };
+      },
+    };
+    const previousRunner = process.env.TASK_ORCH_RUNNER;
+    process.env.TASK_ORCH_RUNNER = "sprites";
+    try {
+      __setRunnerProviderForTests(spriteProvider);
+      await db.update(agentSessions)
+        .set({
+          status: "preparing",
+          workerScope: `server-${hostname()}@4194303@dead-boot@dispatch`,
+        })
+        .where(eq(agentSessions.id, run.id));
+      await db.insert(runnerInstances).values({
+        runId: run.id,
+        provider: "sprites",
+        spriteName,
+        state: "starting",
+        workerGeneration: 2,
+        generationState: "booting",
+        providerServiceName: "worker-g2",
+      });
+
+      await expect(resolveLiveness(run.id)).resolves.toMatchObject({
+        verdict: "dead",
+        reason: "exited",
+        detail: expect.stringContaining("worker-g2 does not exist"),
+      });
+    } finally {
+      if (previousRunner == null) delete process.env.TASK_ORCH_RUNNER;
+      else process.env.TASK_ORCH_RUNNER = previousRunner;
+    }
+  });
 });
 
 describe("isResumableDeadRun — reconciled existence gate", () => {
   const base = {
     detached: true,
     isImplementWorktree: true,
-    hasSdkSession: true,
+    hasContinuationState: true,
     hasBranch: true,
     worktreeOnDisk: true,
   };
-  it("requires detached + implement-worktree + sdk session", () => {
+  it("requires detached + implement-worktree + durable continuation state", () => {
     expect(isResumableDeadRun({ ...base, remote: true })).toBe(true);
     expect(isResumableDeadRun({ ...base, remote: true, detached: false })).toBe(false);
     expect(isResumableDeadRun({ ...base, remote: true, isImplementWorktree: false })).toBe(false);
-    expect(isResumableDeadRun({ ...base, remote: true, hasSdkSession: false })).toBe(false);
+    expect(isResumableDeadRun({ ...base, remote: true, hasContinuationState: false })).toBe(false);
   });
   it("remote runners check the branch (not the never-present server worktree)", () => {
     expect(isResumableDeadRun({ ...base, remote: true, hasBranch: true, worktreeOnDisk: false })).toBe(true);

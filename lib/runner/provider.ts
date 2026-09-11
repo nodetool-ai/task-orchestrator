@@ -31,7 +31,16 @@ export type RunnerObservation =
       pid?: number;
     }
   | { status: "dead"; reason?: "runner-gone"; detail?: string }
-  | { status: "unknown" };
+  | {
+      status: "unknown";
+      /** A typed ambiguity lets the liveness layer distinguish an authoritative
+       *  404 from a provider outage. A missing service is still "unknown" to a
+       *  provider sweep during a legitimate boot window; once the durable
+       *  provisioning owner is observably dead, it becomes proof that startup
+       *  was interrupted. */
+      reason?: "not-found";
+      detail?: string;
+    };
 
 export interface RunnerRef {
   /** Run id this runner serves. */

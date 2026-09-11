@@ -280,7 +280,11 @@ describe("SpritesRunnerProvider.inspect", () => {
       providerServiceName: "worker-g17",
     };
 
-    await expect(provider.inspectGeneration(ref)).resolves.toEqual({ status: "unknown" });
+    await expect(provider.inspectGeneration(ref)).resolves.toEqual({
+      status: "unknown",
+      reason: "not-found",
+      detail: "service worker-g17 does not exist",
+    });
     await expect(provider.inspectGeneration({ ...ref, storedIncarnation: "2026-09-08T10:00:00Z#17" }))
       .resolves.toEqual({
         status: "dead",
@@ -361,7 +365,11 @@ describe("SpritesRunnerProvider.inspect", () => {
       getSprite: vi.fn(async (name: string) => ({ name, status: "cold" })),
       getService: vi.fn(async () => null),
     }));
-    await expect(absent.inspect("to-run-1")).resolves.toEqual({ status: "unknown" });
+    await expect(absent.inspect("to-run-1")).resolves.toEqual({
+      status: "unknown",
+      reason: "not-found",
+      detail: "service worker does not exist",
+    });
   });
 
   it("a destroyed sprite is dead; an unreadable service answer is unknown", async () => {

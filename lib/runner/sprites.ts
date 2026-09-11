@@ -448,7 +448,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
       // preserves run 184's boot window while allowing run 226 to self-heal.
       if (!service) return storedIncarnation
         ? { status: "dead", reason: "runner-gone", detail: `service ${serviceName} disappeared after incarnation ${storedIncarnation}` }
-        : { status: "unknown" };
+        : { status: "unknown", reason: "not-found", detail: `service ${serviceName} does not exist` };
       if (s!.status === "failed") return { status: "dead", detail: s!.error ?? "failed" };
       if (s!.nextRestartAt) return { status: "unknown" };
       if (s!.status !== "running" || s!.pid == null || !s!.startedAt) return { status: "unknown" };

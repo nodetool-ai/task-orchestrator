@@ -419,6 +419,31 @@ describe("handleWebhookEvent CI-autofix targeting", () => {
     expect(mockHintDelivery).not.toHaveBeenCalled();
   });
 
+  it("describes authoritative aggregate failure instead of blaming a queued check", async () => {
+    const id = await insertRun("idle");
+    const queuedEvent: NormalizedWebhookEvent = {
+      ...ciFailure(),
+      action: "created",
+      ciState: "pending",
+      conclusion: "queued",
+      workflowName: "Quality Gate / quality",
+    };
+
+    await handleWebhookEvent(
+      queuedEvent,
+      "delivery-queued-observed-red",
+      fakeFetch(gh({ ciConclusion: "failure", headSha: "authoritative-sha" }))
+    );
+
+    expect(mockFollowUp).toHaveBeenCalledTimes(1);
+    const prompt = String(mockFollowUp.mock.calls[0]?.[1]);
+    expect(prompt).toContain("Conclusion: failure.");
+    expect(prompt).toContain("Head commit: authoritative-sha.");
+    expect(prompt).not.toContain("Conclusion: queued.");
+    expect(prompt).not.toContain("Workflow/check: Quality Gate / quality.");
+    expect(await eventsOfType(id, "github_autofix")).toBe(1);
+  });
+
   it("defers the delivery-pump wake until after the autofix decision", async () => {
     // A run autofix will not take (already running), so the matched event still
     // has to reach it — the wake fires, just after the decision rather than
