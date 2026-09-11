@@ -95,6 +95,10 @@ function serviceIsQuiescent(service: SpriteService | null): boolean {
     || (service.state.status === "stopped" && service.state.nextRestartAt === undefined);
 }
 
+function serviceIsFailedWithoutRestart(service: SpriteService | null): boolean {
+  return service?.state.status === "failed" && service.state.nextRestartAt === undefined;
+}
+
 /** Keep generation columns optional while the generation migration is rolled
  * out. New callers always provide both values; legacy rows continue using the
  * historical `worker` service until their next restart. */
@@ -496,15 +500,19 @@ export class SpritesRunnerProvider implements RunnerProvider {
     const older = owned
       .filter((entry) => entry.generation < targetGeneration)
       .sort((a, b) => a.generation - b.generation);
+    const explicitlyDisabledFailures = new Set<string>();
     for (const { service } of older) {
       if (!serviceIsQuiescent(service)) {
-        await this.stopServiceAndConfirm(spriteName, service.name);
+        const result = await this.stopServiceAndConfirm(spriteName, service.name);
+        if (result === "failed-disabled") explicitlyDisabledFailures.add(service.name);
       }
     }
     const confirmed = await this.spritesClient.listServices(spriteName);
     const unsafe = confirmed.find((service) => {
       const generation = ownedWorkerGeneration(service.name);
-      return generation != null && generation < targetGeneration && !serviceIsQuiescent(service);
+      return generation != null && generation < targetGeneration
+        && !serviceIsQuiescent(service)
+        && !(explicitlyDisabledFailures.has(service.name) && serviceIsFailedWithoutRestart(service));
     });
     if (unsafe) {
       throw new Error(`Older Sprite worker ${spriteName}/${unsafe.name} remains restartable`);
@@ -931,11 +939,15 @@ export class SpritesRunnerProvider implements RunnerProvider {
    * reports it running. An API error is treated as an absent service only when
    * the follow-up read confirms that; callers never start a replacement based
    * solely on fire-and-forget stop. */
-  private async stopServiceAndConfirm(spriteName: string, serviceName: string): Promise<void> {
+  private async stopServiceAndConfirm(
+    spriteName: string,
+    serviceName: string,
+  ): Promise<"stopped" | "failed-disabled"> {
     const deadline = Date.now() + 30_000;
     let lastError: unknown;
     let lastState: SpriteService["state"] | undefined;
     for (;;) {
+      let providerConfirmedNotRunning = false;
       try {
         await this.spritesClient.stopService(spriteName, serviceName);
         lastError = undefined;
@@ -943,11 +955,28 @@ export class SpritesRunnerProvider implements RunnerProvider {
         // Stop responses are not authoritative by themselves. Preserve the
         // error for diagnostics, then resolve the outcome with a service GET.
         lastError = err;
+        // Sprites returns 409 when a crash-looping service is between
+        // processes. The stop still cancels its pending restart, but GET keeps
+        // reporting the last process result as `failed` rather than changing
+        // it to `stopped`. Accept that shape only for this explicit, named stop
+        // request, only when the provider says no process is running, and only
+        // after a second authoritative observation proves no restart timer was
+        // attached in the meantime.
+        providerConfirmedNotRunning = err instanceof SpritesApiError
+          && err.status === 409
+          && /service is not running/i.test(err.body);
       }
       try {
         const service = await this.spritesClient.getService(spriteName, serviceName);
         lastState = service?.state;
-        if (serviceIsQuiescent(service)) return;
+        if (serviceIsQuiescent(service)) return "stopped";
+        if (providerConfirmedNotRunning && serviceIsFailedWithoutRestart(service)) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          const confirmed = await this.spritesClient.getService(spriteName, serviceName);
+          lastState = confirmed?.state;
+          if (serviceIsQuiescent(confirmed)) return "stopped";
+          if (serviceIsFailedWithoutRestart(confirmed)) return "failed-disabled";
+        }
       } catch (err) {
         // An observation failure is unknown, never proof that teardown
         // completed. Keep polling and fail closed at the deadline.

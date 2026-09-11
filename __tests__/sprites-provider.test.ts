@@ -586,6 +586,9 @@ describe("SpritesRunnerProvider.resume", () => {
       }),
       stopService: vi.fn(async (_spriteName: string, serviceName: string) => {
         order.push(`stop:${serviceName}`);
+        if (serviceName === "worker-g49") {
+          throw new SpritesApiError(409, "service is not running");
+        }
         if (states.has(serviceName)) states.set(serviceName, { status: "stopped" });
       }),
       putService: vi.fn(async (_spriteName: string, serviceName: string) => { order.push(`put:${serviceName}`); }),
