@@ -4870,7 +4870,15 @@ export async function reconcileOrphanedRuns(): Promise<number> {
     // says 'completed', honor that instead — a later 'running'/'preparing' event
     // means a genuine mid-turn orphan and falls through to the reap below.
     const lastEvent = await latestEventStatus(row.id);
-    if (lastEvent?.status === "completed") {
+    // A renewed attempt can be claimed without emitting its own status event
+    // before the provisioning process dies. In that window the latest status
+    // event may still be the PREVIOUS attempt's completion (run 264). Only heal
+    // completion when it belongs to the current claim window; otherwise the
+    // pending inputs must drive orphan recovery below.
+    const completionBelongsToCurrentClaim =
+      lastEvent?.status === "completed" &&
+      (row.claimedAt == null || lastEvent.at.getTime() >= row.claimedAt.getTime());
+    if (completionBelongsToCurrentClaim) {
       // Atomic status+event. Guard on `stillOrphan` (BUG 6b): a real finalize that
       // landed between our SELECT and here left a lease status (→ no clobber), but a
       // RE-DISPATCH that re-claimed to 'preparing' is ALSO a lease status — the old

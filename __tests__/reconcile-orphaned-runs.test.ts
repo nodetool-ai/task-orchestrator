@@ -157,6 +157,40 @@ describe("reconcileOrphanedRuns", () => {
     expect(after?.error).toBeNull();
   });
 
+  it("does not apply a prior attempt's completion after a newer claim", async () => {
+    process.env.TASK_ORCH_DETACHED_RUNS = "1";
+    const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
+    try {
+      const run = await create({ goal: "<implement>", defer: true });
+      const priorCompletion = new Date(Date.now() - 60_000);
+      await db.insert(agentEvents).values({
+        sessionId: run.id,
+        type: "status",
+        payload: JSON.stringify({ status: "completed" }),
+        createdAt: priorCompletion,
+      });
+      await db.update(agentSessions)
+        .set({
+          status: "preparing",
+          attempt: 2,
+          claimedAt: new Date(priorCompletion.getTime() + 30_000),
+          branch: "claude/renewed-attempt",
+          worktreePath: process.cwd(),
+          deliveryVersion: 2,
+        })
+        .where(eq(agentSessions.id, run.id));
+
+      await reconcileOrphanedRuns();
+
+      expect(spy).toHaveBeenCalledWith(run.id);
+      expect((await get(run.id))?.status).not.toBe("parked");
+      expect((await get(run.id))?.workerScope).toBeNull();
+    } finally {
+      delete process.env.TASK_ORCH_DETACHED_RUNS;
+      vi.restoreAllMocks();
+    }
+  });
+
   it("still fails an orphan whose latest status event is a later 'running' (not the stale completed)", async () => {
     // A resumed run that completed one turn, then orphaned mid a LATER turn:
     // the newest status event is 'running', so it is a genuine orphan.
