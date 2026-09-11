@@ -334,7 +334,13 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
     execute: async ({ minutes, note }, ctx) => {
       const runId = requireRunId(ctx);
       if (!runId) return NO_RUN;
-      const res = await createTimer({ runId, minutes, note: note ?? null, correlationId: null });
+      const res = await createTimer({
+        runId,
+        minutes,
+        note: note ?? null,
+        correlationId: null,
+        kind: "sleep",
+      });
       if (!res.ok) return errResult(res.error);
       await recordTurnEffect(patchRunColumns(runId), { kind: "park", reason: "sleeping" });
       return ok(
@@ -358,7 +364,13 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
     execute: async ({ minutes, note }, ctx) => {
       const runId = requireRunId(ctx);
       if (!runId) return NO_RUN;
-      const res = await createTimer({ runId, minutes, note: note ?? null, correlationId: null });
+      const res = await createTimer({
+        runId,
+        minutes,
+        note: note ?? null,
+        correlationId: null,
+        kind: "watchdog",
+      });
       if (!res.ok) return errResult(res.error);
       return ok(
         JSON.stringify({ timer_id: res.timerId, fire_at: res.fireAt.toISOString() }, null, 2)
@@ -621,6 +633,7 @@ export const EVENT_TOOLS: OrchestratorTool[] = [
         minutes,
         note: "ask_parent deadline",
         correlationId: questionId,
+        kind: "deadline",
       });
       if (!timerRes.ok) {
         return errResult(

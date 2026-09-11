@@ -92,6 +92,7 @@ import { type RunEnvelope } from "./pi-event-mapper";
 import { estimateCostUsd } from "./pricing";
 import { getBackend, resolveBackendId, type ContextSource, type Extension } from "./agent-backend";
 import {
+  cancelPendingSleepTimersForRun,
   cancelPendingTimersForRun,
   cancelTimersByCorrelation,
   claimInboxEventsTx,
@@ -1379,6 +1380,13 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
         await db.transaction(tx => enqueueMessageTx(tx, { runId: run!.id, messageId: userMsg.id, kind: "user" }));
       }
       yield { type: "user_message", message: userMsg };
+    }
+
+    // Legacy rows do not claim durable run_inputs, so a persisted append is
+    // their turn boundary. Retire only the maximum-wait sleep it superseded;
+    // v2 does this atomically in claimRunTurn instead.
+    if (run.deliveryVersion !== 2 && run.parkReason === "sleeping") {
+      await cancelPendingSleepTimersForRun(run.id);
     }
 
     // Event system: fresh-turn bookkeeping (docs/agent-events.md §4.3, §6.1).
@@ -3900,6 +3908,13 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     cwd,
     contextSource,
     model: { provider: resolvedProvider, id: resolvedModelId },
+    // Executors coordinate through orchestrator/spawn tools only. Their profile
+    // never included repo/GitHub tools, but full SDK backends also expose native
+    // Bash/file tools outside profiles; run 248 used that escape hatch to read
+    // CI logs and bypass the autofix repair budget.
+    nativeToolPolicy: run.personaId === "executor"
+      ? "orchestration-only" as const
+      : "default" as const,
     // Reasoning is a per-run property (migration 0031). create() already folded
     // in the deployment default; a null column leaves the model's own default.
     thinkingLevel: (run.thinkingLevel ?? undefined) as

@@ -25,6 +25,7 @@ interface InboxEventRow {
 
 interface TimerRow {
   id: number;
+  kind: "sleep" | "watchdog" | "deadline";
   status: "pending" | "fired" | "cancelled";
   note: string | null;
   correlationId: string | null;
@@ -162,6 +163,9 @@ export function InboxPanel({ runId }: { runId: number }) {
                   {timers.map((t) => (
                     <div key={t.id} className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                       <AlarmClock className="size-3 text-muted-foreground" />
+                      <span className="font-mono text-[10px] text-muted-foreground/80">
+                        {t.kind}
+                      </span>
                       <span
                         className={cn("rounded px-1.5 py-0.5 font-mono text-[10px]", TIMER_TONE[t.status] ?? TIMER_TONE.fired)}
                       >

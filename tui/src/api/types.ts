@@ -152,6 +152,7 @@ export interface InboxEventRow {
 /** One row of GET /api/runs/:id/inbox → timers[]. */
 export interface RunTimerRow {
   id: number;
+  kind: "sleep" | "watchdog" | "deadline";
   status: string;
   note: string | null;
   correlationId: string | null;

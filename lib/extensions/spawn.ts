@@ -227,6 +227,30 @@ export function checkAppendableStatus(status: string, cwdStrategy: string): stri
   return null;
 }
 
+/**
+ * Keep CI repair admission single-owner. The webhook/poller autofix path is the
+ * only component allowed to resume an implementor while its task is failing;
+ * it owns the durable claim, debounce and attempt cap in lib/ci-autofix.ts.
+ *
+ * An executor may still answer a child's explicit question through the event
+ * answer path, and may append ordinary guidance before CI owns the task. Once
+ * the task is failing (or has been escalated to blocked), a manual append or a
+ * replacement spawn would bypass the autofix budget exactly as run 248 did.
+ */
+export function checkExecutorCiRepairOwnership(
+  callerPersonaId: string | null,
+  taskState: string | null
+): string | null {
+  if (callerPersonaId !== "executor") return null;
+  if (taskState !== "failing" && taskState !== "blocked") return null;
+  return (
+    `Cannot manually dispatch work for a task in '${taskState}' from an executor. ` +
+    `CI repair dispatch is owned by the webhook/poller autofix loop, which resumes ` +
+    `the existing implementor with the shared debounce and attempt cap. Re-scan task ` +
+    `state; if it is blocked, report the recorded escalation instead of bypassing it.`
+  );
+}
+
 // ────────────────────────────────────────
 // DB-backed helpers (verbatim from lib/spawn-mcp.ts)
 // ────────────────────────────────────────
@@ -453,6 +477,16 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
           return errResult(startableError);
         }
 
+        // 1d. CI has one repair dispatcher: maybeTriggerAutofix. Executors must
+        //     not create a fresh fixer for a failing/blocked task, which would
+        //     evade that dispatcher's in-flight claim and attempt cap.
+        const spawnTask = args.task_id ? await repo.getTask(args.task_id) : null;
+        const ciOwnershipError = checkExecutorCiRepairOwnership(
+          runRow.personaId,
+          spawnTask?.state ?? null
+        );
+        if (ciOwnershipError) return errResult(ciOwnershipError);
+
         // 2. Depth check.
         const parentChain = await walkParentChain(runRow.parentRunId, MAX_DEPTH + 2);
         const newChildDepth = computeDepth(parentChain) + 1;
@@ -597,7 +631,7 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
       name: "spawn__append_message",
       label: "Append Message",
       description:
-        "Send a user message to an existing run, resuming its SDK session, and return immediately (non-blocking) with status 'running'. Uses the same per-run lock as the UI composer, so this is safe to call concurrently with the UI. The resumed child's completion arrives automatically as an event message. For an ongoing chat reply, subscribe to run.turn_finished. Continue other work or end your turn; no wait call is needed. Refuses on closed/cancelled runs, and on completed/failed/budget_exhausted runs that are NOT resumable worktree (implement-style) children — those can be resumed even after they land 'completed'. Cannot target your own run or a mid-turn ancestor (that would deadlock). Same tree-budget cap as spawn__spawn_agent.",
+        "Send a user message to an existing run, resuming its SDK session, and return immediately (non-blocking) with status 'running'. Uses the same per-run lock as the UI composer, so this is safe to call concurrently with the UI. The resumed child's completion arrives automatically as an event message. For an ongoing chat reply, subscribe to run.turn_finished. Continue other work or end your turn; no wait call is needed. Refuses on closed/cancelled runs, and on completed/failed/budget_exhausted runs that are NOT resumable worktree (implement-style) children — those can be resumed even after they land 'completed'. An executor cannot use this tool to bypass autofix on a failing or blocked task. Cannot target your own run or a mid-turn ancestor (that would deadlock). Same tree-budget cap as spawn__spawn_agent.",
       parameters: Type.Object({
         run_id: Type.Integer({ minimum: 1 }),
         text: Type.String({ minLength: 1 }),
@@ -661,6 +695,12 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
         if (refusal) {
           return errResult(refusal);
         }
+        const targetTask = target.taskId ? await repo.getTask(target.taskId) : null;
+        const ciOwnershipError = checkExecutorCiRepairOwnership(
+          runRow.personaId,
+          targetTask?.state ?? null
+        );
+        if (ciOwnershipError) return errResult(ciOwnershipError);
 
         // Envelope for a fire-and-forget append (the message is persisted + a
         // turn is running, but we did not wait for it). To read the reply, the

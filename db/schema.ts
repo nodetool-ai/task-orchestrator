@@ -778,6 +778,9 @@ export const runTimers = pgTable(
       .references(() => agentSessions.id, { onDelete: "cascade" }),
     fireAt: ts("fire_at").notNull(),
     note: text("note"),
+    // Why the timer exists. Sleep timers are replaced/cancelled when another
+    // input starts a new turn; watchdogs and deadlines must survive that wake.
+    kind: text("kind").notNull().default("watchdog"),
     // Correlates a question-deadline timer with its ask_parent exchange.
     correlationId: text("correlation_id"),
     // pending | fired | cancelled
@@ -790,6 +793,10 @@ export const runTimers = pgTable(
       .on(t.fireAt)
       .where(sql`status = 'pending'`),
     runIdx: index("run_timers_run_idx").on(t.runId),
+    kindCheck: check(
+      "run_timers_kind_check",
+      sql`${t.kind} IN ('sleep', 'watchdog', 'deadline')`
+    ),
   })
 );
 

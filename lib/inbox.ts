@@ -309,6 +309,20 @@ export async function claimInboxEventsTx(
     })
     .where(inArray(inboxEvents.id, picked.map((p) => p.id)))
     .returning();
+  // Legacy delivery has no durable run_turn claim. Claiming an inbox event is
+  // its atomic turn boundary, so retire maximum-wait sleeps here. A fired sleep
+  // is already non-pending; any other pending sleep was superseded by this
+  // event. Watchdogs and deadlines deliberately survive.
+  await tx
+    .update(runTimers)
+    .set({ status: "cancelled" })
+    .where(
+      and(
+        eq(runTimers.runId, runId),
+        eq(runTimers.kind, "sleep"),
+        eq(runTimers.status, "pending")
+      )
+    );
   claimed.sort((a, b) => a.id - b.id);
   return claimed;
 }
@@ -801,12 +815,14 @@ export const TIMER_MIN_MINUTES = 1;
 export const TIMER_MAX_MINUTES = 1440; // 24h
 export const TIMER_MAX_PER_RUN = 4;
 export const TIMER_MAX_PER_TREE = 64;
+export type TimerKind = "sleep" | "watchdog" | "deadline";
 
 export interface CreateTimerInput {
   runId: number;
   minutes: number;
   note?: string | null;
   correlationId?: string | null;
+  kind?: TimerKind;
 }
 
 export type CreateTimerResult =
@@ -872,6 +888,7 @@ export async function createTimer(input: CreateTimerInput): Promise<CreateTimerR
       runId: input.runId,
       fireAt,
       note: input.note ?? null,
+      kind: input.kind ?? "watchdog",
       correlationId: input.correlationId ?? null,
     })
     .returning({ id: runTimers.id });
@@ -886,6 +903,23 @@ export async function cancelTimer(runId: number, timerId: number): Promise<boole
       and(eq(runTimers.id, timerId), eq(runTimers.runId, runId), eq(runTimers.status, "pending"))
     );
   return (res as unknown as { count?: number }).count !== 0;
+}
+
+/** Cancel only maximum-wait sleeps superseded by another input. Explicit
+ * watchdogs and question/await deadlines intentionally survive a wake. */
+export async function cancelPendingSleepTimersForRun(runId: number): Promise<number> {
+  const rows = await db
+    .update(runTimers)
+    .set({ status: "cancelled" })
+    .where(
+      and(
+        eq(runTimers.runId, runId),
+        eq(runTimers.kind, "sleep"),
+        eq(runTimers.status, "pending")
+      )
+    )
+    .returning({ id: runTimers.id });
+  return rows.length;
 }
 
 /**
@@ -946,7 +980,7 @@ export async function fireDueTimers(now = new Date()): Promise<number> {
         if (!timer) return;
         await tx.update(runTimers).set({ status: "fired", firedAt: now }).where(eq(runTimers.id, timer.id));
         const payload = {
-          timer_id: timer.id, note: timer.note,
+          timer_id: timer.id, kind: timer.kind, note: timer.note,
           set_at: timer.createdAt.toISOString(), fire_at: timer.fireAt.toISOString(),
         };
         await tx.insert(inboxEvents).values({

@@ -113,13 +113,24 @@ export class PiBackend implements AgentBackend {
         });
       }
 
-      if (collected.interceptors.length > 0) {
+      if (args.nativeToolPolicy === "orchestration-only" || collected.interceptors.length > 0) {
         pi.on("tool_call", async (event: any) => {
+          const toolName = interceptorToolName(event.toolName);
+          if (
+            args.nativeToolPolicy === "orchestration-only" &&
+            ["read", "write", "edit", "bash", "grep", "glob", "ls", "webfetch", "websearch", "task"].includes(toolName)
+          ) {
+            return {
+              block: true,
+              reason:
+                "This executor is coordination-only. Repository, shell, web, and CI inspection belong to the child implementor; use task/run state and spawn tools.",
+            };
+          }
           for (const fn of collected.interceptors) {
             // pi's built-ins are already lowercase but use its own names
             // (`find`/`ls`); fold them into the shared canonical vocabulary so
             // interceptors key on one set of names across both harnesses.
-            const decision = await fn({ toolName: interceptorToolName(event.toolName), input: event.input });
+            const decision = await fn({ toolName, input: event.input });
             if (!decision) continue;
             if ("block" in decision) return { block: true, reason: decision.reason };
             if ("input" in decision) Object.assign(event.input, decision.input);

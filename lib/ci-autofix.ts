@@ -31,6 +31,7 @@ import { db } from "@/db";
 import { resolveLiveness } from "@/lib/run-liveness";
 import { agentEvents, agentSessions, runTurns } from "@/db/schema";
 import { CODE_REVIEW_RECEPTION_GUIDANCE } from "./code-review-guidance";
+import { emitInboxEvent } from "./inbox";
 import * as repo from "./repo";
 import * as runs from "./runs";
 import { autofixEnabledFor } from "./github-webhook";
@@ -479,12 +480,36 @@ async function escalateExhausted(
 
     await repo.transitionTask(taskId, { state: "blocked", note });
 
-    await db.insert(agentEvents).values({
+    const [exhaustedEvent] = await db.insert(agentEvents).values({
       sessionId: anchorRunId,
       type: "github_autofix_exhausted",
       payload: JSON.stringify(payload),
       createdAt: new Date(),
-    });
+    }).returning({ id: agentEvents.id });
+
+    // Wake the supervising executor with a terminal coordination fact. This is
+    // deliberately NOT another CI repair request: the task is already blocked,
+    // and the executor's spawn tools reject attempts to bypass that state. The
+    // parent can now report the blocker promptly without polling CI itself.
+    const anchorRun = await runs.get(anchorRunId);
+    if (anchorRun?.parentRunId != null && exhaustedEvent) {
+      await emitInboxEvent({
+        targetRunId: anchorRun.parentRunId,
+        type: "ci.autofix_exhausted",
+        sourceKind: "system",
+        sourceId: String(anchorRunId),
+        dedupeKey: `ci-autofix-exhausted:${exhaustedEvent.id}`,
+        payload: {
+          task_id: taskId,
+          child_run_id: anchorRunId,
+          state: "blocked",
+          note,
+          ...payload,
+        },
+      }).catch((err) =>
+        console.error("ci-autofix: failed to notify supervising executor:", err)
+      );
+    }
     return true;
   } catch (err) {
     console.error("ci-autofix: escalation failed:", err);

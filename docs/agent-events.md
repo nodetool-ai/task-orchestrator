@@ -262,8 +262,16 @@ enqueues inbox events. `dedupe_key = gh:<delivery_id>:<run_id>`.
 | `gh.ci.completed` | pr_url, conclusion (success \| failure), check name, logs url |
 
 Routing: `audience: owner` to the run that **owns** the PR (matched by
-`pr_url`/`branch` as today); `audience: supervisor` copy to its parent (§5.2).
-Exactly one run is expected to act.
+`pr_url`/`branch` as today). Cross-run observation requires an explicit event
+subscription; ancestry alone does not copy the event. For red aggregate CI,
+the platform autofix loop owns repair dispatch and resumes that same PR-owning
+run through its durable claim/debounce/cap. Exactly one run is expected to act.
+
+When that bounded loop is exhausted (or no resumable PR-owning run exists), it
+first transitions the task to `blocked`, then sends the parent executor one
+direct `ci.autofix_exhausted` event (`source_kind: system`). The event is a
+terminal coordination fact, not permission to dispatch another repair: the
+executor reports the blocker and waits for human direction.
 
 ### 3.3 Timers (`source_kind: timer`)
 
@@ -678,6 +686,8 @@ export const runTimers = pgTable("run_timers", {
     .references(() => agentSessions.id, { onDelete: "cascade" }),
   fireAt: ts("fire_at").notNull(),
   note: text("note"),
+  // sleep | watchdog | deadline
+  kind: text("kind").notNull().default("watchdog"),
   // pending | fired | cancelled
   status: text("status").notNull().default("pending"),
   createdAt: ts("created_at").notNull().defaultNow(),
@@ -690,7 +700,9 @@ Tools:
 - **`timer__sleep(minutes, note?)`** — the always-available one. Inserts a
   timer, ends the turn, parks the run (`park_reason: 'sleeping'`). Wakes on
   `timer.fired` or any earlier owner event (sleep is a *maximum* wait, like
-  `select()` with a timeout, not a hard suspension).
+  `select()` with a timeout, not a hard suspension). When another input wins,
+  the pending sleep timer is cancelled atomically with that new turn's claim;
+  independent watchdog and deadline timers are not cancelled.
 - **`timer__set(minutes, note?)`** — schedule a future `timer.fired`
   *without* parking; returns `timer_id`. How an agent arms a watchdog for its
   own children: "wake me in 45 minutes even if nothing has happened." Multiple
@@ -782,8 +794,10 @@ Persona workflow (`lib/personas/executor.ts`) under this design:
    - child.exception / child.died (not)  → retry fresh once; then task → blocked + note
    - gh.pr.merged                        → task done arrives on its own; start
                                            newly-ready dependents
-   - gh.ci.completed (failure, own PR)   → n/a (child owns it; supervisor copy
-                                           is context — tool guard enforces, §5.2)
+   - gh.ci.completed (failure, own PR)   → n/a (platform autofix dispatches;
+                                           child diagnoses/fixes/pushes)
+   - ci.autofix_exhausted                → re-scan state, report blocked task;
+                                           never append/spawn another fixer
    - child.question                      → answer_question(child, qid, answer)
    - budget.warning                      → stop spawning; drain what's running
    - timer.fired (watchdog)              → spawn__get_run each outstanding child;

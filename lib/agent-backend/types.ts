@@ -136,6 +136,13 @@ export interface PostgresContextSource {
 export interface RunTurnArgs {
   cwd: string;
   model: { provider: string; id: string };
+  /**
+   * Restrict harness-provided coding tools for coordination-only personas.
+   * MCP/orchestrator tools remain available; native shell/filesystem/web tools
+   * do not. Backends must enforce this independently because native tools do
+   * not all pass through the neutral extension interceptor chain.
+   */
+  nativeToolPolicy?: "default" | "orchestration-only";
   thinkingLevel?: "low" | "medium" | "high" | "xhigh";
   toolCallingMode?: "direct" | "codeact";
   extensions: Extension[];

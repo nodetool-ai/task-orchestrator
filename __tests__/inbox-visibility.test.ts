@@ -85,7 +85,7 @@ describe("listRunTimers", () => {
   it("returns the run's timers, newest first", async () => {
     const run = await insertRun({});
     const t1 = await createTimer({ runId: run, minutes: 5, note: "watchdog" });
-    const t2 = await createTimer({ runId: run, minutes: 30 });
+    const t2 = await createTimer({ runId: run, minutes: 30, kind: "sleep" });
     expect(t1.ok && t2.ok).toBe(true);
 
     const rows = await listRunTimers(run);
@@ -94,6 +94,8 @@ describe("listRunTimers", () => {
       (t1 as { timerId: number }).timerId,
     ]);
     expect(rows[1].note).toBe("watchdog");
+    expect(rows[0].kind).toBe("sleep");
+    expect(rows[1].kind).toBe("watchdog");
   });
 });
 

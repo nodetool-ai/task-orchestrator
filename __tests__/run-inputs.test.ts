@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { db, initDb } from "../db";
-import { agentMessages, agentSessions, inboxEvents, runEventSubscriptions, runSourceEvents, runInputs, runTurns } from "../db/schema";
+import { agentMessages, agentSessions, inboxEvents, runEventSubscriptions, runSourceEvents, runInputs, runTimers, runTurns } from "../db/schema";
 import { eq } from "drizzle-orm";
 import { registerDefaultChildSubscriptionTx, publishAttemptFinishedTx } from "../lib/run-source-events";
 import { enqueueMessageTx, materializeInboxEventsTx, claimRunTurn, completeRunTurnTx } from "../lib/run-inputs";
@@ -16,7 +16,7 @@ async function message(runId: number, text: string) {
 
 beforeAll(() => initDb());
 beforeEach(async () => {
-  await db.delete(runTurns); await db.delete(runInputs); await db.delete(inboxEvents); await db.delete(agentMessages); await db.delete(runEventSubscriptions); await db.delete(runSourceEvents); await db.delete(agentSessions);
+  await db.delete(runTurns); await db.delete(runInputs); await db.delete(runTimers); await db.delete(inboxEvents); await db.delete(agentMessages); await db.delete(runEventSubscriptions); await db.delete(runSourceEvents); await db.delete(agentSessions);
 });
 
 describe("durable conversation inputs", () => {
@@ -39,6 +39,45 @@ describe("durable conversation inputs", () => {
     const refs = await db.transaction(tx => materializeInboxEventsTx(tx, id));
     expect(refs).toHaveLength(1); expect((await db.select().from(runInputs))).toHaveLength(1);
     expect((await db.select().from(inboxEvents))[0].status).toBe("injected");
+  });
+  it("cancels a superseded sleep when an event claims a new turn but preserves watchdogs and deadlines", async () => {
+    const id = await run("parked");
+    await db.update(agentSessions).set({ parkReason: "sleeping" }).where(eq(agentSessions.id, id));
+    await db.insert(runTimers).values([
+      { runId: id, fireAt: new Date(Date.now() + 300_000), kind: "sleep", note: "maximum wait" },
+      { runId: id, fireAt: new Date(Date.now() + 600_000), kind: "watchdog", note: "independent watchdog" },
+      { runId: id, fireAt: new Date(Date.now() + 900_000), kind: "deadline", note: "question deadline" },
+    ]);
+    await db.insert(inboxEvents).values({
+      targetRunId: id,
+      type: "task.transitioned",
+      payload: { status: "completed" },
+      sourceKind: "task",
+      sourceId: "T-999",
+    });
+
+    await db.transaction(tx => materializeInboxEventsTx(tx, id));
+    expect(await db.transaction(tx => claimRunTurn(tx, id, 1))).not.toBeNull();
+
+    const timers = await db.select().from(runTimers).where(eq(runTimers.runId, id));
+    expect(timers.find(timer => timer.kind === "sleep")?.status).toBe("cancelled");
+    expect(timers.find(timer => timer.kind === "watchdog")?.status).toBe("pending");
+    expect(timers.find(timer => timer.kind === "deadline")?.status).toBe("pending");
+  });
+  it("does not cancel a sleep when a replacement worker recovers the same active turn", async () => {
+    const id = await run();
+    const msg = await message(id, "turn");
+    await db.transaction(tx => enqueueMessageTx(tx, { runId: id, messageId: msg, kind: "user" }));
+    const first = await db.transaction(tx => claimRunTurn(tx, id, 4));
+    await db.insert(runTimers).values({
+      runId: id,
+      fireAt: new Date(Date.now() + 300_000),
+      kind: "sleep",
+    });
+
+    const recovered = await db.transaction(tx => claimRunTurn(tx, id, 5));
+    expect(recovered?.id).toBe(first?.id);
+    expect((await db.select().from(runTimers))[0].status).toBe("pending");
   });
   it("allocates a manifest and recovers it on replacement", async () => {
     const id = await run(); const msg = await message(id, "turn");

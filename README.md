@@ -697,11 +697,11 @@ Each delivery is matched to runs by PR url or by head branch + repository, then:
 - a **merged PR** transitions its task to `done` instantly (the poller is the
   fallback);
 - a **CI failure** or **"changes requested"** review adds a note to the task,
-  and — when `TASK_ORCH_CI_AUTOFIX=1` — resumes the agent on the same branch to
+  and — unless `TASK_ORCH_CI_AUTOFIX` is explicitly disabled — resumes the agent on the same branch to
   fix it and re-push (re-triggering CI). Auto-fix is capped
   (`TASK_ORCH_CI_AUTOFIX_MAX`, default 3) and debounced
-  (`TASK_ORCH_CI_AUTOFIX_DEBOUNCE_MS`, default 120s) per run; it is off by
-  default since it spends model budget unattended.
+  (`TASK_ORCH_CI_AUTOFIX_DEBOUNCE_MS`, default 120s) per run. It is on by
+  default; set `TASK_ORCH_CI_AUTOFIX=0` (or `false`/`no`/`off`) to disable it.
 
 The webhook is the fast path, but the 20s PR-state poller (`TASK_ORCH_PR_SYNC_MS`)
 also drives the same capped autofix when it sees a PR with red CI — so a dropped
@@ -711,7 +711,10 @@ guards (keyed to the same `github_autofix` events), so they never double-fire.
 When the loop can't converge — CI is still red after `TASK_ORCH_CI_AUTOFIX_MAX`
 attempts, or there's no resumable run left to fix in place — the task is escalated
 to `blocked` (once, guarded by a `github_autofix_exhausted` event) so a human is
-pulled in instead of the loop going silent.
+pulled in instead of the loop going silent. The parent executor receives a
+`ci.autofix_exhausted` wake, but cannot resume or replace the implementor while
+the task remains failing/blocked; this keeps the autofix claim and retry cap
+authoritative.
 
 ### Proactive scheduler (`TASK_ORCH_AUTO_LAUNCH`)
 

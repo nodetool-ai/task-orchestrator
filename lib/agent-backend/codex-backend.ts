@@ -250,7 +250,12 @@ export class CodexBackend implements AgentBackend {
           // CLI's own auth — so that auth is all the shell still needs removed.
           shell_environment_policy: {
             ignore_default_excludes: true,
-            exclude: [...CODEX_CLI_AUTH_KEYS],
+            exclude: [
+              ...CODEX_CLI_AUTH_KEYS,
+              ...(args.nativeToolPolicy === "orchestration-only"
+                ? ["GH_TOKEN", "GITHUB_TOKEN"]
+                : []),
+            ],
           },
         },
       });
@@ -261,11 +266,20 @@ export class CodexBackend implements AgentBackend {
         // A run's cwd is usually a git worktree, but chat-shaped runs can point
         // at a plain directory; the check would fail those outright.
         skipGitRepoCheck: true,
-        sandboxMode: config.agent.codexSandbox,
+        // The Codex SDK does not expose a native-tool allowlist. For an
+        // executor, force the strongest available structural equivalent:
+        // read-only sandbox, no native network/web search, and no GitHub token
+        // in shell children. MCP calls still go through the loopback bridge.
+        sandboxMode: args.nativeToolPolicy === "orchestration-only"
+          ? "read-only" as const
+          : config.agent.codexSandbox,
         // Approvals have no interactive channel in a run — the sandbox mode is
         // the policy.
         approvalPolicy: "never" as const,
-        networkAccessEnabled: true,
+        networkAccessEnabled: args.nativeToolPolicy === "orchestration-only" ? false : true,
+        ...(args.nativeToolPolicy === "orchestration-only"
+          ? { webSearchMode: "disabled" as const }
+          : {}),
         // Codex's reasoning-effort vocabulary is a superset of the neutral one,
         // so every level (xhigh included) passes through unchanged.
         ...(thinkingLevel ? { modelReasoningEffort: thinkingLevel } : {}),

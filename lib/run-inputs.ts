@@ -194,6 +194,15 @@ export async function claimRunTurn(
     await tx.execute(sql`DELETE FROM run_turns WHERE id = ${turnId}::uuid`);
     return null;
   }
+  // A sleep is a maximum wait for the next input, not a persistent watchdog.
+  // Retire it in the same transaction that accepts that input as a new turn.
+  // This deliberately runs after the existing-turn recovery return above: a
+  // replacement worker resuming the same turn must not cancel a sleep that the
+  // still-active turn just armed.
+  await tx.execute(sql`
+    UPDATE run_timers SET status = 'cancelled'
+     WHERE run_id = ${runId} AND status = 'pending' AND kind = 'sleep'
+  `);
   await tx.execute(sql`UPDATE agent_runs SET park_reason = NULL, result = NULL WHERE id = ${runId}`);
   const ids = inputRows.map((row) => String(row.id));
   await tx.execute(sql`

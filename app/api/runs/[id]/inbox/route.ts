@@ -52,6 +52,7 @@ export async function GET(
       })),
       timers: timers.map((t) => ({
         id: t.id,
+        kind: t.kind,
         status: t.status,
         note: t.note,
         correlationId: t.correlationId,

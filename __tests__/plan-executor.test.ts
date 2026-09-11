@@ -21,6 +21,7 @@ import { ORCHESTRATOR_TOOLS } from "../lib/orchestrator-tools";
 import { decideTurnEndStatus } from "../lib/run-state";
 import { buildExecutePrompt } from "../lib/run-templates";
 import { PERSONAS } from "../lib/personas";
+import { SPAWN_TOOLS } from "../lib/extensions/spawn";
 import { seedPersonas } from "../db/seed-personas";
 
 beforeEach(async () => {
@@ -69,6 +70,56 @@ describe("executor persona", () => {
     // gh_pr or repo tools. Children own the PR/repo work end-to-end.
     expect(p!.toolsProfile).not.toContain("gh_pr");
     expect(p!.toolsProfile).not.toContain("repo_read");
+    expect(p!.systemPrompt).toContain("CI ownership is single-writer");
+    expect(p!.systemPrompt).toContain("Never inspect CI with");
+    expect(p!.systemPrompt).toContain("ci.autofix_exhausted");
+  });
+
+  it("cannot bypass autofix by appending to or replacing a failing implementor", async () => {
+    const plan = await repo.createPlan({ title: "CI ownership", date: "2026-09-11" });
+    const task = await repo.createTask({ planId: plan.id, title: "Fix me", date: "2026-09-11" });
+    await repo.transitionTask(task.id, { state: "in_progress", assignee: "child" });
+    await repo.transitionTask(task.id, { state: "testing" });
+    await repo.transitionTask(task.id, { state: "failing" });
+
+    const parent = await insertRun({
+      goal: "<execute>",
+      status: "running",
+      personaId: "executor",
+      planId: plan.id,
+    });
+    const child = await insertRun({
+      goal: "<implement>",
+      status: "completed",
+      personaId: "implementor",
+      parentRunId: parent,
+      taskId: task.id,
+      cwdStrategy: "worktree",
+      branch: "claude/ci-owner",
+      worktreePath: "/tmp/ci-owner",
+    });
+
+    const append = SPAWN_TOOLS.find((entry) => entry.name === "spawn__append_message")!;
+    const appendResult = await append.execute(
+      { run_id: child, text: "Fix CI now" },
+      { author: "executor", runId: parent }
+    );
+    expect(appendResult.isError).toBe(true);
+    expect((appendResult.content[0] as { text: string }).text).toMatch(/CI repair dispatch is owned/i);
+
+    const spawn = SPAWN_TOOLS.find((entry) => entry.name === "spawn__spawn_agent")!;
+    const spawnResult = await spawn.execute(
+      {
+        goal: "<implement>",
+        persona: "implementor",
+        tools_profile: "orchestrator,repo_write,gh_pr,gh_ci",
+        cwd_strategy: "worktree",
+        task_id: task.id,
+      },
+      { author: "executor", runId: parent }
+    );
+    expect(spawnResult.isError).toBe(true);
+    expect((spawnResult.content[0] as { text: string }).text).toMatch(/CI repair dispatch is owned/i);
   });
 });
 

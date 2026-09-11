@@ -4,6 +4,7 @@ import {
   sumTreeCost,
   checkTreeBudget,
   checkAppendableStatus,
+  checkExecutorCiRepairOwnership,
   checkToolsProfile,
   checkSpawnStartable,
   extractLatestAssistantText,
@@ -252,6 +253,21 @@ describe("checkAppendableStatus (append_message refusal predicate)", () => {
     expect(checkAppendableStatus("running", "none")).toBeNull();
     expect(checkAppendableStatus("preparing", "none")).toBeNull();
     expect(checkAppendableStatus("pushing", "none")).toBeNull();
+  });
+});
+
+describe("checkExecutorCiRepairOwnership", () => {
+  it("blocks executor repair dispatch while CI owns a failing task", () => {
+    expect(checkExecutorCiRepairOwnership("executor", "failing")).toMatch(/autofix loop/i);
+  });
+
+  it("blocks executor retries after autofix escalates the task", () => {
+    expect(checkExecutorCiRepairOwnership("executor", "blocked")).toMatch(/report the recorded escalation/i);
+  });
+
+  it("allows pre-CI executor guidance and non-executor callers", () => {
+    expect(checkExecutorCiRepairOwnership("executor", "in_progress")).toBeNull();
+    expect(checkExecutorCiRepairOwnership("implementor", "failing")).toBeNull();
   });
 });
 

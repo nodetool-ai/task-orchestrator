@@ -249,6 +249,22 @@ describe("CodexBackend.runTurn CLI configuration", () => {
     expect(sdk.threadOptions.sandboxMode).toBe("danger-full-access");
   });
 
+  it("forces coordination-only executors offline and read-only", async () => {
+    vi.stubEnv("TASK_ORCH_CODEX_SANDBOX", "danger-full-access");
+    sdk.scripts = [[started("th_executor"), completed]];
+    await new CodexBackend().runTurn(
+      makeArgs({ nativeToolPolicy: "orchestration-only" })
+    );
+    expect(sdk.threadOptions).toMatchObject({
+      sandboxMode: "read-only",
+      networkAccessEnabled: false,
+      webSearchMode: "disabled",
+    });
+    expect(sdk.ctorOptions.config.shell_environment_policy.exclude).toEqual(
+      expect.arrayContaining(["GH_TOKEN", "GITHUB_TOKEN"])
+    );
+  });
+
   it("passes xhigh reasoning through unchanged (Codex's vocabulary is a superset)", async () => {
     sdk.scripts = [[started("th_1"), completed]];
     await new CodexBackend().runTurn(makeArgs({ thinkingLevel: "xhigh" }));

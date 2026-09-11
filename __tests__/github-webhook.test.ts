@@ -731,7 +731,14 @@ describe("handleWebhookEvent CI-autofix escalation", () => {
   it("escalates to blocked once when the attempt cap is hit", async () => {
     const { AUTOFIX_MAX } = await import("../lib/ci-autofix");
     const taskId = await makeFailingTask();
+    const [parent] = await db.insert(agentSessions).values({
+      goal: "<execute>",
+      status: "idle",
+      cwdStrategy: "repo",
+      repoId: "R-acme",
+    }).returning({ id: agentSessions.id });
     const runId = await insertRun("idle");
+    await db.update(agentSessions).set({ parentRunId: parent.id }).where(eq(agentSessions.id, runId));
     for (let i = 0; i < AUTOFIX_MAX; i++) {
       await db.insert(agentEvents).values({
         sessionId: runId,
@@ -745,11 +752,26 @@ describe("handleWebhookEvent CI-autofix escalation", () => {
     expect((await repo.getTask(taskId))!.state).toBe("blocked");
     expect(mockFollowUp).not.toHaveBeenCalled();
     expect(await eventsOfType(runId, "github_autofix_exhausted")).toBe(1);
+    const parentNotices = await db.select().from(inboxEvents).where(and(
+      eq(inboxEvents.targetRunId, parent.id),
+      eq(inboxEvents.type, "ci.autofix_exhausted")
+    ));
+    expect(parentNotices).toHaveLength(1);
+    expect(parentNotices[0].payload).toMatchObject({
+      task_id: taskId,
+      child_run_id: runId,
+      state: "blocked",
+      kind: "attempt_cap",
+    });
 
     // A second delivery does not re-escalate (guard) and does not undo the block.
     await handleWebhookEvent(ciFailure(), "d-cap-2", fakeFetch(gh({ ciConclusion: "failure" })));
     expect((await repo.getTask(taskId))!.state).toBe("blocked");
     expect(await eventsOfType(runId, "github_autofix_exhausted")).toBe(1);
+    expect(await db.select().from(inboxEvents).where(and(
+      eq(inboxEvents.targetRunId, parent.id),
+      eq(inboxEvents.type, "ci.autofix_exhausted")
+    ))).toHaveLength(1);
   });
 
   it("escalates to blocked when there is no resumable run", async () => {

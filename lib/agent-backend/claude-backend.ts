@@ -30,6 +30,10 @@ import type { RunEnvelope } from "../pi-event-mapper";
 
 const TAG = "claude:";
 const MCP_SERVER_NAME = "task_orch";
+const ORCHESTRATION_ONLY_NATIVE_TOOLS = [
+  "Read", "Write", "Edit", "NotebookEdit", "Bash", "Grep", "Glob",
+  "WebFetch", "WebSearch", "Task",
+] as const;
 
 /** The CLI's error when a `--resume <id>` transcript isn't on this machine's
  *  disk. Surfaced by the SDK as a thrown stream error ("Claude Code returned an
@@ -301,6 +305,9 @@ export class ClaudeBackend implements AgentBackend {
             ? { effort: thinkingLevel === "xhigh" ? "high" : thinkingLevel }
             : {}),
           permissionMode: "bypassPermissions",
+          ...(args.nativeToolPolicy === "orchestration-only"
+            ? { disallowedTools: [...ORCHESTRATION_ONLY_NATIVE_TOOLS] }
+            : {}),
           systemPrompt: {
             type: "preset",
             preset: "claude_code",

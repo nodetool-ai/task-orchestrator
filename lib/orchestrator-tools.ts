@@ -1157,6 +1157,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
         minutes,
         note: `await_session #${session_id} timeout`,
         correlationId: `await-session:${session_id}`,
+        kind: "deadline",
       });
       // Park via the shared turn-effect writer (lib/run-state.ts) — the same
       // path the events.ts tools use — instead of a bespoke db.update. Keeps the

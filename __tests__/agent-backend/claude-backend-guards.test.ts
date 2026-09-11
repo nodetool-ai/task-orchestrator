@@ -60,6 +60,16 @@ describe("ClaudeBackend.runTurn guards", () => {
     expect(Object.keys(sdk.captured.options.mcpServers)).toEqual(["task_orch"]);
   });
 
+  it("disables native coding and web tools for coordination-only executors", async () => {
+    sdk.captured = null;
+    await new ClaudeBackend().runTurn(
+      makeArgs({ nativeToolPolicy: "orchestration-only" })
+    );
+    expect(sdk.captured.options.disallowedTools).toEqual(
+      expect.arrayContaining(["Read", "Write", "Edit", "Bash", "Grep", "Glob", "WebFetch", "WebSearch", "Task"])
+    );
+  });
+
   it("mounts the shared CodeAct contract without disabling Claude's native coding preset", async () => {
     const direct = (reg: any) => reg.registerTool({
       name: "task_orch__list_tasks",

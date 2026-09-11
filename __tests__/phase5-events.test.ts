@@ -249,6 +249,25 @@ describe("5.6 timer hygiene", () => {
     expect(other.status).toBe("pending");
   });
 
+  it("a legacy inbox wake cancels only sleep timers at the atomic claim boundary", async () => {
+    const run = await insertRun({ status: "parked", parkReason: "sleeping" });
+    await createTimer({ runId: run, minutes: 10, note: "maximum wait", kind: "sleep" });
+    await createTimer({ runId: run, minutes: 30, note: "watchdog", kind: "watchdog" });
+    await emitInboxEvent({
+      targetRunId: run,
+      type: "task.transitioned",
+      sourceKind: "task",
+      sourceId: "T-999",
+      noWake: true,
+    });
+
+    expect(await injectPendingInboxEvents(run)).toBeTruthy();
+
+    const timers = await db.select().from(runTimers).where(eq(runTimers.runId, run));
+    expect(timers.find(timer => timer.kind === "sleep")?.status).toBe("cancelled");
+    expect(timers.find(timer => timer.kind === "watchdog")?.status).toBe("pending");
+  });
+
   it("cancelTimersByCorrelation only touches pending timers with the matching correlation", async () => {
     const run = await insertRun({});
     const match = await createTimer({
