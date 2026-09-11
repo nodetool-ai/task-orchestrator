@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
-import { agentSessions, inboxEvents, runEventSubscriptions } from "../db/schema";
+import { agentMessages, agentSessions, inboxEvents, runEventSubscriptions } from "../db/schema";
 import * as runs from "../lib/runs";
 import * as repo from "../lib/repo";
 import { startSession } from "../lib/agent";
@@ -25,6 +25,54 @@ async function fixture() {
 }
 
 describe("replacement supervision", () => {
+  it("exposes tool activity through the real get_session supervision entry point", async () => {
+    const task = await repo.createTask({
+      planId: null,
+      repoId: "R-default",
+      title: "Observe active tooling",
+    });
+    const child = await startSession({ taskId: task.id });
+    await db.insert(agentMessages).values({
+      runId: child.id,
+      role: "agent",
+      content: JSON.stringify([
+        { type: "tool_use", id: "active-build", name: "Bash", input: { command: "private" } },
+      ]),
+    });
+    const getSession = ORCHESTRATOR_TOOLS.find(t => t.name === "get_session")!;
+
+    const response = await getSession.execute(
+      { session_id: child.id, tail: 5 },
+      { runId: 999, author: "executor" }
+    );
+
+    const body = JSON.parse(String(response.content[0].text));
+    expect(body.activity.in_flight_tools).toEqual([
+      expect.objectContaining({ tool_use_id: "active-build", tool_name: "Bash" }),
+    ]);
+    expect(JSON.stringify(body.activity)).not.toContain("private");
+  });
+
+  it("denies model-driven destructive cancellation of a task worktree", async () => {
+    const parent = await runs.create({ goal: "<execute>", defer: true });
+    const task = await repo.createTask({
+      planId: null,
+      repoId: "R-default",
+      title: "Preserve unpublished work",
+    });
+    const child = await startSession({ taskId: task.id, parentRunId: parent.id });
+    const cancel = ORCHESTRATOR_TOOLS.find(t => t.name === "cancel_session")!;
+
+    const response = await cancel.execute(
+      { session_id: child.id },
+      { runId: parent.id, author: "executor" }
+    );
+
+    expect(response.isError).toBe(true);
+    expect(response.content[0].text).toContain("Destructive cancellation denied");
+    expect((await runs.get(child.id))?.status).not.toBe("cancelled");
+  });
+
   it("keeps the original supervisor when another root retries a failed task without a resume token", async () => {
     const { parent, other, task, prior } = await fixture();
     const tool = ORCHESTRATOR_TOOLS.find(t => t.name === "start_session")!;

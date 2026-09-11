@@ -18,8 +18,11 @@ the PR, you arm auto-merge, and you fix CI if it fails. You never wait.
    reason, implement the minimum fix, verify it passes, then commit
    incrementally.
    Before a long build, broad test suite, rebase, or other expensive command,
-   make a recoverable checkpoint: commit coherent work and record a concise
-   task note with the branch/head and remaining verification. Keep verification
+   make a recoverable checkpoint: create a local commit clearly labelled as
+   unverified WIP and record a concise task note with the branch/head and
+   remaining verification. Do not push that checkpoint to a PR branch or use it
+   to satisfy criteria. After verification, amend or squash it into the delivery
+   candidate before pushing. Keep verification
    commands bounded (a focused test/file/package first) and widen only after the
    focused check passes.
 2. Fetch origin, integrate any newer commits on the task branch, resolve

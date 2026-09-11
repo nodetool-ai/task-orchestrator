@@ -30,6 +30,7 @@ import { listProfiles } from "../profiles";
 import type { OrchestratorTool, OrchestratorToolResult } from "../orchestrator-tools";
 import { legacyToolInvoker } from "./legacy-invoker";
 import type { ExtensionFactory, ToolInvoker } from "./types";
+import { getRunActivitySnapshot } from "../run-activity";
 
 // ────────────────────────────────────────
 // Constants
@@ -98,6 +99,36 @@ export function checkTreeBudget(
     return { capUsd: cap, spentUsd };
   }
   return null;
+}
+
+/**
+ * Supervisor guidance is ordinary model-authored input, not trusted policy.
+ * Reject the dangerous incident class where a parent asks an implementor to
+ * weaken verification specifically so it can publish or arm auto-merge.
+ * This is containment; publication still needs a future evidence-backed
+ * control-plane service because native shell commands cannot be intercepted.
+ */
+export function checkSupervisorMessageSafety(text: string): string | null {
+  const requestsRemotePublication =
+    /\b(push|publish|open\s+(?:the\s+)?(?:pr|pull request)|arm\s+(?:squash\s+)?auto[- ]?merge)\b/i.test(
+      text
+    );
+  if (!requestsRemotePublication) return null;
+
+  const weakensVerification = [
+    /\b(?:do not|don't|never)\s+(?:run|rerun|wait for|perform|complete)\b[^.\n]{0,100}\b(?:tests?|testing|verification|verify|build|lint|typecheck)\b/i,
+    /\bskip(?:ping)?\s+(?:the\s+)?(?:tests?|testing|verification|build|lint|typecheck)\b/i,
+    /\bstop\b[^.\n]{0,80}\b(?:tests?|testing|verification|build|lint|typecheck)\b/i,
+    /\b(?:push|publish|open\s+(?:the\s+)?(?:pr|pull request)|auto[- ]?merge)\b[^.\n]{0,100}\b(?:before|without)\b[^.\n]{0,80}\b(?:tests?|testing|verification|verify|build|lint|typecheck)\b/i,
+    /\bci\b[^.\n]{0,60}\b(?:will|can|should)\b[^.\n]{0,60}\b(?:verify|verification|perform\s+(?:the\s+)?tests?)\b/i,
+  ].some((pattern) => pattern.test(text));
+
+  return weakensVerification
+    ? "Supervisor message rejected by delivery policy: parent guidance cannot " +
+        "skip or defer verification in order to push, publish a PR, or arm auto-merge. " +
+        "You may request a local, explicitly unverified recovery checkpoint before a " +
+        "long command, but publication must wait for fresh verification."
+    : null;
 }
 
 /**
@@ -580,7 +611,7 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
       name: "spawn__get_run",
       label: "Get Run",
       description:
-        "Look up a run by id and return its current status, outcome, and last agent text. Use to inspect authoritative current state; event messages notify you automatically.",
+        "Look up a run by id and return its current status, outcome, last agent text, and a content-free activity snapshot with in-flight tools. Use activity timestamps—not branch/PR absence—to assess progress; event messages notify you automatically.",
       parameters: Type.Object({ id: Type.Integer({ minimum: 1 }) }),
       execute: async ({ id }: { id: number }, _ctx) => {
         const run = await runs.get(id);
@@ -609,6 +640,7 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
               status: run.status,
               outcome: run.outcome,
               last_text: lastText,
+              activity: await getRunActivitySnapshot(id),
               pr_url: run.prUrl,
               total_cost_usd: run.totalCostUsd,
               parent_run_id: run.parentRunId,
@@ -701,6 +733,10 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
           targetTask?.state ?? null
         );
         if (ciOwnershipError) return errResult(ciOwnershipError);
+        if (target.goal === "<implement>" && target.cwdStrategy === "worktree") {
+          const policyError = checkSupervisorMessageSafety(args.text);
+          if (policyError) return errResult(policyError);
+        }
 
         // Envelope for a fire-and-forget append (the message is persisted + a
         // turn is running, but we did not wait for it). To read the reply, the

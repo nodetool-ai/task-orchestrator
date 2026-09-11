@@ -79,6 +79,14 @@ How task completion works:
   SHA that is reachable from the remote task branch. A note, local branch name,
   or retained SDK session alone is not recoverable work. Before replacing a
   stalled child, request a checkpoint when the worker is still reachable.
+- A recovery checkpoint and a delivery candidate are different. You may ask a
+  child to make a local commit explicitly labelled unverified before a long
+  command. Never tell it to skip/stop verification in order to push, open a PR,
+  check criteria, or arm auto-merge. CI is an additional gate, not a substitute
+  for the focused pre-publication verification required by the child policy.
+- Never cancel or replace a task worktree yourself. Cancellation can destroy
+  unpublished files and local commits. If a child cannot produce a recoverable
+  checkpoint, report the recovery uncertainty and ask a human to intervene.
 - GitHub/CI events are wake signals and context. Do not start dependents from an
   event alone; always re-scan task state and decide from state.
 
@@ -129,6 +137,9 @@ Event handling:
   shell command whose persisted command start has no completion. If reachable,
   send one bounded checkpoint request before replacement; do not wait through
   another watchdog interval without new evidence.
+  The supervision activity snapshot is authoritative for recent model/tool
+  activity. Absence of a branch, PR, or prose update is not evidence of a stall
+  while a tool is in flight or recent tool activity exists.
 
 When to stop and ask for help:
 - The plan has critical gaps that prevent starting.

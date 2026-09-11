@@ -24,6 +24,7 @@ import {
 import { createTimer, TIMER_MAX_MINUTES, TIMER_MIN_MINUTES } from "./inbox";
 import { recordTurnEffect } from "./run-state";
 import { subscribeRunEvents, listRunSubscriptions } from "./run-event-subscriptions";
+import { getRunActivitySnapshot } from "./run-activity";
 
 // Derived from TASK_TRANSITIONS so the transition_task description can never
 // drift from the actual allowed edges (a hardcoded list silently goes stale
@@ -1030,7 +1031,8 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
   {
     name: "get_session",
     label: "Get Session",
-    description: "Get an agent session including its recent event tail.",
+    description:
+      "Get a session with its lifecycle event tail and a content-free worker activity snapshot, including recent agent/tool timestamps and in-flight tool calls.",
     parameters: Type.Object({
       session_id: Type.Integer(),
       tail: Type.Optional(Type.Integer()),
@@ -1041,6 +1043,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       const events = await agentLib.getSessionEvents(session_id, 0, tail ?? 50);
       return jsonResult({
         ...summariseSession(s),
+        activity: await getRunActivitySnapshot(session_id),
         recent_events: events.map((e) => ({
           id: e.id,
           type: e.type,
@@ -1192,9 +1195,25 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
   {
     name: "cancel_session",
     label: "Cancel Session",
-    description: "Cancel a running agent session.",
+    description:
+      "Terminally cancel a running session. This is destructive for task worktrees: the worker is stopped and unpublished checkout state may be deleted. Model-run callers cannot use it on task worktrees; request a checkpoint or human recovery instead.",
     parameters: Type.Object({ session_id: Type.Integer() }),
-    execute: async ({ session_id }, _ctx) => {
+    execute: async ({ session_id }, ctx) => {
+      const target = await runs.get(session_id);
+      if (!target) return errResult(`Error: Session ${session_id} not found`);
+      if (
+        ctx.runId != null &&
+        !isTerminalStatus(target.status) &&
+        target.taskId &&
+        target.cwdStrategy === "worktree"
+      ) {
+        return errResult(
+          `Destructive cancellation denied for task worktree session #${session_id}. ` +
+            "A supervisor cannot prove that unpublished checkout state is recoverable. " +
+            "Inspect the activity snapshot, request a local recovery checkpoint, and " +
+            "escalate to a human if the worker cannot respond."
+        );
+      }
       const result = await safe(() => agentLib.cancelSession(session_id));
       if ("_error" in result) return errResult(`Error: ${result._error}`);
       return ok(`Session #${result.id} status: ${result.status}.`);

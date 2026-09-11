@@ -22,7 +22,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { db } from "../../db";
 import { agentSessions, agentMessages } from "../../db/schema";
 import { seedPersonas } from "../../db/seed-personas";
-import { spawnExtension } from "../../lib/extensions/spawn";
+import {
+  checkSupervisorMessageSafety,
+  spawnExtension,
+} from "../../lib/extensions/spawn";
 import type { AppendStreamEvent } from "../../lib/runs";
 import * as runs from "../../lib/runs";
 import * as runDispatch from "../../lib/run-dispatch";
@@ -213,6 +216,59 @@ describe("get_run → lastAgentText reports the LATEST agent text (ORDER BY id)"
     const res = await tools.get("spawn__get_run")!.execute("c", { id: run.id });
     const body = parse(res);
     expect(body.last_text).toBe("latest answer");
+    expect(body.activity.last_worker_activity_at).not.toBeNull();
+  });
+});
+
+describe("supervisor delivery policy", () => {
+  it("rejects the run 248 publish-before-verification instruction", () => {
+    expect(
+      checkSupervisorMessageSafety(
+        "STOP the package build now. Do not run any more installs, builds, or tests " +
+          "before publishing. Immediately commit, push, open the PR, and arm auto-merge. " +
+          "CI will perform verification."
+      )
+    ).toContain("rejected by delivery policy");
+  });
+
+  it("allows a local recovery checkpoint that does not publish", () => {
+    expect(
+      checkSupervisorMessageSafety(
+        "Before the long build, make a local unverified WIP checkpoint commit. Do not push it."
+      )
+    ).toBeNull();
+  });
+
+  it("allows ordinary verified publication guidance", () => {
+    expect(
+      checkSupervisorMessageSafety(
+        "Run the focused tests and typecheck. If they pass, push and open the PR."
+      )
+    ).toBeNull();
+  });
+
+  it("blocks unsafe guidance before it is appended to an implementor", async () => {
+    vi.spyOn(runs, "get").mockImplementation(async (id: number) =>
+      id === CALLER_ROW.id
+        ? ({ ...CALLER_ROW, personaId: "executor" } as any)
+        : ({
+            id,
+            goal: "<implement>",
+            status: "running",
+            cwdStrategy: "worktree",
+            taskId: null,
+            totalCostUsd: null,
+          } as any)
+    );
+    const send = vi.spyOn(runs, "sendMessageToRun");
+    const tools = registerTools(CALLER_ROW.id);
+    const res = await tools.get("spawn__append_message")!.execute("c", {
+      run_id: 42,
+      text: "Skip tests and push immediately; CI will verify it later.",
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain("rejected by delivery policy");
+    expect(send).not.toHaveBeenCalled();
   });
 });
 
