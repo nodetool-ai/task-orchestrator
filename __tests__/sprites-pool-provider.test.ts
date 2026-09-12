@@ -195,4 +195,50 @@ describe("Sprite pool provider integration", () => {
     await expect(new SpritesRunnerProvider(warmClient).create({ runId: warm.id, scope: `run-${warm.id}`, workerGeneration: 4, providerOperationId: warmOp, channelInstanceId: "wi_33333333333333333333333333333333", providerServiceName: "worker-g4" })).resolves.toBeTruthy();
     expect(warmClient.restoreCheckpoint).toHaveBeenCalledWith("pool-at-cap", "cp-at-cap");
   });
+
+  it("does not let a null Sprite mapping block a cold create at the hard cap", async () => {
+    vi.stubEnv("TASK_ORCH_SPRITE_POOL_SIZE", "0");
+    vi.stubEnv("SPRITES_TOKEN", "test-token");
+    vi.stubEnv("TASK_ORCH_RUNNER", "sprites");
+    vi.stubEnv("TASK_ORCH_SPRITES_WORKER_BUNDLE_URL", "https://example/worker.tgz");
+    const capacityBeforePhantom = await spritesPoolStore.countCapacity();
+    // Leave one slot of headroom for a pool refill already queued by a prior
+    // test. Three null mappings must still be ignored by the provider's own
+    // hard-cap query; counting them would exceed this limit.
+    vi.stubEnv("TASK_ORCH_MAX_SPRITES", String(capacityBeforePhantom.total + 2));
+    const phantoms = await Promise.all(Array.from({ length: 3 }, () => create({ goal: "<implement>", defer: true })));
+    await db.insert(runnerInstances).values(phantoms.map((phantom) => ({
+      runId: phantom.id,
+      provider: "sprites",
+      spriteName: null,
+      state: "starting",
+      generationState: "stopped",
+    })));
+    const cold = await create({ goal: "<implement>", defer: true });
+    const op = "00000000-0000-4000-8000-000000000037";
+    await db.insert(runnerInstances).values({
+      runId: cold.id,
+      provider: "sprites",
+      state: "starting",
+      workerGeneration: 1,
+      generationState: "allocating",
+      providerOperationId: op,
+      channelInstanceId: "wi_44444444444444444444444444444444",
+      providerServiceName: "worker-g1",
+    });
+    const c = client();
+
+    await expect(new SpritesRunnerProvider(c).create({
+      runId: cold.id,
+      scope: `run-${cold.id}`,
+      workerGeneration: 1,
+      providerOperationId: op,
+      channelInstanceId: "wi_44444444444444444444444444444444",
+      providerServiceName: "worker-g1",
+    })).resolves.toBeTruthy();
+    expect(c.createSprite).toHaveBeenCalledWith({
+      name: spriteNameForRun(cold.id),
+      urlSettings: { auth: "sprite" },
+    });
+  });
 });

@@ -146,6 +146,10 @@ export function spritesRunnerStateFromStatus(status: string | undefined): Runner
     case "running":
       return "running";
     case "warm":
+      // Warm is a suspended VM, not an in-progress bootstrap. Treating it as
+      // `starting` made the lifecycle policy's bootstrap guard permanent and
+      // prevented terminal run Sprites from ever reaching age-based cleanup.
+      return "suspended";
     case "starting":
     case "creating":
       return "starting";
@@ -596,6 +600,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
             SELECT ((SELECT count(*) FROM sprite_pool_entries WHERE state <> 'deleted') +
               (SELECT count(*) FROM runner_instances ri LEFT JOIN sprite_pool_entries pe ON pe.sprite_name=ri.sprite_name
                WHERE ri.provider='sprites' AND ri.run_id <> ${input.runId}
+                 AND ri.sprite_name IS NOT NULL
                  AND ri.state <> 'gone' AND ri.generation_state <> 'allocating' AND pe.id IS NULL))::int AS count`);
           if (Number(counts[0]?.count ?? 0) >= config.sprites.maxSprites) throw new SpriteCapacityError();
           const updated = await tx.update(runnerInstances).set(mapping).where(and(
@@ -1140,7 +1145,26 @@ export class SpritesRunnerProvider implements RunnerProvider {
     for (const r of rows) if (r.spriteName) protectedNames.add(r.spriteName);
 
     for (const row of rows) {
-      if (!row.spriteName) continue;
+      if (!row.spriteName) {
+        // Failed pre-allocation attempts can leave a terminal runner row in a
+        // nonterminal-looking state even though no provider resource exists.
+        // Normalize it so operational views agree with reality. The null-name
+        // and generation guards keep this from racing a fresh allocation.
+        if (row.runStatus && isTerminalStatus(row.runStatus as SessionStatus)) {
+          const normalized = await this.updateInstance(row.runId, {
+            state: "gone",
+            generationState: "stopped",
+            providerOperationId: null,
+          }, {
+            workerGeneration: row.workerGeneration ?? undefined,
+            spriteName: null,
+          });
+          if (normalized) await emitRunnerEvent(row.runId, "runner_mapping_reconciled", {
+            reason: "terminal-run-without-sprite",
+          });
+        }
+        continue;
+      }
       const spriteName = row.spriteName;
       // Serialize the complete observation/reconciliation transaction with
       // create, resume, stop, and destroy for this run. A lock only around the
@@ -1199,6 +1223,22 @@ export class SpritesRunnerProvider implements RunnerProvider {
         }
 
         const runStatus = (row.runStatus ?? "closed") as SessionStatus;
+        const idleMs = Math.max(0, now - lastActivityMs(row));
+        // Retention expiry is authoritative for inactive/terminal runs. Check
+        // it before inspecting the worker service: service inspection can wake
+        // a hibernated Sprite, and a stale/restartable service must not retain
+        // an otherwise terminal environment forever.
+        const expired = nextSpritesLifecycleAction({
+          runStatus,
+          runnerState,
+          idleMs,
+          workerLive: false,
+          goal: row.runGoal,
+        });
+        if (expired.kind === "destroy") {
+          await this.applyLifecycle(row, runnerState, runStatus, now, false);
+          return;
+        }
         const observed = row.workerGeneration != null
           ? await this.inspectGeneration({
               runId: row.runId,

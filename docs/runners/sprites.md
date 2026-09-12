@@ -107,17 +107,23 @@ Auto-wake: dialing a cold sprite wakes it; no explicit start call.
 
 Every pump tick (`TASK_ORCH_PENDING_PUMP_MS`, default 15s) the sweep lists sprites by prefix
 (paginating past the 50-item cap), reconciles each row's state
-(`running→running`, `warm→starting`, `cold→suspended`, 404→`gone`), and
+(`running→running`, `warm/cold→suspended`, 404→`gone`), and
 decides a lifecycle action. **Suspension is automatic** — sprites hibernate
 themselves ~30s after activity ceases. The only decision left to us is
 **destroy**: `nextSpritesLifecycleAction` → `destroy` once a terminal run is
 past `TASK_ORCH_RUNNER_TERMINAL_MS` (default 24h), or an idle run past
-`TASK_ORCH_RUNNER_STOP_MS` (default 7d); a provider-observed live worker is
+`TASK_ORCH_RUNNER_STOP_MS` (default 7d). Once an inactive run's retention
+window expires, the sweep destroys its Sprite without probing the worker
+service first; this avoids waking idle environments and prevents a stale
+restartable service from retaining storage forever. Before the retention
+window expires, a provider-observed live worker is
 never destroyed. A missing sprite → the row goes `gone` and, if the run was
 still active, the death policy runs. The sweep also reaps leaked prefix-owned
 sprites with no live row (after a grace window). A `cold` sprite with an active
 run is **not** a death — hibernation mid-turn is not failure. A wedged-but-alive
 worker is bounded by the backend progress watchdog and any explicit run budget.
+Terminal runner mappings that never acquired a Sprite are normalized to `gone`
+and excluded from capacity accounting.
 
 ### Lifecycle
 

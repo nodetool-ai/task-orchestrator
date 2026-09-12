@@ -11,6 +11,30 @@ beforeEach(async () => {
 });
 
 describe("Sprite pool store (Postgres)", () => {
+  it("does not count runner rows without a provider resource against capacity", async () => {
+    const run = (await db.insert(agentSessions).values({
+      status: "failed",
+      goal: "<implement>",
+      toolsProfile: "",
+      cwdStrategy: "worktree",
+    }).returning())[0]!;
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      provider: "sprites",
+      spriteName: null,
+      state: "starting",
+      generationState: "stopped",
+    });
+
+    await expect(spritesPoolStore.countCapacity()).resolves.toMatchObject({ total: 0 });
+    await expect(spritesPoolStore.reservePreparation({
+      spriteName: `pool-after-phantom-${crypto.randomUUID()}`,
+      fingerprint: "fp-after-phantom",
+      checkpointId: "pending",
+      baselineManifest: {},
+    }, 1)).resolves.not.toBeNull();
+  });
+
   it("keeps failed deletion resources inside the unused budget without a hard cap", async () => {
     await db.insert(spritePoolEntries).values({ spriteName: "pool-delete-outage", state: "deleting",
       fingerprint: "old", baselineManifest: {}, checkpointId: "cp-old" });

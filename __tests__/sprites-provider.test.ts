@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 
 import { db } from "../db";
-import { agentMessages, agentSessions, inboxEvents, runInputs, runTurns, runnerInstances } from "../db/schema";
+import { agentEvents, agentMessages, agentSessions, inboxEvents, runInputs, runTurns, runnerInstances } from "../db/schema";
 import { create } from "../lib/runs";
 import {
   buildSpritesWorkerEnv,
@@ -89,7 +89,7 @@ afterEach(async () => {
 describe("spritesRunnerStateFromStatus", () => {
   it("maps known statuses", () => {
     expect(spritesRunnerStateFromStatus("running")).toBe("running");
-    expect(spritesRunnerStateFromStatus("warm")).toBe("starting");
+    expect(spritesRunnerStateFromStatus("warm")).toBe("suspended");
     expect(spritesRunnerStateFromStatus("cold")).toBe("suspended");
     expect(spritesRunnerStateFromStatus("destroyed")).toBe("gone");
     expect(spritesRunnerStateFromStatus("unknown_status_xyz")).toBe("starting");
@@ -918,6 +918,71 @@ describe("isRunSpriteName", () => {
 });
 
 describe("SpritesRunnerProvider sweep orphan reaper", () => {
+  it("normalizes a terminal runner mapping that has no Sprite", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
+    await db.update(agentSessions).set({ status: "failed", completedAt: new Date() })
+      .where(eq(agentSessions.id, run.id));
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      provider: "sprites",
+      spriteName: null,
+      state: "starting",
+      workerGeneration: 2,
+      generationState: "failed",
+      providerOperationId: "00000000-0000-4000-8000-000000000099",
+    });
+    const provider = new SpritesRunnerProvider(fakeSpritesClient({ listAllSprites: vi.fn(async () => []) }));
+
+    await provider.sweep();
+
+    expect((await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id)))[0])
+      .toMatchObject({ state: "gone", spriteName: null, generationState: "stopped", providerOperationId: null });
+    const events = await db.select().from(agentEvents).where(eq(agentEvents.sessionId, run.id));
+    expect(events.some((event) => event.type === "runner_mapping_reconciled")).toBe(true);
+  });
+
+  it("destroys an expired terminal warm Sprite without waking its worker service", async () => {
+    vi.stubEnv("TASK_ORCH_RUNNER_TERMINAL_MS", "0");
+    const deleteSpy = vi.fn(async () => {});
+    const getServiceSpy = vi.fn(async () => {
+      throw new Error("terminal cleanup must not wake or inspect the service");
+    });
+    const run = await create({ goal: "<implement>", defer: true });
+    const spriteName = spriteNameForRun(run.id);
+    await db.update(agentSessions).set({
+      status: "completed",
+      completedAt: new Date(Date.now() - 60_000),
+      sdkSessionId: "sdk-terminal",
+    }).where(eq(agentSessions.id, run.id));
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      provider: "sprites",
+      spriteName,
+      state: "starting",
+      workerGeneration: 1,
+      generationState: "stopped",
+      channelInstanceId: "wi_cccccccccccccccccccccccccccccccc",
+      workerIncarnation: "2026-01-01T00:00:00Z#1",
+    });
+    const provider = new SpritesRunnerProvider(fakeSpritesClient({
+      listAllSprites: vi.fn(async () => [{
+        name: spriteName,
+        status: "warm",
+        createdAt: new Date(Date.now() - 60_000),
+      }]),
+      getService: getServiceSpy,
+      deleteSprite: deleteSpy,
+    }));
+
+    await provider.sweep();
+
+    expect(getServiceSpy).not.toHaveBeenCalled();
+    expect(deleteSpy).toHaveBeenCalledWith(spriteName);
+    expect((await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id)))[0])
+      .toMatchObject({ state: "gone", spriteName: null, generationState: "stopped" });
+    expect((await db.select().from(agentSessions).where(eq(agentSessions.id, run.id)))[0]!.sdkSessionId).toBeNull();
+  });
+
   it("deletes only old unprotected run sprites, skips pool and null createdAt", async () => {
     const deleteSpy = vi.fn(async () => {});
     const old = new Date(Date.now() - 20 * 60_000); // 20m old, past 10m grace

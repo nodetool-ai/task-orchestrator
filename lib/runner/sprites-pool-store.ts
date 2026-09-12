@@ -58,7 +58,8 @@ export const spritesPoolStore = {
       const countRows = await tx.execute<{ count: number | string }>(sql`
         SELECT ((SELECT count(*) FROM sprite_pool_entries WHERE state <> 'deleted') +
           (SELECT count(*) FROM runner_instances ri LEFT JOIN sprite_pool_entries pe ON pe.sprite_name=ri.sprite_name
-            WHERE ri.provider='sprites' AND ri.state NOT IN ('gone','stopped') AND pe.id IS NULL))::int AS count
+            WHERE ri.provider='sprites' AND ri.sprite_name IS NOT NULL
+              AND ri.state NOT IN ('gone','stopped') AND pe.id IS NULL))::int AS count
       `);
       if (Number(countRows[0]?.count ?? 0) >= effectiveLimit) { spriteLog("sprites_pool_reservation_declined", { fingerprint: baselineInput.fingerprint, reason: "total_capacity" }, "debug"); return null; }
       if (readyTarget !== undefined) {
@@ -93,7 +94,7 @@ export const spritesPoolStore = {
     const rows = await db.select({ state: spritePoolEntries.state, count: sql<number>`count(*)::int` }).from(spritePoolEntries).where(notInArray(spritePoolEntries.state, ["deleted"])).groupBy(spritePoolEntries.state);
     const fpRows = await db.select({ fingerprint: spritePoolEntries.fingerprint, state: spritePoolEntries.state, count: sql<number>`count(*)::int` }).from(spritePoolEntries).where(notInArray(spritePoolEntries.state, ["deleted"])).groupBy(spritePoolEntries.fingerprint, spritePoolEntries.state);
     const byState = new Map(rows.map((r) => [r.state, Number(r.count)]));
-    const other = await db.execute<{ count: number | string }>(sql`SELECT count(*)::int AS count FROM runner_instances ri LEFT JOIN sprite_pool_entries pe ON pe.sprite_name=ri.sprite_name WHERE ri.provider='sprites' AND ri.state NOT IN ('gone','stopped') AND pe.id IS NULL`);
+    const other = await db.execute<{ count: number | string }>(sql`SELECT count(*)::int AS count FROM runner_instances ri LEFT JOIN sprite_pool_entries pe ON pe.sprite_name=ri.sprite_name WHERE ri.provider='sprites' AND ri.sprite_name IS NOT NULL AND ri.state NOT IN ('gone','stopped') AND pe.id IS NULL`);
     const byFingerprint: Record<string, { preparing: number; ready: number }> = {};
     for (const row of fpRows) { const item = byFingerprint[row.fingerprint] ?? { preparing: 0, ready: 0 }; if (row.state === "preparing") item.preparing = Number(row.count); if (row.state === "ready") item.ready = Number(row.count); byFingerprint[row.fingerprint] = item; }
     return { total: rows.reduce((n, r) => n + Number(r.count), 0) + Number(other[0]?.count ?? 0), preparing: byState.get("preparing") ?? 0, ready: byState.get("ready") ?? 0, byFingerprint };
