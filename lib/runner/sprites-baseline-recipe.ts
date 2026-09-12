@@ -10,6 +10,13 @@ const inputPath = z.string().min(1).refine((path) =>
   !path.startsWith("/") && !path.includes("\\") && !path.includes("\0") &&
   !path.split("/").some((part) => part === ".." || part === "." || part === ""),
 "Input paths must be relative repository files");
+const uniqueInputPaths = z.array(inputPath).superRefine((paths, ctx) => {
+  const seen = new Set<string>();
+  for (const [index, path] of paths.entries()) {
+    if (seen.has(path)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [index], message: "paths must be unique" });
+    seen.add(path);
+  }
+});
 const recipeSchema = z.object({
   repositoryId: z.string().min(1),
   repository: z.string().url(),
@@ -24,6 +31,7 @@ const recipeSchema = z.object({
   setupCommands: z.array(z.string()).optional(),
   buildCommands: z.array(z.string()).optional(),
   readinessCommands: z.array(z.string()).optional(),
+  workspaceOutputExclusions: uniqueInputPaths.optional(),
   minimumGitHistoryDepth: z.number().int().positive().optional(),
   baseRef: z.string().optional(),
 }).strict();
@@ -60,6 +68,12 @@ export async function generateSpriteBaseline(checkout: string, ref: string, inpu
   const packagePaths = [...new Set(["package.json", ...Object.keys(lock.packages)
     .filter((path) => path && !path.split("/").includes("node_modules"))
     .map((path) => `${path}/package.json`)])].sort();
+  const packagePathSet = new Set(packagePaths);
+  for (const path of recipe.workspaceOutputExclusions ?? []) {
+    if (path === "package.json" || !packagePathSet.has(path)) {
+      throw new Error(`workspace output exclusion must reference a workspace package manifest at ${revision}: ${path}`);
+    }
+  }
   const digest = async (path: string) => ({ path, sha256: createHash("sha256").update(await read(path)).digest("hex") });
   const { repositoryId, allowedUserIds, target, nodeVersion, architecture, installScriptInputs, ...dependency } = recipe;
   const spec = {

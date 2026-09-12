@@ -5,6 +5,7 @@ import {
   baselineFingerprint,
   canonicalBaselineManifest,
   controlledNpmCiCommand,
+  dependencyFingerprint,
   dependencyPreparationCommand,
   dependencyVerificationProgram,
   type SpriteBaselineManifest,
@@ -97,9 +98,11 @@ describe("Sprite baseline identity", () => {
     try {
       await mkdir(join(root, "node_modules"), { recursive: true });
       await mkdir(join(root, "packages/core/dist"), { recursive: true });
+      await mkdir(join(root, "packages/private"), { recursive: true });
       await writeFile(join(root, "package.json"), JSON.stringify({ devDependencies: { typescript: "1.0.0" } }));
       await writeFile(join(root, "package-lock.json"), "lock");
       await writeFile(join(root, "packages/core/package.json"), JSON.stringify({ main: "dist/index.js" }));
+      await writeFile(join(root, "packages/private/package.json"), JSON.stringify({ private: true, main: "dist/index.js" }));
       await writeFile(join(root, "packages/core/dist/index.js"), "export {};\n");
       await exec("git", ["init", "-b", "main"], { cwd: root });
       await exec("git", ["config", "user.email", "test@example.com"], { cwd: root });
@@ -114,6 +117,7 @@ describe("Sprite baseline identity", () => {
         packageManifests: [
           { path: "package.json", sha256: await digest("package.json") },
           { path: "packages/core/package.json", sha256: await digest("packages/core/package.json") },
+          { path: "packages/private/package.json", sha256: await digest("packages/private/package.json") },
         ],
         readinessCommands: ["node -e \"process.exit(0)\""],
         packageManagerVersion: (await exec("npm", ["--version"])).stdout.trim(),
@@ -125,7 +129,16 @@ describe("Sprite baseline identity", () => {
       await mkdir(join(root, "node_modules/typescript"), { recursive: true });
       await writeFile(join(root, "node_modules/typescript/package.json"), JSON.stringify({ name: "typescript", version: "1.0.0" }));
       await expect(exec("node", ["-e", dependencyVerificationProgram(dependency, root)], { cwd: root }))
+        .rejects.toThrow(/workspace build output missing: packages\/private\/package.json/);
+
+      const excluded = { ...dependency, workspaceOutputExclusions: ["packages/private/package.json"] };
+      expect(dependencyFingerprint(excluded)).not.toBe(dependencyFingerprint(dependency));
+      await expect(exec("node", ["-e", dependencyVerificationProgram(excluded, root)], { cwd: root }))
         .resolves.toBeDefined();
+
+      await writeFile(join(root, "packages/private/package.json"), JSON.stringify({ private: true, main: "different/dist/index.js" }));
+      await expect(exec("node", ["-e", dependencyVerificationProgram(excluded, root)], { cwd: root }))
+        .rejects.toThrow(/dependency input mismatch/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

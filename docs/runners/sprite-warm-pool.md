@@ -213,6 +213,12 @@ Turbo, Sharp, Keytar and `better-sqlite3`. Preparation installs the Linux
 The first preparation is still a full install;
 only a verified checkpoint is eligible for assignment.
 
+The recipe excludes `packages/fal-codegen/package.json` from generic workspace
+entrypoint checks because this private generator declares stale `dist/index`
+entries without corresponding source files. Its manifest remains fingerprinted,
+and an explicit readiness probe requires its actual `dist/generate.js` and
+`dist/generate.d.ts` outputs. Other workspace outputs retain their default checks.
+
 ## Ownership, recovery and cleanup
 
 A pool entry is claimed and bound to its runner atomically. Before first use,

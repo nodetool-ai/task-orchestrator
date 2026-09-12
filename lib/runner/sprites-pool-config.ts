@@ -12,6 +12,10 @@ export interface ConfiguredSpriteBaseline {
 }
 
 const relativePath = z.string().min(1).refine((value) => !value.startsWith("/") && !value.split("/").includes("..") && !value.includes("\\"), "dependency input must be a relative repository path");
+const workspaceManifestPath = z.string().min(1).refine((value) =>
+  !value.startsWith("/") && !value.includes("\\") && !value.includes("\0") &&
+  !value.split("/").some((part) => part === ".." || part === "." || part === ""),
+"workspace output exclusions must be relative repository files");
 const digest = z.object({ path: relativePath, sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 const remoteUrl = z.string().url().refine((value) => {
   const url = new URL(value);
@@ -36,6 +40,7 @@ const dependency = z.object({
   setupCommands: z.array(z.string().trim().min(1)).optional(),
   buildCommands: z.array(z.string().trim().min(1)).optional(),
   readinessCommands: z.array(z.string().trim().min(1)).optional(),
+  workspaceOutputExclusions: z.array(workspaceManifestPath).optional(),
   minimumGitHistoryDepth: z.number().int().positive().optional(),
   baseRef: z.string().trim().min(1).optional(),
 }).strict().superRefine((value, ctx) => {
@@ -46,6 +51,20 @@ const dependency = z.object({
   if (value.reusePolicy === "inputs" && value.npmConfig === undefined) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["npmConfig"],
       message: "input-scoped reuse requires npmConfig (use null to assert .npmrc is absent)" });
+  }
+  const exclusions = value.workspaceOutputExclusions ?? [];
+  const packageManifests = new Set(value.packageManifests.map((file) => file.path));
+  const seen = new Set<string>();
+  for (const [index, path] of exclusions.entries()) {
+    if (seen.has(path)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["workspaceOutputExclusions", index],
+        message: "workspace output exclusions must be unique" });
+    }
+    seen.add(path);
+    if (path === "package.json" || !packageManifests.has(path)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["workspaceOutputExclusions", index],
+        message: "workspace output exclusion must reference a workspace package manifest" });
+    }
   }
 });
 const manifestSchema = z.object({

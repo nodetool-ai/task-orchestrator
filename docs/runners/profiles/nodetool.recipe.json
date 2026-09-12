@@ -25,8 +25,12 @@
     "NODE_ENV= npm run build:packages"
   ],
   "readinessCommands": [
-    "node -e \"require.resolve('jest/package.json');require.resolve('typescript/package.json');require.resolve('turbo/package.json');require('sharp');require('keytar');const D=require('better-sqlite3');const d=new D(':memory:');d.close()\""
+    "node -e \"require.resolve('jest/package.json');require.resolve('typescript/package.json');require.resolve('turbo/package.json');require('sharp');require('keytar');const D=require('better-sqlite3');const d=new D(':memory:');d.close()\"",
+    "test -f packages/fal-codegen/dist/generate.js && test -f packages/fal-codegen/dist/generate.d.ts"
   ],
   "baseRef": "origin/main",
-  "minimumGitHistoryDepth": 100
+  "minimumGitHistoryDepth": 100,
+  "workspaceOutputExclusions": [
+    "packages/fal-codegen/package.json"
+  ]
 }

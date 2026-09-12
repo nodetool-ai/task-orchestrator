@@ -55,4 +55,20 @@ describe("Sprite pool baseline configuration", () => {
     expect(() => parse({ ...repository(), revision: "c".repeat(40) })).toThrow();
     expect(() => getConfiguredSpriteBaselines(sha, JSON.stringify([generic(), generic()]))).toThrow();
   });
+  it("accepts only unique package manifest paths as workspace output exclusions", () => {
+    const dependency = {
+      ...repository().manifest.dependency,
+      packageManifests: [
+        { path: "package.json", sha256: digest },
+        { path: "packages/private/package.json", sha256: digest },
+      ],
+    };
+    const withExclusions = (workspaceOutputExclusions: string[]) => parse({
+      ...repository(), manifest: { ...repository().manifest, dependency: { ...dependency, workspaceOutputExclusions } },
+    });
+    expect(() => withExclusions(["packages/private/package.json"])).not.toThrow();
+    expect(() => withExclusions(["scripts/setup.js"])).toThrow(/workspace package manifest/);
+    expect(() => withExclusions(["../package.json"])).toThrow(/relative repository files/);
+    expect(() => withExclusions(["packages/private/package.json", "packages/private/package.json"])).toThrow(/unique/);
+  });
 });

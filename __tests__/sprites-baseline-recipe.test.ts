@@ -82,6 +82,24 @@ describe("Sprite baseline recipe", () => {
     await expect(generateSpriteBaseline(root, "HEAD", recipe())).rejects.toThrow("version 2 or 3");
   });
 
+  it("accepts only unique workspace manifest paths as output exclusions", async () => {
+    const { root } = await fixture();
+    const spec = await generateSpriteBaseline(root, "HEAD", {
+      ...recipe(), workspaceOutputExclusions: ["packages/core/package.json"],
+    });
+    expect(spec.manifest.dependency.workspaceOutputExclusions).toEqual(["packages/core/package.json"]);
+
+    await expect(generateSpriteBaseline(root, "HEAD", {
+      ...recipe(), workspaceOutputExclusions: ["scripts/install.js"],
+    })).rejects.toThrow(/workspace package manifest/);
+    await expect(generateSpriteBaseline(root, "HEAD", {
+      ...recipe(), workspaceOutputExclusions: ["../package.json"],
+    })).rejects.toThrow(/relative repository files/);
+    await expect(generateSpriteBaseline(root, "HEAD", {
+      ...recipe(), workspaceOutputExclusions: ["packages/core/package.json", "packages/core/package.json"],
+    })).rejects.toThrow(/unique/);
+  });
+
   it("rejects an untracked or symlinked input instead of hashing mutable external content", async () => {
     const { root, git } = await fixture();
     await writeFile(join(root, "untracked.js"), "untracked");

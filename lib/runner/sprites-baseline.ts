@@ -40,6 +40,9 @@ export interface SpriteDependencyManifest {
   buildCommands?: string[];
   /** Non-mutating project checks run after preparation and on restore. */
   readinessCommands?: string[];
+  /** Workspace package manifests whose declared dist outputs are intentionally
+   * not checked. Their manifest digests remain required and verified. */
+  workspaceOutputExclusions?: string[];
   minimumGitHistoryDepth?: number;
   baseRef?: string;
 }
@@ -100,6 +103,9 @@ export function dependencyFingerprint(manifest: SpriteDependencyManifest): strin
     reusePolicy: policy,
     ...(manifest.installScriptInputs ? { installScriptInputs: manifest.installScriptInputs } : {}),
     ...(manifest.setupCommands ? { setupCommands: manifest.setupCommands } : {}),
+    ...(manifest.workspaceOutputExclusions !== undefined
+      ? { workspaceOutputExclusions: manifest.workspaceOutputExclusions }
+      : {}),
     ...(policy === "revision" ? {
       ...(manifest.revision ? { revision: manifest.revision } : {}),
       ...(manifest.sourceChangesSha ? { sourceChangesSha: manifest.sourceChangesSha } : {}),
@@ -177,7 +183,8 @@ const pkg=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8'));
 const declared={...(pkg.dependencies||{}),...(pkg.devDependencies||{}),...(pkg.optionalDependencies||{})};
 for(const tool of ['typescript','tsx','vitest']) if(declared[tool]) {try{cp.execFileSync('node',['-e','require.resolve('+JSON.stringify(tool+'/package.json')+')'],{cwd:root,stdio:'ignore'});}catch{throw Error('declared tool unavailable: '+tool);}}
 if(declared['better-sqlite3']) {try{cp.execFileSync('node',['-e',"const D=require('better-sqlite3');const d=new D(':memory:');d.close()"],{cwd:root,stdio:'ignore'});}catch{throw Error('native binding unavailable: better-sqlite3 (install scripts may have been skipped)');}}
-for(const rel of m.packageManifests.filter(x=>x.path!=='package.json').map(x=>x.path)) {const p=JSON.parse(fs.readFileSync(path.join(root,rel),'utf8'));for(const field of ['main','module','types']) {const out=p[field];if(typeof out==='string'&&/(^|\\/)dist\\//.test(out)&&!fs.existsSync(path.resolve(path.dirname(path.join(root,rel)),out))) throw Error('workspace build output missing: '+rel+' '+field+' -> '+out);}}
+const outputExclusions=new Set(m.workspaceOutputExclusions||[]);
+for(const rel of m.packageManifests.filter(x=>x.path!=='package.json'&&!outputExclusions.has(x.path)).map(x=>x.path)) {const p=JSON.parse(fs.readFileSync(path.join(root,rel),'utf8'));for(const field of ['main','module','types']) {const out=p[field];if(typeof out==='string'&&/(^|\\/)dist\\//.test(out)&&!fs.existsSync(path.resolve(path.dirname(path.join(root,rel)),out))) throw Error('workspace build output missing: '+rel+' '+field+' -> '+out);}}
 for(const command of (m.readinessCommands||[])){const result=cp.spawnSync(command,{cwd:root,shell:true,stdio:'pipe',encoding:'utf8',timeout:120000});if(result.status!==0) throw Error('readiness command failed: '+command+'\\n'+String(result.stderr||result.stdout||'').slice(-2000));}})();`;
 }
 
