@@ -1,0 +1,32 @@
+{
+  "repositoryId": "R-default",
+  "repository": "https://github.com/nodetool-ai/nodetool.git",
+  "allowedUserIds": [
+    1
+  ],
+  "target": 1,
+  "nodeVersion": "v22.22.3",
+  "architecture": "x64",
+  "packageManagerVersion": "10.9.8",
+  "installOptions": [
+    "--no-audit",
+    "--no-fund",
+    "--include=dev",
+    "--include=optional"
+  ],
+  "reusePolicy": "inputs",
+  "installScriptInputs": [
+    "electron/scripts/rebuild-native.mjs"
+  ],
+  "setupCommands": [
+    "command -v python3 >/dev/null && command -v make >/dev/null && command -v g++ >/dev/null"
+  ],
+  "buildCommands": [
+    "NODE_ENV= npm run build:packages"
+  ],
+  "readinessCommands": [
+    "node -e \"require.resolve('jest/package.json');require.resolve('typescript/package.json');require.resolve('turbo/package.json');require('sharp');const D=require('better-sqlite3');const d=new D(':memory:');d.close()\""
+  ],
+  "baseRef": "origin/main",
+  "minimumGitHistoryDepth": 100
+}

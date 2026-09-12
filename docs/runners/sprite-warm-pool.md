@@ -188,6 +188,29 @@ environments never return to the ready pool. Fly advertises SBD drive forking,
 but wiring that in requires a supported API and enabled organization; do not
 assume portable checkpoint IDs or silently recycle a used checkout.
 
+## Production NodeTool profile
+
+The production app uses a persistent Fly secret-store override for
+`TASK_ORCH_SPRITE_POOL_BASELINES`: one NodeTool repository snapshot and two
+generic snapshots, within the existing total target of three. This override
+takes precedence over the generic default in `fly.toml` and survives image
+deployments. Change the override when adjusting production targets.
+
+The [NodeTool recipe](profiles/nodetool.recipe.json) is scoped to `R-default`
+and user `1`, matching run 276. Its initial pin is
+`fc3abb76b01416a140ba1c3039051272aa8b5ffe`. Generate its repository specification
+with:
+
+```sh
+npm run sprite:baseline -- --repo=/path/to/nodetool --ref=fc3abb76b01416a140ba1c3039051272aa8b5ffe --recipe=docs/runners/profiles/nodetool.recipe.json --out=nodetool-baseline.json
+```
+
+Combine that specification with a generic target of two before applying the
+override. Preparation installs all locked workspaces, rebuilds native bindings,
+builds package outputs with `NODE_ENV` cleared, and probes Jest, TypeScript,
+Turbo, Sharp and `better-sqlite3`. The first preparation is still a full install;
+only a verified checkpoint is eligible for assignment.
+
 ## Ownership, recovery and cleanup
 
 A pool entry is claimed and bound to its runner atomically. Before first use,
