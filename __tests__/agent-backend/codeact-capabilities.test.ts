@@ -43,18 +43,17 @@ function resultJson(result: Awaited<ReturnType<NeutralTool["execute"]>>): any {
 }
 
 describe("backend-neutral CodeAct capabilities", () => {
-  it("adds one shared execute/catalog contract while retaining direct tools and hooks", async () => {
+  it("exposes only the shared execute/catalog contract while retaining internal handlers and hooks", async () => {
     const direct = tool();
     const base = collected([direct]);
     const augmented = withCodeActCapabilities(base);
 
     expect(augmented.tools.map((entry) => entry.name)).toEqual([
-      direct.name,
       CODEACT_CATALOG_TOOL,
       CODEACT_EXECUTE_TOOL,
     ]);
     expect(augmented.interceptors).toBe(base.interceptors);
-    expect(augmented.systemPromptFns).toBe(base.systemPromptFns);
+    expect(augmented.systemPromptFns.slice(0, -1)).toEqual(base.systemPromptFns);
     expect(augmented.agentStartFns).toBe(base.agentStartFns);
     expect(augmented.skills).toBe(base.skills);
 

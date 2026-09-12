@@ -25,6 +25,7 @@
 
 import type { OrchestratorTool } from "../orchestrator-tools";
 import { dispatchTool } from "../app-api/dispatcher";
+import { bindOperationImplementation } from "../app-api/registry";
 import type { AppApiContext, AppApiResult } from "../app-api/types";
 import { Type } from "typebox";
 import {
@@ -134,6 +135,7 @@ async function buildRegistry(): Promise<Map<string, OrchestratorTool>> {
       throw new Error(`Duplicate server tool name: ${tool.name}`);
     }
     map.set(tool.name, tool);
+    bindOperationImplementation(tool);
   }
   return map;
 }

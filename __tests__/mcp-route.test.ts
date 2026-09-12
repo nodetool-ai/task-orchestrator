@@ -109,29 +109,17 @@ describe("POST /api/mcp", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(Array.isArray(body.result.tools)).toBe(true);
-    expect(body.result.tools.length).toBe(37);
-    const names = body.result.tools.map((t: { name: string }) => t.name);
-    expect(names).toContain("list_plans");
-    expect(names).not.toContain("start_review");
-    expect(names).toContain("await_session");
-    expect(names).toContain("create_task");
-    expect(names).toContain("transition_task");
-    expect(names).toContain("list_attachments");
-    expect(names).toContain("get_attachment");
-    expect(names).toContain("add_attachment");
-    expect(names).toContain("delete_attachment");
-    // Bare names — no task_orch__ prefix.
-    expect(names.some((n: string) => n.startsWith("task_orch__"))).toBe(false);
+    expect(body.result.tools.map((t: { name: string }) => t.name)).toEqual(["codeact_catalog", "codeact_execute"]);
   });
 
-  it("tools/call list_plans returns a content block", async () => {
+  it("tools/call CodeAct returns a content block", async () => {
     const res = await POST(
       makeReq(
         {
           jsonrpc: "2.0",
           id: 3,
           method: "tools/call",
-          params: { name: "list_plans", arguments: {} },
+          params: { name: "codeact_execute", arguments: { code: "return await app.plans.list({});" } },
         },
         { Authorization: `Bearer ${token}` }
       ) as never
@@ -159,105 +147,40 @@ describe("POST /api/mcp", () => {
     expect(body.error.code).toBe(-32601);
   });
 
-  it("tools/call rejects an unknown enum value with -32602 and does not execute", async () => {
-    const res = await POST(
-      makeReq(
-        {
-          jsonrpc: "2.0",
-          id: 6,
-          method: "tools/call",
-          params: { name: "create_plan", arguments: { title: "Bogus State Plan", state: "bogus" } },
-        },
-        { Authorization: `Bearer ${token}` }
-      ) as never
-    );
-    const body = await res.json();
-    expect(body.error.code).toBe(-32602);
-    expect(body.error.message).toMatch(/state/);
-    expect(body.result).toBeUndefined();
-    // The plan must never have been created.
-    const list = await POST(
-      makeReq(
-        {
-          jsonrpc: "2.0",
-          id: 7,
-          method: "tools/call",
-          params: { name: "list_plans", arguments: {} },
-        },
-        { Authorization: `Bearer ${token}` }
-      ) as never
-    );
-    const listBody = await list.json();
-    const text = listBody.result.content[0].text as string;
-    expect(text).not.toMatch(/Bogus State Plan/);
-  });
-
-  it("tools/call rejects create_plan with a terminal/accepted initial state", async () => {
-    for (const state of ["accepted", "done", "cancelled"]) {
-      const res = await POST(
-        makeReq(
-          {
-            jsonrpc: "2.0",
-            id: 8,
-            method: "tools/call",
-            params: { name: "create_plan", arguments: { title: `P-${state}`, state } },
-          },
-          { Authorization: `Bearer ${token}` }
-        ) as never
-      );
-      const body = await res.json();
-      expect(body.error?.code).toBe(-32602);
+  it("rejects direct calls to application operations", async () => {
+    for (const name of ["list_plans", "create_plan", "schedules_create", "app.schedules.create"]) {
+      const res = await POST(makeReq({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name, arguments: {} } }, { Authorization: `Bearer ${token}` }) as never);
+      expect((await res.json()).error.code).toBe(-32601);
     }
   });
 
-  it("tools/call rejects a missing required field with -32602", async () => {
-    const res = await POST(
-      makeReq(
-        {
-          jsonrpc: "2.0",
-          id: 9,
-          method: "tools/call",
-          params: { name: "create_plan", arguments: {} },
-        },
-        { Authorization: `Bearer ${token}` }
-      ) as never
-    );
-    const body = await res.json();
-    expect(body.error.code).toBe(-32602);
-    expect(body.error.message).toMatch(/title/);
+  it("validates the outer CodeAct schema", async () => {
+    for (const args of [{}, { code: 42 }]) {
+      const res = await POST(makeReq({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "codeact_execute", arguments: args } }, { Authorization: `Bearer ${token}` }) as never);
+      expect((await res.json()).error.code).toBe(-32602);
+    }
   });
 
-  it("tools/call rejects a wrong-typed field with -32602", async () => {
-    const res = await POST(
-      makeReq(
-        {
-          jsonrpc: "2.0",
-          id: 10,
-          method: "tools/call",
-          params: { name: "get_repository", arguments: { id: 123 } },
-        },
-        { Authorization: `Bearer ${token}` }
-      ) as never
-    );
-    const body = await res.json();
-    expect(body.error.code).toBe(-32602);
+  it("enforces application schemas inside CodeAct before mutation", async () => {
+    for (const input of [{}, { title: "Bogus State Plan", state: "bogus" }, { title: "P-done", state: "done" }]) {
+      const res = await POST(makeReq({ jsonrpc: "2.0", id: 8, method: "tools/call", params: {
+        name: "codeact_execute", arguments: { code: `return await app.plans.create(${JSON.stringify(input)});` },
+      } }, { Authorization: `Bearer ${token}` }) as never);
+      const body = await res.json();
+      expect(body.result.isError).toBe(true);
+      expect(body.result.content[0].text).toContain("Invalid params");
+    }
   });
 
-  it("tools/call still executes with valid args (regression)", async () => {
-    const res = await POST(
-      makeReq(
-        {
-          jsonrpc: "2.0",
-          id: 11,
-          method: "tools/call",
-          params: { name: "create_plan", arguments: { title: "Valid Plan", state: "draft" } },
-        },
-        { Authorization: `Bearer ${token}` }
-      ) as never
-    );
+  it("creates scheduled jobs through CodeAct with the authenticated owner", async () => {
+    const [owner] = await db.select().from(users);
+    const res = await POST(makeReq({ jsonrpc: "2.0", id: 9, method: "tools/call", params: {
+      name: "codeact_execute", arguments: { code: `const job = await app.schedules.create({name: 'Weekly', prompt: 'Check dependencies', repoId: 'R-default', kind: 'cron', cronExpression: '0 9 * * 1', userId: 999}); return JSON.parse(job.content[0].text);` },
+    } }, { Authorization: `Bearer ${token}` }) as never);
     const body = await res.json();
     expect(body.error).toBeUndefined();
-    expect(body.result.content[0].text).toMatch(/Created plan/);
+    expect(body.result.isError).toBe(false);
+    expect(JSON.parse(body.result.content[0].text).result).toMatchObject({ name: "Weekly", userId: owner.id });
   });
 
   it("notifications/initialized returns 202 with empty body", async () => {

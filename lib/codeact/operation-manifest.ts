@@ -95,6 +95,15 @@ const TOOL_OPS: OperationEntry[] = [
   t("repositories", "create_repository", "Register a new repository", "app.repositories.create"),
   t("repositories", "update_repository", "Patch repository fields", "app.repositories.update"),
   t("repositories", "delete_repository", "Delete a repository", "app.repositories.delete"),
+  // Scheduled jobs (shared direct/MCP/CodeAct tools)
+  t("schedules", "schedules_list", "List scheduled jobs", "app.schedules.list"),
+  t("schedules", "schedules_get", "Get a scheduled job", "app.schedules.get"),
+  t("schedules", "schedules_create", "Create a scheduled job", "app.schedules.create"),
+  t("schedules", "schedules_update", "Update a scheduled job", "app.schedules.update"),
+  t("schedules", "schedules_pause", "Pause a scheduled job", "app.schedules.pause"),
+  t("schedules", "schedules_resume", "Resume a scheduled job", "app.schedules.resume"),
+  t("schedules", "schedules_run_now", "Trigger a scheduled job now", "app.schedules.runNow"),
+  t("schedules", "schedules_delete", "Delete a scheduled job", "app.schedules.delete"),
   // Plans
   t("plans", "list_plans", "List plans, optional state filter", "app.plans.list"),
   t("plans", "get_plan", "Get a plan and its tasks", "app.plans.get"),

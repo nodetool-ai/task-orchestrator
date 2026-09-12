@@ -352,7 +352,19 @@ POST   /api/schedules/:id/resume
 
 The whole tool registry is also served as a remote MCP server, so Claude
 Code, Claude Desktop, Cursor, or VS Code can drive plans, tasks, and agent
-runs against a deployment:
+runs against a deployment.
+
+Agents and remote MCP clients use `codeact_catalog` and `codeact_execute` as
+their only application tools. CodeAct is always enabled; application handlers
+are internal SDK operations, not a second set of model-visible tools.
+
+The `orchestrator` profile includes scheduled coding jobs through `app.schedules`:
+`list`, `get`, `create`, `update`, `pause`, `resume`, `runNow`, and `delete`.
+Jobs support one-time, interval, and cron triggers with an IANA timezone. Use
+`codeact_catalog` to discover their inputs; the SDK shares the REST/CLI scheduler
+and retains occurrence history.
+
+Connect to the remote MCP endpoint with an API token:
 
 ```
 POST /api/mcp        # JSON-RPC 2.0 over Streamable HTTP

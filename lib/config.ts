@@ -81,15 +81,9 @@ export function floatEnv(key: string, dflt: number): number {
 
 export type ToolCallingMode = "direct" | "codeact";
 
-/** Deterministic cohort selection keeps retries/resumes in the same mode. */
-export function resolveToolCallingMode(seed: string, requested?: ToolCallingMode | null): ToolCallingMode {
-  if (requested === "direct" || requested === "codeact") return requested;
-  if (config.agent.toolCallingDefault === "direct") return "direct";
-  const percent = config.agent.codeactRolloutPercent;
-  if (percent <= 0) return "direct";
-  if (percent >= 100) return "codeact";
-  const digest = createHash("sha256").update(seed).digest();
-  return digest.readUInt32BE(0) % 100 < percent ? "codeact" : "direct";
+/** Legacy inputs are accepted for stored-run compatibility; CodeAct is always on. */
+export function resolveToolCallingMode(_seed: string, _requested?: ToolCallingMode | null): ToolCallingMode {
+  return "codeact";
 }
 
 /** Trimmed string env, or `dflt` (default undefined) when unset/empty. */
@@ -368,12 +362,12 @@ export const config = Object.freeze({
     get model(): string | undefined {
       return strEnv("TASK_ORCH_AGENT_MODEL");
     },
-    /** New runs default to CodeAct; set to direct for rollback. */
+    /** CodeAct is the only agent application-tool surface. */
     get toolCallingDefault(): ToolCallingMode {
-      return strEnv("TASK_ORCH_TOOL_CALLING_MODE", "codeact") === "direct" ? "direct" : "codeact";
+      return "codeact";
     },
     get codeactRolloutPercent(): number {
-      return Math.max(0, Math.min(100, floatEnv("TASK_ORCH_CODEACT_ROLLOUT_PERCENT", 100)));
+      return 100;
     },
     /** Absolute path to the separately bundled CodeAct worker-thread entry.
      * Standalone runner images set this because worker_threads cannot execute

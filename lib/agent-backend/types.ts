@@ -144,11 +144,10 @@ export interface RunTurnArgs {
    */
   nativeToolPolicy?: "default" | "orchestration-only";
   thinkingLevel?: "low" | "medium" | "high" | "xhigh";
+  /** Legacy serialized setting; adapters always enable CodeAct. */
   toolCallingMode?: "direct" | "codeact";
   extensions: Extension[];
-  /** Optional control-plane invoker used to mount the neutral CodeAct tools.
-   * Pi's worker and postgres-context paths provide the same seam; other
-   * backends opt in independently. */
+  /** Pi forwards application CodeAct to the control plane for durable receipts. */
   codeActInvoker?: (tool: string, params: unknown) => Promise<ToolResult>;
   /** Backend-tagged resume token from a prior turn ("pi:<path>" / "claude:<id>"
    *  / "codex:<thread-id>"), or null for a fresh session. An adapter ignores a

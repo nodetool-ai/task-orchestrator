@@ -550,7 +550,7 @@ async function runModelTurn(
     cwd,
     model: { provider: resolvedProvider, id: resolvedModel },
     thinkingLevel: (runField(run, "thinkingLevel") as RunTurnArgs["thinkingLevel"]) ?? undefined,
-    toolCallingMode: (runField(run, "toolCallingMode") as RunTurnArgs["toolCallingMode"]) ?? "codeact",
+    toolCallingMode: "codeact",
     extensions,
     codeActInvoker: invoke,
     resumeToken: sdkSessionId,

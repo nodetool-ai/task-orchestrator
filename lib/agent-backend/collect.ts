@@ -12,9 +12,6 @@ import type {
   NeutralTool,
   ToolCallInterceptor,
 } from "./types";
-import { Type } from "typebox";
-
-const CODEACT_GUIDANCE = `Use codeact_catalog to discover the authorized app SDK, then codeact_execute to batch related application operations in isolated JavaScript. Code is an async function body: app.* and tools.* methods return promises; return a concise value. Lifecycle tools for parking, questions, and final reporting remain available as native tools.`;
 
 export interface CollectedCapabilities {
   tools: NeutralTool[];
@@ -58,47 +55,6 @@ export async function composeSystemPrompt(
   let out = base;
   for (const fn of fns) out = await fn(out);
   return out;
-}
-
-/** Add CodeAct after ordinary extension collection. This deliberately changes
- * only the model-visible tools and prompt guidance: extension interceptors,
- * lifecycle hooks, ambient skills, and direct compatibility tools are retained
- * byte-for-byte and continue to be owned by the backend adapter. */
-export function withCodeActTools(
-  collected: CollectedCapabilities,
-  invoke: NonNullable<import("./types").RunTurnArgs["codeActInvoker"]> | undefined,
-): CollectedCapabilities {
-  if (!invoke) return collected;
-  return {
-    ...collected,
-    tools: [
-      ...collected.tools,
-      {
-        name: "codeact_catalog",
-        label: "CodeAct Catalog",
-        description: "Discover the bounded CodeAct application operation catalogue authorized for this run.",
-        parameters: Type.Object({
-          query: Type.Optional(Type.String()),
-          names: Type.Optional(Type.Array(Type.String())),
-        }),
-        execute: async (_id: string, params: unknown) => invoke("codeact_catalog", params),
-      },
-      {
-        name: "codeact_execute",
-        label: "CodeAct Execute",
-        description: "Execute an async JavaScript function body against the isolated, authorized application SDK.",
-        parameters: Type.Object({
-          code: Type.String({ minLength: 1, maxLength: 64 * 1024 }),
-          title: Type.Optional(Type.String({ maxLength: 512 })),
-        }),
-        execute: async (_id: string, params: unknown) => invoke("codeact_execute", params),
-      },
-    ],
-    systemPromptFns: [
-      ...collected.systemPromptFns,
-      (base) => base ? `${base}\n\n${CODEACT_GUIDANCE}` : CODEACT_GUIDANCE,
-    ],
-  };
 }
 
 /**

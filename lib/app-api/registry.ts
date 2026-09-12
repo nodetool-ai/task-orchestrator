@@ -2,6 +2,7 @@ import { Type } from "typebox";
 import { ORCHESTRATOR_TOOLS, type OrchestratorTool } from "../orchestrator-tools";
 import { OPERATION_MANIFEST } from "../codeact/operation-manifest";
 import { PRODUCT_API_DESCRIPTORS } from "./product-operations";
+import { SCHEDULE_API_DESCRIPTORS } from "../schedule-tools";
 import {
   APP_API_VERSION,
   type OperationDescriptor,
@@ -23,14 +24,17 @@ function manifestFor(name: string) {
 }
 
 function descriptorFor(tool: OrchestratorTool): OperationDescriptor {
+  const schedule = SCHEDULE_API_DESCRIPTORS.find((entry) => entry.name === tool.name);
+  if (schedule) return { ...schedule, tool, schema: tool.parameters };
   const entry = manifestFor(tool.name);
   const sdkPath = entry?.sdkNamespace ?? `app.${tool.name}`;
   const aliases = [`task_orch__${tool.name}`, `tools.${tool.name}`];
   const planningStages =
+    tool.name === "create_plan" ? [] : // planning runs must commit the approved spec
     tool.name === "propose_spec" ? ["gathering", "spec_review"] :
     tool.name === "commit_spec_as_plan" ? ["building_plan"] :
     tool.name === "propose_implementation_plan" ? ["building_plan", "plan_review"] :
-    ["create_plan", "create_task", "update_task", "transition_task"].includes(tool.name)
+    ["create_task", "update_task", "transition_task"].includes(tool.name)
       ? ["committing", "done"]
       : undefined;
   return {
@@ -105,6 +109,16 @@ for (const descriptor of APP_API_DESCRIPTORS) {
 
 export function resolveOperation(name: string): OperationDescriptor | null {
   return byName.get(name) ?? byName.get(name.replace(/^mcp__task_orch__/, "")) ?? null;
+}
+
+/** Bind extension-owned implementations when the control-plane registry loads.
+ * Their manifest entries supply policy/SDK names; discovery and dispatch must
+ * use the real parameter schemas and handlers rather than placeholder stubs. */
+export function bindOperationImplementation(tool: OrchestratorTool): void {
+  const descriptor = byName.get(tool.name);
+  if (!descriptor || descriptor.executionLocation !== "control-plane") return;
+  descriptor.tool = tool;
+  descriptor.schema = tool.parameters;
 }
 
 export function discoverOperations(): readonly OperationDescriptor[] {
