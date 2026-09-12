@@ -1,10 +1,17 @@
 // lib/builtin-tools.ts
 //
-// Single source of truth for the built-in file / search / shell tools that both
-// agent harnesses ship. The two SDKs name the same capabilities differently:
+// Single source of truth for the built-in file / search / shell tools the agent
+// harnesses ship. The SDKs name the same capabilities differently:
 //
 //   pi      read  write  edit  bash  grep  find  ls          (lowercase)
 //   Claude  Read  Write  Edit  Bash  Grep  Glob  (no LS)     (TitleCase)
+//   Codex   spawn_agent + the rest of the multi-agent family (snake_case)
+//
+// Sub-agent spawning is part of that vocabulary: canonical `Agent` covers
+// Claude's `Agent` (and its legacy `Task` spelling) and Codex's `spawn_agent`
+// (and the v1-namespaced form). lib/subagent-tools.ts is the per-harness table
+// behind those names; this module is where either spelling collapses to one
+// identity for the UI and the interceptor seam. pi has no sub-agent built-in.
 //
 // Without a shared vocabulary the UI rendered pi's lowercase tools as anonymous
 // wrenches (so grep/glob looked unused), and the neutral interceptor seam only
@@ -23,7 +30,7 @@ export type CanonicalTool =
   | "WebFetch"
   | "WebSearch"
   | "TodoWrite"
-  | "Task";
+  | "Agent";
 
 // Every raw tool name we recognize (compared lowercased), mapped to its canonical
 // identity. Covers pi names, Claude names, and common variants of each.
@@ -46,7 +53,11 @@ const RAW_TO_CANONICAL: Record<string, CanonicalTool> = {
   webfetch: "WebFetch",
   websearch: "WebSearch",
   todowrite: "TodoWrite",
-  task: "Task",
+  // Sub-agent spawning, every harness spelling (lib/subagent-tools.ts).
+  agent: "Agent",
+  task: "Agent",
+  spawn_agent: "Agent",
+  "multi_agent_v1.spawn_agent": "Agent",
 };
 
 /** Resolve any harness's raw tool name to its canonical identity, or null when
@@ -114,5 +125,6 @@ export const TOOL_INPUT_KEYS: Record<CanonicalTool, string[]> = {
   WebFetch: ["url"],
   WebSearch: ["query"],
   TodoWrite: [],
-  Task: ["description"],
+  // Claude: subagent_type/description/prompt. Codex: task_name/message.
+  Agent: ["description", "task_name", "subagent_type", "prompt", "message"],
 };

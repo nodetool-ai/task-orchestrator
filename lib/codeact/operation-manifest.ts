@@ -449,7 +449,7 @@ const TOOLS_COMPAT_ALIASES = TOOL_OPS
 // repo_fs SDK methods. Recorded as excluded so their name-aliases resolve and
 // the surface is accounted for.
 const BUILTIN_CANONICAL: OperationEntry[] = [
-  "Read", "Write", "Edit", "Bash", "Grep", "Glob", "LS", "WebFetch", "WebSearch", "TodoWrite", "Task",
+  "Read", "Write", "Edit", "Bash", "Grep", "Glob", "LS", "WebFetch", "WebSearch", "TodoWrite", "Agent",
 ].map((name) => ({
   id: `tool:builtin:${name}`,
   surface: "tool" as const,
@@ -471,6 +471,11 @@ const BUILTIN_NAME_ALIASES: OperationEntry[] = [
   alias("tool", "repo_fs", "find", "Built-in alias → Glob", "tool:builtin:Glob"),
   alias("tool", "repo_fs", "fd", "Built-in alias → Glob", "tool:builtin:Glob"),
   alias("tool", "repo_fs", "tree", "Built-in alias → LS", "tool:builtin:LS"),
+  // Sub-agent spawning, per harness (lib/subagent-tools.ts): Claude's legacy
+  // `Task` spelling and Codex's `spawn_agent` (v2) / `multi_agent_v1.spawn_agent`.
+  alias("tool", "repo_fs", "task", "Built-in alias → Agent", "tool:builtin:Agent"),
+  alias("tool", "repo_fs", "spawn_agent", "Built-in alias → Agent", "tool:builtin:Agent"),
+  alias("tool", "repo_fs", "multi_agent_v1.spawn_agent", "Built-in alias → Agent", "tool:builtin:Agent"),
 ];
 
 // ---------------------------------------------------------------------------

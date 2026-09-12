@@ -93,18 +93,41 @@ A child run is a whole container, checkout, budget and supervision chain. It is
 worth minting for a task that owns its own branch and PR — not for a step inside
 a task some run already holds. Sub-work (searching the codebase, reading an
 unfamiliar area, reproducing a failure, reviewing a diff, digesting long output)
-belongs to the agent's own harness subagent tool — `Task` on the Claude harness,
-`task` on pi — which runs in the same container on the same checkout and answers
-inline.
+belongs to the agent runtime's own sub-agent, which runs in the same container
+on the same checkout and answers inline — or, on a harness without one, to the
+agent itself, inline. Treat sub-agent spawning as a native runtime capability;
+do not build a replacement for it here.
 
-Agents are told this automatically: `lib/delegation-guidance.ts` is appended to
-every run's system prompt by an always-on extension
+Which tool that is depends on the harness, so `lib/subagent-tools.ts` keeps the
+table and everything else reads from it:
+
+| concept | Claude Agent SDK | Codex | pi |
+| --- | --- | --- | --- |
+| spawn sub-agent | `Agent` | `spawn_agent` | — (none built in) |
+| agent type | `subagent_type` | — | — |
+| label | `description` | `task_name` | — |
+| instruction | `prompt` | `message` | — |
+| legacy spelling | `Task` (0.2.x) | `multi_agent_v1.spawn_agent` | — |
+
+Detect both spellings per harness; generate the current one. Claude's legacy
+`Task` is the sub-agent tool, unrelated to the `TaskCreate` / `TaskGet` /
+`TaskUpdate` / `TaskList` work-item tools. Codex's family also has
+`send_message`, `followup_task`, `wait_agent`, `list_agents` and `close_agent`.
+pi's built-ins are `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls` —
+sub-agents exist only as an optional pi extension, which this deployment does
+not mount. `lib/builtin-tools.ts` folds every spelling onto the canonical
+`Agent` identity so the UI and the interceptor seam key on one name.
+
+Agents are told the rule automatically: `lib/delegation-guidance.ts` is appended
+to every run's system prompt by an always-on extension
 (`lib/extensions/delegation.ts`, mounted in `profiles.alwaysOnExtensions`, so it
 reaches the containerized worker path, the in-process postgres turn and the
-legacy runner alike). Runs with no native tool surface — the coordination-only
-executor, the server-runtime concierge — get the "one child run per task" half
-instead of being pointed at a subagent tool they were never given. The same cost
-note rides on the descriptions of the two tools that mint a run,
+legacy runner alike). Each run gets its OWN backend's flavour — `Agent` with its
+call shape, `spawn_agent` with its own, or, on pi, that there is no sub-agent
+tool and the sub-work is inline. Runs with no native tool surface at all — the
+coordination-only executor, the server-runtime concierge — get the child-run
+economy rule alone rather than being pointed at a tool they were never given.
+The same cost note rides on the descriptions of the two tools that mint a run,
 `start_session` and `spawn__spawn_agent`.
 
 A task has one active session at a time — cancel or let it finish

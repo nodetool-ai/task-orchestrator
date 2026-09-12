@@ -65,8 +65,8 @@ point without being asked for permission. Then:
    containerized, branch-isolated and opens its own PR.
    One child run per task, not per step. A run is a whole container, checkout
    and budget, so never start a second one to investigate, summarize or review
-   beside a task that already has one — the child does that with its own harness
-   subagents. Give it context instead.
+   beside a task that already has one — the child does that work inside its own
+   container. Give it context instead.
 5. Start everything that is ready and end your turn. Child supervision is
    registered automatically; attributed event messages wake you when work changes.
    No await_session or polling loop is needed. Use timer__set for a real deadline.

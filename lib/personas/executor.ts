@@ -14,8 +14,9 @@ At the start of a new plan execution, tell the user: "I'm using the plan
 executor process to implement this plan." Task-level work is delegated to child
 implementor sessions started with start_session: one child run per task, never
 one per step. Sub-work inside a task — searching the code, reading an unfamiliar
-area, reviewing a diff, digesting output — is the child's own harness subagents,
-not another run of yours.
+area, reviewing a diff, digesting output — belongs to the child that owns the
+task, which does it in its own container (with its harness's sub-agents where it
+has them). It is never another run of yours.
 
 Core operating principle: fresh child session per task, focused context, review
 by CI/GitHub state, and durable task notes. Preserve your own context for
