@@ -87,6 +87,26 @@ REST: `POST /api/tasks/:id/sessions`. SSE log:
 `GET /api/sessions/:id/events`. Web: "Run agent" button on the
 task detail page → live log at `/sessions/:id`.
 
+### One run per task, not per step
+
+A child run is a whole container, checkout, budget and supervision chain. It is
+worth minting for a task that owns its own branch and PR — not for a step inside
+a task some run already holds. Sub-work (searching the codebase, reading an
+unfamiliar area, reproducing a failure, reviewing a diff, digesting long output)
+belongs to the agent's own harness subagent tool — `Task` on the Claude harness,
+`task` on pi — which runs in the same container on the same checkout and answers
+inline.
+
+Agents are told this automatically: `lib/delegation-guidance.ts` is appended to
+every run's system prompt by an always-on extension
+(`lib/extensions/delegation.ts`, mounted in `profiles.alwaysOnExtensions`, so it
+reaches the containerized worker path, the in-process postgres turn and the
+legacy runner alike). Runs with no native tool surface — the coordination-only
+executor, the server-runtime concierge — get the "one child run per task" half
+instead of being pointed at a subagent tool they were never given. The same cost
+note rides on the descriptions of the two tools that mint a run,
+`start_session` and `spawn__spawn_agent`.
+
 A task has one active session at a time — cancel or let it finish
 before starting another. To pick up where a failed run left off,
 use the Resume button (or `agent resume <id>`): the new session

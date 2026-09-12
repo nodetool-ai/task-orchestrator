@@ -25,6 +25,7 @@ import { recordTurnEffect } from "./run-state";
 import { subscribeRunEvents, listRunSubscriptions } from "./run-event-subscriptions";
 import { getRunActivitySnapshot } from "./run-activity";
 import { checkExecutorCiRepairOwnership } from "./extensions/spawn";
+import { RUN_MINTING_COST_NOTE } from "./delegation-guidance";
 import { SPRITE_TOOLS } from "./sprite-tools";
 import { SCHEDULE_TOOLS } from "./schedule-tools";
 
@@ -1062,7 +1063,8 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
     name: "start_session",
     label: "Start Session",
     description:
-      "Start an agent to implement a task. Use resume_of to renew a settled session in place: the same session id, runner/Sprite, worktree, SDK conversation, pending inputs, PR, and supervisor are retained while a new worker generation starts. New tasks are supervised by your run. Returns the supervising parent and subscription; completion and questions arrive there automatically.",
+      "Start an agent to implement a task. Use resume_of to renew a settled session in place: the same session id, runner/Sprite, worktree, SDK conversation, pending inputs, PR, and supervisor are retained while a new worker generation starts. New tasks are supervised by your run. Returns the supervising parent and subscription; completion and questions arrive there automatically. " +
+      RUN_MINTING_COST_NOTE,
     parameters: Type.Object({
       task_id: Type.String({ minLength: 1 }),
       model: Type.Optional(Type.String()),

@@ -11,9 +11,11 @@ sessions for each ready task, tracking their progress, and closing the plan
 when the work is complete.
 
 At the start of a new plan execution, tell the user: "I'm using the plan
-executor process to implement this plan." Also note that this system works best
-with subagents; in this app, those are child implementor sessions started with
-start_session.
+executor process to implement this plan." Task-level work is delegated to child
+implementor sessions started with start_session: one child run per task, never
+one per step. Sub-work inside a task — searching the code, reading an unfamiliar
+area, reviewing a diff, digesting output — is the child's own harness subagents,
+not another run of yours.
 
 Core operating principle: fresh child session per task, focused context, review
 by CI/GitHub state, and durable task notes. Preserve your own context for

@@ -226,13 +226,26 @@ export function serverUnsafeProfiles(profileString: string): string[] {
  * by a profile-string typo the way a missing 'spawn' entry can strand
  * spawn__*. The runner (lib/runs.ts) calls this unconditionally and appends
  * the result to whatever resolveProfiles() returns.
+ *
+ * The delegation guidance rides here for the same reason: the ws worker path
+ * (lib/worker-runtime/context.ts) mounts profile + always-on factories and
+ * nothing else, so this is the only seam that reaches every run regardless of
+ * path or persona — and "don't burn a container on work you can do here" must
+ * not be strandable by a profile string either.
  */
 export async function alwaysOnExtensions(ctx: ProfileContext): Promise<ExtensionFactory[]> {
   const { eventsExtension } = await import("./extensions/events");
   const { braveSearchExtension } = await import("./extensions/brave-search");
+  const { delegationGuidanceFactory } = await import("./extensions/delegation");
   return [
     eventsExtension({ runId: ctx.runId, invoke: ctx.invoke }),
     braveSearchExtension(),
+    delegationGuidanceFactory({
+      id: ctx.run?.id ?? ctx.runId,
+      runtime: ctx.run?.runtime ?? "worker",
+      toolsProfile: ctx.run?.toolsProfile ?? null,
+      personaId: ctx.run?.personaId ?? null,
+    }),
   ];
 }
 
