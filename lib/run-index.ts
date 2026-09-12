@@ -155,6 +155,29 @@ export function latestActivity(node: RunTreeNode): number {
   return latest;
 }
 
+/**
+ * The order the list renders in: most-active group first, then most recent
+ * activity inside each group. Exported so a capped list (the home page shows
+ * only the first few trees) cuts the same order the full page shows.
+ */
+export function orderTrees(trees: RunTreeNode[]): RunTreeNode[] {
+  return [...trees].sort(
+    (a, b) =>
+      GROUP_PRIORITY[groupForTree(a)] - GROUP_PRIORITY[groupForTree(b)] ||
+      latestActivity(b) - latestActivity(a)
+  );
+}
+
+/** Bucket trees into their render sections, each bucket in recency order. */
+export function groupTrees(trees: RunTreeNode[]): Map<RunGroup, RunTreeNode[]> {
+  const byGroup = new Map<RunGroup, RunTreeNode[]>(RUN_GROUPS.map((g) => [g, []]));
+  for (const t of trees) byGroup.get(groupForTree(t))!.push(t);
+  for (const bucket of byGroup.values()) {
+    bucket.sort((a, b) => latestActivity(b) - latestActivity(a));
+  }
+  return byGroup;
+}
+
 /** Total number of runs in the tree, the root included. */
 export function treeSize(node: RunTreeNode): number {
   let n = 1;
