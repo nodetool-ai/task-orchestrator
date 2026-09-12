@@ -83,6 +83,25 @@ export interface BackendRegistrar {
 export type Extension = (reg: BackendRegistrar) => void | Promise<void>;
 
 /**
+ * A deliberately tiny, synchronous diagnostics seam.  The worker owns the
+ * implementation (the OTel/JSONL logger), while adapters only report bounded
+ * lifecycle facts.  Diagnostics must never be able to fail or delay a model
+ * callback, so implementations should treat these methods as best-effort.
+ *
+ * The optional methods are split by provenance: raw SDK activity, meaningful
+ * progress accepted by the watchdog, and transcript output are intentionally
+ * distinct signals in the run-tracing file.
+ */
+export interface BackendDiagnostics {
+  emit(event: string, attributes?: Record<string, unknown>, options?: { invocationId?: string; turnId?: string }): void;
+  rawSdkEvent?(type: string, at?: number): void;
+  meaningfulProgress?(reason: string, itemId?: string, at?: number): void;
+  transcriptOutput?(at?: number): void;
+  /** Current bounded state, used by the watchdog's 30-second summary. */
+  snapshot?(): Record<string, unknown>;
+}
+
+/**
  * A persisted agent_messages row, handed to a postgres-mode turn so it can
  * rebuild the pi conversation from the DB. The `content` is already JSON-parsed
  * into SDK content blocks (the caller — lib/runs.ts — owns the db read); a block
@@ -168,6 +187,13 @@ export interface RunTurnArgs {
   /** Observed model/tool progress, including SDK events omitted from the
    * transcript. Heartbeats and retry diagnostics must not count as progress. */
   onProgress?: (activity: string) => void;
+  /** Worker-local diagnostics sink. It is synchronous and best-effort. */
+  diagnostics?: BackendDiagnostics;
+  /** Bounded run/turn identity and effective timeout settings supplied by the
+   * worker. Never place prompts, tool arguments, or environment values here. */
+  diagnosticsContext?: Record<string, unknown>;
+  /** Internal adapter identity used by the postgres-mode pi loop. */
+  diagnosticsInvocationId?: string;
 }
 
 export interface TurnOutcome {

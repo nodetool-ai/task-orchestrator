@@ -97,4 +97,26 @@ describe("worker local diagnostics", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("uses the stream id as the collision suffix and keeps invocation-scoped tool state", async () => {
+    const root = await mkdtemp(join(tmpdir(), "task-orch-diag-"));
+    try {
+      const first = setupDiagnostics({ runId: 4, instanceId: "same", sessionRoot: root, streamId: "first-stream" });
+      first.emit("worker.started");
+      await first.shutdown();
+      const second = setupDiagnostics({ runId: 4, instanceId: "same", sessionRoot: root, streamId: "second-stream" });
+      second.emit("tool.started", { invocation_id: "inv-a", "tool.name": "Bash", "tool.item_id": "same-id" });
+      second.emit("tool.started", { invocation_id: "inv-b", "tool.name": "Bash", "tool.item_id": "same-id" });
+      second.emit("tool.finished", { invocation_id: "inv-a", "tool.name": "Bash", "tool.item_id": "same-id" });
+      second.emit("channel.connected", { "channel.state": "connected", "channel.controller_epoch": 2 });
+      second.emit("channel.disconnected", { "channel.state": "disconnected", "channel.controller_epoch": 1 });
+      expect(second.snapshot()).toMatchObject({ open_tool_count: 1, "channel.state": "connected" });
+      await second.shutdown();
+      const collided = join(root, "logs", "diagnostics-4-same.second-stream.jsonl");
+      const output = await lines(collided);
+      expect(output.every((record) => record.stream_id === "second-stream")).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

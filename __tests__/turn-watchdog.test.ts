@@ -5,7 +5,7 @@ const MINUTE = 60_000;
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
-function pendingTurn(options: { idleTimeoutMs?: number; hardTimeoutMs?: number; deadline?: string } = {}) {
+function pendingTurn(options: { idleTimeoutMs?: number; hardTimeoutMs?: number; deadline?: string; diagnostics?: any } = {}) {
   const abort = new AbortController();
   const warning = vi.fn();
   let progress!: (activity: string) => void;
@@ -78,6 +78,38 @@ describe("backend turn watchdog", () => {
     turn.abort.abort(cancel);
     expect(await turn.result).toBe(cancel);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("summarizes a never-settling invocation without treating diagnostics as progress", async () => {
+    const emit = vi.fn();
+    const diagnostics = {
+      emit,
+      snapshot: () => ({
+        last_raw_event_type: "tool.started",
+        last_meaningful_progress_reason: "tool started",
+        open_tool_count: 1,
+        open_tools: ["inv-1:Bash:item-1:0"],
+        rss_bytes: 1024,
+        cpu_time_delta_ms: 1,
+        "channel.state": "connected",
+      }),
+    };
+    const turn = pendingTurn({ idleTimeoutMs: MINUTE, diagnostics });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(emit).toHaveBeenCalledWith("backend.progress", expect.objectContaining({
+      last_raw_event_type: "tool.started",
+      open_tool_count: 1,
+      "watchdog.armed": true,
+      "watchdog.fired": false,
+      "watchdog.latest_reset": "initial arm",
+      "watchdog.reset_count": 0,
+    }));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await turn.result).toBeInstanceOf(Error);
+    expect(emit).toHaveBeenCalledWith("watchdog.expired", expect.objectContaining({
+      "watchdog.fired": true,
+      open_tool_count: 1,
+    }));
   });
 
   it("clears warning and timeout state after recovery or normal errors", async () => {

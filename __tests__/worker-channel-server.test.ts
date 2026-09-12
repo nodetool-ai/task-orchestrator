@@ -314,6 +314,35 @@ describe("worker WebSocket supervisor", () => {
     await server.drain("test drain");
     expect(await closed(socket)).toBe(1000);
   });
+
+  it("reports channel lifecycle without allowing diagnostics failures to affect transport", async () => {
+    const emit = vi.fn();
+    const { server, token } = await makeServer({ diagnostics: { emit } });
+    const socket = connect(server, token);
+    await openSocket(socket);
+    await nextFrame(socket);
+    socket.send(encodeFrame(accept(1)));
+    await vi.waitFor(() => expect(emit).toHaveBeenCalledWith("channel.connected", expect.objectContaining({
+      "channel.state": "connected",
+      "channel.controller_epoch": 1,
+    })));
+    socket.close(1011, "remote detail must not be logged");
+    await closed(socket);
+    await vi.waitFor(() => expect(emit).toHaveBeenCalledWith("channel.disconnected", expect.objectContaining({
+      "channel.state": "disconnected",
+      "channel.close_category": "error",
+    })));
+    expect(JSON.stringify(emit.mock.calls)).not.toContain("remote detail must not be logged");
+
+    const failing = await makeServer({ diagnostics: { emit: () => { throw new Error("diagnostics failed"); } } });
+    const healthySocket = connect(failing.server, failing.token);
+    await openSocket(healthySocket);
+    await nextFrame(healthySocket);
+    healthySocket.send(encodeFrame(accept(1)));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(healthySocket.readyState).toBe(WebSocket.OPEN);
+    healthySocket.close();
+  });
 });
 
 

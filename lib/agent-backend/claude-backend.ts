@@ -26,6 +26,7 @@ import { interceptorToolName, isFileTool } from "../builtin-tools";
 import { CLAUDE_SUBAGENT_TOOLS } from "../subagent-tools";
 import { scrubClaudeCliEnv } from "./env-scrub";
 import { resolveClaudeBinary } from "./claude-binary";
+import { beginBackendInvocation, markTranscriptOutput, type BackendInvocation } from "./diagnostics";
 import type { AgentBackend, RunTurnArgs, TurnOutcome } from "./types";
 import type { RunEnvelope } from "../pi-event-mapper";
 
@@ -138,8 +139,20 @@ export class ClaudeBackend implements AgentBackend {
   private loggedBinary = false;
 
   async runTurn(args: RunTurnArgs): Promise<TurnOutcome> {
+    const invocation = beginBackendInvocation(args);
+    try {
+      const outcome = await this.runTurnInner(args, invocation);
+      invocation.finish("completed");
+      return outcome;
+    } catch (error) {
+      invocation.finish(args.abort.signal.aborted ? "aborted" : "error", error);
+      throw error;
+    }
+  }
+
+  private async runTurnInner(args: RunTurnArgs, invocation: BackendInvocation): Promise<TurnOutcome> {
     const { cwd, model, thinkingLevel, extensions, abort, prompt, onEvent } = args;
-    const progress = createBackendProgressReporter(args.onProgress);
+    const progress = createBackendProgressReporter(args.onProgress, args.diagnostics, invocation.id);
 
     // Runs 26/27 cost hours because nothing recorded which claude binary a
     // worker actually drove. Record it (and its version) once per backend.
@@ -189,8 +202,17 @@ export class ClaudeBackend implements AgentBackend {
         t.description,
         toZodRawShape(t.parameters),
         async (a: any) => {
-          const r = await t.execute(randomUUID(), a);
-          return { content: r.content as any, isError: r.isError };
+          const callId = randomUUID();
+          const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+          invocation.toolStarted(t.name, callId);
+          try {
+            const r = await t.execute(callId, a);
+            invocation.toolFinished(t.name, callId, r.isError ? "error" : "completed", startedAt);
+            return { content: r.content as any, isError: r.isError };
+          } catch (error) {
+            invocation.toolFinished(t.name, callId, "error", startedAt);
+            throw error;
+          }
         }
       )
     );
@@ -355,6 +377,7 @@ export class ClaudeBackend implements AgentBackend {
               env.session_id = `${TAG}${env.session_id}`;
             }
             envelopes.push(env);
+            if (env.type === "assistant" || env.type === "user" || env.type === "result") markTranscriptOutput(args.diagnostics);
             // Keep the init in the in-memory envelope list (it carries the
             // resume token) but don't re-persist it on a retry if the first
             // attempt already persisted one.

@@ -35,7 +35,7 @@ import type {
 import type { WorkerSessionCommand } from "../worker-channel/worker-session";
 import { getBackend } from "../agent-backend";
 import { prepareWorkerCwd, workerBranchFor } from "./cwd";
-import type { RunTurnArgs } from "../agent-backend/types";
+import type { BackendDiagnostics, RunTurnArgs } from "../agent-backend/types";
 import type { RunEnvelope } from "../pi-event-mapper";
 import { config } from "../config";
 import { runWithTurnWatchdog } from "./turn-watchdog";
@@ -74,6 +74,8 @@ export interface WorkerDriverSession {
   waitForCommit?(finishEventId: string): Promise<RunCommit>;
   /** Aborts when the control plane cancels the run or the controller disconnects. */
   readonly abortSignal?: AbortSignal;
+  /** Worker-local diagnostics sink; never used for control-plane I/O. */
+  readonly diagnostics?: BackendDiagnostics;
 }
 
 /**
@@ -111,6 +113,8 @@ export interface WorkerRunContext {
   cwd?: string;
   /** The bootstrap event envelope is consumed by the first assigned turn. */
   eventPromptConsumed?: boolean;
+  /** Synchronous, best-effort local diagnostics sink. */
+  diagnostics?: BackendDiagnostics;
 }
 
 /**
@@ -146,6 +150,7 @@ export function buildWorkerRunContext(
     repository: start.repository,
     transcript: [...transcript, ...pendingInput],
     pendingInput,
+    diagnostics: session.diagnostics,
   };
 }
 
@@ -568,6 +573,13 @@ async function runModelTurn(
     invokeTool: session.invokeTool
       ? (tool, args, callId) => session.invokeTool!(tool, args, callId)
       : undefined,
+    diagnostics: context.diagnostics,
+    diagnosticsContext: {
+      ...(context.currentTurnId ? { turn_id: context.currentTurnId } : {}),
+      ...(context.currentInputIds?.length ? { input_ids: context.currentInputIds } : {}),
+      idle_timeout_ms: config.agent.turnIdleTimeoutMs,
+      hard_timeout_ms: config.agent.turnTimeoutMs,
+    },
   };
 
   const outcome = await runWithTurnWatchdog(
@@ -576,6 +588,7 @@ async function runModelTurn(
       idleTimeoutMs: config.agent.turnIdleTimeoutMs,
       hardTimeoutMs: config.agent.turnTimeoutMs,
       deadline: context.start.policy.deadline,
+      diagnostics: context.diagnostics,
       onWarning: (message) => {
         void session.emit("agent.event", { event: { type: "warning", message } }).catch(() => undefined);
       },
@@ -626,7 +639,7 @@ async function emitCheckpoint(context: WorkerRunContext, turn: TurnResult): Prom
  * `run.input` command and drains it, mirroring the legacy chat loop's wake.
  */
 export async function driveWorkerRun(
-  input: WorkerRunContext | { start?: RunStart; session: WorkerDriverSession }
+  input: WorkerRunContext | { start?: RunStart; session: WorkerDriverSession; diagnostics?: BackendDiagnostics }
 ): Promise<void> {
   let context: WorkerRunContext;
   let inputDriven: boolean;
@@ -635,6 +648,7 @@ export async function driveWorkerRun(
     inputDriven = false;
   } else if (input.start != null) {
     context = buildWorkerRunContext(input.start, input.session);
+    context.diagnostics = input.diagnostics ?? context.diagnostics;
     inputDriven = false;
   } else {
     if (!input.session.waitForStart) {
@@ -642,8 +656,16 @@ export async function driveWorkerRun(
     }
     const start = await input.session.waitForStart();
     context = buildWorkerRunContext(start, input.session);
+    context.diagnostics = input.diagnostics ?? context.diagnostics;
     inputDriven = true;
   }
+
+  const attempt = (context.start.run as { attempt?: unknown }).attempt;
+  if (attempt !== undefined) {
+    const sink = context.diagnostics as (BackendDiagnostics & { setAttempt?: (value: unknown) => void }) | undefined;
+    try { sink?.setAttempt?.(attempt); } catch { /* diagnostics never affect the drive */ }
+  }
+  emitBootstrapInputs(context);
 
   if (runGoal(context.run) === "<chat>") {
     await driveChatRun(context, inputDriven);
@@ -702,6 +724,28 @@ function consumeInputCommands(
       if (stopped) break;
       if (isRunInput(command)) {
         const outcomes = queue.offerBatch(command);
+        // OrderedInputQueue sorts by durable input sequence before offering;
+        // mirror that ordering when correlating the outcome with IDs so an
+        // out-of-order command cannot produce a misleading receipt.
+        const orderedMessages = command.messages.map((message, index) => ({
+          message,
+          inputId: command.inputIds?.[index],
+          inputSeq: command.inputSeqs?.[index],
+        })).sort((a, b) => (a.inputSeq ?? a.message.id) - (b.inputSeq ?? b.message.id));
+        const acceptedIds = orderedMessages
+          .map((entry, index) => outcomes[index] === "accepted"
+            ? entry.inputId ?? (entry.message as MessageSnapshot & { inputId?: string }).inputId ?? `message:${entry.message.id}`
+            : undefined)
+          .filter((id): id is string => typeof id === "string");
+        if (acceptedIds.length > 0) {
+          try {
+            context.diagnostics?.emit("input.received", {
+              input_ids: acceptedIds,
+              input_count: acceptedIds.length,
+              ...(command.turnId ? { turn_id: command.turnId } : {}),
+            });
+          } catch { /* diagnostics never affect input delivery */ }
+        }
         if (outcomes.some((o) => o === "accepted")) onWake();
         if (command.turnId && outcomes.some((o) => o === "accepted")) offerDecision(command);
       } else if (isRunCancel(command)) {
@@ -749,6 +793,21 @@ function isRunPark(command: WorkerSessionCommand): command is RunPark {
 
 function isRunCommit(command: WorkerSessionCommand): command is RunCommit {
   return typeof (command as RunCommit).status === "string" && !isRunInput(command) && !isRunCancel(command) && !isRunPark(command);
+}
+
+/** Record only durable scheduler receipts included in the bootstrap snapshot.
+ * Transcript rows alone do not prove that an input reached this worker. */
+function emitBootstrapInputs(context: WorkerRunContext): void {
+  const manifest = context.start.inputManifest;
+  if (!manifest?.length) return;
+  try {
+    context.diagnostics?.emit("input.received", {
+      input_ids: manifest.map((entry) => entry.id),
+      input_count: manifest.length,
+      ...(context.start.turnId ? { turn_id: context.start.turnId } : {}),
+      reason: "bootstrap",
+    });
+  } catch { /* diagnostics never affect bootstrap */ }
 }
 
 /**

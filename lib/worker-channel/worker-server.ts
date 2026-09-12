@@ -39,6 +39,7 @@ import {
   type WorkerSessionCommand,
   type WorkerSessionTransport,
 } from "./worker-session";
+import type { BackendDiagnostics } from "../agent-backend/types";
 
 const CHANNEL_PATH = "/worker/channel";
 const DEFAULT_ACCEPT_TIMEOUT_MS = 10_000;
@@ -96,6 +97,8 @@ export interface WorkerServerConfig {
   sessionRoot?: string;
   outboxRoot?: string;
   workerBuild?: string;
+  /** Best-effort worker-local diagnostics sink. */
+  diagnostics?: BackendDiagnostics;
   capabilities?: string[];
   acceptTimeoutMs?: number;
   disconnectGraceMs?: number;
@@ -156,6 +159,10 @@ interface ControllerConnection {
   closed: boolean;
   superseded: boolean;
   accepting: boolean;
+  closeCode?: number;
+  closeReason?: string;
+  intentional?: boolean;
+  errorCategory?: string;
   acceptTimer?: NodeJS.Timeout;
   messageTail: Promise<void>;
   sendTail: Promise<void>;
@@ -267,6 +274,7 @@ class WorkerServerImpl implements WorkerServer {
   readonly session: WorkerSessionLike;
 
   private readonly config: WorkerServerConfig;
+  private readonly diagnostics?: BackendDiagnostics;
   private readonly listener: ListenerAddress;
   private readonly idleExitMs: number = 0;
   private idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -283,6 +291,7 @@ class WorkerServerImpl implements WorkerServer {
 
   private constructor(config: WorkerServerConfig, listener: ListenerAddress, session: WorkerSessionLike) {
     this.config = config;
+    this.diagnostics = config.diagnostics;
     this.listener = listener;
     this.session = session;
     this.runId = config.runId;
@@ -481,9 +490,18 @@ class WorkerServerImpl implements WorkerServer {
     });
     socket.on("error", (error) => {
       const code = (error as { code?: string }).code;
+      connection.errorCategory = code === "ECONNRESET" || code === "EPIPE"
+        ? "connection_reset"
+        : code === "ETIMEDOUT"
+          ? "timeout"
+          : "socket_error";
       if (code !== "WS_ERR_UNEXPECTED_RSV_1") this.logError("worker websocket connection error", error);
     });
-    socket.on("close", () => this.handleConnectionClose(connection));
+    socket.on("close", (code, reason) => {
+      if (connection.closeCode === undefined) connection.closeCode = code;
+      if (connection.closeReason === undefined && reason.length > 0) connection.closeReason = reason.toString("utf8").slice(0, 123);
+      this.handleConnectionClose(connection);
+    });
     void this.sendHello(connection).catch((error) => this.protocolFailure(connection, error));
   }
 
@@ -590,6 +608,12 @@ class WorkerServerImpl implements WorkerServer {
       previous.superseded = true;
       this.closeConnection(previous, CLOSE_CODE_STALE_CONTROLLER_EPOCH, "replaced by a newer controller epoch", false);
     }
+    this.emitDiagnostic("channel.connected", {
+      "channel.state": "connected",
+      "channel.transport": this.listener.kind,
+      "channel.controller_epoch": connection.epoch,
+      "channel.worker_generation": this.workerGeneration,
+    });
   }
 
   private async sendReject(
@@ -645,8 +669,10 @@ class WorkerServerImpl implements WorkerServer {
   private closeConnection(connection: ControllerConnection, code: number, reason: string, notify = true): void {
     if (connection.closed) return;
     connection.closed = true;
+    connection.closeCode = code;
+    connection.closeReason = reason;
+    connection.intentional = this.draining || code === 1000 || code === CLOSE_CODE_CLEAN_DRAIN;
     if (connection.acceptTimer) clearTimeout(connection.acceptTimer);
-    if (!notify) connection.superseded = true;
     if (connection.socket.readyState === WebSocket.OPEN || connection.socket.readyState === WebSocket.CONNECTING) {
       try {
         connection.socket.close(code, safeReason(reason));
@@ -703,6 +729,19 @@ class WorkerServerImpl implements WorkerServer {
     connection.closed = true;
     if (connection.acceptTimer) clearTimeout(connection.acceptTimer);
     this.connections.delete(connection);
+    this.emitDiagnostic("channel.disconnected", {
+      "channel.state": "disconnected",
+      "channel.controller_epoch": connection.epoch,
+      "channel.worker_generation": this.workerGeneration,
+      "channel.close_code": connection.closeCode ?? 1006,
+      "channel.close_category": channelCloseCategory(
+        connection.closeCode,
+        connection.closeReason,
+        connection.intentional,
+        connection.superseded,
+      ),
+      ...(connection.errorCategory ? { "channel.error_category": connection.errorCategory } : {}),
+    });
     if (this.active !== connection) return;
     this.active = undefined;
     // Re-arm the backstop: the session grace below only aborts the SESSION; this
@@ -734,6 +773,28 @@ class WorkerServerImpl implements WorkerServer {
       console.error(`[worker-channel] ${message}`, error);
     }
   }
+
+  private emitDiagnostic(event: string, attributes: Record<string, unknown>): void {
+    try {
+      this.diagnostics?.emit(event, attributes);
+    } catch {
+      // Diagnostics are strictly observational and must never affect transport.
+    }
+  }
+}
+
+function channelCloseCategory(
+  code: number | undefined,
+  reason: string | undefined,
+  intentional: boolean | undefined,
+  superseded: boolean,
+): string {
+  if (superseded || code === CLOSE_CODE_STALE_CONTROLLER_EPOCH) return "superseded";
+  if (reason?.includes("idle backstop")) return "idle_backstop";
+  if (code === CLOSE_CODE_PROTOCOL_MISMATCH || code === CLOSE_CODE_FRAME_TOO_LARGE || code === 4403 || code === 4408 || code === 4409) return "protocol";
+  if (intentional || code === 1000 || code === CLOSE_CODE_CLEAN_DRAIN) return "clean";
+  if (code === 1006 || code === 1011) return "error";
+  return "controller_disconnect";
 }
 
 /** Start a private worker supervisor and its upgrade-only HTTP listener. */

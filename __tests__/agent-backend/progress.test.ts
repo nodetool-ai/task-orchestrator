@@ -40,4 +40,29 @@ describe("backend progress signals", () => {
     progress.pi({ type: "auto_retry_start", attempt: 5 });
     expect(report).toHaveBeenCalledTimes(4);
   });
+
+  it("records tool lifecycle by invocation and item id without copying payloads", () => {
+    const emit = vi.fn();
+    const diagnostics = { emit, rawSdkEvent: vi.fn(), meaningfulProgress: vi.fn() };
+    const progress = createBackendProgressReporter(undefined, diagnostics, "inv-2");
+    progress.codex({
+      type: "item.started",
+      item: { id: "reused-id", type: "command_execution", command: "do not log me" },
+    });
+    progress.codex({
+      type: "item.completed",
+      item: { id: "reused-id", type: "command_execution", aggregated_output: "secret output" },
+    });
+    progress.codex({ type: "item.started", item: { id: "mcp-id", type: "mcp_tool_call" } });
+    progress.codex({ type: "item.completed", item: { id: "mcp-id", type: "mcp_tool_call" } });
+    expect(emit).toHaveBeenNthCalledWith(1, "tool.started", expect.objectContaining({
+      "tool.item_id": "reused-id",
+    }), { invocationId: "inv-2" });
+    expect(emit).toHaveBeenNthCalledWith(2, "tool.finished", expect.objectContaining({
+      "tool.item_id": "reused-id",
+      "tool.outcome": "completed",
+    }), { invocationId: "inv-2" });
+    expect(JSON.stringify(emit.mock.calls)).not.toMatch(/do not log me|secret output/);
+    expect(emit).toHaveBeenCalledTimes(2);
+  });
 });

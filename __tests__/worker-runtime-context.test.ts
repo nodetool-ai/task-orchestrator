@@ -498,12 +498,15 @@ describe("driveWorkerRun", () => {
       },
     } as any);
     const emitted: Array<{ type: string; payload: any }> = [];
+    const diagnosticEmit = vi.fn();
     const session: WorkerDriverSession = {
       async *commands() {
-        yield {
+        const input = {
           messages: [msg(2, "user", "follow up")],
           inputIds: ["input-2"], inputSeqs: [2], turnId: "turn-2",
         } as unknown as WorkerSessionCommand;
+        yield input;
+        yield input; // replay is a duplicate and must not create another receipt
       },
       async emit(type, payload) {
         emitted.push({ type, payload });
@@ -512,7 +515,7 @@ describe("driveWorkerRun", () => {
       async waitForCommit() { return { status: "failed" } as any; },
       abortSignal: new AbortController().signal,
     };
-    await driveWorkerRun({ session, start: makeStart({
+    await driveWorkerRun({ session, diagnostics: { emit: diagnosticEmit }, start: makeStart({
       run: { id: 43, status: "idle", goal: "<chat>" },
       transcript: [],
       pendingInput: [msg(1, "user", "first")],
@@ -526,5 +529,9 @@ describe("driveWorkerRun", () => {
     expect(checkpoint?.payload.sdkSessionId).toBe("checkpoint-token");
     expect(failed?.payload.error).toContain("provider quota exhausted");
     expect(failed?.payload.usage).toBeUndefined();
+    expect(diagnosticEmit.mock.calls.filter(([event]) => event === "input.received")).toEqual([
+      ["input.received", { input_ids: ["input-1"], input_count: 1, turn_id: "turn-1", reason: "bootstrap" }],
+      ["input.received", { input_ids: ["input-2"], input_count: 1, turn_id: "turn-2" }],
+    ]);
   });
 });

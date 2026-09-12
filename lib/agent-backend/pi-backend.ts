@@ -25,6 +25,7 @@ import { collectExtensions, composeSystemPrompt } from "./collect";
 import { withCodeActTools } from "./codeact-server-capabilities";
 import { createUsageAccumulator } from "./usage";
 import { runPostgresTurn } from "./postgres-turn";
+import { beginBackendInvocation, markTranscriptOutput, type BackendInvocation } from "./diagnostics";
 import type { AgentBackend, AmbientSkill, RunTurnArgs, TurnOutcome } from "./types";
 
 const TAG = "pi:";
@@ -75,15 +76,27 @@ export class PiBackend implements AgentBackend {
   readonly id = "pi" as const;
 
   async runTurn(args: RunTurnArgs): Promise<TurnOutcome> {
+    const invocation = beginBackendInvocation(args);
+    try {
+      const outcome = await this.runTurnInner(args, invocation);
+      invocation.finish("completed");
+      return outcome;
+    } catch (error) {
+      invocation.finish(args.abort.signal.aborted ? "aborted" : "error", error);
+      throw error;
+    }
+  }
+
+  private async runTurnInner(args: RunTurnArgs, invocation: BackendInvocation): Promise<TurnOutcome> {
     // Postgres mode: no session files — replay the conversation from the DB and
     // drive pi-ai's completeSimple directly. This is the former lib/chat-ai-loop
     // machinery, now a mode of this backend (R3).
     if (args.contextSource?.kind === "postgres") {
-      return runPostgresTurn(args);
+      return runPostgresTurn({ ...args, diagnosticsInvocationId: invocation.id });
     }
 
     const { cwd, model, thinkingLevel, extensions, abort, prompt, onEvent } = args;
-    const progress = createBackendProgressReporter(args.onProgress);
+    const progress = createBackendProgressReporter(args.onProgress, args.diagnostics, invocation.id);
 
     const collected = withCodeActTools(
       await collectExtensions(extensions),
@@ -102,6 +115,9 @@ export class PiBackend implements AgentBackend {
           description: tool.description,
           parameters: tool.parameters,
           execute: async (id: string, params: any) => {
+            // Pi's SDK emits tool_execution_start/end for both registered and
+            // native tools; the progress reporter owns the single lifecycle
+            // record so these calls are not double-counted.
             const r = await tool.execute(id, params);
             return { content: r.content, details: r.details, isError: r.isError ?? false };
           },
@@ -227,6 +243,7 @@ export class PiBackend implements AgentBackend {
           env.session_id = `${TAG}${env.session_id}`;
         }
         envelopes.push(env);
+        if (env.type === "assistant" || env.type === "user" || env.type === "result") markTranscriptOutput(args.diagnostics);
         persistChain = persistChain.then(() => onEvent(env));
         // Observe each step so a persist rejection can't sit unhandled, and abort
         // the turn on the first failure. persistError is re-thrown after the drain.

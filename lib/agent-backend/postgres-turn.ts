@@ -441,9 +441,13 @@ async function executeToolCall(args: {
   dispatch: Map<string, LoopToolEntry>;
   interceptors: Parameters<typeof runInterceptors>[0];
   call: ToolCall;
+  diagnostics?: RunTurnArgs["diagnostics"];
+  invocationId?: string;
 }): Promise<ToolResultMessage> {
-  const { tools, dispatch, interceptors, call } = args;
+  const { tools, dispatch, interceptors, call, diagnostics, invocationId } = args;
   const now = Date.now();
+  const startedAt = typeof performance !== "undefined" ? performance.now() : now;
+  try { diagnostics?.emit("tool.started", { "tool.name": call.name, "tool.item_id": call.id }, invocationId ? { invocationId } : undefined); } catch { /* best effort */ }
 
   try {
     let params = validateToolCall(tools, call);
@@ -454,6 +458,7 @@ async function executeToolCall(args: {
     // if a future profile adds an interceptor.
     const decision = await runInterceptors(interceptors, interceptorToolName(call.name), params);
     if (decision && "block" in decision) {
+      try { diagnostics?.emit("tool.finished", { "tool.name": call.name, "tool.item_id": call.id, "tool.outcome": "error", "tool.duration_ms": 0 }, invocationId ? { invocationId } : undefined); } catch { /* best effort */ }
       return {
         role: "toolResult",
         toolCallId: call.id,
@@ -469,6 +474,7 @@ async function executeToolCall(args: {
       throw new Error(`Unknown lightweight tool: ${call.name}`);
     }
     const result = await entry.execute(call.id, params);
+    try { diagnostics?.emit("tool.finished", { "tool.name": call.name, "tool.item_id": call.id, "tool.outcome": result.isError ? "error" : "completed", "tool.duration_ms": Math.max(0, (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt) }, invocationId ? { invocationId } : undefined); } catch { /* best effort */ }
     return {
       role: "toolResult",
       toolCallId: call.id,
@@ -478,6 +484,7 @@ async function executeToolCall(args: {
       timestamp: now,
     };
   } catch (err) {
+    try { diagnostics?.emit("tool.finished", { "tool.name": call.name, "tool.item_id": call.id, "tool.outcome": "error", "tool.duration_ms": Math.max(0, (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt) }, invocationId ? { invocationId } : undefined); } catch { /* best effort */ }
     const message = err instanceof Error ? err.message : String(err);
     return {
       role: "toolResult",
@@ -566,6 +573,8 @@ export async function runPostgresTurn(args: RunTurnArgs): Promise<TurnOutcome> {
 
     const env = sdkEventFor(assistant);
     envelopes.push(env);
+    args.onProgress?.("Pi model output");
+    try { args.diagnostics?.transcriptOutput?.(); } catch { /* best effort */ }
     await onEvent(env);
 
     summary = textFromAssistant(assistant) ?? summary;
@@ -598,7 +607,15 @@ export async function runPostgresTurn(args: RunTurnArgs): Promise<TurnOutcome> {
 
     for (const call of calls) {
       if (abort.signal.aborted) throw new Error("Turn aborted");
-      const toolResult = await executeToolCall({ tools, dispatch, interceptors: collected.interceptors, call });
+      const toolResult = await executeToolCall({
+        tools,
+        dispatch,
+        interceptors: collected.interceptors,
+        call,
+        diagnostics: args.diagnostics,
+        invocationId: args.diagnosticsInvocationId,
+      });
+      args.onProgress?.(`Pi tool ${call.name}: completed`);
       context.messages.push(toolResult);
       const toolEnv = sdkEventFor(toolResult);
       envelopes.push(toolEnv);

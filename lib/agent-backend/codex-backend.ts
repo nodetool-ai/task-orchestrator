@@ -51,6 +51,7 @@ import { resolveCodexAuth } from "./codex-auth";
 import { codexModelCatalog } from "./codex-models";
 import { scrubCodexCliEnv, CODEX_CLI_AUTH_KEYS } from "./env-scrub";
 import { config } from "../config";
+import { beginBackendInvocation, markTranscriptOutput, type BackendInvocation } from "./diagnostics";
 import type { AgentBackend, RunTurnArgs, TurnOutcome } from "./types";
 import type { RunEnvelope } from "../pi-event-mapper";
 
@@ -129,8 +130,20 @@ export class CodexBackend implements AgentBackend {
   readonly id = "codex" as const;
 
   async runTurn(args: RunTurnArgs): Promise<TurnOutcome> {
+    const invocation = beginBackendInvocation(args);
+    try {
+      const outcome = await this.runTurnInner(args, invocation);
+      invocation.finish("completed");
+      return outcome;
+    } catch (error) {
+      invocation.finish(args.abort.signal.aborted ? "aborted" : "error", error);
+      throw error;
+    }
+  }
+
+  private async runTurnInner(args: RunTurnArgs, invocation: BackendInvocation): Promise<TurnOutcome> {
     const { cwd, model, thinkingLevel, extensions, abort, prompt, onEvent } = args;
-    const progress = createBackendProgressReporter(args.onProgress);
+    const progress = createBackendProgressReporter(args.onProgress, args.diagnostics, invocation.id);
 
     // Postgres mode (the lightweight in-process loop) drives @earendil-works/pi-ai
     // directly and is pi-only; a lightweight-shaped run is always pi-backed, so
@@ -161,6 +174,7 @@ export class CodexBackend implements AgentBackend {
         tools: collected.tools,
         interceptors: collected.interceptors,
         serverName: MCP_SERVER_NAME,
+        diagnostics: invocation,
       });
     }
 
@@ -359,6 +373,7 @@ export class CodexBackend implements AgentBackend {
               const isInit = env.type === "system" && env.subtype === "init";
               if (isInit && env.session_id) env.session_id = `${TAG}${env.session_id}`;
               envelopes.push(env);
+              if (env.type === "assistant" || env.type === "user" || env.type === "result") markTranscriptOutput(args.diagnostics);
 
               // Keep the init in the in-memory list (it carries the resume
               // token) but don't persist a duplicate on a retry.
@@ -378,6 +393,7 @@ export class CodexBackend implements AgentBackend {
                 if (text) lastAgentMessage = text;
               }
               if (env.type === "result") {
+                markTranscriptOutput(args.diagnostics);
                 if (!env.is_error && typeof env.result === "string") {
                   summary = env.result.trim() || null;
                 }

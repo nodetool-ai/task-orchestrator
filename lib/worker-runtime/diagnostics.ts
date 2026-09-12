@@ -257,8 +257,9 @@ export class JsonlLogRecordExporter implements LogRecordExporter {
       await handle.close();
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
-      const suffix = randomUUID();
-      path = join(dirname(path), `${basename(path, extname(path))}.${suffix}${extname(path)}`);
+      // The collision suffix is the process stream identity so a reader can
+      // correlate the fallback filename with every record it contains.
+      path = join(dirname(path), `${basename(path, extname(path))}.${this.streamId}${extname(path)}`);
       const handle = await this.fs.open(path, "wx");
       await handle.close();
     }
@@ -432,7 +433,10 @@ export function setupDiagnostics(options: DiagnosticsOptions): Diagnostics {
   let lastMeaningfulProgressItemId: string | undefined;
   let lastMeaningfulProgressAt: number | undefined;
   let lastTranscriptOutputAt: number | undefined;
-  const openTools = new Map<string, { name: string; lastOutputAt: number }>();
+  const openTools = new Map<string, { name: string; itemId: string; invocationId?: string; lastOutputAt: number }>();
+  let channelState = "disconnected";
+  let channelEpoch = 0;
+  let priorCpu = process.cpuUsage();
   const identityState: DiagnosticsIdentity = {
     runId: options.runId!, instanceId: options.instanceId!, generation: options.generation, attempt: options.attempt,
   };
@@ -456,10 +460,29 @@ export function setupDiagnostics(options: DiagnosticsOptions): Diagnostics {
       const bounded = boundAdmissionAttributes(event, attrs, options.maxRecordBytes ?? DEFAULT_DIAGNOSTIC_RECORD_BYTES);
       const toolName = typeof bounded["tool.name"] === "string" ? bounded["tool.name"] : undefined;
       const toolId = typeof bounded["tool.item_id"] === "string" ? bounded["tool.item_id"] : undefined;
-      if (event === "tool.started" && toolId) openTools.set(toolId, { name: toolName ?? "unknown", lastOutputAt: now() });
-      if (event === "tool.finished" && toolId) openTools.delete(toolId);
+      const invocationId = typeof bounded.invocation_id === "string" ? bounded.invocation_id : undefined;
+      const toolKey = toolId ? `${invocationId ?? "unknown"}:${toolId}` : undefined;
+      if (event === "tool.started" && toolId && toolKey) {
+        openTools.set(toolKey, { name: toolName ?? "unknown", itemId: toolId, invocationId, lastOutputAt: now() });
+      }
+      if (event === "tool.finished" && toolKey) openTools.delete(toolKey);
+      const eventEpoch = typeof bounded["channel.controller_epoch"] === "number"
+        ? bounded["channel.controller_epoch"]
+        : 0;
+      if (event === "channel.connected" && eventEpoch >= channelEpoch) {
+        channelEpoch = eventEpoch;
+        channelState = "connected";
+      }
+      if (event === "channel.disconnected" && eventEpoch >= channelEpoch) {
+        channelEpoch = eventEpoch;
+        channelState = "disconnected";
+      }
       const sev = severity(emitOptions.level ?? "INFO");
-      logger.emit({ body: event, eventName: event, attributes: bounded as never, severityNumber: sev.severityNumber, severityText: sev.severityText });
+      try {
+        logger.emit({ body: event, eventName: event, attributes: bounded as never, severityNumber: sev.severityNumber, severityText: sev.severityText });
+      } catch {
+        // A provider or processor failure is diagnostic loss, never a run failure.
+      }
       return seq;
     },
     rawSdkEvent(type, at = now()) { lastRawSdkEventType = type.slice(0, 160); lastRawSdkEventAt = at; },
@@ -467,10 +490,16 @@ export function setupDiagnostics(options: DiagnosticsOptions): Diagnostics {
       lastMeaningfulProgressReason = reason.slice(0, 200);
       lastMeaningfulProgressItemId = itemId?.slice(0, 200);
       lastMeaningfulProgressAt = at;
-      for (const tool of openTools.values()) tool.lastOutputAt = at;
+      if (itemId) {
+        for (const tool of openTools.values()) {
+          if (tool.itemId === itemId) tool.lastOutputAt = at;
+        }
+      }
     },
     transcriptOutput(at = now()) { lastTranscriptOutputAt = at; },
     snapshot() {
+      const cpu = process.cpuUsage(priorCpu);
+      priorCpu = process.cpuUsage();
       return {
         ...(lastRawSdkEventType ? { last_raw_event_type: lastRawSdkEventType } : {}),
         ...(lastRawSdkEventAt === undefined ? {} : { last_raw_event_time: new Date(lastRawSdkEventAt).toISOString() }),
@@ -479,7 +508,12 @@ export function setupDiagnostics(options: DiagnosticsOptions): Diagnostics {
         ...(lastMeaningfulProgressAt === undefined ? {} : { last_meaningful_progress_time: new Date(lastMeaningfulProgressAt).toISOString() }),
         ...(lastTranscriptOutputAt === undefined ? {} : { last_transcript_output_time: new Date(lastTranscriptOutputAt).toISOString() }),
         open_tool_count: openTools.size,
-        open_tools: [...openTools.entries()].slice(0, 8).map(([id, tool]) => `${tool.name}:${id}:${tool.lastOutputAt}`),
+        open_tools: [...openTools.values()].slice(0, 8).map((tool) =>
+          `${tool.invocationId ?? "unknown"}:${tool.name}:${tool.itemId}:${tool.lastOutputAt}`
+        ),
+        rss_bytes: process.memoryUsage.rss(),
+        cpu_time_delta_ms: (cpu.user + cpu.system) / 1_000,
+        "channel.state": channelState,
       };
     },
     setAttempt(attempt) { exporter.setIdentity({ attempt }); identityState.attempt = attempt; },

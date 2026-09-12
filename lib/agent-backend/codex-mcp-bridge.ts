@@ -33,6 +33,7 @@ import { runInterceptors } from "./collect";
 import { validateToolArgs } from "../tool-args";
 import { interceptorToolName } from "../builtin-tools";
 import type { NeutralTool, ToolCallInterceptor } from "./types";
+import type { BackendInvocation } from "./diagnostics";
 
 const JSONRPC_VERSION = "2.0";
 const MCP_PROTOCOL_VERSION = "2024-11-05";
@@ -63,6 +64,8 @@ export interface CodexMcpBridgeOptions {
   serverName?: string;
   /** Env var the CLI reads the bearer token from. */
   tokenEnvVar?: string;
+  /** Invocation-scoped diagnostics for MCP tool lifecycle records. */
+  diagnostics?: BackendInvocation;
 }
 
 function bearerMatches(header: string | undefined, token: string): boolean {
@@ -106,7 +109,7 @@ function send(res: ServerResponse, status: number, body: unknown): void {
  */
 export async function handleMcpRequest(
   body: { jsonrpc?: string; id?: number | string | null; method?: string; params?: unknown },
-  ctx: { tools: NeutralTool[]; interceptors: ToolCallInterceptor[]; serverName: string }
+  ctx: { tools: NeutralTool[]; interceptors: ToolCallInterceptor[]; serverName: string; diagnostics?: BackendInvocation }
 ): Promise<{ status: number; body?: unknown }> {
   const id = body.id ?? null;
   if (body.jsonrpc !== JSONRPC_VERSION || typeof body.method !== "string") {
@@ -181,10 +184,16 @@ export async function handleMcpRequest(
       }
       if (decision && "input" in decision) args = decision.input;
 
+      const callId = randomUUID();
+      const sdkItemId = typeof body.id === "string" || typeof body.id === "number" ? String(body.id) : callId;
+      const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+      ctx.diagnostics?.toolStarted(name, sdkItemId);
       try {
-        const result = await tool.execute(randomUUID(), args);
+        const result = await tool.execute(callId, args);
+        ctx.diagnostics?.toolFinished(name, sdkItemId, result.isError ? "error" : "completed", startedAt);
         return ok({ content: result.content, isError: result.isError ?? false });
       } catch (err) {
+        ctx.diagnostics?.toolFinished(name, sdkItemId, "error", startedAt);
         const message = err instanceof Error ? err.message : String(err);
         return ok({ content: [{ type: "text", text: message }], isError: true });
       }
@@ -205,6 +214,7 @@ export async function startCodexMcpBridge(
     tools: opts.tools,
     interceptors: opts.interceptors ?? [],
     serverName,
+    diagnostics: opts.diagnostics,
   };
 
   const server: Server = createServer((req, res) => {

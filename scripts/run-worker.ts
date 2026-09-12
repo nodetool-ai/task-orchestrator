@@ -20,6 +20,11 @@ import { installProcessSafetyNet } from "../lib/transient-errors";
 import { startWorkerServer, type WorkerServer } from "../lib/worker-channel/worker-server";
 import { createLogger } from "../lib/worker/log";
 import { executeInThread } from "../lib/codeact/thread";
+import { setupDiagnostics, type Diagnostics } from "../lib/worker-runtime/diagnostics";
+import claudeSdkPackage from "../node_modules/@anthropic-ai/claude-agent-sdk/package.json";
+import piSdkPackage from "../node_modules/@earendil-works/pi-coding-agent/package.json";
+import codexSdkPackage from "../node_modules/@openai/codex-sdk/package.json";
+import otelLogsPackage from "../node_modules/@opentelemetry/sdk-logs/package.json";
 
 const log = createLogger("run-worker");
 
@@ -36,7 +41,7 @@ async function main() {
     return;
   }
   const runId = parseInt(process.argv[2] ?? "", 10);
-  if (!Number.isFinite(runId)) {
+  if (!Number.isSafeInteger(runId) || runId <= 0) {
     console.error("[run-worker] usage: run-worker <runId>");
     process.exit(2);
   }
@@ -68,10 +73,49 @@ async function main() {
     );
     process.exit(2);
   }
+  if (!/^wi_[a-f0-9]{32}$/.test(instanceId)) {
+    console.error("[run-worker] invalid TASK_ORCH_WORKER_INSTANCE_ID");
+    process.exit(2);
+  }
 
   let exitCode = 0;
   let supervisor: WorkerServer | undefined;
+  let diagnostics: Diagnostics | undefined;
   try {
+    // Diagnostics are local-only and best effort. Keep setup inside the worker
+    // after channel identity validation so a logger failure can never prevent
+    // the run from reaching the control plane.
+    try {
+      diagnostics = setupDiagnostics({
+        runId,
+        instanceId,
+        generation: appConfig.worker.generation,
+        sessionRoot,
+        instrumentationVersion: "1",
+      });
+      diagnostics.emit("worker.started", {
+        bundle_version: appConfig.worker.build ?? "unknown",
+        sdk_version: [
+          `claude-agent-sdk=${claudeSdkPackage.version}`,
+          `pi-coding-agent=${piSdkPackage.version}`,
+          `codex-sdk=${codexSdkPackage.version}`,
+          `otel-sdk-logs=${otelLogsPackage.version}`,
+          `node=${process.versions.node}`,
+        ],
+        configuration: [
+          "transport=ws",
+          "scheduled_delay_ms=1000",
+          "max_queue_size=256",
+          "max_export_batch_size=32",
+          "export_timeout_ms=1000",
+          "max_record_bytes=4096",
+          "rotation_bytes=5242880",
+          "retained_files=2",
+        ],
+      });
+    } catch (error) {
+      console.error("[run-worker] failed to initialize diagnostics:", error);
+    }
     // WebSocket transport (plan section 13): the control plane pushes the
     // authoritative RunStart snapshot and all subsequent input over the channel.
     // Start the supervisor, wait for that snapshot, build the worker run context
@@ -95,6 +139,13 @@ async function main() {
       endpoint,
       disconnectGraceMs: waitMs,
       idleExitMs: Math.max(appConfig.worker.idleExitMs, waitMs),
+      diagnostics,
+      onIdleExit: async (reason) => {
+        diagnostics?.emit("worker.shutdown", { reason }, { level: "INFO" });
+        await supervisor?.close({ code: 1000, reason: "worker idle backstop" }).catch(() => {});
+        await diagnostics?.shutdown(1_000).catch(() => false);
+        process.exit(0);
+      },
     });
 
     // Ship the tee'd runner.log over the CHANNEL, not the db. A worker holds no
@@ -124,7 +175,7 @@ async function main() {
     // until chatIdleMs passes with none. Passing `start` selected the single
     // drive, so the worker exited after every turn and the sprite service
     // restarted it — a new worker generation per message (2026-08-27).
-    await driveWorkerRun({ session: session as WorkerDriverSession });
+    await driveWorkerRun({ session: session as WorkerDriverSession, diagnostics });
     log.info("worker finished", { runId });
   } catch (e) {
     log.error("worker fatal", { runId, error: e instanceof Error ? (e.stack ?? e.message) : String(e) });
@@ -138,6 +189,7 @@ async function main() {
     // the run fail with "worker session is closed" every time.
     if (stopLogFlusher) await stopLogFlusher().catch(() => {});
     await supervisor?.close().catch(() => {});
+    await diagnostics?.shutdown(1_000).catch(() => false);
   }
   process.exit(exitCode);
 }
