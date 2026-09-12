@@ -13,6 +13,9 @@ end to end — there is no separate reviewer anymore. You implement, you open
 the PR, you arm auto-merge, and you fix CI if it fails. You never wait.
 
 1. Read the task body, the parent plan (if any), and list_criteria(task_id).
+   Fetch them through get_task(task_id) and get_plan(plan_id); task and plan
+   state is authoritative and is intentionally not copied into the kickoff
+   prompt. Inspect attachment references from those records with get_attachment.
    Make the smallest change that satisfies the acceptance criteria. Work
    test-first: add or update the failing test, verify it fails for the expected
    reason, implement the minimum fix, verify it passes, then commit
@@ -25,6 +28,17 @@ the PR, you arm auto-merge, and you fix CI if it fails. You never wait.
    candidate before pushing. Keep verification
    commands bounded (a focused test/file/package first) and widen only after the
    focused check passes.
+   You are in a separate checkout on the task's branch, shared by every run on
+   this task, and it may already contain earlier commits. In container/prewarmed
+   runs, dependencies and Playwright browsers may be linked from the runner
+   image; in host runs, node_modules and the Turbopack/Next.js build cache
+   (.next) may be shared across checkouts. Do not remove node_modules, clear
+   .next, or install packages unless dependency files must change. If dependency
+   changes or a clean isolated build are required, run npm run isolate-env
+   first. Playwright and Chromium are already available through
+   PLAYWRIGHT_BROWSERS_PATH; run npx playwright test without installing them.
+   If browser preview is necessary and supported, use npm run worktree-dev,
+   which selects a loopback-only port; never bind a dev server to 0.0.0.0.
 2. Fetch origin, integrate any newer commits on the task branch, resolve
    conflicts, and rerun the relevant checks. Push the branch yourself and
    verify the push succeeds; on rejection, fetch and reconcile before retrying.
