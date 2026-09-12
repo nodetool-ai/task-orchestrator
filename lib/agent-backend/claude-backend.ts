@@ -23,6 +23,7 @@ import { withCodeActCapabilities } from "./codeact-capabilities";
 import { createUsageAccumulator } from "./usage";
 import { toZodRawShape } from "./typebox-to-zod";
 import { interceptorToolName, isFileTool } from "../builtin-tools";
+import { CLAUDE_SUBAGENT_TOOLS } from "../subagent-tools";
 import { scrubClaudeCliEnv } from "./env-scrub";
 import { resolveClaudeBinary } from "./claude-binary";
 import type { AgentBackend, RunTurnArgs, TurnOutcome } from "./types";
@@ -30,9 +31,13 @@ import type { RunEnvelope } from "../pi-event-mapper";
 
 const TAG = "claude:";
 const MCP_SERVER_NAME = "task_orch";
+// Both sub-agent spellings are listed on purpose: the current SDK emits `Agent`
+// and 0.2.x emitted `Task`, and a sub-agent inherits the very tool surface this
+// list withholds — leaving either name out reopens the escape hatch for the
+// whole list (lib/subagent-tools.ts).
 const ORCHESTRATION_ONLY_NATIVE_TOOLS = [
   "Read", "Write", "Edit", "NotebookEdit", "Bash", "Grep", "Glob",
-  "WebFetch", "WebSearch", "Task",
+  "WebFetch", "WebSearch", ...CLAUDE_SUBAGENT_TOOLS,
 ] as const;
 
 /** The CLI's error when a `--resume <id>` transcript isn't on this machine's

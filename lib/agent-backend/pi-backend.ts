@@ -120,7 +120,10 @@ export class PiBackend implements AgentBackend {
           const toolName = interceptorToolName(event.toolName);
           if (
             args.nativeToolPolicy === "orchestration-only" &&
-            ["read", "write", "edit", "bash", "grep", "glob", "ls", "webfetch", "websearch", "task"].includes(toolName)
+            // Canonical (lowercased) names — interceptorToolName has already
+            // folded every harness spelling, the sub-agent tool included, into
+            // this vocabulary (lib/builtin-tools.ts).
+            ["read", "write", "edit", "bash", "grep", "glob", "ls", "webfetch", "websearch", "agent"].includes(toolName)
           ) {
             return {
               block: true,

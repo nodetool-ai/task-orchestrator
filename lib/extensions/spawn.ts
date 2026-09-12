@@ -31,6 +31,7 @@ import type { OrchestratorTool, OrchestratorToolResult } from "../orchestrator-t
 import { legacyToolInvoker } from "./legacy-invoker";
 import type { ExtensionFactory, ToolInvoker } from "./types";
 import { getRunActivitySnapshot } from "../run-activity";
+import { RUN_MINTING_COST_NOTE } from "../delegation-guidance";
 
 // ────────────────────────────────────────
 // Constants
@@ -432,7 +433,8 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
       name: "spawn__spawn_agent",
       label: "Spawn Agent",
       description:
-        "Spawn a child agent run. Returns immediately with the new run_id; poll spawn__get_run(id) for status. Enforces a depth cap of 3 on the parent chain and a tree-wide cost cap. The 'persona' field selects the agent role (reviewer | implementor | planner | designer | qa).",
+        "Spawn a child agent run. Returns immediately with the new run_id; poll spawn__get_run(id) for status. Enforces a depth cap of 3 on the parent chain and a tree-wide cost cap. The 'persona' field selects the agent role (reviewer | implementor | planner | designer | qa). " +
+        RUN_MINTING_COST_NOTE,
       parameters: Type.Object({
         goal: Type.String({ minLength: 1 }),
         persona: Type.String({ minLength: 1 }),
