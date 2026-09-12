@@ -12,13 +12,16 @@ import {
 } from "../../db/schema";
 import * as repo from "../../lib/repo";
 import { orchestratorExtension } from "../../lib/extensions/agent";
+import { ORCHESTRATOR_TOOLS } from "../../lib/orchestrator-tools";
 import { makeRegistrar } from "../helpers/fake-registrar";
 
 describe("orchestratorExtension", () => {
-  it("registers 45 task_orch tools", () => {
+  it("registers every orchestrator tool under its task_orch name", () => {
     const r = makeRegistrar();
     orchestratorExtension({ author: "test" })(r.reg);
-    expect(r.tools.size).toBe(45);
+    expect([...r.tools.keys()].sort()).toEqual(
+      ORCHESTRATOR_TOOLS.map((tool) => `task_orch__${tool.name}`).sort()
+    );
     for (const [name, def] of r.tools) {
       expect(name).toMatch(/^task_orch__/);
       expect(def.label).toBeDefined();
