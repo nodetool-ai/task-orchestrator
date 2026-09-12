@@ -4,6 +4,7 @@
 // Verified shapes: docs/runners/sprites-api-notes.md
 
 import { spritesProxyUrl } from "./sprites-tunnel";
+import { Agent, type Dispatcher } from "undici";
 
 export interface Sprite {
   name: string;
@@ -185,7 +186,7 @@ function serviceFromJson(raw: RawSpriteServiceJson): SpriteService {
 export function parseExecFrames(chunks: Uint8Array[]): { exitCode: number; stdout: string; stderr: string } {
   const out: Uint8Array[] = [];
   const err: Uint8Array[] = [];
-  let exitCode = 0;
+  let exitCode: number | undefined;
   for (const chunk of chunks) {
     if (chunk.length === 0) continue;
     const payload = chunk.subarray(1);
@@ -204,6 +205,7 @@ export function parseExecFrames(chunks: Uint8Array[]): { exitCode: number; stdou
         err.push(chunk);
     }
   }
+  if (exitCode === undefined) throw new SpritesApiError(0, "exec stream ended without an exit status");
   return { exitCode, stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8") };
 }
 
@@ -217,6 +219,43 @@ async function readChunks(response: Response): Promise<Uint8Array[]> {
     if (value) chunks.push(value);
   }
   return chunks;
+}
+
+function transportErrorCode(error: unknown): string | undefined {
+  let candidate = error;
+  for (let depth = 0; depth < 3 && candidate && typeof candidate === "object"; depth++) {
+    const record = candidate as { code?: unknown; cause?: unknown };
+    if (typeof record.code === "string" && /^[A-Z][A-Z0-9_]*$/.test(record.code)) return record.code;
+    candidate = record.cause;
+  }
+  return undefined;
+}
+
+function execTransportError(error: unknown, safePath: string, timeoutMs: number, deadlineExpired: boolean): SpritesApiError {
+  const code = transportErrorCode(error);
+  const name = error instanceof Error ? error.name : undefined;
+  if (deadlineExpired || name === "TimeoutError" || code === "ABORT_ERR") {
+    return new SpritesApiError(0, `exec timed out after ${timeoutMs}ms: POST ${safePath}`);
+  }
+  const suffix = code ? ` (${code})` : "";
+  return new SpritesApiError(0, `exec transport failed before terminal status: POST ${safePath}${suffix}`);
+}
+
+const disableExecParserTimeouts: Dispatcher.DispatcherComposeInterceptor = (dispatch) => (options, handler) =>
+  dispatch({ ...options, headersTimeout: 0, bodyTimeout: 0 }, handler);
+
+/** Build a request-scoped dispatcher whose parser cannot preempt the exec
+ * deadline, even if fetch supplies its own per-dispatch timeout values. */
+export function createExecDispatcher(agent: Agent = new Agent({ headersTimeout: 0, bodyTimeout: 0 })): Dispatcher {
+  return agent.compose(disableExecParserTimeouts);
+}
+
+async function closeDispatcher(dispatcher: Dispatcher): Promise<void> {
+  try {
+    await dispatcher.close();
+  } catch {
+    await dispatcher.destroy().catch(() => undefined);
+  }
 }
 
 function spriteFromJson(raw: RawSpriteJson): Sprite {
@@ -432,24 +471,31 @@ export function makeSpritesClient(input?: SpritesClientOptions): SpritesClient {
       if (input.env) {
         for (const [k, v] of Object.entries(input.env)) params.append("env", `${k}=${v}`);
       }
-      const path = `/sprites/${encodeURIComponent(spriteName)}/exec?${params.toString()}`;
-      let response: Response;
+      const safePath = `/sprites/${encodeURIComponent(spriteName)}/exec`;
+      const path = `${safePath}?${params.toString()}`;
+      const timeoutMs = input.timeoutMs ?? REQUEST_TIMEOUT_MS;
+      // Node's fetch uses Undici, whose default headers/body idle timeouts are
+      // 300 seconds. Long silent commands must instead be bounded solely by
+      // the command's explicit hard deadline.
+      const dispatcher = createExecDispatcher();
+      const signal = AbortSignal.timeout(timeoutMs);
       try {
-        response = await fetchImpl(`${baseUrl}${path}`, {
+        const response = await fetchImpl(`${baseUrl}${path}`, {
           method: "POST",
           headers: { Authorization: `Bearer ${token}` },
-          signal: AbortSignal.timeout(input.timeoutMs ?? REQUEST_TIMEOUT_MS),
-        });
-      } catch (err) {
-        if (err instanceof Error && err.name === "TimeoutError") {
-          throw new SpritesApiError(0, `request timed out: POST ${path}`);
+          signal,
+          dispatcher,
+        } as RequestInit & { dispatcher: Dispatcher });
+        if (!response.ok) {
+          throw new SpritesApiError(response.status, await response.text());
         }
-        throw err;
+        return parseExecFrames(await readChunks(response));
+      } catch (err) {
+        if (err instanceof SpritesApiError) throw err;
+        throw execTransportError(err, safePath, timeoutMs, signal.aborted);
+      } finally {
+        await closeDispatcher(dispatcher);
       }
-      if (!response.ok) {
-        throw new SpritesApiError(response.status, await response.text());
-      }
-      return parseExecFrames(await readChunks(response));
     },
 
     async checkpoint(spriteName: string, comment?: string) {

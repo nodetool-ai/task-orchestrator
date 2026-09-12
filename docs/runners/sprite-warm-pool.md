@@ -208,7 +208,9 @@ npm run sprite:baseline -- --repo=/path/to/nodetool --ref=fc3abb76b01416a140ba1c
 Combine that specification with a generic target of two before applying the
 override. Preparation installs all locked workspaces, rebuilds native bindings,
 builds package outputs with `NODE_ENV` cleared, and probes Jest, TypeScript,
-Turbo, Sharp and `better-sqlite3`. The first preparation is still a full install;
+Turbo, Sharp, Keytar and `better-sqlite3`. Preparation installs the Linux
+`libsecret-1-dev` prerequisite before npm so Keytar can fall back to compilation.
+The first preparation is still a full install;
 only a verified checkpoint is eligible for assignment.
 
 ## Ownership, recovery and cleanup

@@ -40,7 +40,7 @@ function client(overrides: Partial<SpritesClient> = {}): SpritesClient & { calls
 }
 
 beforeEach(async () => { await db.delete(spritePoolEntries); await db.delete(agentSessions); });
-afterEach(async () => { await db.delete(spritePoolEntries); await db.delete(agentSessions); vi.restoreAllMocks(); });
+afterEach(async () => { await db.delete(spritePoolEntries); await db.delete(agentSessions); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 describe("Sprite pool provider integration", () => {
   it.each([false, true])("reserves foreground priority only for pending runs needing a Sprite (bound=%s)", async (bound) => {
@@ -192,7 +192,9 @@ describe("Sprite pool provider integration", () => {
       providerServiceName: "worker-g1",
     });
 
-    await expect(new SpritesRunnerProvider(c).create({
+    const provider = new SpritesRunnerProvider(c);
+    vi.spyOn(provider as unknown as { refillPool(): void }, "refillPool").mockImplementation(() => {});
+    await expect(provider.create({
       runId: run.id,
       scope: `run-${run.id}`,
       workerGeneration: 1,

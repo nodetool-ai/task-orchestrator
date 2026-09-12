@@ -237,7 +237,12 @@ export const spritesPoolStore = {
   },
 
   async recoverExpiredLeases(now = new Date()): Promise<number> {
-    const rows = await db.update(spritePoolEntries).set({ state: "draining", deleteRequestedAt: now, lastError: "preparation lease expired", updatedAt: now }).where(and(isNull(spritePoolEntries.runId), notInArray(spritePoolEntries.state, ["deleted", "claimed"]), sql`${spritePoolEntries.leaseExpiresAt} IS NOT NULL AND ${spritePoolEntries.leaseExpiresAt} < ${now.toISOString()}`)).returning({ id: spritePoolEntries.id });
+    const rows = await db.update(spritePoolEntries).set({
+      state: "draining",
+      deleteRequestedAt: now,
+      lastError: sql`CASE WHEN ${spritePoolEntries.state} = 'preparing' THEN 'preparation lease expired' ELSE ${spritePoolEntries.lastError} END`,
+      updatedAt: now,
+    }).where(and(isNull(spritePoolEntries.runId), notInArray(spritePoolEntries.state, ["deleted", "claimed"]), sql`${spritePoolEntries.leaseExpiresAt} IS NOT NULL AND ${spritePoolEntries.leaseExpiresAt} < ${now.toISOString()}`)).returning({ id: spritePoolEntries.id });
     return rows.length;
   },
 

@@ -19,13 +19,13 @@
     "electron/scripts/rebuild-native.mjs"
   ],
   "setupCommands": [
-    "command -v python3 >/dev/null && command -v make >/dev/null && command -v g++ >/dev/null"
+    "sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential pkg-config python3 libsecret-1-dev ca-certificates && pkg-config --exists libsecret-1"
   ],
   "buildCommands": [
     "NODE_ENV= npm run build:packages"
   ],
   "readinessCommands": [
-    "node -e \"require.resolve('jest/package.json');require.resolve('typescript/package.json');require.resolve('turbo/package.json');require('sharp');const D=require('better-sqlite3');const d=new D(':memory:');d.close()\""
+    "node -e \"require.resolve('jest/package.json');require.resolve('typescript/package.json');require.resolve('turbo/package.json');require('sharp');require('keytar');const D=require('better-sqlite3');const d=new D(':memory:');d.close()\""
   ],
   "baseRef": "origin/main",
   "minimumGitHistoryDepth": 100

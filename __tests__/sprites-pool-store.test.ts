@@ -126,12 +126,27 @@ describe("Sprite pool store (Postgres)", () => {
     expect(await spritesPoolStore.reservePreparation({ spriteName: `pool-backoff-2-${crypto.randomUUID()}`, fingerprint: "fp-backoff", checkpointId: "pending", baselineManifest: {} }, 0)).toBeNull();
   });
 
+  it("preserves the preparation failure while draining after backoff", async () => {
+    const row = await spritesPoolStore.reservePreparation({ spriteName: `pool-failed-${crypto.randomUUID()}`, fingerprint: "fp-failed", checkpointId: "pending", baselineManifest: {} }, 0);
+    const now = Date.now();
+    await spritesPoolStore.failPreparation({ reservationId: String(row!.id), leaseToken: String(row!.leaseToken), reason: "baseline command exited 1", retryAt: now - 1 });
+
+    expect(await spritesPoolStore.recoverExpiredLeases(new Date(now))).toBe(1);
+    expect(await spritesPoolStore.findBySpriteName(row!.spriteName)).toMatchObject({
+      state: "draining",
+      lastError: "baseline command exited 1",
+    });
+  });
+
   it("recovers expired preparation leases without allowing readiness", async () => {
     const row = await spritesPoolStore.reservePreparation({ spriteName: `pool-expired-${crypto.randomUUID()}`, fingerprint: "fp-expired", checkpointId: "pending", baselineManifest: {}, leaseMs: 1 }, 0);
     await new Promise((resolve) => setTimeout(resolve, 5));
     const result = await spritesPoolStore.reconcile(Date.now());
     expect(result.expired.some((item) => item.id === String(row!.id))).toBe(true);
-    expect((await spritesPoolStore.listActive()).find((item) => item.id === row!.id)?.state).toBe("draining");
+    expect((await spritesPoolStore.listActive()).find((item) => item.id === row!.id)).toMatchObject({
+      state: "draining",
+      lastError: "preparation lease expired",
+    });
     await expect(spritesPoolStore.completePreparation({ reservationId: String(row!.id), leaseToken: String(row!.leaseToken), checkpointId: "late" })).rejects.toThrow("lease");
   });
 

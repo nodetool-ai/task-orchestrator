@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import { createServer } from "node:http";
+import { Agent } from "undici";
 
-import { makeSpritesClient, SpritesApiError } from "../lib/runner/sprites-client";
+import { createExecDispatcher, makeSpritesClient, SpritesApiError } from "../lib/runner/sprites-client";
 
 const TOKEN = "test-token-123";
 const BASE_URL = "https://api.sprites.dev/v1";
@@ -245,6 +247,7 @@ describe("SpritesClient", () => {
   });
 
   it("exec sends the line as sh -c argv in query params and parses the framed stream", async () => {
+    let dispatcher: Agent | undefined;
     const fetchImpl = makeFetchMock(async (url, init) => {
       expect(url).toContain("/sprites/to-run-1/exec?");
       expect(url).toContain("cmd=sh&cmd=-c&cmd=node+%2B+version");
@@ -254,6 +257,8 @@ describe("SpritesClient", () => {
       const headers = init.headers as Record<string, string>;
       expect(headers["Content-Type"]).toBeUndefined();
       expect(init.body).toBeUndefined();
+      dispatcher = (init as RequestInit & { dispatcher?: Agent }).dispatcher;
+      expect(dispatcher).toBeInstanceOf(Agent);
       return framedResponse([[1, "v20"], [3, "\0"]]);
     });
     const client = makeSpritesClient({ fetchImpl, baseUrl: BASE_URL, token: TOKEN });
@@ -264,6 +269,7 @@ describe("SpritesClient", () => {
     });
     expect(res.exitCode).toBe(0);
     expect(res.stdout).toBe("v20");
+    expect(dispatcher?.closed).toBe(true);
   });
 
   it("exec drops timeout_ms and uses query params only", async () => {
@@ -277,6 +283,79 @@ describe("SpritesClient", () => {
     const res = await client.exec("to-run-1", { cmd: "false", timeoutMs: 5000 });
     expect(res.exitCode).toBe(1);
     expect(res.stderr).toBe("oops");
+  });
+
+  it("exec retains its hard deadline while parser idle timeouts are disabled", async () => {
+    const fetchImpl = makeFetchMock(async (_url, init) => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(Buffer.concat([Buffer.from([1]), Buffer.from("still running\n")]));
+        init.signal?.addEventListener("abort", () => controller.error(init.signal?.reason), { once: true });
+      },
+    }), { status: 200 }));
+    const client = makeSpritesClient({ fetchImpl, baseUrl: BASE_URL, token: TOKEN });
+
+    await expect(client.exec("to-run-1", { cmd: "sleep 60", timeoutMs: 10 }))
+      .rejects.toThrow("exec timed out after 10ms: POST /sprites/to-run-1/exec");
+  });
+
+  it("exec dispatcher overrides Undici's body-idle timeout on a real response stream", async () => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "Content-Type": "application/octet-stream" });
+      response.write(Buffer.concat([Buffer.from([1]), Buffer.from("working") ]));
+      setTimeout(() => response.end(Buffer.from([3, 0])), 150);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no TCP address");
+    const url = `http://127.0.0.1:${address.port}`;
+    const agent = new Agent({ headersTimeout: 0, bodyTimeout: 25 });
+    const originalDispatch = agent.dispatch.bind(agent);
+    let dispatchedOptions: Parameters<Agent["dispatch"]>[0] | undefined;
+    vi.spyOn(agent, "dispatch").mockImplementation((options, handler) => {
+      dispatchedOptions = options;
+      return originalDispatch(options, handler);
+    });
+    try {
+      const dispatcher = createExecDispatcher(agent);
+      const response = await fetch(url, { dispatcher } as RequestInit & { dispatcher: typeof dispatcher });
+      expect([...new Uint8Array(await response.arrayBuffer())]).toEqual([1, ...Buffer.from("working"), 3, 0]);
+      expect(dispatchedOptions).toMatchObject({ headersTimeout: 0, bodyTimeout: 0 });
+      await dispatcher.close();
+    } finally {
+      await agent.destroy().catch(() => undefined);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("classifies body transport timeouts without exposing command environment", async () => {
+    const bodyTimeout = Object.assign(new Error("body timed out at a URL containing credentials"), {
+      code: "UND_ERR_BODY_TIMEOUT",
+    });
+    const fetchImpl = makeFetchMock(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.error(bodyTimeout); },
+    }), { status: 200 }));
+    const client = makeSpritesClient({ fetchImpl, baseUrl: BASE_URL, token: TOKEN });
+
+    let thrown: unknown;
+    try {
+      await client.exec("to-run-1", { cmd: "npm ci", env: { GH_TOKEN: "secret-value" }, timeoutMs: 20 * 60_000 });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(SpritesApiError);
+    expect((thrown as SpritesApiError).body).toBe(
+      "exec transport failed before terminal status: POST /sprites/to-run-1/exec (UND_ERR_BODY_TIMEOUT)",
+    );
+    expect((thrown as Error).message).not.toContain("secret-value");
+    expect((thrown as Error).message).not.toContain("GH_TOKEN");
+  });
+
+  it("rejects a successful HTTP exec stream without a terminal exit frame", async () => {
+    const fetchImpl = makeFetchMock(async () => framedResponse([[1, "install finished\n"]]));
+    const client = makeSpritesClient({ fetchImpl, baseUrl: BASE_URL, token: TOKEN });
+
+    await expect(client.exec("to-run-1", { cmd: "npm ci", timeoutMs: 20 * 60_000 }))
+      .rejects.toThrow("exec stream ended without an exit status");
   });
 
   it("startService handles NDJSON stream without JSON parse error", async () => {
@@ -394,6 +473,12 @@ describe("parseExecFrames", () => {
     const f = (id: number, s: string) => Buffer.concat([Buffer.from([id]), Buffer.from(s)]);
     const r = parseExecFrames([f(1, "a\nb\n"), f(1, "noline"), f(2, "e\n"), Buffer.from([3, 5])]);
     expect(r).toEqual({ exitCode: 5, stdout: "a\nb\nnoline", stderr: "e\n" });
+  });
+
+  it("does not infer success when the exit frame is absent", async () => {
+    const { parseExecFrames } = await import("../lib/runner/sprites-client");
+    expect(() => parseExecFrames([Buffer.concat([Buffer.from([1]), Buffer.from("done")])]))
+      .toThrow("exec stream ended without an exit status");
   });
 });
 
