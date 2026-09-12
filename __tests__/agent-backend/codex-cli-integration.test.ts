@@ -83,7 +83,10 @@ class LocalResponsesApi {
         call_id: `probe-call-${this.connectionCount}`,
         name: "exec",
         namespace: "functions",
-        input: "text(await tools.mcp__task_orch__orch_probe({}));",
+        // CodeAct is always on (lib/agent-backend/codeact-capabilities.ts), so the
+        // only MCP tools the bridge exposes are codeact_catalog/codeact_execute:
+        // the probe is reached as a catalogued operation inside the sandbox.
+        input: "text(await tools.mcp__task_orch__codeact_execute({ code: 'return await tools.orch_probe({});' }));",
       };
       socket.send(JSON.stringify({ type: "response.output_item.added", output_index: 0, item: { ...call, input: "" } }));
       socket.send(JSON.stringify({ type: "response.output_item.done", output_index: 0, item: call }));
@@ -188,7 +191,16 @@ describe("CodexBackend with the real Codex CLI", () => {
       expect(outcome.inputTokens).toBe(4);
       expect(outcome.outputTokens).toBe(2);
       expect(JSON.stringify(api.inputs)).toContain("ORCH_PROBE_OK");
-      expect(outcome.envelopes.some((e: any) => e.type === "user" && e.message.content[0].content[0].text === "ORCH_PROBE_OK")).toBe(true);
+      // The bridged tool result is now the CodeAct execution record: it must show
+      // the probe having run as a subcall, with its output carried back.
+      const record = outcome.envelopes
+        .filter((e: any) => e.type === "user")
+        .flatMap((e: any) => e.message.content)
+        .find((block: any) => block.type === "tool_result");
+      expect(record).toBeDefined();
+      const execution = JSON.parse(record.content[0].text);
+      expect(execution.subcalls.map((subcall: any) => subcall.operation)).toContain("tools.orch_probe");
+      expect(execution.result.content[0].text).toBe("ORCH_PROBE_OK");
     } finally {
       await api.close();
     }
