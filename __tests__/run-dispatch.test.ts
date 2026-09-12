@@ -11,8 +11,14 @@ import {
   dispatchRun,
   provisionLocalChannel,
   provisionSpritesChannel,
+  stopRunner,
   unsupportedWsProviderMessage,
 } from "../lib/run-dispatch";
+import {
+  __resetRunnerProviderForTests,
+  __setRunnerProviderForTests,
+  type RunnerProvider,
+} from "../lib/runner/provider";
 
 describe("dispatchRun", () => {
   it("claims an unclaimed run and calls spawn once", async () => {
@@ -92,6 +98,75 @@ describe("dispatchRun", () => {
     expect(row.status).toBe("preparing");
     expect(row.error).toBeNull();
     expect(row.completedAt).toBeNull();
+  });
+});
+
+describe("stopRunner generation guard", () => {
+  it("filters optional generation identity and stops the current row by run id", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      provider: "local",
+      spriteName: "reusable-runner",
+      state: "running",
+      generationState: "active",
+      workerGeneration: 4,
+      channelInstanceId: "wi_44444444444444444444444444444444",
+    });
+    const destroyGeneration = vi.fn(async () => {});
+    const provider: RunnerProvider = {
+      kind: "local",
+      create: vi.fn(async () => null),
+      stop: vi.fn(async () => {}),
+      sweep: vi.fn(async () => {}),
+      inspect: vi.fn(async () => ({ status: "unknown" as const })),
+      destroyGeneration,
+    };
+    __setRunnerProviderForTests(provider);
+    try {
+      await stopRunner("reusable-runner", { runId: run.id, workerGeneration: 3 });
+      await stopRunner("reusable-runner", { runId: run.id, instanceId: "wi_stale" });
+      expect(destroyGeneration).not.toHaveBeenCalled();
+
+      await stopRunner("reusable-runner", { runId: run.id });
+      expect(destroyGeneration).toHaveBeenCalledWith(expect.objectContaining({
+        runId: run.id,
+        generation: 4,
+        instanceId: "wi_44444444444444444444444444444444",
+        providerHandle: "reusable-runner",
+      }));
+    } finally {
+      __resetRunnerProviderForTests();
+    }
+  });
+
+  it("does not fall back to a stale scope after a Sprite binding is detached", async () => {
+    const run = await create({ goal: "<chat>", defer: true });
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      provider: "sprites",
+      spriteName: null,
+      state: "gone",
+      generationState: "stopped",
+      workerGeneration: 2,
+    });
+    const stop = vi.fn(async () => {});
+    const destroyGeneration = vi.fn(async () => {});
+    __setRunnerProviderForTests({
+      kind: "sprites",
+      create: vi.fn(async () => null),
+      stop,
+      sweep: vi.fn(async () => {}),
+      inspect: vi.fn(async () => ({ status: "unknown" as const })),
+      destroyGeneration,
+    });
+    try {
+      await stopRunner("recycled-sprite", { runId: run.id });
+      expect(destroyGeneration).not.toHaveBeenCalled();
+      expect(stop).not.toHaveBeenCalled();
+    } finally {
+      __resetRunnerProviderForTests();
+    }
   });
 });
 

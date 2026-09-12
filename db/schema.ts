@@ -434,6 +434,9 @@ export const spritePoolEntries = pgTable(
     checkpointId: text("checkpoint_id").notNull(),
     restoreState: text("restore_state").notNull().default("pending"),
     baselineRestoredAt: ts("baseline_restored_at"),
+    reuseUserId: integer("reuse_user_id").references(() => users.id),
+    reuseRepositoryId: text("reuse_repository_id").references(() => repositories.id),
+    reuseCount: integer("reuse_count").notNull().default(0),
     runId: integer("run_id").references(() => agentSessions.id, { onDelete: "set null" }),
     leaseToken: uuid("lease_token"),
     leaseExpiresAt: ts("lease_expires_at"),
@@ -451,7 +454,7 @@ export const spritePoolEntries = pgTable(
     stateUpdatedIdx: index("sprite_pool_entries_state_updated_idx").on(t.state, t.updatedAt),
     stateCheck: check(
       "sprite_pool_entries_state_check",
-      sql`${t.state} IN ('preparing', 'ready', 'claimed', 'draining', 'deleting', 'deleted', 'failed')`
+      sql`${t.state} IN ('preparing', 'ready', 'claimed', 'recycling', 'draining', 'deleting', 'deleted', 'failed')`
     ),
     baselineClassCheck: check(
       "sprite_pool_entries_baseline_class_check",
@@ -463,6 +466,20 @@ export const spritePoolEntries = pgTable(
     ),
   })
 );
+
+export const spritePoolAssignments = pgTable("sprite_pool_assignments", {
+  id: serial("id").primaryKey(),
+  poolEntryId: integer("pool_entry_id").notNull().references(() => spritePoolEntries.id, { onDelete: "cascade" }),
+  runId: integer("run_id").notNull(),
+  userId: integer("user_id"),
+  repositoryId: text("repository_id"),
+  leaseToken: uuid("lease_token").notNull().unique(),
+  generation: integer("generation").notNull(),
+  assignedAt: ts("assigned_at").notNull().defaultNow(),
+  releasedAt: ts("released_at"),
+  branch: text("branch"),
+  commitSha: text("commit_sha"),
+}, (t) => ({ runIdx: index("sprite_pool_assignments_run_idx").on(t.runId) }));
 
 export const workerChannelCommands = pgTable(
   "worker_channel_commands",

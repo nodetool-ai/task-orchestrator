@@ -40,7 +40,7 @@ async function makeActiveChild(parentRunId: number) {
 
 describe("cancel() cascades to descendants (FIX 1)", () => {
   it("reaches a grandchild", async () => {
-    vi.spyOn(dispatch, "stopRunner").mockResolvedValue(undefined as any);
+    const stopRunner = vi.spyOn(dispatch, "stopRunner").mockResolvedValue(undefined as any);
     // executor (idle) → child (running) → grandchild (running)
     const parent = await create({ goal: "adhoc-parent", cwdStrategy: "none", defer: true });
     const childId = await makeActiveChild(parent.id);
@@ -51,6 +51,9 @@ describe("cancel() cascades to descendants (FIX 1)", () => {
     expect((await get(parent.id))?.status).toBe("cancelled");
     expect((await get(childId))?.status).toBe("cancelled");
     expect((await get(grandchildId))?.status).toBe("cancelled");
+    expect(stopRunner).toHaveBeenCalledWith(null, { runId: parent.id });
+    expect(stopRunner).toHaveBeenCalledWith(null, { runId: childId });
+    expect(stopRunner).toHaveBeenCalledWith(null, { runId: grandchildId });
   });
 
   it("leaves an already-terminal descendant untouched (no resurrection)", async () => {
@@ -76,7 +79,7 @@ describe("cancel() cascades to descendants (FIX 1)", () => {
 
 describe("close() cascades to descendants as cancels (FIX 1)", () => {
   it("cancels children of a closed parent", async () => {
-    vi.spyOn(dispatch, "stopRunner").mockResolvedValue(undefined as any);
+    const stopRunner = vi.spyOn(dispatch, "stopRunner").mockResolvedValue(undefined as any);
     const parent = await create({ goal: "adhoc-parent", cwdStrategy: "none", defer: true });
     const childId = await makeActiveChild(parent.id);
     const grandchildId = await makeActiveChild(childId);
@@ -87,5 +90,8 @@ describe("close() cascades to descendants as cancels (FIX 1)", () => {
     // Children are cancelled (workers for the closed parent), not closed.
     expect((await get(childId))?.status).toBe("cancelled");
     expect((await get(grandchildId))?.status).toBe("cancelled");
+    expect(stopRunner).toHaveBeenCalledWith(null, { runId: parent.id });
+    expect(stopRunner).toHaveBeenCalledWith(null, { runId: childId });
+    expect(stopRunner).toHaveBeenCalledWith(null, { runId: grandchildId });
   });
 });

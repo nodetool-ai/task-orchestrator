@@ -1,9 +1,10 @@
-import { and, desc, eq, isNull, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, notInArray, or, sql } from "drizzle-orm";
 import { db } from "../../db";
-import { runnerInstances, spritePoolEntries } from "../../db/schema";
+import { agentSessions, runnerInstances, spritePoolEntries, spritePoolAssignments } from "../../db/schema";
 import { spriteLog } from "./sprites-log";
+import { config } from "../config";
 
-export type SpritePoolState = "preparing" | "ready" | "claimed" | "draining" | "deleting" | "deleted" | "failed";
+export type SpritePoolState = "preparing" | "ready" | "claimed" | "recycling" | "draining" | "deleting" | "deleted" | "failed";
 export type BaselineClass = "generic" | "repository";
 export type SpritePoolEntry = typeof spritePoolEntries.$inferSelect;
 
@@ -25,6 +26,7 @@ export interface ClaimInput {
   expectedProviderOperationId?: string | null;
   leaseMs?: number;
   expectedRunnerState?: string;
+  reuseAffinity?: { userId: number; repositoryId: string };
 }
 
 function expiry(ms = 10 * 60_000): Date {
@@ -69,7 +71,8 @@ export const spritesPoolStore = {
         if (Number(targetRows[0]?.count ?? 0) >= readyTarget) { spriteLog("sprites_pool_reservation_declined", { fingerprint: baselineInput.fingerprint, reason: "unused_budget" }, "debug"); return null; }
       }
       if (fingerprintTarget !== undefined) {
-        const fpRows = await tx.execute<{ count: number | string }>(sql`SELECT count(*)::int AS count FROM sprite_pool_entries WHERE fingerprint=${baselineInput.fingerprint} AND state IN ('preparing','ready')`);
+        const fpRows = await tx.execute<{ count: number | string }>(sql`SELECT count(*)::int AS count FROM sprite_pool_entries WHERE fingerprint=${baselineInput.fingerprint}
+          AND (state IN ('preparing','ready') OR (${config.sprites.poolReuse} AND baseline_class='repository' AND state IN ('claimed','recycling')))`);
         if (Number(fpRows[0]?.count ?? 0) >= fingerprintTarget) { spriteLog("sprites_pool_reservation_declined", { fingerprint: baselineInput.fingerprint, reason: "fingerprint_target" }, "debug"); return null; }
       }
       const now = new Date();
@@ -162,6 +165,11 @@ export const spritesPoolStore = {
       // the claim transaction.
       const runnerRows = await tx.select().from(runnerInstances).where(eq(runnerInstances.runId, input.runId)).limit(1).for("update");
       const runner = runnerRows[0];
+      const [run] = await tx.select({ userId: agentSessions.userId, repoId: agentSessions.repoId, branch: agentSessions.branch })
+        .from(agentSessions).where(eq(agentSessions.id, input.runId)).for("share");
+      if (input.reuseAffinity && (input.reuseAffinity.userId !== run?.userId || input.reuseAffinity.repositoryId !== run?.repoId)) {
+        throw new Error("Reusable Sprite affinity differs from the run owner or repository");
+      }
       if (runner) {
         if (input.expectedWorkerGeneration !== undefined && runner.workerGeneration !== input.expectedWorkerGeneration) throw new Error("runner worker generation changed during pool claim");
         if (input.expectedProviderOperationId !== undefined && (runner.providerOperationId ?? null) !== (input.expectedProviderOperationId ?? null)) throw new Error("runner provider operation changed during pool claim");
@@ -173,13 +181,16 @@ export const spritesPoolStore = {
         return existing[0];
       }
       const candidates = await tx.select().from(spritePoolEntries)
-        .where(and(eq(spritePoolEntries.fingerprint, input.fingerprint), eq(spritePoolEntries.state, "ready")))
+        .where(and(eq(spritePoolEntries.fingerprint, input.fingerprint), eq(spritePoolEntries.state, "ready"),
+          or(isNull(spritePoolEntries.reuseUserId), run?.userId ? eq(spritePoolEntries.reuseUserId, run.userId) : undefined),
+          or(isNull(spritePoolEntries.reuseRepositoryId), run?.repoId ? eq(spritePoolEntries.reuseRepositoryId, run.repoId) : undefined)))
         .orderBy(desc(spritePoolEntries.createdAt)).limit(1).for("update", { skipLocked: true });
       const entry = candidates[0];
       if (!entry) return null;
       const now = new Date();
       const [claimed] = await tx.update(spritePoolEntries).set({
         state: "claimed", runId: input.runId, leaseToken: sql`gen_random_uuid()`, leaseExpiresAt: expiry(input.leaseMs), updatedAt: now,
+        ...(input.reuseAffinity ? { reuseUserId: input.reuseAffinity.userId, reuseRepositoryId: input.reuseAffinity.repositoryId } : {}),
       }).where(and(eq(spritePoolEntries.id, entry.id), eq(spritePoolEntries.state, "ready"))).returning();
       if (!claimed) return null;
 
@@ -187,6 +198,8 @@ export const spritesPoolStore = {
         const [bound] = await tx.update(runnerInstances).set({ provider: "sprites", spriteName: claimed.spriteName, state: "creating", generationState: "booting" }).where(and(eq(runnerInstances.runId, input.runId), ...(input.expectedWorkerGeneration === undefined ? [] : [eq(runnerInstances.workerGeneration, input.expectedWorkerGeneration)]), ...(input.expectedProviderOperationId === undefined ? [] : [input.expectedProviderOperationId === null ? isNull(runnerInstances.providerOperationId) : eq(runnerInstances.providerOperationId, input.expectedProviderOperationId)]))).returning();
         if (!bound) throw new Error("runner binding disappeared during pool claim");
       } else throw new Error("runner binding must be preallocated before pool claim");
+      await tx.insert(spritePoolAssignments).values({ poolEntryId: claimed.id, runId: input.runId, userId: run?.userId,
+        repositoryId: run?.repoId, leaseToken: claimed.leaseToken!, generation: runner.workerGeneration, branch: run?.branch });
       return claimed;
     });
   },

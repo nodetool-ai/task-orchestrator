@@ -14,7 +14,8 @@ const commandSchema = z.object({
   timeoutSeconds: z.number().int().min(1).max(3600).default(600),
   commandId: z.string().uuid(),
 });
-const jobPath = (generation: number, commandId: string) => `/var/tmp/task-orch-codeact/g${generation}/${z.string().uuid().parse(commandId)}`;
+const jobPath = (runId: number, generation: number, commandId: string) =>
+  `/var/tmp/task-orch-codeact/r${z.number().int().positive().parse(runId)}/g${z.number().int().positive().parse(generation)}/${z.string().uuid().parse(commandId)}`;
 
 async function providerCall<T>(action: () => Promise<T>): Promise<T> {
   try { return await action(); }
@@ -37,7 +38,7 @@ export async function listAgentSprites(ctx: AppApiContext) {
 export async function startSpriteCommand(ctx: AppApiContext, raw: unknown) {
   const input = commandSchema.parse(raw);
   const commandId = input.commandId;
-  const path = jobPath(input.generation, commandId);
+  const path = jobPath(input.runId, input.generation, commandId);
   return withOwnedSprite(ctx, input, async (runner) => {
     const digest = createHash("sha256").update(JSON.stringify([input.command, input.directory ?? runner.repoPath, input.timeoutSeconds])).digest("hex");
     const script = `#!/bin/sh\ncd ${quote(input.directory ?? runner.repoPath)} || exit 125\nexec timeout --signal=TERM --kill-after=5s ${input.timeoutSeconds}s sh -c ${quote(input.command)}\n`;
@@ -51,7 +52,7 @@ export async function startSpriteCommand(ctx: AppApiContext, raw: unknown) {
 }
 
 export async function spriteCommandStatus(ctx: AppApiContext, input: SpriteRunTarget & { commandId: string }) {
-  const path = jobPath(input.generation, input.commandId);
+  const path = jobPath(input.runId, input.generation, input.commandId);
   return withOwnedSprite(ctx, input, async (runner) => {
     // JSON construction stays in the control plane. Only bounded file bytes
     // cross the provider connection; stdout cannot grow control-plane memory.
@@ -73,7 +74,7 @@ export async function execSpriteCommand(ctx: AppApiContext, raw: unknown) {
   // silently execute the command twice when commandId was supplied.
   const job = await startSpriteCommand(ctx, input);
   return withOwnedSprite(ctx, input, async (runner) => {
-    const path = jobPath(input.generation, job.commandId);
+    const path = jobPath(input.runId, input.generation, job.commandId);
     await providerCall(() => makeSpritesClient().exec(runner.spriteName!, {
       cmd: `n=0; while [ ! -f ${quote(path + "/exit")} ] && [ "$n" -lt ${input.timeoutSeconds} ]; do sleep 1; n=$((n+1)); done`, maxOutputBytes: 64_000, timeoutMs: (input.timeoutSeconds + 2) * 1000,
     }));

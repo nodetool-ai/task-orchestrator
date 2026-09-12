@@ -261,9 +261,19 @@ Sprites, immutable baseline manifests/fingerprints and checkpoint IDs,
 preparation leases, assigned run IDs, restore receipts, and deletion work.
 States are `preparing → ready → claimed` and `draining → deleting → deleted`,
 with `failed` preparation rows held through retry backoff before draining.
-Used environments never return to `ready`. Assigned rows remain associated
-with a run through retention; a deleted/failed row does not prevent a later
-replacement record for the same run.
+With `TASK_ORCH_SPRITE_POOL_REUSE=1`, repository entries can transition
+`claimed → recycling → ready` after a completed run's clean Git HEAD is
+verified as published (or unchanged from the baseline). Recycling stops all
+services and restores/verifies the original checkpoint. The transaction that
+publishes readiness also revokes the old runner mapping. Unpublished, failed,
+paused and conversational runs retain their assignment.
+
+Migration `0047_sprite_pool_reuse` adds permanent owner/repository affinity,
+a reuse counter, and `sprite_pool_assignments` lease history. Every assignment
+records its run, generation and eventual published branch/commit. Reusable
+profile targets count preparing, ready, claimed and recycling entries, bounding
+the fleet rather than replenishing a spare after each claim. Other entries
+retain the original terminal-retention deletion policy.
 
 Pool claims bind `runner_instances` in the same transaction as ownership.
 `restore_state` (`pending | restoring | restored | failed`) distinguishes

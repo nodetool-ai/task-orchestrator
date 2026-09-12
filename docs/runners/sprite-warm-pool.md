@@ -42,7 +42,7 @@ entry. Inspect `sprite_pool_entries.last_error` and server pool logs when a
 configuration produces no ready capacity.
 
 The provider requests maintenance after create and during existing sweeps.
-Preparation runs asynchronously, with two local preparation slots and a
+Preparation runs asynchronously, with two local preparation slots (three when reuse is enabled) and a
 30-minute reservation lease renewed while preparation is active. A lost or
 expired lease cannot publish a ready checkpoint. PostgreSQL reserves the total and per-fingerprint
 unused targets across replicas and accounts for existing Sprite runner rows
@@ -183,16 +183,16 @@ validation actually avoided installation.
 This implementation does **not** clone one template checkpoint into multiple
 Sprites. The public checkpoint restore API is scoped to the same Sprite, and
 no documented cross-Sprite fork operation was available when checked on
-2026-09-12. Each replenished pool entry still pays preparation once. Used task
-environments never return to the ready pool. Fly advertises SBD drive forking,
+2026-09-12. Each replenished pool entry still pays preparation once. With reuse enabled,
+completed and published runs return their Sprite after a clean checkpoint restore. Fly advertises SBD drive forking,
 but wiring that in requires a supported API and enabled organization; do not
 assume portable checkpoint IDs or silently recycle a used checkout.
 
 ## Production NodeTool profile
 
 The production app uses a persistent Fly secret-store override for
-`TASK_ORCH_SPRITE_POOL_BASELINES`: one NodeTool repository snapshot and two
-generic snapshots, within the existing total target of three. This override
+`TASK_ORCH_SPRITE_POOL_BASELINES`: three reusable NodeTool repository snapshots
+and zero generic snapshots, within the existing total target of three. This override
 takes precedence over the generic default in `fly.toml` and survives image
 deployments. Change the override when adjusting production targets.
 
@@ -205,8 +205,7 @@ with:
 npm run sprite:baseline -- --repo=/path/to/nodetool --ref=fc3abb76b01416a140ba1c3039051272aa8b5ffe --recipe=docs/runners/profiles/nodetool.recipe.json --out=nodetool-baseline.json
 ```
 
-Combine that specification with a generic target of two before applying the
-override. Preparation installs all locked workspaces, rebuilds native bindings,
+Apply that specification with target three and a generic target of zero. Preparation installs all locked workspaces, rebuilds native bindings,
 builds package outputs with `NODE_ENV` cleared, and probes Jest, TypeScript,
 Turbo, Sharp, Keytar and `better-sqlite3`. Preparation installs the Linux
 `libsecret-1-dev` prerequisite before npm so Keytar can fall back to compilation.
@@ -233,10 +232,11 @@ normal resume and preserves files. Fingerprint drift replaces only unused
 entries. A disappeared assigned Sprite is surfaced as unavailable rather than
 silently replacing its resumable filesystem.
 
-Terminal cleanup atomically releases runner authority and queues pool deletion.
-Provider failure leaves `deleting` work for later sweeps. Used Sprites never
-return to the ready pool. Existing `TASK_ORCH_RUNNER_TERMINAL_MS` retention
-continues to apply, including the current 24-hour default.
+Without reuse, terminal cleanup atomically releases runner authority and queues
+pool deletion. Provider failure leaves `deleting` work for later sweeps. Existing
+`TASK_ORCH_RUNNER_TERMINAL_MS` retention continues to apply, including the current
+24-hour default. The opt-in reuse protocol below returns verified completed
+repository runs immediately after checkpoint restoration.
 
 Setting the pool size to zero disables new claims and refill and drains unused
 entries. Assigned runs continue using their Sprite and dependency manifest.
@@ -308,3 +308,32 @@ The new lifecycle logger accepts only selected primitive fields and excludes
 commands, manifests, service environments, lease tokens, raw errors and provider
 response bodies. Existing logs and database error records retain their existing
 behavior; this is not a repository-wide log redaction change.
+
+## Reusing a three-Sprite repository pool
+
+Set `TASK_ORCH_SPRITE_POOL_REUSE=1`, `TASK_ORCH_SPRITE_POOL_SIZE=3`, and the
+single-owner repository profile target to 3; set the generic target to zero.
+Apply migration `0047_sprite_pool_reuse` with the new server and worker bundle.
+The target now counts the entire reusable fleet, including leased Sprites.
+When all three are assigned, matching runs queue for capacity.
+
+A claim permanently pins the Sprite to that owner and repository. Each run
+gets `/home/user/session/runs/<runId>/repo` and its own recorded Git branch;
+the freshly restored prepared checkout is atomically moved there, retaining
+installed native dependencies without copying the dependency tree. Worker
+service names and remote-command directories include the run ID. Same-run
+restarts use the existing checkout. Concurrent runs never share a Sprite.
+
+Completed non-conversational runs return their Sprite only after service
+quiescence and verification that the checkout is clean and its HEAD has been
+published to the recorded branch, or is unchanged from the baseline. The
+original checkpoint is then restored and verified before the old assignment
+is revoked and the entry becomes ready. An interrupted restore remains in
+`recycling` and is retried by reconciliation. Failed, paused, conversational,
+and unpublished runs retain their filesystem for recovery. Explicit closure
+or cancellation still permits normal destruction.
+
+`sprite_pool_assignments` preserves the assignment and release history, branch
+and verified commit; `sprite_pool_entries.reuse_count` counts successful returns.
+This reuses existing VMs through checkpoint restoration; it does not require
+a provider fork API.

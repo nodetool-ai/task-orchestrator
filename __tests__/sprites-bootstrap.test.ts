@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { spawn } from "node:child_process";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   bootstrapSprite,
@@ -36,6 +40,56 @@ function fakeClient(overrides: Partial<SpritesClient> = {}): SpritesClient {
   } as SpritesClient;
 }
 
+const swapRoots: string[] = [];
+
+async function executable(path: string, source: string) {
+  await writeFile(path, `#!/bin/sh\n${source}\n`);
+  await chmod(path, 0o755);
+}
+
+async function swapShellFixture(size: number, active = false) {
+  const root = await mkdtemp(join(tmpdir(), "sprite-swap-shell-"));
+  swapRoots.push(root);
+  const bin = join(root, "bin");
+  const swapFile = join(root, "task-orchestrator.swap");
+  const swaps = join(root, "proc-swaps");
+  const log = join(root, "calls.log");
+  await mkdir(bin);
+  await writeFile(swapFile, Buffer.alloc(size));
+  await writeFile(swaps, `Filename\tType\tSize\tUsed\tPriority\n${active ? "/task-orchestrator.swap file 1024 0 -2\n" : ""}`);
+  await executable(join(bin, "flock"), 'printf "flock %s\\n" "$*" >> "$MOCK_CALL_LOG"');
+  await executable(join(bin, "findmnt"), 'printf "%s\\n" "$MOCK_MOUNT_TARGET"');
+  await executable(join(bin, "stat"), '[ -f "$3" ] || exit 1\nwc -c < "$3" | tr -d " "');
+  await executable(join(bin, "sudo"), '[ "$1" = -n ] && shift\nexec "$@"');
+  await executable(join(bin, "swapoff"), 'printf "swapoff %s\\n" "$*" >> "$MOCK_CALL_LOG"\n[ "${MOCK_SWAPOFF_FAIL:-0}" = 1 ] && exit 1\nexit 0');
+  await executable(join(bin, "swapon"), [
+    'printf "swapon %s\\n" "$*" >> "$MOCK_CALL_LOG"',
+    'if [ "${MOCK_SWAPON_MODE:-success}" = busy-active ]; then',
+    '  printf "/task-orchestrator.swap file 1024 0 -2\\n" >> "$MOCK_PROC_SWAPS"',
+    '  exit 1',
+    "fi",
+    '[ "${MOCK_SWAPON_MODE:-success}" = fail ] && exit 1',
+    'printf "/task-orchestrator.swap file 1024 0 -2\\n" >> "$MOCK_PROC_SWAPS"',
+  ].join("\n"));
+  await executable(join(bin, "mkswap"), "exit 0");
+  const command = spriteSwapSetupCommand(1)
+    .replaceAll("/tmp/task-orchestrator.swap", swapFile)
+    .replaceAll("/proc/swaps", swaps);
+  const run = (env: Record<string, string> = {}) => new Promise<{ code: number; stderr: string }>((resolve, reject) => {
+    const child = spawn("sh", ["-c", command], { env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`,
+      MOCK_CALL_LOG: log, MOCK_MOUNT_TARGET: root, MOCK_PROC_SWAPS: swaps, ...env }, stdio: ["ignore", "ignore", "pipe"] });
+    const stderr: Buffer[] = [];
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code: code ?? 1, stderr: Buffer.concat(stderr).toString("utf8") }));
+  });
+  return { swapFile, swaps, log, run };
+}
+
+afterEach(async () => {
+  await Promise.all(swapRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
 describe("bootstrapSprite", () => {
   it("creates and verifies disk-backed swap idempotently", async () => {
     const exec = vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" }));
@@ -60,6 +114,32 @@ describe("bootstrapSprite", () => {
       step: "configure-swap",
       message: expect.stringContaining("swapon: denied"),
     });
+  });
+
+  it("recognizes the active swap path reported relative to the /tmp mount", async () => {
+    const fixture = await swapShellFixture(1024 * 1024, true);
+    expect(await fixture.run()).toMatchObject({ code: 0 });
+    expect(await readFile(fixture.log, "utf8")).toBe("flock -x 9\n");
+  });
+
+  it("does not delete an active swap file when swapoff fails during resize", async () => {
+    const fixture = await swapShellFixture(17, true);
+    const before = await readFile(fixture.swapFile);
+    const result = await fixture.run({ MOCK_SWAPOFF_FAIL: "1" });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("swapoff failed");
+    expect(await readFile(fixture.swapFile)).toEqual(before);
+    expect(await readFile(fixture.log, "utf8")).toContain("swapoff");
+  });
+
+  it("accepts a failed swapon only when a recheck finds the expected mount alias active", async () => {
+    const raced = await swapShellFixture(1024 * 1024);
+    expect(await raced.run({ MOCK_SWAPON_MODE: "busy-active" })).toMatchObject({ code: 0 });
+
+    const failed = await swapShellFixture(1024 * 1024);
+    const result = await failed.run({ MOCK_SWAPON_MODE: "fail" });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("expected swap is not active");
   });
 
   it("selects Node before npm and invalidates checkpoints from the floating runtime", async () => {

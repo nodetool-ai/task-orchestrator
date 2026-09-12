@@ -534,6 +534,9 @@ export const config = Object.freeze({
     get poolSize(): number {
       return intEnv("TASK_ORCH_SPRITE_POOL_SIZE", 0);
     },
+    get poolReuse(): boolean {
+      return process.env.TASK_ORCH_SPRITE_POOL_REUSE === "1";
+    },
     get maxSprites(): number {
       return intEnv("TASK_ORCH_MAX_SPRITES", 0);
     },

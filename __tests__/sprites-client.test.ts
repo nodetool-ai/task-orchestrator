@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
 import { Agent } from "undici";
 
-import { createExecDispatcher, makeSpritesClient, SpritesApiError } from "../lib/runner/sprites-client";
+import {
+  createExecDispatcher,
+  makeSpritesClient,
+  SPRITE_CHECKPOINT_TIMEOUT_MS,
+  SpritesApiError,
+} from "../lib/runner/sprites-client";
 
 const TOKEN = "test-token-123";
 const BASE_URL = "https://api.sprites.dev/v1";
@@ -380,6 +385,8 @@ describe("SpritesClient", () => {
   it("checkpoint handles NDJSON and resolves id via listCheckpoints (hint as fallback)", async () => {
     const ndjson = `{"type":"info","data":"Creating checkpoint...","time":"2026-01-01T00:00:00Z"}\n{"type":"complete","data":"Checkpoint v99 created","time":"2026-01-01T00:00:01Z"}\n`;
     let call = 0;
+    let checkpointDispatcher: Agent | undefined;
+    const timeout = vi.spyOn(AbortSignal, "timeout");
     const fetchImpl = makeFetchMock(async (url, init) => {
       call++;
       if (call === 1) {
@@ -387,6 +394,7 @@ describe("SpritesClient", () => {
         expect(init.method).toBe("POST");
         const body = JSON.parse(String(init.body));
         expect(body).toEqual({ comment: "bootstrap test" });
+        checkpointDispatcher = (init as RequestInit & { dispatcher?: Agent }).dispatcher;
         return new Response(ndjson, { status: 200, headers: { "Content-Type": "application/x-ndjson" } });
       }
       // Second call: listCheckpoints after NDJSON
@@ -401,6 +409,10 @@ describe("SpritesClient", () => {
     const cp = await client.checkpoint("to-run-1", "bootstrap test");
     expect(cp.id).toBe("v99");
     expect(cp.comment).toBe("bootstrap test");
+    expect(timeout).toHaveBeenCalledWith(SPRITE_CHECKPOINT_TIMEOUT_MS);
+    expect(checkpointDispatcher).toBeInstanceOf(Agent);
+    expect(checkpointDispatcher?.closed).toBe(true);
+    timeout.mockRestore();
   });
 
   it("checkpoint falls back to hint when listCheckpoints empty", async () => {
@@ -438,9 +450,36 @@ describe("SpritesClient", () => {
   });
 
   it("accepts a completed restore stream", async () => {
-    const fetchImpl = makeFetchMock(async () => new Response('{"type":"complete"}\n', { status: 200 }));
+    let dispatcher: Agent | undefined;
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    const fetchImpl = makeFetchMock(async (_url, init) => {
+      dispatcher = (init as RequestInit & { dispatcher?: Agent }).dispatcher;
+      return new Response('{"type":"complete"}\n', { status: 200 });
+    });
     const client = makeSpritesClient({ fetchImpl, baseUrl: BASE_URL, token: TOKEN });
     await expect(client.restoreCheckpoint("pool-1", "v1")).resolves.toBeUndefined();
+    expect(timeout).toHaveBeenCalledWith(SPRITE_CHECKPOINT_TIMEOUT_MS);
+    expect(dispatcher).toBeInstanceOf(Agent);
+    expect(dispatcher?.closed).toBe(true);
+    timeout.mockRestore();
+  });
+
+  it("applies the checkpoint deadline while reading a silent restore body", async () => {
+    const controller = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+    const fetchImpl = makeFetchMock(async (_url, init) => new Response(new ReadableStream<Uint8Array>({
+      start(stream) {
+        init.signal?.addEventListener("abort", () => stream.error(init.signal?.reason), { once: true });
+      },
+    }), { status: 200 }));
+    const client = makeSpritesClient({ fetchImpl, baseUrl: BASE_URL, token: TOKEN });
+    const restoring = client.restoreCheckpoint("pool-1", "v1");
+    controller.abort(new DOMException("deadline", "TimeoutError"));
+
+    await expect(restoring).rejects.toThrow(
+      `request timed out after ${SPRITE_CHECKPOINT_TIMEOUT_MS}ms: POST /sprites/pool-1/checkpoints/v1/restore`,
+    );
+    timeout.mockRestore();
   });
 
   it("does not use an old checkpoint after a streamed checkpoint failure", async () => {

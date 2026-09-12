@@ -50,10 +50,10 @@ async function runShell(command: string): Promise<{ exitCode: number; stdout: st
   });
 }
 
-async function waitForExit(commandId: string) {
+async function waitForExit(commandId: string, runId = RUN_ID) {
   const deadline = Date.now() + 5_000;
   for (;;) {
-    const status = await spriteCommandStatus(context, { runId: RUN_ID, generation: GENERATION, commandId });
+    const status = await spriteCommandStatus({ ...context, runId }, { runId, generation: GENERATION, commandId });
     if (status.status === "exited") return status;
     if (Date.now() >= deadline) throw new Error(`command ${commandId} did not exit: ${status.status}`);
     await new Promise((resolve) => setTimeout(resolve, 25));
@@ -106,6 +106,27 @@ describe("Sprite remote command shell protocol", () => {
     await expect(startSpriteCommand(context, { ...input, command: `printf y >> '${counter}'` }))
       .rejects.toThrow("Command ID is already reserved for different input or an incomplete launch");
     expect(await readFile(counter, "utf8")).toBe("x");
+  });
+
+  it("scopes the same generation and command UUID to its run", async () => {
+    const commandId = "10000000-0000-4000-8000-000000000004";
+    const first = join(root, "first.txt");
+    const second = join(root, "second.txt");
+    await startSpriteCommand(context, {
+      runId: RUN_ID, generation: GENERATION, commandId,
+      command: `printf first > '${first}'`, timeoutSeconds: 3,
+    });
+    await waitForExit(commandId);
+
+    const secondRunId = RUN_ID + 1;
+    await startSpriteCommand({ ...context, runId: secondRunId }, {
+      runId: secondRunId, generation: GENERATION, commandId,
+      command: `printf second > '${second}'`, timeoutSeconds: 3,
+    });
+    await waitForExit(commandId, secondRunId);
+
+    expect(await readFile(first, "utf8")).toBe("first");
+    expect(await readFile(second, "utf8")).toBe("second");
   });
 
   it("terminates a timed command and records exit code 124", async () => {

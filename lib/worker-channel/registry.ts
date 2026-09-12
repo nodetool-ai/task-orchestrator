@@ -182,7 +182,10 @@ export async function connectRun(
       // The worker at this endpoint speaks an incompatible protocol. Replace it
       // with a fresh worker built from the current image before surfacing the
       // failure to the caller.
-      await replaceWorker(runId).catch(() => undefined);
+      await replaceWorker(runId, {
+        workerGeneration: supervisor.workerGeneration,
+        instanceId: supervisor.instanceId,
+      }).catch(() => undefined);
     }
     throw error;
   }
@@ -233,7 +236,10 @@ async function attemptReconnect(supervisor: Supervisor): Promise<void> {
       supervisor.stopped = true;
       registry().supervisors.delete(supervisor.runId);
       registry().blobs.delete(supervisor.runId);
-      await replaceWorker(supervisor.runId).catch(() => undefined);
+      await replaceWorker(supervisor.runId, {
+        workerGeneration: supervisor.workerGeneration,
+        instanceId: supervisor.instanceId,
+      }).catch(() => undefined);
       return;
     }
     if (error instanceof ControllerProtocolError && error.closeCode === CLOSE_CODE_STALE_CONTROLLER_EPOCH) {
@@ -265,11 +271,11 @@ async function attemptReconnect(supervisor: Supervisor): Promise<void> {
 
 /** Protocol-mismatch replacement: abandon the incompatible worker instance and
  * dispatch a fresh one built from the current image. */
-async function replaceWorker(runId: number): Promise<void> {
+async function replaceWorker(runId: number, generation: { workerGeneration: number; instanceId: string }): Promise<void> {
   const runDispatch = await import("../run-dispatch");
   const scope = await currentWorkerScope(runId);
-  if (scope) await runDispatch.stopRunner(scope).catch(() => undefined);
-  await releaseChannelForReplacement(runId);
+  await runDispatch.stopRunner(scope, { runId, ...generation }).catch(() => undefined);
+  await releaseChannelForReplacement(runId, generation);
   await runDispatch.dispatchRun(runId).catch(() => undefined);
 }
 

@@ -1962,8 +1962,14 @@ export async function stopWorkerContainer(scope: string | null): Promise<void> {
   }
 }
 
+export interface StopRunnerGuard {
+  runId: number;
+  workerGeneration?: number;
+  instanceId?: string;
+}
+
 /** Provider-aware hard-stop used by run cancellation. */
-export async function stopRunner(scope: string | null, generationGuard?: { runId: number; workerGeneration: number; instanceId: string }): Promise<void> {
+export async function stopRunner(scope: string | null, generationGuard?: StopRunnerGuard): Promise<void> {
   // A terminal callback may run after another path has released workerScope.
   // The generation guard still identifies the exact provider resource, so do
   // not require the transient claim token in that case.
@@ -1988,15 +1994,19 @@ export async function stopRunner(scope: string | null, generationGuard?: { runId
       ...(generationGuard
         ? [eq(runnerInstances.runId, generationGuard.runId)]
         : [eq(agentSessions.workerScope, effectiveScope)]),
-      ...(generationGuard ? [
-        eq(runnerInstances.workerGeneration, generationGuard.workerGeneration),
-        eq(runnerInstances.channelInstanceId, generationGuard.instanceId),
-      ] : []),
+      ...(generationGuard?.workerGeneration != null
+        ? [eq(runnerInstances.workerGeneration, generationGuard.workerGeneration)] : []),
+      ...(generationGuard?.instanceId != null
+        ? [eq(runnerInstances.channelInstanceId, generationGuard.instanceId)] : []),
     ));
   // A guarded cleanup belongs to one exact generation. If that generation has
   // already been replaced or its row was reclaimed, never fall back to the
   // stable run scope: that could stop/delete the replacement generation.
   if (generationGuard && !row) return;
+  // A recycled Sprite is detached from the old run by clearing this durable
+  // binding. Its former workerScope may still name the physical Sprite, so a
+  // run-guarded stop must never use that stale claim as a provider handle.
+  if (generationGuard && row?.provider === "sprites" && !row.spriteName) return;
   if (row && row.workerGeneration > 0) {
     // Invalidate the provider operation before issuing the external stop. A
     // late create/start completion must fail its `(generation, operation)` CAS

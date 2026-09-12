@@ -16,7 +16,7 @@ import { and, eq, isNull, or } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { spriteLog, spriteErrorFields, logSpritePhase } from "./sprites-log";
 
-export type SpritePoolState = "preparing" | "ready" | "claimed" | "draining" | "deleting" | "deleted" | "failed";
+export type SpritePoolState = "preparing" | "ready" | "claimed" | "recycling" | "draining" | "deleting" | "deleted" | "failed";
 
 export interface SpritePoolEntry {
   id: string;

@@ -1828,7 +1828,7 @@ export async function cancel(id: number): Promise<RunRow> {
   // it gracefully within a heartbeat; provider stop is the belt). No-op if gone.
   // .catch: stopRunner is fire-and-forget here; a provider hiccup must not surface
   // as an unhandled rejection.
-  void runDispatch.stopRunner(run.workerScope).catch(() => {});
+  void runDispatch.stopRunner(run.workerScope, { runId: id }).catch(() => {});
   if (run.cwdStrategy === "worktree" && run.worktreePath) {
     cleanupWorktree(run.worktreePath, await repoRoot(run)).catch(() => {});
   }
@@ -1945,7 +1945,7 @@ export async function close(id: number): Promise<RunRow> {
     noWake: true,
   }).catch(() => {});
   closeBus(id);
-  void runDispatch.stopRunner(run.workerScope).catch(() => {});
+  void runDispatch.stopRunner(run.workerScope, { runId: id }).catch(() => {});
   if (run.cwdStrategy === "worktree" && run.worktreePath) {
     cleanupWorktree(run.worktreePath, await repoRoot(run)).catch(() => {});
   }

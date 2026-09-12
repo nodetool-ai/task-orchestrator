@@ -487,12 +487,18 @@ describe("worker channel recovery (plan section 17)", () => {
       helloProtocol: { min: 2, max: 2 },
     });
     const dispatchSpy = vi.spyOn(runDispatch, "dispatchRun").mockResolvedValue("spawned" as never);
+    const stopSpy = vi.spyOn(runDispatch, "stopRunner").mockResolvedValue();
 
     await expect(connectRun(runId)).rejects.toThrow();
 
     // The incompatible instance is abandoned (its channel identity cleared) and a
     // fresh worker is dispatched from the current image.
     await waitFor(async () => (await getChannelIdentity(runId)) === null);
+    expect(stopSpy).toHaveBeenCalledWith(expect.anything(), {
+      runId,
+      workerGeneration: 1,
+      instanceId: channel.instanceId,
+    });
     expect(dispatchSpy).toHaveBeenCalledWith(runId);
   });
 

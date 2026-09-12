@@ -4,7 +4,7 @@
   "allowedUserIds": [
     1
   ],
-  "target": 1,
+  "target": 3,
   "nodeVersion": "v22.22.3",
   "architecture": "x64",
   "packageManagerVersion": "10.9.8",

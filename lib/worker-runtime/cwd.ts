@@ -46,13 +46,15 @@ export function runnerCheckoutDir(runId: number): string | null {
 
 /** Branch a worker checks out for a run, mirroring ensureWorktreeBranch():
  *  the run's recorded branch, else the task's canonical branch, else a
- *  per-run chat branch — for worktree strategies; the default branch otherwise. */
+ *  per-run chat branch. Ordinary repo strategies use the default branch;
+ *  reusable Sprite checkouts always use a private run branch. */
 export function workerBranchFor(start: RunStart, defaultBranch: string): string {
   const run = start.run;
   const strategy = field<string>(run, "cwdStrategy") ?? "worktree";
+  const reusableSpriteCheckout = process.env.TASK_ORCH_SPRITE_RUN_WORKTREE === "1";
   const recorded = field<string>(run, "branch");
   if (recorded) return recorded;
-  if (strategy !== "worktree" && strategy !== "worktree_at_pr") return defaultBranch;
+  if (!reusableSpriteCheckout && strategy !== "worktree" && strategy !== "worktree_at_pr") return defaultBranch;
   const taskBranch = field<string>(start.task, "branch");
   if (taskBranch) return taskBranch;
   const taskId = field<string>(start.task, "id") ?? field<string>(run, "taskId");
@@ -111,7 +113,8 @@ export async function prepareWorkerCwd(start: RunStart): Promise<PreparedCwd> {
   // It runs after checkout so the requested revision is authoritative.
   await prepareSpriteDependencies(cwd);
   const strategy = field<string>(run, "cwdStrategy") ?? "worktree";
-  const reports = strategy === "worktree" || strategy === "worktree_at_pr";
+  const reports = process.env.TASK_ORCH_SPRITE_RUN_WORKTREE === "1"
+    || strategy === "worktree" || strategy === "worktree_at_pr";
   return {
     cwd: validateCwd(cwd, { runId, repoId, hint }),
     ...(reports ? { branch, worktreePath: cwd } : {}),

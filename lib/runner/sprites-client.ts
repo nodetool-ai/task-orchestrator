@@ -89,6 +89,7 @@ export interface SpritesClient {
 }
 
 const REQUEST_TIMEOUT_MS = 30_000;
+export const SPRITE_CHECKPOINT_TIMEOUT_MS = 10 * 60_000;
 
 export class SpritesApiError extends Error {
   constructor(
@@ -326,10 +327,19 @@ export function makeSpritesClient(input?: SpritesClientOptions): SpritesClient {
     return JSON.parse(text) as T;
   }
 
-  async function requestNdjson(method: string, path: string, body?: unknown): Promise<Array<Record<string, unknown>>> {
-    let response: Response;
+  async function requestNdjson(
+    method: string,
+    path: string,
+    body?: unknown,
+    timeoutMs = REQUEST_TIMEOUT_MS,
+  ): Promise<Array<Record<string, unknown>>> {
+    // Checkpoint and restore streams can remain silent for several minutes.
+    // Give them a hard operation deadline while disabling Undici's shorter
+    // parser idle timeouts, which otherwise preempt that deadline.
+    const dispatcher = timeoutMs > REQUEST_TIMEOUT_MS ? createExecDispatcher() : undefined;
+    const signal = AbortSignal.timeout(timeoutMs);
     try {
-      response = await fetchImpl(`${baseUrl}${path}`, {
+      const response = await fetchImpl(`${baseUrl}${path}`, {
         method,
         headers: {
           Authorization: `Bearer ${token}`,
@@ -337,31 +347,35 @@ export function makeSpritesClient(input?: SpritesClientOptions): SpritesClient {
           ...(body == null ? {} : { "Content-Type": "application/json" }),
         },
         body: body == null ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
+        signal,
+        ...(dispatcher ? { dispatcher } : {}),
+      } as RequestInit & { dispatcher?: Dispatcher });
+      if (!response.ok) {
+        throw new SpritesApiError(response.status, await response.text());
+      }
+      if (response.status === 204) return [];
+      const text = await response.text();
+      if (!text.trim()) return [];
+      const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+      const out: Array<Record<string, unknown>> = [];
+      for (const line of lines) {
+        try {
+          out.push(JSON.parse(line) as Record<string, unknown>);
+        } catch {
+          // Non-JSON line (e.g. plain text log) — wrap as data
+          out.push({ type: "info", data: line } as Record<string, unknown>);
+        }
+      }
+      return out;
     } catch (err) {
-      if (err instanceof Error && err.name === "TimeoutError") {
-        throw new SpritesApiError(0, `request timed out after ${REQUEST_TIMEOUT_MS}ms: ${method} ${path}`);
+      if (err instanceof SpritesApiError) throw err;
+      if (signal.aborted || (err instanceof Error && err.name === "TimeoutError")) {
+        throw new SpritesApiError(0, `request timed out after ${timeoutMs}ms: ${method} ${path}`);
       }
       throw err;
+    } finally {
+      if (dispatcher) await closeDispatcher(dispatcher);
     }
-    if (!response.ok) {
-      throw new SpritesApiError(response.status, await response.text());
-    }
-    if (response.status === 204) return [];
-    const text = await response.text();
-    if (!text.trim()) return [];
-    const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-    const out: Array<Record<string, unknown>> = [];
-    for (const line of lines) {
-      try {
-        out.push(JSON.parse(line) as Record<string, unknown>);
-      } catch {
-        // Non-JSON line (e.g. plain text log) — wrap as data
-        out.push({ type: "info", data: line } as Record<string, unknown>);
-      }
-    }
-    return out;
   }
 
   const client: SpritesClient = {
@@ -507,7 +521,8 @@ export function makeSpritesClient(input?: SpritesClientOptions): SpritesClient {
     },
 
     async checkpoint(spriteName: string, comment?: string) {
-      const events = await requestNdjson("POST", `/sprites/${encodeURIComponent(spriteName)}/checkpoint`, comment ? { comment } : {});
+      const events = await requestNdjson("POST", `/sprites/${encodeURIComponent(spriteName)}/checkpoint`,
+        comment ? { comment } : {}, SPRITE_CHECKPOINT_TIMEOUT_MS);
       const failure = events.find((event) => event.type === "error");
       if (failure) throw new SpritesApiError(500, String(failure.error ?? failure.data ?? "checkpoint failed"));
       if (!events.some((event) => event.type === "complete" || typeof event.id === "string")) {
@@ -559,7 +574,8 @@ export function makeSpritesClient(input?: SpritesClientOptions): SpritesClient {
     },
 
     async restoreCheckpoint(spriteName: string, checkpointId: string) {
-      const events = await requestNdjson("POST", `/sprites/${encodeURIComponent(spriteName)}/checkpoints/${encodeURIComponent(checkpointId)}/restore`);
+      const events = await requestNdjson("POST", `/sprites/${encodeURIComponent(spriteName)}/checkpoints/${encodeURIComponent(checkpointId)}/restore`,
+        undefined, SPRITE_CHECKPOINT_TIMEOUT_MS);
       const failure = events.find((event) => event.type === "error");
       if (failure) throw new SpritesApiError(500, String(failure.error ?? failure.data ?? "checkpoint restore failed"));
       if (!events.some((event) => event.type === "complete")) {

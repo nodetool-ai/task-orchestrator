@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db";
-import { agentSessions, runnerInstances, spritePoolEntries } from "../db/schema";
+import { agentSessions, repositories, runnerInstances, spritePoolAssignments, spritePoolEntries, users } from "../db/schema";
 import { spritesPoolStore } from "../lib/runner/sprites-pool-store";
 
 beforeEach(async () => {
@@ -9,6 +9,7 @@ beforeEach(async () => {
   await db.delete(runnerInstances);
   await db.delete(agentSessions);
 });
+afterEach(() => vi.unstubAllEnvs());
 
 describe("Sprite pool store (Postgres)", () => {
   it("does not count runner rows without a provider resource against capacity", async () => {
@@ -99,6 +100,98 @@ describe("Sprite pool store (Postgres)", () => {
     expect(claimed).toMatchObject({ id: pool.id, state: "claimed", runId: run.id, restoreState: "pending" });
     expect((await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id)))[0]).toMatchObject({ spriteName: pool.spriteName });
     expect(await spritesPoolStore.claimForRun({ runId: run.id, fingerprint: pool.fingerprint })).toMatchObject({ id: pool.id });
+  });
+
+  it("keeps reusable ready entries within one owner and repository and records the successful assignment", async () => {
+    const suffix = crypto.randomUUID();
+    const owners = await db.insert(users).values([
+      { email: `affinity-owner-${suffix}@test.invalid`, passwordHash: "unused" },
+      { email: `affinity-other-${suffix}@test.invalid`, passwordHash: "unused" },
+    ]).returning();
+    const repositoryIds = [`R-affinity-a-${suffix}`, `R-affinity-b-${suffix}`];
+    await db.insert(repositories).values(repositoryIds.map((id) => ({ id, name: id, remote: `https://github.com/acme/${id}` })));
+    const runs = await db.insert(agentSessions).values([
+      { status: "pending", goal: "<implement>", toolsProfile: "", cwdStrategy: "worktree", userId: owners[1]!.id, repoId: repositoryIds[0] },
+      { status: "pending", goal: "<implement>", toolsProfile: "", cwdStrategy: "worktree", userId: owners[0]!.id, repoId: repositoryIds[1] },
+      { status: "pending", goal: "<implement>", toolsProfile: "", cwdStrategy: "worktree", userId: owners[0]!.id, repoId: repositoryIds[0], branch: "claude/affinity" },
+    ]).returning();
+    await db.insert(runnerInstances).values(runs.map((run) => ({
+      runId: run.id,
+      provider: "sprites",
+      state: "creating",
+      generationState: "stopped",
+      workerGeneration: 3,
+    })));
+    const [pool] = await db.insert(spritePoolEntries).values({
+      spriteName: `pool-affinity-${suffix}`,
+      fingerprint: `fp-affinity-${suffix}`,
+      checkpointId: "cp",
+      baselineManifest: {},
+      baselineClass: "repository",
+      state: "ready",
+      reuseUserId: owners[0]!.id,
+      reuseRepositoryId: repositoryIds[0],
+    }).returning();
+
+    expect(await spritesPoolStore.claimForRun({ runId: runs[0]!.id, fingerprint: pool!.fingerprint })).toBeNull();
+    expect(await spritesPoolStore.claimForRun({ runId: runs[1]!.id, fingerprint: pool!.fingerprint })).toBeNull();
+    const claimed = await spritesPoolStore.claimForRun({
+      runId: runs[2]!.id,
+      fingerprint: pool!.fingerprint,
+      reuseAffinity: { userId: owners[0]!.id, repositoryId: repositoryIds[0]! },
+    });
+    expect(claimed).toMatchObject({ id: pool!.id, runId: runs[2]!.id, state: "claimed" });
+    const [history] = await db.select().from(spritePoolAssignments).where(eq(spritePoolAssignments.runId, runs[2]!.id));
+    expect(history).toMatchObject({
+      poolEntryId: pool!.id,
+      userId: owners[0]!.id,
+      repositoryId: repositoryIds[0],
+      generation: 3,
+      branch: "claude/affinity",
+    });
+  });
+
+  it("counts claimed reusable repository entries toward their fingerprint fleet target", async () => {
+    vi.stubEnv("TASK_ORCH_SPRITE_POOL_REUSE", "1");
+    const suffix = crypto.randomUUID();
+    const [owner] = await db.insert(users).values({ email: `fleet-${suffix}@test.invalid`, passwordHash: "unused" }).returning();
+    const repositoryId = `R-fleet-${suffix}`;
+    await db.insert(repositories).values({ id: repositoryId, name: repositoryId });
+    const [run] = await db.insert(agentSessions).values({
+      status: "pending",
+      goal: "<implement>",
+      toolsProfile: "",
+      cwdStrategy: "worktree",
+      userId: owner!.id,
+      repoId: repositoryId,
+    }).returning();
+    await db.insert(runnerInstances).values({
+      runId: run!.id,
+      provider: "sprites",
+      state: "creating",
+      generationState: "stopped",
+    });
+    const fingerprint = `fp-fleet-${suffix}`;
+    await db.insert(spritePoolEntries).values({
+      spriteName: `pool-fleet-${suffix}`,
+      fingerprint,
+      checkpointId: "cp",
+      baselineManifest: {},
+      baselineClass: "repository",
+      state: "ready",
+    });
+    expect(await spritesPoolStore.claimForRun({
+      runId: run!.id,
+      fingerprint,
+      reuseAffinity: { userId: owner!.id, repositoryId },
+    })).not.toBeNull();
+
+    await expect(spritesPoolStore.reservePreparation({
+      fingerprint,
+      maxTotal: 3,
+      leaseMs: 60_000,
+      fingerprintTarget: 1,
+    })).resolves.toBeNull();
   });
 
   it("serializes competing claims so one ready Sprite has one owner", async () => {

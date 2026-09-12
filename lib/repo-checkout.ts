@@ -6,7 +6,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import { config } from "./config";
@@ -59,6 +59,55 @@ export function cloneUrlFromRemote(remote: string | null | undefined): string | 
   return null;
 }
 
+function sameRepository(left: string, right: string): boolean {
+  const a = ownerRepoFromRemote(left);
+  const b = ownerRepoFromRemote(right);
+  if (a && b) return a.owner.toLowerCase() === b.owner.toLowerCase() && a.repo.toLowerCase() === b.repo.toLowerCase();
+  return left === right;
+}
+
+function spriteRunBaselineCheckout(work: string): string | null {
+  if (process.env.TASK_ORCH_SPRITE_RUN_WORKTREE !== "1") return null;
+  const configuredSeed = process.env.TASK_ORCH_SPRITE_BASELINE_CHECKOUT;
+  if (!configuredSeed || !isAbsolute(configuredSeed)) {
+    throw new Error("Reusable Sprite runs require an absolute TASK_ORCH_SPRITE_BASELINE_CHECKOUT");
+  }
+  const seed = resolve(configuredSeed);
+  if (seed === resolve(work)) throw new Error("Reusable Sprite run checkout must differ from its baseline checkout");
+  return seed;
+}
+
+/**
+ * Move a freshly restored dependency baseline into a private run path.
+ *
+ * A reusable pool Sprite has one active run and is restored from its immutable
+ * checkpoint before each assignment. Moving the restored checkout is therefore
+ * both private and constant-time: no writable node_modules tree is shared, and
+ * checkpoint restoration recreates the baseline path after the run. Refuse a
+ * cross-device fallback rather than recursively copying a large dependency tree.
+ */
+async function seedSpriteRunCheckout(work: string, remote: string, seed: string | null): Promise<boolean> {
+  if (!seed) return false;
+  const target = resolve(work);
+  if (!await hasUsableGitCheckout(seed)) throw new Error("Reusable Sprite dependency baseline checkout is missing or invalid");
+  const seedBranch = (await sh(["git", "-C", seed, "symbolic-ref", "--quiet", "--short", "HEAD"], "/").catch(() => "")).trim();
+  if (seedBranch) throw new Error("Reusable Sprite dependency baseline checkout must remain detached");
+  const seedRemote = (await sh(["git", "-C", seed, "remote", "get-url", "origin"], "/")).trim();
+  if (!sameRepository(seedRemote, remote)) throw new Error("Reusable Sprite dependency baseline repository differs from the run repository");
+
+  try {
+    await rename(seed, target);
+    // Preparation commands can legitimately update tracked generated files.
+    // Start the run from clean tracked source; ignored dependency/build files
+    // remain and the dependency verifier decides what can be reused.
+    await sh(["git", "-C", target, "reset", "--hard", "HEAD"], "/");
+    return true;
+  } catch (error) {
+    if (!existsSync(seed) && existsSync(target)) await rename(target, seed).catch(() => undefined);
+    throw error;
+  }
+}
+
 /** A runner that has no git credential helper (a sprite) authenticates GitHub
  *  over https with GH_TOKEN. Idempotent; a no-op when a helper is already
  *  configured or there is no token. */
@@ -92,8 +141,9 @@ export interface CheckoutRepositoryOptions {
 
 /**
  * Ensure `work` holds a checkout of the repository on `branch`.
- * Idempotent: an existing clone is fetched and switched in place; otherwise the
- * repository is cloned (blobless, optionally shallow). Existing-branch first:
+ * Idempotent: an existing checkout is fetched and switched in place; otherwise
+ * a reusable Sprite adopts its restored baseline or the repository is cloned.
+ * Existing-branch first:
  * a branch another run already pushed is checked out from origin/<branch>;
  * only when it does not exist yet is it created off origin/<base>.
  */
@@ -106,6 +156,7 @@ export async function checkoutRepositoryAt(opts: CheckoutRepositoryOptions): Pro
       `Run #${runId}: repository '${repoId ?? "(default)"}' has no clonable remote for the worker.`
     );
   }
+  const baselineCheckout = spriteRunBaselineCheckout(work);
   if (url.startsWith("https://github.com/")) {
     if (!process.env.GH_TOKEN) {
       throw new Error(`Run #${runId}: GH_TOKEN is required for in-runner checkout.`);
@@ -121,17 +172,25 @@ export async function checkoutRepositoryAt(opts: CheckoutRepositoryOptions): Pro
       );
     }
     if (existsSync(work)) await rm(work, { recursive: true, force: true });
-    const mirror = opts.mirrorDir ?? null;
-    const reference = mirror && existsSync(mirror) ? ["--reference", mirror, "--dissociate"] : [];
-    const depth = gitCloneDepthArgs();
-    await timeRunnerPhase(
-      "git_clone",
-      () => sh(["git", "clone", "--filter=blob:none", ...depth, ...reference, url, work], "/"),
-      { provider, fields: { runId, repoId, reference: reference.length > 0, shallow: depth.length > 0 } }
-    );
-  } else {
-    await sh(["git", "-C", work, "remote", "set-url", "origin", url], "/").catch(() => {});
+    const seeded = baselineCheckout
+      ? await timeRunnerPhase(
+        "git_seed_checkout",
+        () => seedSpriteRunCheckout(work, url, baselineCheckout),
+        { provider, fields: { runId, repoId } },
+      )
+      : false;
+    if (!seeded) {
+      const mirror = opts.mirrorDir ?? null;
+      const reference = mirror && existsSync(mirror) ? ["--reference", mirror, "--dissociate"] : [];
+      const depth = gitCloneDepthArgs();
+      await timeRunnerPhase(
+        "git_clone",
+        () => sh(["git", "clone", "--filter=blob:none", ...depth, ...reference, url, work], "/"),
+        { provider, fields: { runId, repoId, reference: reference.length > 0, shallow: depth.length > 0 } }
+      );
+    }
   }
+  await sh(["git", "-C", work, "remote", "set-url", "origin", url], "/").catch(() => {});
   await timeRunnerPhase(
     "git_fetch",
     () => sh(["git", "-C", work, "fetch", "--prune", "origin"], "/").catch(() => {}),

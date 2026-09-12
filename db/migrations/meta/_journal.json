@@ -330,6 +330,13 @@
       "when": 1789228800000,
       "tag": "0046_sprite_baseline_profiles",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1789230000000,
+      "tag": "0047_sprite_pool_reuse",
+      "breakpoints": true
     }
   ]
 }

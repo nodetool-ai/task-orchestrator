@@ -381,8 +381,11 @@ capacity transactionally, refill asynchronously with bounded concurrency and
 backoff, and reconcile orphaned provider resources. Replace run-ID parsing
 from Sprite names in lifecycle/cleanup paths with durable ownership lookup.
 Drain stale **unclaimed** fingerprints; keep claimed Sprites bound through the
-run's resumable lifetime. Destroy them after terminal retention and never
-return them to `ready`. On a pool miss, retain the inline bootstrap fallback.
+run's resumable lifetime. The original mode destroys them after terminal retention.
+The opt-in reusable repository pool now restores and verifies the immutable
+baseline after published completion, revokes the old assignment, then returns
+the entry to `ready`; see [the operational protocol](runners/sprite-warm-pool.md#reusing-a-three-sprite-repository-pool).
+Reusable profile misses queue; other profiles retain inline bootstrap fallback.
 
 **Restore protocol:** serialize against other lifecycle operations, stop all
 worker services on the Sprite, fence the old channel with a newly allocated

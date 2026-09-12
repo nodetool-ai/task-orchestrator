@@ -211,3 +211,23 @@ repository whose tests require Postgres, a bounded probe can be configured as:
 Keep probes non-destructive and bounded. Failures retain only the final 2 KiB
 of command output in the diagnostic, which is enough to identify the missing
 service or tool without flooding the durable runner history.
+
+## Reusable Sprite fences
+
+- Runs 283/285/286 exposed mount-relative swap reporting: `/proc/swaps` can
+  report `/task-orchestrator.swap` while the same file is accessed at
+  `/tmp/task-orchestrator.swap`. Resolve the mount root or file identity before
+  resizing/enabling swap. Accept `swapon` failure only after confirming the
+  expected file is active. Never remove a file whose `swapoff` failed.
+- Checkpoint restore and creation are streaming operations; allow the complete
+  operation deadline without a shorter HTTP header/body idle timeout.
+- With `TASK_ORCH_SPRITE_POOL_REUSE=1`, Sprite names are no longer run identities.
+  Stop by run, generation and channel instance; an old physical handle may
+  already belong to another run. Service and remote-command names include run IDs.
+- Recycling requires clean published Git work, then a stopped-service checkpoint
+  restore and baseline verification. Publish `ready` and clear the old mapping in
+  one transaction. Failed restoration stays unclaimable in `recycling`.
+- Follow-ups arriving after the recycling fence remain queued. Dispatch waits
+  for the Sprite lifecycle lock, then creates the next generation from the
+  published branch with a fresh SDK session; it must not resume the restored
+  filesystem under the old channel identity.
