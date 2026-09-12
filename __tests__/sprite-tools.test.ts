@@ -173,7 +173,7 @@ describe("owned Sprite commands", () => {
     const calls = sprites.exec.mock.calls.map((call) => call[1]);
     expect(calls[0]).toEqual(calls[1]);
     expect(calls[0]).toMatchObject({ maxOutputBytes: 64_000, timeoutMs: 10_000 });
-    expect(calls[0].cmd).toContain(`/var/tmp/task-orch-codeact/g${owned.generation}/${COMMAND_ID}`);
+    expect(calls[0].cmd).toContain(`/var/tmp/task-orch-codeact/r${owned.runId}/g${owned.generation}/${COMMAND_ID}`);
     expect(calls[0].cmd).toContain("if mkdir ");
     expect(calls[0].cmd).toContain("/tmp/work dir/it");
     expect(calls[0].cmd).toContain("'\\''s-safe");

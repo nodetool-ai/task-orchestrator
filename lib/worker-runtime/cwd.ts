@@ -51,7 +51,7 @@ export function runnerCheckoutDir(runId: number): string | null {
 export function workerBranchFor(start: RunStart, defaultBranch: string): string {
   const run = start.run;
   const strategy = field<string>(run, "cwdStrategy") ?? "worktree";
-  const reusableSpriteCheckout = process.env.TASK_ORCH_SPRITE_RUN_WORKTREE === "1";
+  const reusableSpriteCheckout = config.worker.spriteRunWorktree;
   const recorded = field<string>(run, "branch");
   if (recorded) return recorded;
   if (!reusableSpriteCheckout && strategy !== "worktree" && strategy !== "worktree_at_pr") return defaultBranch;
@@ -113,7 +113,7 @@ export async function prepareWorkerCwd(start: RunStart): Promise<PreparedCwd> {
   // It runs after checkout so the requested revision is authoritative.
   await prepareSpriteDependencies(cwd);
   const strategy = field<string>(run, "cwdStrategy") ?? "worktree";
-  const reports = process.env.TASK_ORCH_SPRITE_RUN_WORKTREE === "1"
+  const reports = config.worker.spriteRunWorktree
     || strategy === "worktree" || strategy === "worktree_at_pr";
   return {
     cwd: validateCwd(cwd, { runId, repoId, hint }),

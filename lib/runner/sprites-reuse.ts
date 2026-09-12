@@ -77,7 +77,7 @@ export async function recycleCompletedSprite(client: SpritesClient, ref: WorkerG
   await client.restoreCheckpoint(ref.providerHandle, entry.checkpointId);
   if ((await client.listServices(ref.providerHandle)).length) throw new Error("Recycled baseline contains unexpected service definitions");
   await verifyBaseline(client, ref.providerHandle, entry.baselineManifest as unknown as SpriteBaselineManifest,
-    process.env.TASK_ORCH_SPRITES_CODEX_BINARY ?? SPRITE_CODEX_BINARY);
+    config.sprites.codexBinary ?? SPRITE_CODEX_BINARY);
 
   await db.transaction(async (tx) => {
     const [runner] = await tx.select().from(runnerInstances).where(eq(runnerInstances.runId, ref.runId)).for("update");

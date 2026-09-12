@@ -67,8 +67,8 @@ function sameRepository(left: string, right: string): boolean {
 }
 
 function spriteRunBaselineCheckout(work: string): string | null {
-  if (process.env.TASK_ORCH_SPRITE_RUN_WORKTREE !== "1") return null;
-  const configuredSeed = process.env.TASK_ORCH_SPRITE_BASELINE_CHECKOUT;
+  if (!config.worker.spriteRunWorktree) return null;
+  const configuredSeed = config.worker.spriteBaselineCheckout;
   if (!configuredSeed || !isAbsolute(configuredSeed)) {
     throw new Error("Reusable Sprite runs require an absolute TASK_ORCH_SPRITE_BASELINE_CHECKOUT");
   }

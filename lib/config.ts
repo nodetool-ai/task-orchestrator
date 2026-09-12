@@ -210,6 +210,10 @@ export const config = Object.freeze({
 
   /** Worker identity + transport (set on the worker process by dispatch). */
   worker: Object.freeze({
+    /** Run-private checkout selected by the reusable Sprite provider. */
+    get spriteRunWorktree(): boolean { return process.env.TASK_ORCH_SPRITE_RUN_WORKTREE === "1"; },
+    /** Prepared checkout moved into the run-private directory after restore. */
+    get spriteBaselineCheckout(): string | undefined { return strEnv("TASK_ORCH_SPRITE_BASELINE_CHECKOUT"); },
     /** This process is a run worker. @see insideWorker */
     get inside(): boolean {
       return insideWorker();
@@ -522,6 +526,8 @@ export const config = Object.freeze({
 
   /** Sprites provider settings. See docs/runners/sprites.md */
   sprites: Object.freeze({
+    /** Optional provider-specific native Codex installation override. */
+    get codexBinary(): string | undefined { return strEnv("TASK_ORCH_SPRITES_CODEX_BINARY"); },
     get token(): string | undefined {
       return strEnv("SPRITES_TOKEN") ?? strEnv("TASK_ORCH_SPRITES_TOKEN");
     },
