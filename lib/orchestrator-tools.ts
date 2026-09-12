@@ -25,6 +25,7 @@ import { recordTurnEffect } from "./run-state";
 import { subscribeRunEvents, listRunSubscriptions } from "./run-event-subscriptions";
 import { getRunActivitySnapshot } from "./run-activity";
 import { checkExecutorCiRepairOwnership } from "./extensions/spawn";
+import { SPRITE_TOOLS } from "./sprite-tools";
 import { SCHEDULE_TOOLS } from "./schedule-tools";
 
 // Derived from TASK_TRANSITIONS so the transition_task description can never
@@ -252,6 +253,7 @@ function summariseSession(s: AgentSessionFull) {
 
 export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
   ...SCHEDULE_TOOLS,
+  ...SPRITE_TOOLS,
   // ── Repositories ──────────────────────────────────────
 
   {

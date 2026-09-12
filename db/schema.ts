@@ -924,6 +924,15 @@ export const users = pgTable(
   })
 );
 
+// Agent-managed overrides of deployment repository baselines. Paused rows stay
+// present so removing a target cannot silently reactivate the env baseline.
+export const spriteBaselineProfiles = pgTable("sprite_baseline_profiles", {
+  repositoryId: text("repository_id").notNull().references(() => repositories.id, { onDelete: "cascade" }),
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  spec: jsonb("spec").notNull().$type<Record<string, unknown>>(),
+  updatedAt: ts("updated_at").notNull().defaultNow(),
+}, (t) => ({ pk: primaryKey({ columns: [t.repositoryId, t.userId] }) }));
+
 // A persona can pin a model for runs that do not make an explicit choice. The
 // backend and reasoning level remain per-run choices; model is nullable so the
 // deployment default remains the final fallback.

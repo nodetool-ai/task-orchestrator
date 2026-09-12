@@ -21,7 +21,7 @@ import { hasReconnectableWork } from "../worker-channel/repository";
 import { spritesDialEndpoint, spritesListenEndpoint, workerChannelDispatchEnv } from "../worker-channel/dispatch-env";
 import { spritesPoolStore, type SpritePoolEntry } from "./sprites-pool-store";
 import { verifyBaseline, dependencyFingerprint, type SpriteBaselineManifest } from "./sprites-baseline";
-import { getConfiguredSpriteBaselines } from "./sprites-pool-config";
+import { getEffectiveSpriteBaselines } from "./sprites-managed-config";
 import { SpritePoolManager, createDatabaseSpritePoolStore, requestSpritePoolMaintenance, requestSpritePoolRefill } from "./sprites-pool";
 import { cloneUrlFromRemote } from "../repo-checkout";
 import { SpriteCapacityError } from "./sprites-capacity";
@@ -289,11 +289,13 @@ export class SpritesRunnerProvider implements RunnerProvider {
 
   private poolMaintenance: Promise<void> | null = null;
 
+  refreshPool(): void { this.refillPool(); }
+
   private refillPool(): void {
     if (this.poolMaintenance || !config.sprites.token) return;
     this.poolMaintenance = (async () => {
       const workerSha = config.sprites.poolSize > 0 ? await workerBundleId() : "";
-      const specs = config.sprites.poolSize > 0 ? getConfiguredSpriteBaselines(workerSha) : [];
+      const specs = config.sprites.poolSize > 0 ? await getEffectiveSpriteBaselines(workerSha) : [];
       if (specs.reduce((total, spec) => total + spec.target, 0) > config.sprites.poolSize) {
         throw new Error("Sprite baseline targets exceed TASK_ORCH_SPRITE_POOL_SIZE");
       }
@@ -392,7 +394,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
 
   private async claimPoolAssignment(input: CreateRunnerInput): Promise<SpritePoolEntry | null> {
     if (config.sprites.poolSize <= 0 || !input.workerGeneration || !input.channelInstanceId) return null;
-    const specs = getConfiguredSpriteBaselines(await workerBundleId());
+    const specs = await getEffectiveSpriteBaselines(await workerBundleId());
     const [run] = await db.select({ repoId: agentSessions.repoId, userId: agentSessions.userId, remote: repositories.remote })
       .from(agentSessions).leftJoin(repositories, eq(repositories.id, agentSessions.repoId))
       .where(eq(agentSessions.id, input.runId));

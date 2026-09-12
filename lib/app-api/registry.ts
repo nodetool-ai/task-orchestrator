@@ -2,6 +2,7 @@ import { Type } from "typebox";
 import { ORCHESTRATOR_TOOLS, type OrchestratorTool } from "../orchestrator-tools";
 import { OPERATION_MANIFEST } from "../codeact/operation-manifest";
 import { PRODUCT_API_DESCRIPTORS } from "./product-operations";
+import { SPRITE_API_DESCRIPTORS } from "../sprite-tools";
 import { SCHEDULE_API_DESCRIPTORS } from "../schedule-tools";
 import {
   APP_API_VERSION,
@@ -24,7 +25,7 @@ function manifestFor(name: string) {
 }
 
 function descriptorFor(tool: OrchestratorTool): OperationDescriptor {
-  const schedule = SCHEDULE_API_DESCRIPTORS.find((entry) => entry.name === tool.name);
+  const schedule = [...SCHEDULE_API_DESCRIPTORS, ...SPRITE_API_DESCRIPTORS].find((entry) => entry.name === tool.name);
   if (schedule) return { ...schedule, tool, schema: tool.parameters };
   const entry = manifestFor(tool.name);
   const sdkPath = entry?.sdkNamespace ?? `app.${tool.name}`;

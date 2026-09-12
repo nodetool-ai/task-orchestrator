@@ -202,6 +202,11 @@ URL template there.
 
 Checkpoints beyond warm boot (pre-turn rollback points, failure archiving) are Phase 8 — optional and not in the migration's critical path.
 
+Agents with the orchestrator profile can manage repository snapshot recipes,
+save personal checkpoints and execute remote commands through CodeAct. See
+[agent Sprite tools](sprite-agent-tools.md) for the API, ownership boundaries,
+background jobs and retry semantics.
+
 ---
 
 ## Network policy (phased hardening, Phase 6 — not yet enforced)

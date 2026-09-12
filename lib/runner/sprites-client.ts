@@ -75,7 +75,7 @@ export interface SpritesClient {
   getServiceLogs(spriteName: string, serviceName: string): Promise<string>;
   exec(
     spriteName: string,
-    input: { cmd: string; dir?: string; env?: Record<string, string>; timeoutMs?: number },
+    input: { cmd: string; dir?: string; env?: Record<string, string>; timeoutMs?: number; maxOutputBytes?: number },
   ): Promise<{ exitCode: number; stdout: string; stderr: string }>;
   checkpoint(spriteName: string, comment?: string): Promise<SpriteCheckpoint>;
   listCheckpoints(spriteName: string): Promise<SpriteCheckpoint[]>;
@@ -209,14 +209,22 @@ export function parseExecFrames(chunks: Uint8Array[]): { exitCode: number; stdou
   return { exitCode, stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8") };
 }
 
-async function readChunks(response: Response): Promise<Uint8Array[]> {
+async function readChunks(response: Response, maxBytes = Infinity): Promise<Uint8Array[]> {
   const chunks: Uint8Array[] = [];
+  let bytes = 0;
   if (!response.body) return chunks;
   const reader = response.body.getReader();
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    if (value) chunks.push(value);
+    if (value) {
+      bytes += value.byteLength;
+      if (bytes > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new SpritesApiError(0, "exec output exceeded the configured byte limit; remote outcome may be unknown");
+      }
+      chunks.push(value);
+    }
   }
   return chunks;
 }
@@ -461,7 +469,7 @@ export function makeSpritesClient(input?: SpritesClientOptions): SpritesClient {
 
     async exec(
       spriteName: string,
-      input: { cmd: string; dir?: string; env?: Record<string, string>; timeoutMs?: number },
+      input: { cmd: string; dir?: string; env?: Record<string, string>; timeoutMs?: number; maxOutputBytes?: number },
     ) {
       // `cmd` is argv on the wire (repeated param), so a shell line goes
       // through `sh -c`; the caller's string is one argument, never split.
@@ -489,7 +497,7 @@ export function makeSpritesClient(input?: SpritesClientOptions): SpritesClient {
         if (!response.ok) {
           throw new SpritesApiError(response.status, await response.text());
         }
-        return parseExecFrames(await readChunks(response));
+        return parseExecFrames(await readChunks(response, input.maxOutputBytes));
       } catch (err) {
         if (err instanceof SpritesApiError) throw err;
         throw execTransportError(err, safePath, timeoutMs, signal.aborted);

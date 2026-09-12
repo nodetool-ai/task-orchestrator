@@ -36,29 +36,33 @@ const recipeSchema = z.object({
   baseRef: z.string().optional(),
 }).strict();
 
-/** Produce a deployable baseline spec from immutable git blobs. No checkout,
- * install, network fetch, or execution of recipe commands takes place here. */
-export async function generateSpriteBaseline(checkout: string, ref: string, input: unknown) {
+/**
+ * A repository view whose revision and file contents cannot change between
+ * reads. Implementations must expose only tracked regular files.
+ */
+export interface ImmutableSpriteBaselineReader {
+  revision: string;
+  hasRegularFile(path: string): boolean;
+  readRegularFile(path: string): Promise<Buffer>;
+}
+
+/** Produce a deployable baseline spec from an immutable repository reader. */
+export async function generateSpriteBaselineFromReader(
+  source: ImmutableSpriteBaselineReader,
+  input: unknown,
+) {
   const recipe = recipeSchema.parse(input);
+  const { revision } = source;
+  if (!/^[a-f0-9]{40}$/.test(revision)) throw new Error("Baseline requires a SHA-1 git commit");
   if (recipe.reusePolicy === "inputs" && recipe.installScriptInputs === undefined) {
     throw new Error("inputs reuse requires an explicit installScriptInputs list; use [] only after auditing lifecycle scripts");
   }
-  const git = async (args: string[]) => (await exec("git", ["-C", checkout, ...args], {
-    encoding: "buffer", maxBuffer: 32 * 1024 * 1024,
-  })).stdout;
-  const revision = (await git(["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`])).toString().trim();
-  if (!/^[a-f0-9]{40}$/.test(revision)) throw new Error("Baseline requires a SHA-1 git commit");
-  const paths = (await git(["ls-tree", "-r", "-z", revision])).toString().split("\0");
-  const modes = new Map(paths.filter(Boolean).map((entry) => {
-    const tab = entry.indexOf("\t");
-    return [entry.slice(tab + 1), entry.slice(0, 6)] as const;
-  }));
   const read = async (path: string) => {
     inputPath.parse(path);
-    if (!/^100(644|755)$/.test(modes.get(path) ?? "")) {
+    if (!source.hasRegularFile(path)) {
       throw new Error(`Baseline input must be a tracked regular file at ${revision}: ${path}`);
     }
-    return git(["show", `${revision}:${path}`]);
+    return source.readRegularFile(path);
   };
   const lockBytes = await read("package-lock.json");
   const lock = JSON.parse(lockBytes.toString()) as { lockfileVersion?: number; packages?: Record<string, unknown> };
@@ -85,7 +89,7 @@ export async function generateSpriteBaseline(checkout: string, ref: string, inpu
         ...dependency, revision, packageManager: "npm",
         lockfile: { path: "package-lock.json", sha256: createHash("sha256").update(lockBytes).digest("hex") },
         packageManifests: await Promise.all(packagePaths.map(digest)),
-        npmConfig: modes.has(".npmrc") ? await digest(".npmrc") : null,
+        npmConfig: source.hasRegularFile(".npmrc") ? await digest(".npmrc") : null,
         ...(installScriptInputs !== undefined ? { installScriptInputs: await Promise.all([...new Set(installScriptInputs)].sort().map(digest)) } : {}),
       },
     },
@@ -94,4 +98,26 @@ export async function generateSpriteBaseline(checkout: string, ref: string, inpu
   // The real worker SHA is deliberately supplied by deployment, not the recipe.
   getConfiguredSpriteBaselines("0".repeat(40), JSON.stringify([spec]));
   return spec;
+}
+
+export type GeneratedSpriteBaseline = Awaited<ReturnType<typeof generateSpriteBaselineFromReader>>;
+
+/** Produce a deployable baseline spec from immutable git blobs. No checkout,
+ * install, network fetch, or execution of recipe commands takes place here. */
+export async function generateSpriteBaseline(checkout: string, ref: string, input: unknown) {
+  const git = async (args: string[]) => (await exec("git", ["-C", checkout, ...args], {
+    encoding: "buffer", maxBuffer: 32 * 1024 * 1024,
+  })).stdout;
+  const revision = (await git(["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`])).toString().trim();
+  if (!/^[a-f0-9]{40}$/.test(revision)) throw new Error("Baseline requires a SHA-1 git commit");
+  const paths = (await git(["ls-tree", "-r", "-z", revision])).toString().split("\0");
+  const modes = new Map(paths.filter(Boolean).map((entry) => {
+    const tab = entry.indexOf("\t");
+    return [entry.slice(tab + 1), entry.slice(0, 6)] as const;
+  }));
+  return generateSpriteBaselineFromReader({
+    revision,
+    hasRegularFile: (path) => /^100(644|755)$/.test(modes.get(path) ?? ""),
+    readRegularFile: (path) => git(["show", `${revision}:${path}`]),
+  }, input);
 }

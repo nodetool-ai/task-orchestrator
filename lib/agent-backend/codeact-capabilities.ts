@@ -87,6 +87,10 @@ function manifestEntry(name: string) {
 
 function effectsFor(name: string): string[] {
   const bare = bareToolName(name);
+  if (["sprites_exec", "sprites_startCommand"].includes(bare)) return ["execute"];
+  if (["snapshots_prepare", "snapshots_checkpoint"].includes(bare)) return ["create"];
+  if (bare === "snapshots_setTarget") return ["update"];
+  if (bare === "snapshots_retire") return ["delete"];
   if (bare.startsWith("delete_") || bare.startsWith("remove_")) return ["delete"];
   if (bare.startsWith("create_") || bare.startsWith("add_") || bare.startsWith("start_")) return ["create"];
   if (bare.startsWith("update_") || bare.startsWith("check_") || bare.startsWith("uncheck_")) return ["update"];

@@ -358,6 +358,14 @@ describe("SpritesClient", () => {
       .rejects.toThrow("exec stream ended without an exit status");
   });
 
+  it("stops reading exec output above the caller's byte limit", async () => {
+    const fetchImpl = makeFetchMock(async () => framedResponse([[1, "12345"], [3, "\0"]]));
+    const client = makeSpritesClient({ fetchImpl, baseUrl: BASE_URL, token: TOKEN });
+
+    await expect(client.exec("to-run-1", { cmd: "printf 12345", maxOutputBytes: 5 }))
+      .rejects.toThrow("exec output exceeded the configured byte limit; remote outcome may be unknown");
+  });
+
   it("startService handles NDJSON stream without JSON parse error", async () => {
     const ndjson = `{"type":"started","timestamp":123}\n{"type":"complete","timestamp":124}\n`;
     const fetchImpl = makeFetchMock(async (url, init) => {

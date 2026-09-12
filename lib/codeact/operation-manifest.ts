@@ -39,6 +39,8 @@ export type OperationSurface = "rest" | "cli" | "tool" | "ui_action";
 export type CoverageClass = "sdk" | "alias" | "excluded";
 
 export type OperationDomain =
+  | "sprites"
+  | "snapshots"
   | "repositories"
   | "plans"
   | "tasks"
@@ -89,6 +91,16 @@ export interface OperationEntry {
 // ---------------------------------------------------------------------------
 
 const TOOL_OPS: OperationEntry[] = [
+  t("snapshots", "snapshots_list", "Sprite list", "app.snapshots.list"),
+  t("snapshots", "snapshots_prepare", "Sprite prepare", "app.snapshots.prepare"),
+  t("snapshots", "snapshots_setTarget", "Sprite setTarget", "app.snapshots.setTarget"),
+  t("snapshots", "snapshots_retire", "Sprite retire", "app.snapshots.retire"),
+  t("snapshots", "snapshots_listCheckpoints", "Sprite listCheckpoints", "app.snapshots.listCheckpoints"),
+  t("snapshots", "snapshots_checkpoint", "Sprite checkpoint", "app.snapshots.checkpoint"),
+  t("sprites", "sprites_list", "Sprite list", "app.sprites.list"),
+  t("sprites", "sprites_exec", "Sprite exec", "app.sprites.exec"),
+  t("sprites", "sprites_startCommand", "Sprite startCommand", "app.sprites.startCommand"),
+  t("sprites", "sprites_commandStatus", "Sprite commandStatus", "app.sprites.commandStatus"),
   // Repositories (ORCHESTRATOR_TOOLS)
   t("repositories", "list_repositories", "List configured repositories", "app.repositories.list"),
   t("repositories", "get_repository", "Get a repository's details", "app.repositories.get"),

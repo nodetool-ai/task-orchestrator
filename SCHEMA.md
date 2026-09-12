@@ -271,6 +271,15 @@ interrupted first assignment from resume. Provider deletion is recorded only
 after success, and pending cleanup survives control-plane restart. See
 [Sprite warm pool](docs/runners/sprite-warm-pool.md) for operator configuration.
 
+`sprite_baseline_profiles` (migration `0046_sprite_baseline_profiles`) stores
+agent-managed recipe specifications under a `(repository_id, user_id)` primary
+key. The control plane derives both identities and immutable file digests;
+workers never write this table. These rows override only that owner's matching
+deployment profile. A target of zero stays persisted as a pause, preventing the
+deployment default from silently reactivating it. Shared deployment profiles
+remain administrator-managed. Writes serialize target allocation against the
+existing global pool budget. See [agent Sprite tools](docs/runners/sprite-agent-tools.md).
+
 ## ID format
 
 - **Plans**: `P-YYYY-MM-DD-slug` (slug is auto-derived from the title on create)
