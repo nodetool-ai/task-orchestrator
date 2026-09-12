@@ -105,11 +105,13 @@ export async function buildImplementPrompt(
   const lines: string[] = [
     `Execute task \`${task.id}\`.`,
     "",
-    `Fetch its authoritative record with \`mcp__task_orch__get_task({ id: \"${task.id}\" })\` before doing any work. The record contains the description, acceptance criteria, notes, dependencies, and attachment references.`,
+    "Use the orchestrator's `codeact_catalog` tool to discover application operations and `codeact_execute` to run JavaScript against the `app` SDK.",
+    `Discover the read operations with \`codeact_catalog({ names: ${JSON.stringify(task.planId ? ["get_task", "get_plan"] : ["get_task"])} })\`.`,
+    `Fetch its authoritative record with \`codeact_execute({ code: ${JSON.stringify(`return await app.tasks.get({ id: ${JSON.stringify(task.id)} });`)} })\` before doing any work. The record contains the description, acceptance criteria, notes, dependencies, and attachment references.`,
   ];
   if (task.planId) {
     lines.push(
-      `Fetch the parent plan with \`mcp__task_orch__get_plan({ id: \"${task.planId}\" })\` and use its current constraints and task roster as context.`
+      `Fetch the parent plan with \`codeact_execute({ code: ${JSON.stringify(`return await app.plans.get({ id: ${JSON.stringify(task.planId)} });`)} })\` and use its current constraints and task roster as context.`
     );
   }
   lines.push("Treat those fetched records as the source of truth and refresh them when their state may have changed.");

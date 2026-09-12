@@ -101,8 +101,10 @@ describe("buildImplementPrompt", () => {
         createdAt: new Date(),
       }],
     }));
-    expect(prompt).toContain('mcp__task_orch__get_task({ id: "T-test" })');
-    expect(prompt).toContain('mcp__task_orch__get_plan({ id: "P-x" })');
+    expect(prompt).toContain('codeact_catalog({ names: ["get_task","get_plan"] })');
+    expect(prompt).toContain(`codeact_execute({ code: ${JSON.stringify('return await app.tasks.get({ id: "T-test" });')} })`);
+    expect(prompt).toContain(`codeact_execute({ code: ${JSON.stringify('return await app.plans.get({ id: "P-x" });')} })`);
+    expect(prompt).not.toContain("mcp__task_orch__");
     expect(prompt).not.toContain("Test task");
     expect(prompt).not.toContain("Body text");
     expect(prompt).not.toContain("first criterion");
@@ -124,8 +126,10 @@ describe("buildImplementPrompt", () => {
 
   it("omits a plan reference for a standalone task", async () => {
     const prompt = await buildImplementPrompt(fakeTask({ planId: null }));
-    expect(prompt).toContain('mcp__task_orch__get_task({ id: "T-test" })');
-    expect(prompt).not.toContain("mcp__task_orch__get_plan");
+    expect(prompt).toContain('codeact_catalog({ names: ["get_task"] })');
+    expect(prompt).toContain(`codeact_execute({ code: ${JSON.stringify('return await app.tasks.get({ id: "T-test" });')} })`);
+    expect(prompt).not.toContain("app.plans.get");
+    expect(prompt).not.toContain("get_plan");
   });
 });
 
