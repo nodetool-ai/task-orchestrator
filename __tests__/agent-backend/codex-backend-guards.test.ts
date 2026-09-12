@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { CodexBackend, __test } from "../../lib/agent-backend/codex-backend";
+import { __test as modelCache } from "../../lib/agent-backend/codex-models";
 import type { RunTurnArgs } from "../../lib/agent-backend/types";
 
 // Stand in for the whole SDK: the backend imports it dynamically, and a real
@@ -88,6 +89,7 @@ beforeEach(() => {
 
 afterEach(() => {
   __test.setSpawnRetryDelays(null);
+  modelCache.resetCache();
   vi.unstubAllEnvs();
 });
 
@@ -441,10 +443,19 @@ describe("CodexBackend failure classification", () => {
 });
 
 describe("CodexBackend.listProviders", () => {
-  it("offers OpenAI models under the id the model picker emits", () => {
-    const [openai, ...rest] = new CodexBackend().listProviders();
+  it("offers the discovered catalog under the id the model picker emits", async () => {
+    // No credential: the catalog resolves from pi-ai's generated list without
+    // touching the network. Discovery itself is covered by codex-models.test.ts.
+    vi.stubEnv("CODEX_API_KEY", "");
+    vi.stubEnv("OPENAI_API_KEY", "");
+    modelCache.resetCache();
+
+    const [openai, ...rest] = await new CodexBackend().listProviders();
     expect(rest).toEqual([]);
     expect(openai.id).toBe("openai");
     expect(openai.models.map((m) => m.id)).toContain("gpt-5.6-terra");
+    // Discovery is codex-models.ts' job (covered there); the backend must not
+    // carry a list of its own.
+    expect(openai.models.length).toBeGreaterThan(1);
   });
 });

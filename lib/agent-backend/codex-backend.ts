@@ -48,6 +48,7 @@ import { CODEACT_BACKEND_GUIDANCE, withCodeActCapabilities } from "./codeact-cap
 import { createUsageAccumulator } from "./usage";
 import { startCodexMcpBridge, type CodexMcpBridge } from "./codex-mcp-bridge";
 import { resolveCodexAuth } from "./codex-auth";
+import { codexModelCatalog } from "./codex-models";
 import { scrubCodexCliEnv, CODEX_CLI_AUTH_KEYS } from "./env-scrub";
 import { config } from "../config";
 import type { AgentBackend, RunTurnArgs, TurnOutcome } from "./types";
@@ -460,24 +461,12 @@ export class CodexBackend implements AgentBackend {
   }
 
 
-  listProviders() {
-    // Curated catalog for the model picker, mirroring the shape the Claude
-    // backend returns. The CLI carries the authoritative catalog; these are the
-    // slugs a run is expected to pick. `openai` is the provider id the picker
-    // emits as `openai/<model>`.
-    return [
-      {
-        id: "openai",
-        models: [
-          { id: "gpt-5.6-terra", name: "GPT-5.6-Terra" },
-          { id: "gpt-5.6-luna", name: "GPT-5.6-Luna" },
-          { id: "gpt-5.6-sol", name: "GPT-5.6-Sol" },
-          { id: "gpt-5.5", name: "GPT-5.5" },
-          { id: "gpt-5.4", name: "GPT-5.4" },
-          { id: "gpt-5.4-mini", name: "GPT-5.4-Mini" },
-        ],
-      },
-    ];
+  async listProviders() {
+    // The catalog is discovered rather than hand-written here — from the
+    // deployment's own OpenAI account when it has an API key, else from pi-ai's
+    // generated openai-codex list (see codex-models.ts). `openai` is the
+    // provider id the picker emits as `openai/<model>`.
+    return [{ id: "openai", models: await codexModelCatalog() }];
   }
 }
 

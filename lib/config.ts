@@ -365,6 +365,21 @@ export const config = Object.freeze({
         ? value
         : "workspace-write";
     },
+    /** Discover the Codex model catalog at request time from the deployment's
+     *  own OpenAI account instead of serving only the built-in list
+     *  (lib/agent-backend/codex-models.ts). Default ON; it is a no-op without
+     *  an API key, and every failure falls back, so turning it off only pins
+     *  the picker to the catalog pi-ai ships. */
+    get codexModelDiscovery(): boolean {
+      return flag("TASK_ORCH_CODEX_MODEL_DISCOVERY", true);
+    },
+    /** Full URL of the OpenAI-compatible `/models` endpoint Codex model
+     *  discovery reads. Explicit-only: unset, it is derived from
+     *  OPENAI_BASE_URL (public API when that is unset too). Point it at a
+     *  gateway or proxy whose catalog differs from api.openai.com's. */
+    get codexModelsUrl(): string | undefined {
+      return strEnv("TASK_ORCH_CODEX_MODELS_URL");
+    },
     get model(): string | undefined {
       return strEnv("TASK_ORCH_AGENT_MODEL");
     },
