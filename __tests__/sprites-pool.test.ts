@@ -5,6 +5,7 @@ function store(overrides: Partial<SpritePoolStore> = {}): SpritePoolStore {
   return {
     countCapacity: vi.fn(async () => ({ total: 0, preparing: 0, ready: 0 })),
     reservePreparation: vi.fn(async (input) => ({ id: "r1", fingerprint: input.fingerprint, leaseToken: "lease" })),
+    renewPreparation: vi.fn(async () => true),
     completePreparation: vi.fn(async () => undefined),
     failPreparation: vi.fn(async () => undefined),
     listUnused: vi.fn(async () => []),
@@ -53,6 +54,56 @@ describe("SpritePoolManager", () => {
     await manager.requestRefill();
     expect(s.failPreparation).toHaveBeenCalledWith(expect.objectContaining({
       reservationId: "r1", leaseToken: "lease", reason: "provider unavailable", retryAt: expect.any(Number),
+    }));
+  });
+
+  it("renews a long preparation lease and stops renewing after completion", async () => {
+    let release!: () => void;
+    const preparation = new Promise<void>((resolve) => { release = resolve; });
+    const s = store();
+    const manager = new SpritePoolManager({
+      store: s,
+      target: 1,
+      leaseMs: 12,
+      maxConcurrent: 1,
+      requestRefill: async () => {
+        await preparation;
+        return { spriteName: "pool-1", checkpointId: "cp-1" };
+      },
+    });
+
+    const running = manager.requestRefill();
+    await vi.waitFor(() => expect(s.renewPreparation).toHaveBeenCalled());
+    release();
+    await running;
+    // At least one heartbeat plus the final ownership fence.
+    expect(vi.mocked(s.renewPreparation).mock.calls.length).toBeGreaterThanOrEqual(2);
+    const callsAfterCompletion = vi.mocked(s.renewPreparation).mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(s.renewPreparation).toHaveBeenCalledTimes(callsAfterCompletion);
+    expect(s.completePreparation).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not publish a prepared checkpoint after losing its lease", async () => {
+    const s = store({ renewPreparation: vi.fn(async () => false) });
+    const manager = new SpritePoolManager({
+      store: s,
+      target: 1,
+      leaseMs: 12,
+      maxConcurrent: 1,
+      initialBackoffMs: 10,
+      requestRefill: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return { spriteName: "pool-1", checkpointId: "cp-1" };
+      },
+    });
+
+    await manager.requestRefill();
+    expect(s.completePreparation).not.toHaveBeenCalled();
+    expect(s.failPreparation).toHaveBeenCalledWith(expect.objectContaining({
+      reservationId: "r1",
+      leaseToken: "lease",
+      reason: "Sprite pool preparation lease is no longer owned",
     }));
   });
 

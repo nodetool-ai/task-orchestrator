@@ -115,6 +115,23 @@ export const spritesPoolStore = {
     if (!row) throw new Error("preparation lease or immutable baseline identity is no longer valid");
   },
 
+  async renewPreparation(input: { reservationId: string; leaseToken: string; leaseMs: number }): Promise<boolean> {
+    if (!Number.isFinite(input.leaseMs) || input.leaseMs <= 0) {
+      throw new Error("Preparation lease duration must be positive");
+    }
+    const now = new Date();
+    const [row] = await db.update(spritePoolEntries).set({
+      leaseExpiresAt: new Date(now.getTime() + input.leaseMs),
+      updatedAt: now,
+    }).where(and(
+      eq(spritePoolEntries.id, Number(input.reservationId)),
+      eq(spritePoolEntries.state, "preparing"),
+      eq(spritePoolEntries.leaseToken, input.leaseToken),
+      sql`${spritePoolEntries.leaseExpiresAt} > ${now.toISOString()}`,
+    )).returning({ id: spritePoolEntries.id });
+    return Boolean(row);
+  },
+
   async failPreparation(input: { reservationId: string; leaseToken: string; reason: string; retryAt: number }): Promise<void> {
     await db.update(spritePoolEntries).set({ state: "failed", restoreState: "failed", lastError: input.reason.slice(0, 4000), leaseExpiresAt: new Date(input.retryAt), updatedAt: new Date() }).where(and(eq(spritePoolEntries.id, Number(input.reservationId)), eq(spritePoolEntries.state, "preparing"), eq(spritePoolEntries.leaseToken, input.leaseToken)));
   },

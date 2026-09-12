@@ -44,6 +44,7 @@ describe("Sprite lifecycle diagnostics", () => {
     const s: SpritePoolStore = {
       countCapacity: async () => ({ total: 0, preparing: 0, ready: 0 }),
       reservePreparation: async () => ({ id: "entry-a", spriteName: "pool-a", fingerprint: "fp", leaseToken: "private-lease" }),
+      renewPreparation: async () => true,
       completePreparation: async () => {
         expect(lines.some(l => l.event === "sprites_pool_ready")).toBe(false);
         if (fails) throw new Error("private-provider-body");

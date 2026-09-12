@@ -4,11 +4,13 @@ import {
   SPRITE_CHECKOUT_PATH,
   baselineFingerprint,
   canonicalBaselineManifest,
+  controlledNpmCiCommand,
   dependencyPreparationCommand,
   dependencyVerificationProgram,
   type SpriteBaselineManifest,
   verifyBaseline,
   writeBaselineManifest,
+  writeDependencyManifest,
 } from "../lib/runner/sprites-baseline";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -48,8 +50,46 @@ describe("Sprite baseline identity", () => {
   it("prepares the worker's stable checkout and cache", () => {
     const command = dependencyPreparationCommand({ remote: "https://github.com/acme/project.git", branch: "main" });
     expect(command).toContain(SPRITE_CHECKOUT_PATH);
-    expect(command).toContain("npm ci --cache '/home/user/session/.npm-cache'");
+    expect(command).toContain("args=[");
+    expect(command).toContain("child_process");
+    expect(command).toContain(" -- '--cache' '/home/user/session/.npm-cache'");
     expect(command).not.toContain("|| true");
+  });
+
+  it("writes ignored dependency and build receipts from a non-checkout exec cwd", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sprite-receipt-"));
+    try {
+      const checkout = join(root, "session/repo");
+      await mkdir(checkout, { recursive: true });
+      await exec("git", ["init", "-q", checkout]);
+      const client = { exec: async (_sprite: string, input: { cmd: string }) => {
+        try {
+          const result = await exec("/bin/sh", ["-c", input.cmd.replaceAll("/home/user", root)], { cwd: root });
+          return { exitCode: 0, stdout: result.stdout, stderr: result.stderr };
+        } catch (error) {
+          const e = error as { code?: number; stdout?: string; stderr?: string };
+          return { exitCode: Number(e.code ?? 1), stdout: e.stdout ?? "", stderr: e.stderr ?? "" };
+        }
+      } } as never;
+      await writeDependencyManifest(client, "fixture", manifest().dependency!);
+      const excludes = await readFile(join(checkout, ".git/info/exclude"), "utf8");
+      expect(excludes).toContain(".sprite-dependency-*");
+      expect(excludes).toContain(".sprite-build-fingerprint*");
+      await expect(readFile(join(checkout, ".sprite-dependency-fingerprint"), "utf8")).resolves.toHaveLength(64);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("executes npm ci with isolated user/global config and inherited overrides removed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "sprite-npm-command-"));
+    try {
+      const postinstall = "node -e \"require('fs').writeFileSync('installed',process.env.NODE_ENV||'unset')\"";
+      await writeFile(join(root, "package.json"), JSON.stringify({ name: "fixture", version: "1.0.0", scripts: { postinstall } }));
+      await writeFile(join(root, "package-lock.json"), JSON.stringify({ name: "fixture", version: "1.0.0", lockfileVersion: 3, packages: { "": { name: "fixture", version: "1.0.0", hasInstallScript: true } } }));
+      await expect(exec("/bin/sh", ["-c", controlledNpmCiCommand(join(root, ".cache"), ["--no-audit", "--no-fund"])], {
+        cwd: root, env: { ...process.env, NODE_ENV: "production", NPM_CONFIG_IGNORE_SCRIPTS: "true", NPM_CONFIG_PACKAGE_LOCK: "false" },
+      })).resolves.toBeDefined();
+      expect(await readFile(join(root, "installed"), "utf8")).toBe("unset");
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 
   it("executes declared-tool, history, workspace-output, and custom readiness checks", async () => {

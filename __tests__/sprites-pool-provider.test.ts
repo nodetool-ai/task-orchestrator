@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
-import { agentSessions, spritePoolEntries } from "@/db/schema";
+import { agentSessions, repositories, spritePoolEntries, users } from "@/db/schema";
 import { runnerInstances } from "@/db/schema";
 import { create } from "@/lib/runs";
 import { SpritesRunnerProvider, spriteNameForRun } from "@/lib/runner/sprites";
@@ -11,6 +11,8 @@ import { createDatabaseSpritePoolStore, requestSpritePoolMaintenance, requestSpr
 import { spritesPoolStore } from "@/lib/runner/sprites-pool-store";
 import type { SpritesClient } from "@/lib/runner/sprites-client";
 import { spriteNodeSetupCommand } from "@/lib/runner/sprites-bootstrap";
+import { baselineFingerprint, controlledNpmCiCommand, dependencyFingerprint, SPRITE_NPM_CACHE_PATH } from "@/lib/runner/sprites-baseline";
+import { getConfiguredSpriteBaselines } from "@/lib/runner/sprites-pool-config";
 
 const manifest = {
   schemaVersion: 1, workerBundleSha: "a".repeat(40), nodeVersion: "v22.0.0", codexVersion: "0.153.4",
@@ -52,13 +54,166 @@ describe("Sprite pool provider integration", () => {
   });
   it("prepares and checkpoints only after baseline verification", async () => {
     const c = client();
-    const refill = requestSpritePoolRefill(c, { baseline: manifest, workerSha: manifest.workerBundleSha, bundleUrl: "https://example/worker.tgz" });
-    const result = await refill!({ reservation: { id: "r", fingerprint: "fp", leaseToken: "l", spriteName: "pool-fp" } });
-    expect(vi.mocked(c.exec).mock.calls[1][1].cmd).toBe(spriteNodeSetupCommand(manifest.nodeVersion));
+    const refill = requestSpritePoolRefill(c, { baseline: manifest, workerSha: manifest.workerBundleSha, bundleUrl: "https://example/worker.tgz", swapMb: 4096 });
+    const fingerprint = baselineFingerprint(manifest);
+    const result = await refill!({ reservation: { id: "r", fingerprint, leaseToken: "l", spriteName: "pool-fp", baselineManifest: manifest } });
+    expect(vi.mocked(c.exec).mock.calls.map(([, input]) => input.cmd)).toContain(spriteNodeSetupCommand(manifest.nodeVersion));
     expect(result).toEqual({ spriteName: "pool-fp", checkpointId: "checkpoint-real" });
     expect(c.checkpoint).toHaveBeenCalledWith("pool-fp", expect.stringContaining("baseline"));
     const commands = (c.exec as ReturnType<typeof vi.fn>).mock.invocationCallOrder;
     expect(commands.length).toBeGreaterThan(0);
+    const commandText = vi.mocked(c.exec).mock.calls.map(([, input]) => input.cmd);
+    expect(commandText.findIndex((command) => command.includes("task-orchestrator.swap")))
+      .toBeLessThan(commandText.findIndex((command) => command === spriteNodeSetupCommand(manifest.nodeVersion)));
+  });
+
+  it("rejects a refill whose reservation does not describe the prepared baseline", async () => {
+    const c = client();
+    const refill = requestSpritePoolRefill(c, { baseline: manifest, workerSha: manifest.workerBundleSha, bundleUrl: "https://example/worker.tgz", swapMb: 4096 });
+
+    await expect(refill!({ reservation: {
+      id: "r", fingerprint: "not-the-baseline", leaseToken: "l", spriteName: "pool-mismatch", baselineManifest: manifest,
+    } })).rejects.toThrow("reservation fingerprint differs");
+    expect(c.createSprite).not.toHaveBeenCalled();
+  });
+
+  it("retires a baseline Sprite when swap cannot be enabled before preparation", async () => {
+    const c = client({ exec: vi.fn(async (_name, input) => input.cmd.includes("task-orchestrator.swap")
+      ? { exitCode: 1, stdout: "", stderr: "swapon failed" }
+      : { exitCode: 0, stdout: "", stderr: "" }) });
+    const fingerprint = baselineFingerprint(manifest);
+    const refill = requestSpritePoolRefill(c, {
+      baseline: manifest,
+      workerSha: manifest.workerBundleSha,
+      bundleUrl: "https://example/worker.tgz",
+      swapMb: 4096,
+    });
+
+    await expect(refill!({ reservation: {
+      id: "r", fingerprint, leaseToken: "l", spriteName: "pool-no-swap", baselineManifest: manifest,
+    } })).rejects.toThrow("configure-swap failed");
+    expect(c.createSprite).toHaveBeenCalledTimes(1);
+    expect(c.deleteSprite).toHaveBeenCalledWith("pool-no-swap");
+    expect(c.checkpoint).not.toHaveBeenCalled();
+    expect(c.exec).toHaveBeenCalledTimes(1);
+  });
+
+  it("prepares one repository baseline and claims its same-Sprite checkpoint with a dependency receipt", async () => {
+    const workerSha = await workerBundleId();
+    const repositoryId = `R-pool-${crypto.randomUUID()}`;
+    const remote = "https://github.com/acme/preinstalled.git";
+    const revision = "b".repeat(40);
+    const digest = "c".repeat(64);
+    const [user] = await db.insert(users).values({ email: `pool-${crypto.randomUUID()}@example.com`, passwordHash: "x" }).returning();
+    await db.insert(repositories).values({ id: repositoryId, name: "preinstalled", remote });
+    const dependency = {
+      repository: remote,
+      revision,
+      lockfile: { path: "package-lock.json", sha256: digest },
+      packageManifests: [{ path: "package.json", sha256: digest }],
+      packageManager: "npm" as const,
+      packageManagerVersion: "10.9.8",
+      installOptions: ["--no-audit", "--no-fund"],
+      setupCommands: ["./scripts/setup-fixture.sh"],
+      buildCommands: ["npm run build:fixture"],
+      readinessCommands: ["npm run ready:fixture"],
+      minimumGitHistoryDepth: 2,
+      baseRef: "origin/main",
+    };
+    const declaredManifest = {
+      ...manifest,
+      workerBundleSha: workerSha,
+      nodeVersion: process.version,
+      architecture: process.arch as "x64" | "arm64",
+      systemToolsVersion: "sprite-base-v1",
+      dependency,
+    };
+    vi.stubEnv("TASK_ORCH_SPRITE_POOL_SIZE", "1");
+    vi.stubEnv("SPRITES_TOKEN", "test-token");
+    vi.stubEnv("GH_TOKEN", "test-gh-token");
+    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    vi.stubEnv("TASK_ORCH_RUNNER", "sprites");
+    vi.stubEnv("TASK_ORCH_SPRITES_WORKER_BUNDLE_URL", "https://example/worker.tgz");
+    vi.stubEnv("TASK_ORCH_SPRITE_POOL_BASELINES", JSON.stringify([{
+      manifest: declaredManifest,
+      target: 1,
+      repositoryId,
+      allowedUserIds: [user.id],
+    }]));
+    // Use the same hydrated manifest the production claim path computes. This
+    // covers the default reuse policy and install-runtime receipt fields rather
+    // than preparing a subtly different pre-normalization fingerprint.
+    const [configuredBaseline] = getConfiguredSpriteBaselines(workerSha);
+    const repositoryManifest = configuredBaseline.manifest;
+    const fingerprint = configuredBaseline.fingerprint;
+    const c = client();
+    const manager = new SpritePoolManager({
+      store: createDatabaseSpritePoolStore(),
+      target: 1,
+      maxSprites: 1,
+      fingerprints: () => [fingerprint],
+      baseline: () => ({ manifest: repositoryManifest as unknown as Record<string, unknown> }),
+      spriteName: () => "pool-repository-ready",
+      requestRefill: requestSpritePoolRefill(c, {
+        baseline: repositoryManifest,
+        workerSha,
+        bundleUrl: "https://example/worker.tgz",
+        swapMb: 4096,
+      }),
+    });
+
+    await manager.requestRefill();
+    expect(c.checkpoint).toHaveBeenCalledTimes(1);
+    expect(c.checkpoint).toHaveBeenCalledWith("pool-repository-ready", `baseline ${fingerprint}`);
+    const preparationCommands = vi.mocked(c.exec).mock.calls.map(([, input]) => input.cmd);
+    expect(preparationCommands.filter((command) => command.includes(controlledNpmCiCommand(
+      SPRITE_NPM_CACHE_PATH, repositoryManifest.dependency!.installOptions,
+    )))).toHaveLength(1);
+    expect(preparationCommands.some((command) => command.includes(dependency.setupCommands[0]))).toBe(true);
+    expect(preparationCommands.some((command) => command.includes(dependency.buildCommands[0]))).toBe(true);
+    expect(preparationCommands.some((command) => command.includes(dependency.readinessCommands[0]))).toBe(true);
+    expect(preparationCommands.some((command) => command.includes("checkout --detach") && command.includes(revision))).toBe(true);
+    const credentialedPreparationCalls = vi.mocked(c.exec).mock.calls.filter(([, input]) => input.env?.GH_TOKEN);
+    expect(credentialedPreparationCalls).toHaveLength(1);
+    expect(credentialedPreparationCalls[0][1].env).toEqual({ GH_TOKEN: "test-gh-token" });
+    expect(vi.mocked(c.exec).mock.calls.every(([, input]) => !input.env?.OPENAI_API_KEY)).toBe(true);
+
+    const run = await create({ goal: "<implement>", repoId: repositoryId, userId: user.id, defer: true });
+    const operationId = "00000000-0000-4000-8000-000000000038";
+    const instanceId = "wi_55555555555555555555555555555555";
+    await db.insert(runnerInstances).values({
+      runId: run.id,
+      provider: "sprites",
+      state: "starting",
+      workerGeneration: 1,
+      generationState: "allocating",
+      providerOperationId: operationId,
+      channelInstanceId: instanceId,
+      providerServiceName: "worker-g1",
+    });
+
+    await expect(new SpritesRunnerProvider(c).create({
+      runId: run.id,
+      scope: `run-${run.id}`,
+      workerGeneration: 1,
+      providerOperationId: operationId,
+      channelInstanceId: instanceId,
+      providerServiceName: "worker-g1",
+    })).resolves.toBeTruthy();
+
+    expect(c.restoreCheckpoint).toHaveBeenCalledTimes(1);
+    expect(c.restoreCheckpoint).toHaveBeenCalledWith("pool-repository-ready", "checkpoint-real");
+    expect(c.createSprite).toHaveBeenCalledTimes(1);
+    expect(c.createSprite).toHaveBeenCalledWith({ name: "pool-repository-ready", urlSettings: { auth: "sprite" } });
+    expect(c.putService).toHaveBeenCalledWith("pool-repository-ready", "worker-g1", expect.objectContaining({
+      env: expect.objectContaining({
+        TASK_ORCH_SPRITE_DEPENDENCY_REUSE: "1",
+        TASK_ORCH_SPRITE_DEPENDENCY_FINGERPRINT: dependencyFingerprint(repositoryManifest.dependency!),
+        TASK_ORCH_SPRITE_PACKAGE_MANAGER: "npm",
+      }),
+    }));
+    const [entry] = await db.select().from(spritePoolEntries).where(eq(spritePoolEntries.spriteName, "pool-repository-ready"));
+    expect(entry).toMatchObject({ state: "claimed", runId: run.id, restoreState: "restored" });
   });
 
   it("retries a deleting entry after a provider outage", async () => {

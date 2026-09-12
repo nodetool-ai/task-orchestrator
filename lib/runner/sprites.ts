@@ -310,6 +310,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
           return requestSpritePoolRefill(this.spritesClient, {
             baseline: spec.manifest, workerSha, bundleUrl: config.sprites.workerBundleUrl,
             codexBinary: envValue("TASK_ORCH_SPRITES_CODEX_BINARY"),
+            swapMb: config.sprites.swapMb,
           })!(request);
         },
       });

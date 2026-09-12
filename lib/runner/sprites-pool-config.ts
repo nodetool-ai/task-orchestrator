@@ -25,13 +25,29 @@ const dependency = z.object({
   packageManager: z.literal("npm"),
   packageManagerVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
   installOptions: z.array(z.enum(["--ignore-scripts", "--no-audit", "--no-fund", "--legacy-peer-deps", "--include=dev", "--include=optional", "--omit=dev"])),
+  npmConfig: digest.extend({ path: z.literal(".npmrc") }).nullable().optional(),
+  installRuntime: z.object({
+    nodeVersion: z.string().regex(/^v\d+\.\d+\.\d+$/),
+    platform: z.literal("linux"),
+    architecture: z.enum(["x64", "arm64"]),
+  }).strict().optional(),
+  reusePolicy: z.enum(["revision", "inputs"]).optional(),
   installScriptInputs: z.array(digest).optional(),
   setupCommands: z.array(z.string().trim().min(1)).optional(),
   buildCommands: z.array(z.string().trim().min(1)).optional(),
   readinessCommands: z.array(z.string().trim().min(1)).optional(),
   minimumGitHistoryDepth: z.number().int().positive().optional(),
   baseRef: z.string().trim().min(1).optional(),
-}).strict();
+}).strict().superRefine((value, ctx) => {
+  if (value.reusePolicy === "inputs" && value.installScriptInputs === undefined) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["installScriptInputs"],
+      message: "input-scoped reuse requires installScriptInputs (use [] to assert none)" });
+  }
+  if (value.reusePolicy === "inputs" && value.npmConfig === undefined) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["npmConfig"],
+      message: "input-scoped reuse requires npmConfig (use null to assert .npmrc is absent)" });
+  }
+});
 const manifestSchema = z.object({
   schemaVersion: z.literal(SPRITE_BASELINE_SCHEMA_VERSION),
   workerBundleSha: z.string().regex(/^[a-f0-9]{40}$/).optional(),
@@ -56,7 +72,25 @@ export function getConfiguredSpriteBaselines(workerSha: string, raw = process.en
   const seen = new Set<string>();
   return parsed.map((item) => {
     if (item.manifest.workerBundleSha && item.manifest.workerBundleSha !== workerSha) throw new Error("Sprite baseline worker SHA differs from the deployed bundle");
-    const manifest = { ...item.manifest, workerBundleSha: workerSha } as SpriteBaselineManifest;
+    const declaredDependency = item.manifest.dependency;
+    const installRuntime = {
+      nodeVersion: item.manifest.nodeVersion,
+      platform: item.manifest.platform,
+      architecture: item.manifest.architecture,
+    };
+    if (declaredDependency?.installRuntime
+      && JSON.stringify(declaredDependency.installRuntime) !== JSON.stringify(installRuntime)) {
+      throw new Error("Dependency install runtime differs from the baseline runtime");
+    }
+    const manifest = {
+      ...item.manifest,
+      workerBundleSha: workerSha,
+      ...(declaredDependency ? { dependency: {
+        ...declaredDependency,
+        installRuntime,
+        reusePolicy: declaredDependency.reusePolicy ?? "revision",
+      } } : {}),
+    } as SpriteBaselineManifest;
     if (manifest.dependency) {
       if (!item.repositoryId || !item.allowedUserIds?.length) throw new Error("Repository baselines require repositoryId and allowedUserIds");
       if (item.remote && item.remote !== manifest.dependency.repository) throw new Error("Baseline repository remotes differ");

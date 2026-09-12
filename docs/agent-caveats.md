@@ -170,6 +170,15 @@ already cost real time once.
 
 ## Repository readiness on Sprite baselines
 
+- Run 276's apparent native-addon postinstall hang was a VM filesystem stall:
+  npm, Codex, and even a fresh login shell had threads blocked in ext4 journal
+  or buffer waits; loop-device completions were frozen and I/O pressure was
+  about 99%. Inspect thread wait channels and disk counters before diagnosing
+  native compatibility. A zombie process leader can still have blocked threads.
+  Use a non-login shell for procfs diagnostics, preserve unpublished work before
+  VM recovery, and do not treat a partial dependency tree as ready. See
+  [run 276 evidence and recovery](run-276-sprite-storage-stall.md).
+
 Repository dependency baselines can opt into project-specific preparation and
 readiness through `TASK_ORCH_SPRITE_POOL_BASELINES`. The dependency manifest
 accepts `setupCommands`, `buildCommands`, `readinessCommands`,
@@ -180,11 +189,15 @@ tree is reused. They verify configured history/merge-base requirements,
 declared `typescript`/`tsx`/`vitest` resolution, `better-sqlite3` native loading,
 declared workspace `dist/` entry points, and every configured readiness command.
 
-These expanded checks are opt-in: at least one of the new fields must be present.
-Existing baseline profiles keep their prior behavior until updated, so merely
-deploying this code does not prove their compiler, native bindings, build
-outputs, or test services are ready. Prefer repository-owned commands and the
-persistent baseline npm cache; do not install arbitrary tools globally. For a
+Dependency baselines always check declared tools, native bindings, and workspace
+outputs; repository-specific services still need explicit readiness commands.
+Input-scoped reuse (`reusePolicy: "inputs"`) requires audited install-script
+inputs and a `.npmrc` hash or absence assertion. It keeps dependencies across
+ordinary source changes and refreshes source-dependent builds separately. Legacy
+profiles retain conservative revision-based installation invalidation. Use
+`npm run sprite:baseline` to hash a pinned commit and generate a validated profile;
+see the [warm-pool guide](runners/sprite-warm-pool.md). Prefer repository-owned
+commands and the persistent baseline npm cache. For a
 repository whose tests require Postgres, a bounded probe can be configured as:
 
 ```json

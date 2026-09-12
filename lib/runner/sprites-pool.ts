@@ -7,7 +7,8 @@
  */
 import { config } from "../config";
 import { spritesPoolStore as databaseStore } from "./sprites-pool-store";
-import { prepareSpriteBaseline, type SpriteBaselineManifest } from "./sprites-baseline";
+import { baselineFingerprint, prepareSpriteBaseline, type SpriteBaselineManifest } from "./sprites-baseline";
+import { configureSpriteSwap } from "./sprites-bootstrap";
 import type { SpritesClient } from "./sprites-client";
 import { db } from "../../db";
 import { runnerInstances, agentSessions } from "../../db/schema";
@@ -38,6 +39,8 @@ export interface SpritePoolReservation {
 export interface SpritePoolStore {
   countCapacity(): Promise<{ total: number; preparing: number; ready: number; byFingerprint?: Record<string, { preparing: number; ready: number }> }>;
   reservePreparation(input: { fingerprint: string; maxTotal: number; maxReady?: number; fingerprintTarget?: number; leaseMs: number; spriteName?: string; baselineManifest?: Record<string, unknown>; checkpointId?: string }): Promise<SpritePoolReservation | null>;
+  /** Extend a live preparation lease only while the same token still owns it. */
+  renewPreparation(input: { reservationId: string; leaseToken: string; leaseMs: number }): Promise<boolean>;
   completePreparation(input: { reservationId: string; leaseToken: string; fingerprint?: string; spriteName: string; checkpointId: string; baselineManifest?: Record<string, unknown> }): Promise<void>;
   failPreparation(input: { reservationId: string; leaseToken: string; reason: string; retryAt: number }): Promise<void>;
   listUnused(input: { fingerprint?: string }): Promise<SpritePoolEntry[]>;
@@ -225,13 +228,59 @@ export class SpritePoolManager {
   private async prepare(reservation: SpritePoolReservation): Promise<void> {
     const context = { poolEntryId: reservation.id, spriteName: reservation.spriteName, fingerprint: reservation.fingerprint };
     const started = performance.now();
+    const renewalIntervalMs = Math.max(1, Math.floor(this.leaseMs / 3));
+    let renewalTimer: ReturnType<typeof setTimeout> | null = null;
+    let renewalInFlight: Promise<void> | null = null;
+    let renewalStopped = false;
+    let renewalError: Error | null = null;
+    const lostLease = () => new Error("Sprite pool preparation lease is no longer owned");
+    const scheduleRenewal = () => {
+      if (renewalStopped || renewalError) return;
+      renewalTimer = setTimeout(() => {
+        renewalTimer = null;
+        renewalInFlight = (async () => {
+          try {
+            const renewed = await this.options.store.renewPreparation({
+              reservationId: reservation.id,
+              leaseToken: reservation.leaseToken,
+              leaseMs: this.leaseMs,
+            });
+            if (!renewed) renewalError = lostLease();
+          } catch (error) {
+            renewalError = error instanceof Error ? error : new Error(String(error));
+          } finally {
+            renewalInFlight = null;
+            scheduleRenewal();
+          }
+        })();
+      }, renewalIntervalMs);
+      renewalTimer.unref?.();
+    };
+    const stopRenewal = async () => {
+      renewalStopped = true;
+      if (renewalTimer) clearTimeout(renewalTimer);
+      renewalTimer = null;
+      await renewalInFlight;
+    };
     spriteLog("sprites_pool_preparation_started", context);
+    scheduleRenewal();
     try {
       const prepared = await this.options.requestRefill!({ reservation });
+      await stopRenewal();
+      if (renewalError) throw renewalError;
+      // Fence the handoff to ready with a final renewal. The store rejects an
+      // expired token, so a preparation that lost ownership can never publish
+      // its checkpoint after a reconciliation pass.
+      if (!await this.options.store.renewPreparation({
+        reservationId: reservation.id,
+        leaseToken: reservation.leaseToken,
+        leaseMs: this.leaseMs,
+      })) throw lostLease();
       await this.options.store.completePreparation({ ...prepared, reservationId: reservation.id, leaseToken: reservation.leaseToken, fingerprint: reservation.fingerprint, baselineManifest: reservation.baselineManifest });
       this.failures = 0;
       spriteLog("sprites_pool_ready", { ...context, checkpointId: prepared.checkpointId, durationMs: Math.round(performance.now() - started) });
     } catch (error) {
+      await stopRenewal();
       this.failures++;
       const delay = Math.min(this.maxBackoffMs, this.initialBackoffMs * 2 ** Math.min(this.failures - 1, 8));
       const retryAt = this.now() + delay;
@@ -277,6 +326,9 @@ export function createDatabaseSpritePoolStore(): SpritePoolStore {
       const candidate = row as (typeof row & { spriteName?: string; baselineManifest?: unknown }) | null;
       return candidate ? { id: String(candidate.id), fingerprint: candidate.fingerprint, leaseToken: candidate.leaseToken ?? "", spriteName: candidate.spriteName ?? undefined, baselineManifest: candidate.baselineManifest as Record<string, unknown> } : null;
     },
+    async renewPreparation(input) {
+      return databaseStore.renewPreparation(input);
+    },
     async completePreparation(input) {
       await databaseStore.completePreparation({ reservationId: input.reservationId, leaseToken: input.leaseToken, spriteName: input.spriteName, checkpointId: input.checkpointId, baselineManifest: input.baselineManifest });
     },
@@ -302,6 +354,9 @@ export interface SpritePoolProviderRefillOptions {
   workerSha: string;
   bundleUrl: string;
   codexBinary?: string;
+  /** Swap is kernel state, so every newly created baseline Sprite must enable
+   * it before dependency installation even when the eventual run also does. */
+  swapMb: number;
 }
 
 /** Provider-side creation hook. A failure always attempts to retire the newly
@@ -310,11 +365,24 @@ export function requestSpritePoolRefill(client: SpritesClient, options: SpritePo
   return async ({ reservation }) => {
     const spriteName = reservation.spriteName;
     if (!spriteName) throw new Error("pool reservation has no provider sprite name");
+    const expectedFingerprint = baselineFingerprint(options.baseline);
+    if (options.workerSha !== options.baseline.workerBundleSha) {
+      throw new Error("Sprite baseline worker SHA differs from refill configuration");
+    }
+    if (reservation.fingerprint !== expectedFingerprint) {
+      throw new Error("Sprite pool reservation fingerprint differs from refill baseline");
+    }
+    if (reservation.baselineManifest
+      && baselineFingerprint(reservation.baselineManifest as unknown as SpriteBaselineManifest) !== expectedFingerprint) {
+      throw new Error("Sprite pool reservation manifest differs from refill baseline");
+    }
     let created = false;
     try {
       await logSpritePhase("pool_sprite_create", { poolEntryId: reservation.id, spriteName, fingerprint: reservation.fingerprint },
         () => client.createSprite({ name: spriteName, urlSettings: { auth: "sprite" } }));
       created = true;
+      await logSpritePhase("pool_swap_configure", { poolEntryId: reservation.id, spriteName, fingerprint: reservation.fingerprint },
+        () => configureSpriteSwap(client, spriteName, options.swapMb));
       const prepared = await prepareSpriteBaseline(client, spriteName, {
         manifest: options.baseline,
         bundleUrl: options.bundleUrl,
@@ -326,6 +394,9 @@ export function requestSpritePoolRefill(client: SpritesClient, options: SpritePo
           installOptions: options.baseline.dependency.installOptions,
         } : undefined,
       });
+      if (prepared.fingerprint !== expectedFingerprint) {
+        throw new Error("Prepared Sprite fingerprint differs from refill baseline");
+      }
       return { spriteName, checkpointId: prepared.checkpointId };
     } catch (error) {
       if (created) await logSpritePhase("failed_preparation_delete", { poolEntryId: reservation.id, spriteName },

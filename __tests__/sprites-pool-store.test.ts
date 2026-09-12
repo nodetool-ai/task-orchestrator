@@ -52,6 +52,45 @@ describe("Sprite pool store (Postgres)", () => {
     await expect(spritesPoolStore.completePreparation({ reservationId: String(row!.id), leaseToken: String(row!.leaseToken), checkpointId: "cp" })).rejects.toThrow("lease");
   });
 
+  it("renews only a live preparation lease owned by the matching token", async () => {
+    const reserve = (label: string) => spritesPoolStore.reservePreparation({
+      spriteName: `pool-renew-${label}-${crypto.randomUUID()}`,
+      fingerprint: `fp-renew-${label}`,
+      checkpointId: "pending",
+      baselineManifest: {},
+      leaseMs: 60_000,
+    }, 0);
+
+    const live = await reserve("live");
+    const liveBefore = (await spritesPoolStore.findBySpriteName(live!.spriteName))!.leaseExpiresAt!.getTime();
+    expect(await spritesPoolStore.renewPreparation({
+      reservationId: String(live!.id), leaseToken: String(live!.leaseToken), leaseMs: 120_000,
+    })).toBe(true);
+    expect((await spritesPoolStore.findBySpriteName(live!.spriteName))!.leaseExpiresAt!.getTime()).toBeGreaterThan(liveBefore);
+
+    expect(await spritesPoolStore.renewPreparation({
+      reservationId: String(live!.id), leaseToken: crypto.randomUUID(), leaseMs: 120_000,
+    })).toBe(false);
+
+    const expired = await reserve("expired");
+    await db.update(spritePoolEntries).set({ leaseExpiresAt: new Date(Date.now() - 1_000) }).where(eq(spritePoolEntries.id, Number(expired!.id)));
+    expect(await spritesPoolStore.renewPreparation({
+      reservationId: String(expired!.id), leaseToken: String(expired!.leaseToken), leaseMs: 120_000,
+    })).toBe(false);
+
+    const ready = await reserve("ready");
+    await spritesPoolStore.completePreparation({ reservationId: String(ready!.id), leaseToken: String(ready!.leaseToken), checkpointId: "cp-ready" });
+    expect(await spritesPoolStore.renewPreparation({
+      reservationId: String(ready!.id), leaseToken: String(ready!.leaseToken), leaseMs: 120_000,
+    })).toBe(false);
+
+    const draining = await reserve("draining");
+    await db.update(spritePoolEntries).set({ state: "draining" }).where(eq(spritePoolEntries.id, Number(draining!.id)));
+    expect(await spritesPoolStore.renewPreparation({
+      reservationId: String(draining!.id), leaseToken: String(draining!.leaseToken), leaseMs: 120_000,
+    })).toBe(false);
+  });
+
   it("claims one ready entry and binds the runner atomically", async () => {
     const run = (await db.insert(agentSessions).values({ status: "pending", goal: "<implement>", toolsProfile: "", cwdStrategy: "worktree" }).returning())[0]!;
     await db.insert(runnerInstances).values({ runId: run.id, provider: "sprites", state: "creating", generationState: "stopped" });

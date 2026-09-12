@@ -28,6 +28,25 @@ describe("Sprite pool baseline configuration", () => {
     expect(() => parse({ ...repository(), repositoryId: undefined })).toThrow();
     expect(() => parse({ ...repository(), allowedUserIds: undefined })).toThrow();
   });
+  it("hydrates conservative policy and install runtime from the baseline", () => {
+    const [result] = parse(repository());
+    expect(result.manifest.dependency).toMatchObject({
+      reusePolicy: "revision",
+      installRuntime: { nodeVersion: "v22.14.0", platform: "linux", architecture: "x64" },
+    });
+  });
+  it("requires explicit lifecycle and npm config declarations for input-scoped reuse", () => {
+    const dep = repository().manifest.dependency;
+    expect(() => parse({ ...repository(), manifest: { ...repository().manifest, dependency: { ...dep, reusePolicy: "inputs" } } })).toThrow(/installScriptInputs/);
+    expect(() => parse({ ...repository(), manifest: { ...repository().manifest, dependency: { ...dep, reusePolicy: "inputs", installScriptInputs: [] } } })).toThrow(/npmConfig/);
+    expect(() => parse({ ...repository(), manifest: { ...repository().manifest, dependency: { ...dep, reusePolicy: "inputs", installScriptInputs: [], npmConfig: null } } })).not.toThrow();
+  });
+  it("rejects a dependency runtime that differs from its baseline", () => {
+    expect(() => parse({ ...repository(), manifest: { ...repository().manifest, dependency: {
+      ...repository().manifest.dependency,
+      installRuntime: { nodeVersion: "v20.0.0", platform: "linux", architecture: "x64" },
+    } } })).toThrow(/install runtime differs/);
+  });
   it.each(["https://user:pass@github.com/acme/project.git", "https://github.com/acme/project.git?token=x", "../project"])("rejects unsafe remote %s", (remote) => {
     expect(() => parse({ ...repository(), manifest: { ...repository().manifest, dependency: { ...repository().manifest.dependency, repository: remote } } })).toThrow();
   });
