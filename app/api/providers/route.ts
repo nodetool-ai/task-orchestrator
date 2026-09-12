@@ -7,6 +7,6 @@ export const dynamic = "force-dynamic";
 // to the UI. The heavy SDK import still happens lazily inside runTurn.
 export async function GET() {
   const defaultBackend = resolveBackendId();
-  const providers = (await getBackend(defaultBackend)).listProviders();
+  const providers = await (await getBackend(defaultBackend)).listProviders();
   return NextResponse.json({ providers, defaultBackend });
 }

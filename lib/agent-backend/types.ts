@@ -186,6 +186,10 @@ export type BackendId = "pi" | "claude" | "codex";
 export interface AgentBackend {
   readonly id: BackendId;
   runTurn(args: RunTurnArgs): Promise<TurnOutcome>;
-  /** Provider/model catalog for the persona editor (GET /api/providers). */
-  listProviders(): Array<{ id: string; models: Array<{ id: string; name: string }> }>;
+  /** Provider/model catalog for the persona editor (GET /api/providers). May be
+   *  async: the Codex catalog is discovered at call time
+   *  (lib/agent-backend/codex-models.ts), so every caller must await it. */
+  listProviders():
+    | Array<{ id: string; models: Array<{ id: string; name: string }> }>
+    | Promise<Array<{ id: string; models: Array<{ id: string; name: string }> }>>;
 }

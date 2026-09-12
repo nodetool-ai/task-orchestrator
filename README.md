@@ -474,6 +474,17 @@ process with no in-process tool seam:
   sandbox instead (`TASK_ORCH_CODEX_SANDBOX`, default `workspace-write` locally;
   isolated Sprite workers default to `danger-full-access`), and
   secrets are absent from the CLI's environment rather than unset per command.
+- **Models.** The catalog offered by the model picker is discovered, not
+  hand-written. With an API key configured, it is read from that account's
+  OpenAI `/models` endpoint and filtered to the ids the CLI can drive, so a
+  model the account has early access to shows up without a code change;
+  otherwise (a ChatGPT-subscription deployment, for which OpenAI publishes no
+  catalog endpoint) it comes from the same generated `openai-codex` list pi
+  serves, so both backends offer the same models. Results are cached, and every
+  failure falls back rather than emptying the picker. `TASK_ORCH_CODEX_MODELS_URL`
+  points discovery at another OpenAI-compatible `/models` route (a gateway or
+  proxy); `TASK_ORCH_CODEX_MODEL_DISCOVERY=0` pins the picker to the built-in
+  list. See `lib/agent-backend/codex-models.ts`.
 - **Auth.** A non-empty `CODEX_API_KEY` takes precedence, followed by the stored
   ChatGPT credential, then a non-empty `OPENAI_API_KEY`. A selected API key is
   passed to the SDK's `apiKey` option so the pinned CLI receives it as

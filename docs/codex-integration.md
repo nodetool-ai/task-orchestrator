@@ -41,6 +41,29 @@ See [MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
 Tool-discovery guidance is repeated on resumed turns so an old transcript
 claiming tools are unavailable does not strand the run on the repository CLI.
 
+## Model catalog
+
+The catalog behind `GET /api/providers` is discovered at request time
+(`lib/agent-backend/codex-models.ts`), not written out in the backend. With an
+API key configured (`CODEX_API_KEY`, else `OPENAI_API_KEY`) it is read from that
+account's OpenAI `/models` endpoint and filtered to the families the CLI can run
+a coding turn on; without one it comes from pi-ai's generated `openai-codex`
+list, which is the catalog pi's own provider serves off the same ChatGPT
+subscription. A ChatGPT bearer is not accepted by the API-key endpoint and
+OpenAI publishes no catalog endpoint for that credential, so a
+subscription-only deployment is served by the generated list by design.
+
+Discovery is never allowed to fail a request: an unreachable, unauthorized,
+malformed or irrelevant response logs once and falls back, a resolved catalog is
+cached per (endpoint, credential) for ten minutes, a failed one for a minute,
+and the request is bounded by a five-second timeout.
+
+The hand-maintained list this replaced had already drifted — it never gained
+`gpt-5.3-codex-spark` — and nothing failed to show it. `lib/pricing.ts` is the
+remaining hand-maintained half: a discovered id it does not price estimates at
+the conservative fallback rate, which is an upper bound, so a missing entry
+trips a budget cap early rather than late.
+
 ## Sprite filesystem policy
 
 Sprite workers use `danger-full-access` by default inside their isolated VM;

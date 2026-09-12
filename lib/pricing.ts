@@ -23,12 +23,16 @@ interface ModelPrice {
 }
 
 // Keyed by bare model id (provider prefix stripped). Kept in sync with the
-// models exposed by the backends' listProviders() / used as DEFAULT_MODEL.
+// models exposed by the backends' listProviders() / used as DEFAULT_MODEL. The
+// Codex catalog is discovered at runtime (lib/agent-backend/codex-models.ts), so
+// an id that appears there before it appears here prices at FALLBACK_PRICE —
+// an upper bound, which is the safe direction for a budget backstop.
 const PRICING: Record<string, ModelPrice> = {
   // GPT-5.6 Sol — $5 / $30 per MTok (limited preview).
   "gpt-5.6-sol": { inputPerMTok: 5, outputPerMTok: 30 },
   "gpt-5.6-terra": { inputPerMTok: 2.5, outputPerMTok: 15 },
   "gpt-5.6-luna": { inputPerMTok: 1, outputPerMTok: 6 },
+  "gpt-5.3-codex-spark": { inputPerMTok: 1.75, outputPerMTok: 14 },
   // Fable tier — $10 / $50 per MTok.
   "claude-fable-5": { inputPerMTok: 10, outputPerMTok: 50 },
   // Opus tier — $5 / $25 per MTok.
