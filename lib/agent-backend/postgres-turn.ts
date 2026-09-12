@@ -36,7 +36,8 @@ import { resolveCodexAccessToken } from "../codex-oauth-token";
 import { interceptorToolName } from "../builtin-tools";
 import { config } from "../config";
 import type { RunEnvelope } from "../pi-event-mapper";
-import { collectExtensions, composeSystemPrompt, runInterceptors, withCodeActTools } from "./collect";
+import { collectExtensions, composeSystemPrompt, runInterceptors } from "./collect";
+import { withCodeActTools } from "./codeact-server-capabilities";
 import { createUsageAccumulator } from "./usage";
 import type {
   NeutralTool,
@@ -505,6 +506,7 @@ export async function runPostgresTurn(args: RunTurnArgs): Promise<TurnOutcome> {
   const collected = withCodeActTools(
     await collectExtensions(args.extensions),
     args.codeActInvoker,
+    abort.signal,
   );
 
   // System prompt: the persona transforms (persona prompt + memory guidance) plus

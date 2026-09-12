@@ -19,14 +19,14 @@ describe("CodeAct rollout", () => {
     expect(resolveToolCallingMode("stable-run")).toBe("codeact");
   });
 
-  it("supports an immediate direct-mode rollback", () => {
+  it("ignores legacy direct-mode requests and environment overrides", () => {
     process.env.TASK_ORCH_TOOL_CALLING_MODE = "direct";
-    expect(resolveToolCallingMode("stable-run")).toBe("direct");
+    expect(resolveToolCallingMode("stable-run", "direct")).toBe("codeact");
   });
 
-  it("uses a stable bounded cohort for controlled rollout", () => {
+  it("keeps CodeAct enabled regardless of legacy rollout percentage", () => {
     process.env.TASK_ORCH_CODEACT_ROLLOUT_PERCENT = "0";
-    expect(resolveToolCallingMode("stable-run")).toBe("direct");
+    expect(resolveToolCallingMode("stable-run", "direct")).toBe("codeact");
     process.env.TASK_ORCH_CODEACT_ROLLOUT_PERCENT = "100";
     expect(resolveToolCallingMode("stable-run")).toBe("codeact");
     process.env.TASK_ORCH_CODEACT_ROLLOUT_PERCENT = "37";

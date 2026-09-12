@@ -1,14 +1,19 @@
 # CodeAct rollout and rollback
 
-Each new run stores `tool_calling_mode` as `direct` or `codeact`. Resumes use
-that recorded value, so a retry never replays a script through another tool
-surface.
+CodeAct is always enabled for every backend, including resumed runs carrying a
+legacy `direct` value. New runs record `tool_calling_mode = codeact`; old rows
+remain readable, but their value does not select a different tool surface.
+`TASK_ORCH_TOOL_CALLING_MODE` and `TASK_ORCH_CODEACT_ROLLOUT_PERCENT` no longer
+disable CodeAct.
 
-The default after cutover is CodeAct. For a controlled cohort, set
-`TASK_ORCH_CODEACT_ROLLOUT_PERCENT` to a value from 0 to 100; assignment is
-deterministic from the run's stable creation inputs. To roll back new runs,
-set `TASK_ORCH_TOOL_CALLING_MODE=direct` and restart the control plane. This
-does not rewrite existing rows or replay failed CodeAct source.
+Operations covered by the run's CodeAct SDK are exposed only through
+`codeact_catalog` and `codeact_execute`. Registered handlers, including lifecycle operations,
+remain private implementations of the SDK. Per-operation validation and
+policy checks still run inside CodeAct. Pi retains control-plane execution and
+durable receipts; helpers absent from its authorized SDK remain native.
+Harness-provided coding tools remain
+subject to the existing native-tool policy. Remote MCP exposes the same two
+outer tools and rejects direct application-tool calls.
 
 Interrupted executions are reconciled from `codeact_executions` and
 `codeact_subcalls`. Completed, failed, cancelled, and unknown subcalls remain

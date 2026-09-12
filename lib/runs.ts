@@ -68,6 +68,7 @@ import {
   decideTurnEndStatus,
   resultPrUrl,
 } from "./run-state";
+import { legacyToolInvoker } from "./extensions/legacy-invoker";
 import { config, resolveToolCallingMode, runnerProviderKind, type RunnerProviderKind, type ToolCallingMode } from "./config";
 import {
   resolveLiveness,
@@ -111,7 +112,6 @@ import { personaPromptFactory } from "./extensions/persona-prompt";
 import { buildMemoryInjection, personaMemoryFactory } from "./extensions/persona-memory";
 import { modelWelfareFactory } from "./extensions/model-welfare";
 import { abortBridgeFactory } from "./extensions/abort-bridge";
-import { legacyToolInvoker } from "./extensions/legacy-invoker";
 import { linkSharedWorktreeArtifacts } from "./worktree-env";
 import { applyPrewarmToCheckout } from "./prewarm";
 import {
@@ -4031,7 +4031,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
       | "high"
       | "xhigh"
       | undefined,
-    toolCallingMode: run.toolCallingMode,
+    toolCallingMode: "codeact" as const,
     extensions,
     codeActInvoker: legacyToolInvoker(run.id, {
       author,
@@ -5556,7 +5556,7 @@ export function hydrateRun(row: typeof agentSessions.$inferSelect): RunRow {
     runtime: (row.runtime as "server" | "worker" | null) ?? "worker",
     model: row.model,
     backend: (row.backend as "pi" | "claude" | "codex" | null) ?? null,
-    toolCallingMode: row.toolCallingMode === "direct" ? "direct" : "codeact",
+    toolCallingMode: "codeact",
     thinkingLevel: (row.thinkingLevel as "low" | "medium" | "high" | "xhigh" | null) ?? null,
     branch: row.branch,
     baseBranch: row.baseBranch ?? null,

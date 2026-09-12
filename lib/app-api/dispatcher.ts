@@ -105,5 +105,10 @@ export async function dispatchAppOperation(
 ): Promise<AppApiResult> {
   const descriptor = resolveOperation(name);
   if (!descriptor) throw new AppApiError("unknown_operation", `Unknown app operation: ${name}`);
+  if (descriptor.executionLocation === "control-plane") {
+    // Also support direct SDK callers that have not opened the outer CodeAct
+    // tools yet. Registry loading binds real extension schemas and handlers.
+    await (await import("../worker/server-tools")).resolveServerTool(descriptor.name);
+  }
   return dispatchDescriptor(descriptor, params, ctx);
 }

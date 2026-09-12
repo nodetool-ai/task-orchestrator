@@ -1,26 +1,33 @@
 # CodeAct backend compatibility
 
-Claude and Codex runs expose the same two backend-neutral tools after extension
+Claude and Codex runs always expose the same two backend-neutral tools after extension
 collection:
 
-- `codeact_catalog({ query?, names? })` searches or describes only the direct
-  tools mounted by the run's profile.
+- `codeact_catalog({ query?, names? })` searches or describes only the internal
+  operations mounted by the run's profile.
 - `codeact_execute({ code, title? })` runs an async JavaScript function body in
   a fresh QuickJS-NG sandbox. The guest receives `app`, `tools`, `catalog`,
   `output`, and bounded `console` globals.
 
-The adapters add this pair without replacing the collected direct tools.
+The adapters expose only this pair. Collected extension handlers are private
+SDK implementations, including lifecycle and planning operations.
 Claude continues to use the `claude_code` preset (including Read, Write, Edit,
 Bash, Grep, and Glob), and Codex continues to use its native shell and patch
-tools under the configured sandbox. CodeAct is therefore the batching surface
-for application operations, not a replacement for interactive coding tools.
+tools under the configured sandbox. CodeAct is the sole surface for application operations.
+
+Pi also always enables CodeAct. It retains control-plane execution and durable
+receipts for its authorized application SDK, removes those operations from the
+native tool list, and retains only worker helpers absent from that SDK (local
+filesystem, GitHub and web search). Its fallback without a control-plane invoker
+uses the neutral sandbox. No operation is advertised through both paths within
+a run.
 
 ## Policy and result compatibility
 
 The catalogue is built after profile resolution, so an unmounted tool has no
 `app.*` method or `tools.*` alias. Every subcall is schema-validated, passed
 through the existing canonical interceptor chain, and then executed through the
-same neutral tool callback used by a direct provider tool call. In dispatched
+registered internal handler. In dispatched
 workers that callback is the worker channel; CodeAct never falls back to direct
 database access. Host-generated execution and subcall IDs are used throughout.
 

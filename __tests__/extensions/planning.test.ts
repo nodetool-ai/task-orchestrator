@@ -13,6 +13,9 @@ import { agentMessages, agentSessions, plans, repositories } from "../../db/sche
 import * as repo from "../../lib/repo";
 import { planningExtension } from "../../lib/extensions/planning";
 import { makeRegistrar } from "../helpers/fake-registrar";
+import { collectExtensions } from "../../lib/agent-backend/collect";
+import { withCodeActTools } from "../../lib/agent-backend/codeact-server-capabilities";
+import { resolveServerTool, executeServerTool } from "../../lib/worker/server-tools";
 import type { RunRow } from "../../lib/runs";
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -240,6 +243,33 @@ describe("planningExtension tool execution", () => {
         .returning({ id: agentSessions.id })
     )[0];
     runId = row!.id;
+  });
+
+  it("preserves review proposals and commits the approved spec using only CodeAct", async () => {
+    const surface = async (planningStage: string) => withCodeActTools(await collectExtensions([
+      planningExtension({ runId, run: makeRun({ id: runId, planningStage }) }),
+    ]), async (name, params) => executeServerTool((await resolveServerTool(name))!, params, { author: "test", runId }));
+    const gathering = await surface("gathering");
+    expect(gathering.tools.map((tool) => tool.name)).toEqual(["codeact_catalog", "codeact_execute"]);
+    const proposed = await gathering.tools[1].execute("spec", {
+      code: `return await app.planning.proposeSpec({title: 'Approved design', spec_markdown: '# Durable spec'});`,
+    });
+    expect(proposed.isError).toBe(false);
+    const [proposal] = await db.select().from(agentMessages).where(eq(agentMessages.runId, runId));
+    expect(JSON.parse(proposal.content)[0]).toMatchObject({
+      type: "text", name: "propose_spec", text: "# Durable spec", input: { spec_markdown: "# Durable spec" },
+    });
+    await repo.setPlanningStage(runId, "building_plan");
+    const building = await surface("building_plan");
+    const committed = await building.tools[1].execute("plan", {
+      code: `await app.planning.commitSpec({title: 'Approved design'}); return await app.planning.proposePlan({tasks: [{title: 'Implement', body: 'Build the design', criteria: ['It works']}]});`,
+    });
+    expect(committed.isError).toBe(false);
+    const [plan] = await db.select().from(plans);
+    expect(plan).toMatchObject({ title: "Approved design", body: "# Durable spec", state: "draft" });
+    const messages = await db.select().from(agentMessages).where(eq(agentMessages.runId, runId));
+    expect(messages.map((message) => JSON.parse(message.content)[0].name)).toContain("propose_implementation_plan");
+    expect((await db.select().from(agentSessions).where(eq(agentSessions.id, runId)))[0].planningStage).toBe("plan_review");
   });
 
   it("propose_spec advances stage from gathering to spec_review", async () => {

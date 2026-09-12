@@ -49,8 +49,16 @@ const errResult = (text: string): OrchestratorToolResult => ({
   isError: true,
 });
 
-/** Scan the message log (newest first) for the latest propose_spec tool_use
- *  and return its spec_markdown. Returns null if not found. */
+/** Proposals are explicit text records because CodeAct subcalls are not native
+ * tool_use messages. Retain legacy tool records when reading older runs. */
+async function saveProposal(runId: number, name: string, input: unknown, text: string): Promise<void> {
+  await db.insert(agentMessages).values({
+    runId, role: "agent", createdAt: new Date(),
+    content: JSON.stringify([{ type: "text", name, input, text }]),
+  });
+}
+
+/** Scan the message log (newest first) for the latest saved proposal. */
 async function findLatestSpecMarkdown(runId: number): Promise<string | null> {
   const rows = await db
     .select({ role: agentMessages.role, content: agentMessages.content })
@@ -74,7 +82,7 @@ async function findLatestSpecMarkdown(runId: number): Promise<string | null> {
       if (
         block !== null &&
         typeof block === "object" &&
-        (block as any).type === "tool_use" &&
+        ["tool_use", "text"].includes((block as any).type) &&
         ((block as any).name === "propose_spec" ||
           String((block as any).name).endsWith("__propose_spec"))
       ) {
@@ -131,10 +139,11 @@ export const PLANNING_TOOLS: OrchestratorTool[] = [
         })
       ),
     }),
-    execute: async (_params, ctx) => {
+    execute: async (params, ctx) => {
       if (!ctx.runId) return errResult("propose_spec needs a run context.");
       const fields = await planningRunFields(ctx.runId);
       if (!fields) return errResult(`Run ${ctx.runId} not found.`);
+      await saveProposal(ctx.runId, "propose_spec", params, params.spec_markdown);
       // Advance gathering → spec_review (stays spec_review on re-propose).
       if (fields.stage === "gathering") await repo.setPlanningStage(ctx.runId, "spec_review");
       return ok(
@@ -217,10 +226,14 @@ export const PLANNING_TOOLS: OrchestratorTool[] = [
         { minItems: 1 }
       ),
     }),
-    execute: async (_params, ctx) => {
+    execute: async (params, ctx) => {
       if (!ctx.runId) return errResult("propose_implementation_plan needs a run context.");
       const fields = await planningRunFields(ctx.runId);
       if (!fields) return errResult(`Run ${ctx.runId} not found.`);
+      await saveProposal(ctx.runId, "propose_implementation_plan", params,
+        params.tasks.map((task: { title: string; body: string; criteria: string[] }) =>
+          `## ${task.title}\n\n${task.body}\n\n${task.criteria.map((criterion) => `- ${criterion}`).join("\n")}`,
+        ).join("\n\n"));
       // Advance building_plan → plan_review (stays plan_review on re-propose).
       if (fields.stage === "building_plan") {
         await repo.setPlanningStage(ctx.runId, "plan_review");

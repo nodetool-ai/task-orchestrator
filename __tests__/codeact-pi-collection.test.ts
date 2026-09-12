@@ -1,10 +1,11 @@
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 
-import { collectExtensions, withCodeActTools } from "../lib/agent-backend/collect";
+import { collectExtensions } from "../lib/agent-backend/collect";
+import { withCodeActTools } from "../lib/agent-backend/codeact-server-capabilities";
 
 describe("Pi CodeAct neutral collection", () => {
-  it("adds the same outer tools without dropping hooks, skills, or direct tools", async () => {
+  it("exposes only CodeAct while preserving internal handlers, hooks and skills", async () => {
     const interceptor = vi.fn();
     const start = vi.fn();
     const collected = await collectExtensions([
@@ -21,13 +22,8 @@ describe("Pi CodeAct neutral collection", () => {
         reg.addAmbientSkill({ name: "memory", description: "memory", body: "body" });
       },
     ]);
-    const invoke = vi.fn(async () => ({
-      content: [{ type: "text" as const, text: "forwarded" }],
-    }));
-
-    const augmented = withCodeActTools(collected, invoke);
+    const augmented = withCodeActTools(collected, undefined);
     expect(augmented.tools.map((tool) => tool.name)).toEqual([
-      "example",
       "codeact_catalog",
       "codeact_execute",
     ]);
@@ -37,14 +33,29 @@ describe("Pi CodeAct neutral collection", () => {
     expect(augmented.systemPromptFns).toHaveLength(2);
 
     const execute = augmented.tools.find((tool) => tool.name === "codeact_execute")!;
-    await expect(execute.execute("call-1", { code: "return 1" })).resolves.toMatchObject({
-      content: [{ text: "forwarded" }],
-    });
-    expect(invoke).toHaveBeenCalledWith("codeact_execute", { code: "return 1" });
+    const result = await execute.execute("call-1", { code: "return await tools.example({});" });
+    expect(result.isError).toBe(false);
+    expect(result.content[0]).toMatchObject({ text: expect.stringContaining("ok") });
+    expect(interceptor).toHaveBeenCalled();
   });
 
-  it("is a no-op for backend paths that have not opted in", async () => {
+  it("always enables CodeAct without an opt-in invoker", async () => {
     const collected = await collectExtensions([]);
-    expect(withCodeActTools(collected, undefined)).toBe(collected);
+    expect(withCodeActTools(collected, undefined).tools.map((tool) => tool.name)).toEqual(["codeact_catalog", "codeact_execute"]);
   });
+  it("forwards covered operations durably and retains only helpers absent from the server SDK", async () => {
+    const collected = await collectExtensions([(reg) => {
+      for (const name of ["task_orch__list_tasks", "task_orch__schedules_create", "report_result", "repo__read_file", "gh_pr__pr_view", "brave__web_search"]) {
+        reg.registerTool({ name, description: name, parameters: Type.Object({}), execute: async () => ({ content: [] }) });
+      }
+    }]);
+    const invoke = vi.fn(async () => ({ content: [{ type: "text" as const, text: "receipt" }] }));
+    const surface = withCodeActTools(collected, invoke);
+    expect(surface.tools.map((tool) => tool.name)).toEqual([
+      "repo__read_file", "gh_pr__pr_view", "brave__web_search", "codeact_catalog", "codeact_execute",
+    ]);
+    await surface.tools.find((tool) => tool.name === "codeact_execute")!.execute("outer", { code: "return await app.tasks.list({});" });
+    expect(invoke).toHaveBeenCalledWith("codeact_execute", { code: "return await app.tasks.list({});" });
+  });
+
 });

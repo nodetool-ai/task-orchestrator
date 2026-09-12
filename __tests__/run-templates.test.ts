@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   REVIEW_DEFAULT_BUDGET_USD,
   buildChatPromptPrefix,
@@ -9,8 +9,6 @@ import {
   extractReviewOutcome,
   parseReviewVerdict,
 } from "../lib/run-templates";
-import * as repo from "../lib/repo";
-import * as worker from "../lib/worker";
 import type { PlanFull, TaskFull } from "../lib/types";
 
 function fakeTask(overrides: Partial<TaskFull> = {}): TaskFull {
@@ -87,98 +85,47 @@ describe("buildImplementPrompt", () => {
     const template = await implementTemplate(fakeTask());
     expect(template.toolsProfile.split(",")).toEqual(expect.arrayContaining(["repo_write", "gh_pr", "gh_ci"]));
   });
-  it("assigns push, conflict recovery, and PR delivery to the agent", async () => {
-    const prompt = await buildImplementPrompt(fakeTask(), { baseBranch: "release" });
-    expect(prompt).toContain("git push -u origin <task-branch>");
-    expect(prompt).toContain("If rejected, fetch and reconcile");
-    expect(prompt).toContain("do not force-push");
-    expect(prompt).toContain("base branch `release`");
-    expect(prompt).toContain("set_task_pr(task_id, pr_url)");
-    expect(prompt).toContain('report_result({ status: "success", summary, pr_url })');
-    expect(prompt).not.toContain("Do NOT push");
-    expect(prompt).not.toContain("then stop");
+  it("references the authoritative task and plan instead of copying their contents", async () => {
+    const prompt = await buildImplementPrompt(fakeTask({
+      notes: [{ id: 1, author: "matti", body: "private note body", createdAt: new Date() }],
+      dependencies: ["T-dependency"],
+      attachments: [{
+        id: 7,
+        planId: null,
+        taskId: "T-test",
+        filename: "design.txt",
+        mimeType: "text/plain",
+        kind: "artifact",
+        sizeBytes: 12,
+        author: "matti",
+        createdAt: new Date(),
+      }],
+    }));
+    expect(prompt).toContain('mcp__task_orch__get_task({ id: "T-test" })');
+    expect(prompt).toContain('mcp__task_orch__get_plan({ id: "P-x" })');
+    expect(prompt).not.toContain("Test task");
+    expect(prompt).not.toContain("Body text");
+    expect(prompt).not.toContain("first criterion");
+    expect(prompt).not.toContain("private note body");
+    expect(prompt).not.toContain("T-dependency");
+    expect(prompt).not.toContain("design.txt");
   });
 
   it("keeps delivery with the agent when auto-merge is disabled", async () => {
     const prompt = await buildImplementPrompt(fakeTask(), { autoMerge: false });
     expect(prompt).toContain("Auto-merge is disabled for this run");
-    expect(prompt).toContain("git push -u origin <task-branch>");
-    expect(prompt).toContain("set_task_pr(task_id, pr_url)");
-    expect(prompt).not.toContain("arm squash auto-merge");
+    expect(prompt).toContain("do not call gh_pr__pr_merge with auto=true");
   });
 
-  it("describes the separate checkout working environment", async () => {
-    const prompt = await buildImplementPrompt(fakeTask());
-    expect(prompt).toContain("separate checkout");
+  it("keeps the selected base branch as a small run setting", async () => {
+    const prompt = await buildImplementPrompt(fakeTask(), { baseBranch: "release" });
+    expect(prompt).toContain("Use `release` as the PR base branch.");
   });
 
-  it("flags prewarmed/shared dependency and build-cache handling", async () => {
-    const prompt = await buildImplementPrompt(fakeTask());
-    expect(prompt).toContain("container/prewarmed runs");
-    expect(prompt).toContain("shared across checkouts");
-    expect(prompt).toContain("node_modules");
-    expect(prompt).toContain("Turbopack");
-  });
-
-  it("tells the agent how to get a private/isolated environment", async () => {
-    const prompt = await buildImplementPrompt(fakeTask());
-    expect(prompt).toContain("npm run isolate-env");
-  });
-
-  it("tells the agent how to start a securely-exposed dev server", async () => {
-    const prompt = await buildImplementPrompt(fakeTask());
-    expect(prompt).toContain("npm run worktree-dev");
-    expect(prompt).toContain("loopback");
-  });
-
-  it("omits parent-plan and sibling context for a standalone task", async () => {
-    const getPlan = vi.fn();
-    const listTasks = vi.fn();
-    vi.spyOn(worker, "runTransport").mockResolvedValue({ getPlan, listTasks } as never);
+  it("omits a plan reference for a standalone task", async () => {
     const prompt = await buildImplementPrompt(fakeTask({ planId: null }));
-    expect(getPlan).not.toHaveBeenCalled();
-    expect(listTasks).not.toHaveBeenCalled();
-    expect(prompt).not.toContain("# Parent plan:");
-    vi.restoreAllMocks();
-  });
-
-  // Regression (#98 fleet outage): buildImplementPrompt runs INSIDE a dispatched
-  // worker, which under the HTTP-worker architecture has no DB access — every
-  // direct repo/db call throws the "Direct database access inside a run worker"
-  // guard and crashes the run at boot. The plan + sibling-task lookups must go
-  // through the worker transport, never `repo` directly. This asserts BOTH the
-  // plan and the sibling snapshot route through the transport, and that repo is
-  // never touched. (The shipped bug: getPlan used the transport but the sibling
-  // `listTasks` still called `repo.listTasks` → 6/6 implement workers dead.)
-  describe("routes all orchestrator lookups through the worker transport (no direct DB)", () => {
-    afterEach(() => vi.restoreAllMocks());
-
-    it("fetches the plan AND sibling tasks via runTransport, not repo", async () => {
-      const plan = {
-        id: "P-x",
-        title: "Parent plan",
-        state: "active",
-        owner: null,
-        body: "plan body",
-      } as unknown as PlanFull;
-      const siblings = [
-        fakeTask({ id: "T-sibling", title: "A sibling task", state: "todo" }),
-        fakeTask({ id: "T-test" }), // the task itself — must be filtered out
-      ];
-      const getPlan = vi.fn().mockResolvedValue(plan);
-      const listTasks = vi.fn().mockResolvedValue(siblings);
-      vi.spyOn(worker, "runTransport").mockResolvedValue({ getPlan, listTasks } as never);
-      const repoListTasks = vi.spyOn(repo, "listTasks");
-
-      const prompt = await buildImplementPrompt(fakeTask({ id: "T-test", planId: "P-x" }));
-
-      expect(getPlan).toHaveBeenCalledWith("P-x");
-      expect(listTasks).toHaveBeenCalledWith({ planId: "P-x" });
-      expect(repoListTasks).not.toHaveBeenCalled(); // never the direct-DB path
-      expect(prompt).toContain("# Parent plan: P-x — Parent plan");
-      expect(prompt).toContain("- T-sibling [todo] A sibling task");
-      expect(prompt).not.toContain("- T-test ["); // the run's own task filtered out
-    });
+    expect(prompt).toContain('mcp__task_orch__get_task({ id: "T-test" })');
+    expect(prompt).not.toContain("mcp__task_orch__get_plan");
   });
 });
 

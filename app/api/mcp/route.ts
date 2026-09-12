@@ -3,7 +3,12 @@ import { verifyToken } from "@/lib/api-tokens";
 import { getUserById } from "@/lib/users";
 import { ORCHESTRATOR_TOOLS } from "@/lib/orchestrator-tools";
 import type { OrchestratorContentBlock } from "@/lib/orchestrator-tools";
-import { AppApiError, descriptorForTool, dispatchAppOperation } from "@/lib/app-api";
+import { AppApiError } from "@/lib/app-api";
+
+import { resolveServerTool, executeServerTool } from "@/lib/worker/server-tools";
+import { appCapabilitiesForTools } from "@/lib/worker/server-policy";
+
+const PUBLIC_TOOLS = ["codeact_catalog", "codeact_execute"];
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -17,11 +22,9 @@ export const runtime = "nodejs";
 //   initialize                 → protocolVersion + capabilities
 //   notifications/initialized  → no response (notification)
 //   ping                       → {}
-//   tools/list                 → all task_orch tools (bare names — no
-//                                pi-side prefix) sourced from
-//                                lib/orchestrator-tools.ts
-//   tools/call                 → dispatches to the same registry the pi
-//                                runtime uses
+//   tools/list                 → CodeAct catalogue and executor
+//   tools/call                 → CodeAct only; SDK subcalls use the internal
+//                                orchestrator registry and capability policy
 //
 // We always return JSON in a single response (not SSE-streamed) — none of
 // our tools are long-running enough to need streaming back to the caller.
@@ -95,24 +98,17 @@ async function handleInitialize() {
   };
 }
 
-function handleToolsList() {
-  return {
-    tools: ORCHESTRATOR_TOOLS.map((tool) => {
-      const t = descriptorForTool(tool);
-      return {
-      name: t.name,
-      description: t.description,
-      // TypeBox schemas are JSON Schema-shaped; the MCP `inputSchema` field
-      // expects a JSON Schema. Pass through as-is.
-      inputSchema: t.schema as unknown,
-      };
-    }),
-  };
+async function handleToolsList() {
+  const tools = await Promise.all(PUBLIC_TOOLS.map(async (name) => {
+    const tool = (await resolveServerTool(name))!;
+    return { name, description: tool.description, inputSchema: tool.parameters };
+  }));
+  return { tools };
 }
 
 async function handleToolsCall(
   params: unknown,
-  ctx: { author: string }
+  ctx: { author: string; userId?: number }
 ): Promise<{ content: OrchestratorContentBlock[]; isError?: boolean }> {
   if (typeof params !== "object" || params === null) {
     throw rpcThrow(InvalidParams, "tools/call requires { name, arguments }");
@@ -125,7 +121,15 @@ async function handleToolsCall(
     throw rpcThrow(InvalidParams, "tools/call: missing name");
   }
   try {
-    return await dispatchAppOperation(name, args ?? {}, ctx);
+    if (!PUBLIC_TOOLS.includes(name)) {
+      throw new AppApiError("unknown_operation", `Use codeact_execute for application operations; unknown tool: ${name}`);
+    }
+    const tool = (await resolveServerTool(name))!;
+    return await executeServerTool(tool, args ?? {}, {
+      ...ctx,
+      capabilities: appCapabilitiesForTools([...PUBLIC_TOOLS, ...ORCHESTRATOR_TOOLS.map((tool) => tool.name)]),
+      runtime: "control-plane",
+    });
   } catch (error) {
     if (error instanceof AppApiError) {
       const code = error.code === "unknown_operation" ? MethodNotFound :
@@ -201,9 +205,9 @@ export async function POST(req: NextRequest) {
       case "ping":
         return rpcResult(body.id, {});
       case "tools/list":
-        return rpcResult(body.id, handleToolsList());
+        return rpcResult(body.id, await handleToolsList());
       case "tools/call": {
-        const r = await handleToolsCall(body.params, { author });
+        const r = await handleToolsCall(body.params, { author, userId: session.userId });
         return rpcResult(body.id, r);
       }
       default:

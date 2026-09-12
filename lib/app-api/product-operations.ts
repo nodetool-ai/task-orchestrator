@@ -1,6 +1,5 @@
 import { Type } from "typebox";
 import type { OrchestratorTool, OrchestratorToolResult } from "../orchestrator-tools";
-import * as schedules from "../schedules";
 import * as chat from "../chat";
 import * as repo from "../repo";
 import * as users from "../users";
@@ -33,7 +32,6 @@ const numberId = (value: unknown): number => {
   if (!Number.isSafeInteger(n) || n <= 0) throw new Error("id must be a positive integer");
   return n;
 };
-const date = (value: unknown): Date | undefined => value == null ? undefined : new Date(String(value));
 
 type Handler = (input: any, ctx: AppApiContext) => Promise<unknown>;
 interface ProductSpec { name: string; sdkPath: string; description: string; capability: string; effect: OperationEffect; handler: Handler; serverSafe?: boolean; }
@@ -47,14 +45,6 @@ const product = (spec: ProductSpec): OrchestratorTool => ({
 });
 
 const specs: ProductSpec[] = [
-  { name: "schedules_list", sdkPath: "app.schedules.list", description: "List schedules and their latest occurrence", capability: "schedules:read", effect: "read", handler: async () => schedules.listScheduleSurfaces() },
-  { name: "schedules_create", sdkPath: "app.schedules.create", description: "Create a validated schedule", capability: "schedules:write", effect: "create", handler: async (p, ctx) => schedules.getScheduleSurface((await schedules.createSchedule({ ...p, repoId: p.repoId, runAt: date(p.runAt), startAt: date(p.startAt), userId: userId(ctx) })).id) },
-  { name: "schedules_get", sdkPath: "app.schedules.get", description: "Get a schedule and latest occurrence", capability: "schedules:read", effect: "read", handler: async p => schedules.getScheduleSurface(numberId(p.id)) },
-  { name: "schedules_update", sdkPath: "app.schedules.update", description: "Update a schedule", capability: "schedules:write", effect: "update", handler: async (p, ctx) => schedules.updateSchedule(numberId(p.id), { ...p, id: undefined, runAt: date(p.runAt), startAt: date(p.startAt), userId: userId(ctx) }) },
-  { name: "schedules_delete", sdkPath: "app.schedules.delete", description: "Delete a schedule", capability: "schedules:write", effect: "delete", handler: async p => schedules.deleteSchedule(numberId(p.id)) },
-  { name: "schedules_pause", sdkPath: "app.schedules.pause", description: "Pause a schedule", capability: "schedules:write", effect: "transition", handler: async p => schedules.pauseSchedule(numberId(p.id)) },
-  { name: "schedules_resume", sdkPath: "app.schedules.resume", description: "Resume a schedule", capability: "schedules:write", effect: "transition", handler: async p => schedules.resumeSchedule(numberId(p.id)) },
-  { name: "schedules_run_now", sdkPath: "app.schedules.runNow", description: "Trigger a schedule immediately", capability: "schedules:execute", effect: "execute", handler: async p => ({ occurrenceId: await schedules.runScheduleNow(numberId(p.id)) }) },
 
   { name: "chats_list", sdkPath: "app.chats.list", description: "List the authenticated user's chats", capability: "chats:read", effect: "read", handler: async (_p, ctx) => chat.listChats(userId(ctx)) },
   { name: "chats_create", sdkPath: "app.chats.create", description: "Create a chat for the authenticated user", capability: "chats:write", effect: "create", handler: async (p, ctx) => chat.createChat(userId(ctx), p.title ?? "New chat", p.repoId ?? undefined) },

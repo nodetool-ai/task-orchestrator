@@ -92,7 +92,9 @@ Operations with **no** current tool equivalent, which the SDK must add:
   proposed under an explicit `app.admin.users.*` namespace (administrative
   capabilities are part of the SDK but must be explicitly granted, per the
   plan, not silently available to every agent).
-- **Schedules** (`app.schedules.*`) — REST + CLI only today; no tool.
+- **Schedules** (`app.schedules.*`) — covered by internal schedule handlers in
+  the orchestrator profile, exposed only through CodeAct with discoverable
+  input schemas. REST and CLI continue to use the same services.
 - **Chats** (`app.chats.*`), **personas** (`app.personas.*`), **API tokens**
   (`app.tokens.*`), **Codex OAuth** (`app.codex.*`), **Discord integration**
   (`app.discord.*`), **provider/assignee/tools-profile catalogs**

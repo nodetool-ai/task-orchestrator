@@ -37,7 +37,8 @@ function findLatestToolUse<T>(messages: MessageLike[], toolName: string): T | nu
     if (m.role !== "agent") continue;
     for (let j = m.content.length - 1; j >= 0; j--) {
       const block = m.content[j];
-      if (block.type === "tool_use" && block.name === toolName) {
+      if ((block.type === "tool_use" || block.type === "text") &&
+          (block.name === toolName || block.name?.endsWith(`__${toolName}`))) {
         return block.input as T;
       }
     }

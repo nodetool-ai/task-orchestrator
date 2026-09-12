@@ -1,8 +1,7 @@
 // lib/orchestrator-tools.ts
 //
-// Shared registry of the 37 orchestrator tool definitions.
-// The pi extension consumes this and registers each with the task_orch__ prefix.
-// The MCP server consumes this directly (bare names).
+// Internal handlers shared by the orchestrator extension and application SDK.
+// Backend adapters expose them to agents only through CodeAct.
 
 import { Type, type TSchema } from "typebox";
 import * as repo from "./repo";
@@ -26,6 +25,7 @@ import { recordTurnEffect } from "./run-state";
 import { subscribeRunEvents, listRunSubscriptions } from "./run-event-subscriptions";
 import { getRunActivitySnapshot } from "./run-activity";
 import { checkExecutorCiRepairOwnership } from "./extensions/spawn";
+import { SCHEDULE_TOOLS } from "./schedule-tools";
 
 // Derived from TASK_TRANSITIONS so the transition_task description can never
 // drift from the actual allowed edges (a hardcoded list silently goes stale
@@ -251,6 +251,7 @@ function summariseSession(s: AgentSessionFull) {
 // ──────────────────────────────────────────────────────
 
 export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
+  ...SCHEDULE_TOOLS,
   // ── Repositories ──────────────────────────────────────
 
   {

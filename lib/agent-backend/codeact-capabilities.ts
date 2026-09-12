@@ -18,7 +18,7 @@ export const CODEACT_EXECUTE_TOOL = "codeact_execute";
 export const CODEACT_CATALOG_TOOL = "codeact_catalog";
 
 export const CODEACT_BACKEND_GUIDANCE =
-  "CodeAct is available through codeact_execute({ code, title? }) with the same contract on every backend. " +
+  "Use CodeAct exclusively for application operations through codeact_execute({ code, title? }) with the same contract on every backend. " +
   "The JavaScript body may use app.*, tools.* compatibility aliases, catalog.search/describe, output.text, " +
   "output.image, and console. Use codeact_catalog for schemas before the first execution. " +
   "Each execution receives a fresh sandbox; conversation resume does not preserve JavaScript globals. " +
@@ -30,6 +30,9 @@ const LIFECYCLE_CLOSING_TOOLS = new Set([
   "ask_parent",
   "report_result",
   "raise",
+  "await_session",
+  "propose_spec",
+  "propose_implementation_plan",
 ]);
 
 export interface NeutralCodeActCatalogEntry {
@@ -198,23 +201,20 @@ function executionToolResult(result: CodeActExecuteResult): ToolResult {
 }
 
 /**
- * Append CodeAct to a collected neutral surface without removing or replacing
- * any direct tool. Both SDK adapters call this exact function, which prevents
- * their catalogues and result semantics from drifting.
+ * Keep registered handlers private and expose only CodeAct to the model. All
+ * backends share this catalogue, validation and interceptor boundary.
  */
 export function withCodeActCapabilities(
   collected: CollectedCapabilities,
   signal?: AbortSignal,
-  enabled = true,
 ): CollectedCapabilities {
-  if (!enabled) return collected;
-  const directTools = collected.tools.filter(
+  const operationTools = collected.tools.filter(
     (tool) => tool.name !== CODEACT_EXECUTE_TOOL && tool.name !== CODEACT_CATALOG_TOOL,
   );
-  const catalog = neutralCodeActCatalog(directTools);
+  const catalog = neutralCodeActCatalog(operationTools);
   const byOperation = new Map<string, NeutralTool>();
   for (const [index, entry] of catalog.operations.entries()) {
-    const tool = directTools[index];
+    const tool = operationTools[index];
     if (!tool) continue;
     for (const name of [entry.sdkPath, ...entry.aliases]) byOperation.set(name, tool);
   }
@@ -296,7 +296,7 @@ export function withCodeActCapabilities(
                 details: { content: toolResult.content },
               });
             }
-            if (LIFECYCLE_CLOSING_TOOLS.has(target.name)) lifecycleClosedBy = target.name;
+            if (LIFECYCLE_CLOSING_TOOLS.has(bareToolName(target.name))) lifecycleClosedBy = target.name;
             return { content: toolResult.content, isError: false };
           } catch (error) {
             throw errorFor(error, operation);
@@ -309,6 +309,8 @@ export function withCodeActCapabilities(
 
   return {
     ...collected,
-    tools: [...directTools, catalogTool, executeTool],
+    tools: [catalogTool, executeTool],
+    systemPromptFns: [...collected.systemPromptFns, (base) =>
+      base ? `${base}\n\n${CODEACT_BACKEND_GUIDANCE}` : CODEACT_BACKEND_GUIDANCE],
   };
 }

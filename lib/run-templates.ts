@@ -8,8 +8,6 @@
 // kick off a worktree, run the agent against the task, open a PR.
 
 import type { AttachmentMeta, PlanFull, TaskFull } from "./types";
-import * as repo from "./repo";
-import { runTransport } from "./worker";
 
 /**
  * Render an "Attachments" section listing images/artifacts on a task or plan.
@@ -92,152 +90,37 @@ export function buildExecutePrompt(plan: PlanFull, tasks: TaskFull[]): string {
 }
 
 /**
- * Build the implement-style agent prompt for a task: title, body,
- * acceptance criteria, parent-plan context, and operating instructions.
+ * Build the implement-style kickoff for a task.
  *
- * This is the single source of truth — both the UI preview (modal) and
- * the runner (lib/runs.ts) call into here so what the user sees in the
- * modal is exactly what the agent receives.
+ * Task and plan records are deliberately referenced, not copied. They are
+ * mutable durable state, and the orchestrator tools are the authoritative way
+ * for an agent to read them. Keeping this prompt small also avoids duplicating
+ * large bodies, notes, criteria, sibling lists, and attachment metadata in the
+ * first turn.
  */
-export async function buildImplementPrompt(task: TaskFull, options: { autoMerge?: boolean; baseBranch?: string | null } = {}): Promise<string> {
-  const lines: string[] = [];
-  lines.push(`You are an autonomous coding agent working on task ${task.id}.`);
-  lines.push("");
-  lines.push(`# ${task.title}`);
-  if (task.body.trim()) {
-    lines.push("");
-    lines.push("## Description");
-    lines.push(task.body.trim());
+export async function buildImplementPrompt(
+  task: Pick<TaskFull, "id" | "planId">,
+  options: { autoMerge?: boolean; baseBranch?: string | null } = {}
+): Promise<string> {
+  const lines: string[] = [
+    `Execute task \`${task.id}\`.`,
+    "",
+    `Fetch its authoritative record with \`mcp__task_orch__get_task({ id: \"${task.id}\" })\` before doing any work. The record contains the description, acceptance criteria, notes, dependencies, and attachment references.`,
+  ];
+  if (task.planId) {
+    lines.push(
+      `Fetch the parent plan with \`mcp__task_orch__get_plan({ id: \"${task.planId}\" })\` and use its current constraints and task roster as context.`
+    );
   }
-  if (task.criteria.length > 0) {
-    lines.push("");
-    lines.push("## Acceptance criteria");
-    for (const c of task.criteria) lines.push(`- [${c.done ? "x" : " "}] ${c.text}`);
-  }
-  if (task.dependencies.length > 0) {
-    lines.push("");
-    lines.push("## Depends on (already done)");
-    for (const dep of task.dependencies) lines.push(`- ${dep}`);
-  }
+  lines.push("Treat those fetched records as the source of truth and refresh them when their state may have changed.");
 
-  // Recent notes — the task page surfaces these inline; the agent should
-  // see them too so it doesn't redo work the human already commented on.
-  if (task.notes.length > 0) {
-    const recent = task.notes.slice(-5);
-    lines.push("");
-    lines.push("## Recent notes");
-    for (const n of recent) {
-      lines.push(`- @${n.author}: ${n.body.trim().replace(/\n+/g, " ")}`);
-    }
-  }
-
-  lines.push(...attachmentSection(task.attachments));
-
-  // Standalone tasks deliberately have no parent-plan or sibling context.
-  // Via the transport: buildImplementPrompt also runs inside dispatched workers.
-  const plan = task.planId ? await (await runTransport()).getPlan(task.planId) : null;
-  if (plan) {
-    lines.push("");
-    lines.push(`# Parent plan: ${plan.id} — ${plan.title}`);
-    lines.push(`(state: ${plan.state}${plan.owner ? `, owner: @${plan.owner}` : ""})`);
-    if (plan.body.trim()) {
-      lines.push("");
-      lines.push("## Plan description");
-      const body = plan.body.trim();
-      const capped =
-        body.length > 6000
-          ? body.slice(0, 6000) +
-            "\n\n…(truncated; call mcp__task_orch__get_plan for the full body)"
-          : body;
-      lines.push(capped);
-    }
-    const siblings = (await (await runTransport())
-      .listTasks({ planId: plan.id }))
-      .filter((t) => t.id !== task.id);
-    if (siblings.length > 0) {
-      lines.push("");
-      lines.push("## Other tasks in this plan");
-      const rank: Record<string, number> = {
-        in_progress: 0,
-        review: 1,
-        todo: 2,
-        blocked: 3,
-        done: 4,
-        cancelled: 5,
-      };
-      const sorted = [...siblings].sort(
-        (a, b) =>
-          (rank[a.state] ?? 9) - (rank[b.state] ?? 9) || a.id.localeCompare(b.id)
-      );
-      const MAX = 25;
-      for (const s of sorted.slice(0, MAX)) {
-        const meta = [s.state, s.assignee ? `@${s.assignee}` : null]
-          .filter(Boolean)
-          .join(", ");
-        lines.push(`- ${s.id} [${meta}] ${s.title}`);
-      }
-      if (sorted.length > MAX) {
-        lines.push(
-          `- … and ${sorted.length - MAX} more (use mcp__task_orch__list_tasks with plan_id=${plan.id} to see all)`
-        );
-      }
-    }
-  }
-
-  lines.push("");
   if (options.autoMerge === false) {
     lines.push("");
-    lines.push("## Merge policy");
     lines.push("Auto-merge is disabled for this run. Open the PR normally, but do not call gh_pr__pr_merge with auto=true.");
   }
-
-  lines.push("# How to work");
-  lines.push("1. Inspect the relevant files and existing patterns before editing.");
-  lines.push("2. Implement the task end to end in this run's checkout.");
-  lines.push("3. Use the task MCP tools during the run: add notes for meaningful decisions and check acceptance criteria as you satisfy them.");
-  lines.push("4. Run the applicable verification commands, including typecheck and lint, and fix failures you introduce.");
-  lines.push("5. Finish exactly as described below.");
-  lines.push("");
-  lines.push("# Working environment");
-  lines.push(
-    "- You are in a separate checkout on the task's branch (shared by every run on this task — it may already carry earlier commits). Make all changes here."
-  );
-  lines.push(
-    "- In container/prewarmed runs, dependencies and Playwright browsers may be linked from the runner image. In host runs, `node_modules` and the Turbopack/Next.js build cache (`.next`) may be shared across checkouts. Do not remove `node_modules`, clear `.next`, or run package installs unless dependency files must change."
-  );
-  lines.push(
-    "- If dependency changes or a clean isolated build are required, run `npm run isolate-env` first. After that, package installs and builds are local to this checkout."
-  );
-  lines.push(
-    "- Playwright and Chromium are already installed via `PLAYWRIGHT_BROWSERS_PATH`; run `npx playwright test` directly and do NOT run `npx playwright install`."
-  );
-  lines.push(
-    "- Prefer automated verification. If a browser preview is necessary and this runner supports it, use `npm run worktree-dev`; it chooses a stable loopback-only port. Never bind a dev server to `0.0.0.0`. Add `-- --tunnel` only when a shareable HTTPS URL is needed."
-  );
-  lines.push("- This is a non-interactive run. Make reasonable decisions; do not ask questions.");
-  lines.push("");
-  lines.push("# Task MCP tools");
-  lines.push("- `mcp__task_orch__add_note(body)`: log decisions, tradeoffs, blockers, or useful findings.");
-  lines.push("- `mcp__task_orch__check_criterion(criterion)`: mark a completed acceptance criterion; match by substring.");
-  lines.push("- `mcp__task_orch__uncheck_criterion(criterion)`: undo an accidental criterion check.");
-  lines.push("- `mcp__task_orch__add_criterion(text)`: add newly discovered required work.");
-  lines.push("- `mcp__task_orch__list_criteria()`: refresh criterion state.");
-  lines.push("- `mcp__task_orch__list_attachments()` / `get_attachment(id)`: inspect task attachments.");
-  lines.push("- `mcp__task_orch__add_attachment(filename, text|content_base64)`: attach useful artifacts you produce.");
-  lines.push("");
-  lines.push("# Finish");
-  lines.push("- Before you stop, check off every acceptance criterion you satisfied with `mcp__task_orch__check_criterion` (confirm with `list_criteria`). The orchestrator blocks the terminal `merged` transition while any criterion stays open, so an unchecked criterion strands the task. If one genuinely can't be met, leave it open and call it out in your summary.");
-  lines.push("- You own git and PR delivery. Commit all intended changes with a clear message. Fetch origin and inspect the current remote task branch before pushing. If it has advanced, integrate its changes, resolve conflicts, and rerun the relevant checks. Preserve other commits; do not force-push over them.");
-  lines.push("- Push the task branch yourself with `git push -u origin <task-branch>` and verify it succeeds. If rejected, fetch and reconcile the remote changes, then retry. The orchestrator will not commit, push, or open a PR after your turn.");
-  lines.push(`- Open or update the task's PR${options.baseBranch ? ` against base branch \`${options.baseBranch}\`` : " using the run's configured base branch"}. Call \`mcp__task_orch__set_task_pr(task_id, pr_url)\` to record it.`);
-  if (options.autoMerge !== false) {
-    lines.push("- Once all acceptance criteria are satisfied, arm squash auto-merge with `gh_pr__pr_merge(url, method=\"squash\", delete_branch=true, auto=true)`. Do not wait for CI.");
+  if (options.baseBranch) {
+    lines.push(`Use \`${options.baseBranch}\` as the PR base branch.`);
   }
-  lines.push("- Only after the push and PR delivery succeed, call `report_result({ status: \"success\", summary, pr_url })` and end your turn. If delivery or the task cannot be completed, report_result with status=\"failed\" or status=\"blocked\" and explain the blocker; do not report success for unpushed work.");
-  lines.push("- Include in your PR description and final summary:");
-  lines.push("- 1-3 sentences explaining what changed and why.");
-  lines.push("- Bullets for main files or behavior changes when non-trivial.");
-  lines.push("- Verification run, plus any caveats, follow-ups, or skipped acceptance criteria.");
   return lines.join("\n");
 }
 

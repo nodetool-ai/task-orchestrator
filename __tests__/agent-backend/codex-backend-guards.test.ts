@@ -212,7 +212,7 @@ describe("CodexBackend.runTurn CLI configuration", () => {
     // The bearer travels in the environment, never on a command line.
     const varName = servers.task_orch.bearer_token_env_var;
     expect(sdk.ctorOptions.env[varName]).toHaveLength(64);
-    expect(sdk.inputs[0]).toContain("mcp__task_orch__task_orch__create_task");
+    expect(sdk.inputs[0]).not.toContain("mcp__task_orch__task_orch__create_task");
     expect(sdk.inputs[0]).toContain("mcp__task_orch__codeact_catalog");
     expect(sdk.inputs[0]).toContain("mcp__task_orch__codeact_execute");
     expect(sdk.inputs[0]).toContain("ALL_TOOLS");
@@ -221,9 +221,9 @@ describe("CodexBackend.runTurn CLI configuration", () => {
     sdk.inputs = [];
     sdk.scripts = [[started("th_1"), completed]];
     await new CodexBackend().runTurn(
-      makeArgs({ extensions: [withTool], resumeToken: "codex:th_1" })
+      makeArgs({ extensions: [withTool], resumeToken: "codex:th_1", toolCallingMode: "direct" })
     );
-    expect(sdk.inputs[0]).toContain("mcp__task_orch__task_orch__create_task");
+    expect(sdk.inputs[0]).not.toContain("mcp__task_orch__task_orch__create_task");
     expect(sdk.inputs[0]).toContain("worker has no direct database access");
   });
 

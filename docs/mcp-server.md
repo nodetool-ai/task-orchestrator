@@ -185,31 +185,19 @@ A healthy deployment returns the full tool list; `initialize` returns
 
 ## Tool surface
 
-`tools/list` serves the orchestrator registry under bare names (no
-`mcp__task_orch__` prefix — that prefix is added by the in-process agent
-runtime, not by this endpoint), grouped as:
+`tools/list` exposes only `codeact_catalog` and `codeact_execute`. Discover
+schemas with `codeact_catalog({query: "schedules"})`, then execute an async
+JavaScript body through `codeact_execute({code: "return await app.schedules.list({});"})`.
+Repositories, plans, tasks, notes, criteria, attachments, sessions and scheduled
+jobs are application SDK operations, not separate native MCP tools. Legacy
+names remain aliases inside the CodeAct sandbox; direct `tools/call` requests
+to them return `-32601`.
 
-- **Repositories** — `list_repositories`, `get_repository`,
-  `create_repository`, `update_repository`, `delete_repository`
-- **Plans** — `list_plans`, `get_plan`, `create_plan`, `update_plan`,
-  `transition_plan`, `delete_plan`, `add_plan_repository`,
-  `remove_plan_repository`
-- **Tasks** — `list_tasks`, `get_task`, `create_task`, `update_task`,
-  `transition_task`, `set_task_pr`, `delete_task`
-- **Notes & criteria** — `add_note`, `list_notes`, `list_criteria`,
-  `add_criterion`, `check_criterion`, `uncheck_criterion`,
-  `update_criterion`, `delete_criterion`
-- **Attachments** — `list_attachments`, `get_attachment`, `add_attachment`,
-  `delete_attachment`
-- **Sessions** — `list_sessions`, `get_session`, `start_session`,
-  `await_session`, `cancel_session`, `events__subscribe`,
-  `events__unsubscribe`, `events__list_subscriptions`. Subscriptions create
-  durable interest in typed run facts; matching events become attributed
-  conversation inputs and wake or resume the subscriber automatically.
-
-Arguments are validated server-side against the same TypeBox schemas served
-in `tools/list`, so a bad enum or wrong-typed field is rejected with
-JSON-RPC `-32602` before it reaches the database.
+The outer tool arguments are validated against their advertised schemas;
+invalid inputs return JSON-RPC `-32602`. SDK operation parameters and permissions
+are checked on every subcall, with failures returned in the CodeAct receipt
+before any corresponding mutation executes. Schedule ownership is derived from
+the authenticated API token and cannot be overridden by the guest.
 
 Supported methods: `initialize`, `notifications/initialized` (202, no body),
 `ping`, `tools/list`, `tools/call`. Anything else returns `-32601`.

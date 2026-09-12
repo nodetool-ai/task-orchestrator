@@ -78,11 +78,10 @@ describe("ClaudeBackend.runTurn guards", () => {
       execute: async () => ({ content: [] }),
     });
     sdk.captured = null;
-    await new ClaudeBackend().runTurn(makeArgs({ extensions: [direct] }));
+    await new ClaudeBackend().runTurn(makeArgs({ extensions: [direct], toolCallingMode: "direct" }));
 
     const tools = sdk.captured.options.mcpServers.task_orch.tools;
     expect(tools.map((entry: any) => entry.name)).toEqual([
-      "task_orch__list_tasks",
       "codeact_catalog",
       "codeact_execute",
     ]);
