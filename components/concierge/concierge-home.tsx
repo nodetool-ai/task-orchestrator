@@ -1,12 +1,12 @@
 "use client";
 
-// The concierge homepage. One conversation, one composer, one door.
+// The concierge homepage. One composer, one door, one list of work.
 //
-// Home is deliberately not a dashboard: no stat tiles, no run cards, no cost
-// or token telemetry, no persona roster. The user tells the concierge an
-// outcome; the concierge coordinates whichever specialists it needs. The
-// operational surfaces (Plans, Tasks, Runs, Schedules, Overview) stay one
-// click away in the top nav for the times someone wants the machinery.
+// Home is still not a dashboard: no stat tiles, no cost or token telemetry, no
+// persona roster. The user tells the concierge an outcome; the concierge
+// coordinates whichever specialists it needs. Below the composer home shows
+// exactly the run list /runs shows, rendered by the same <RunList> and kept
+// live by the same stream, so there is one way runs read in this product.
 
 import * as React from "react";
 import Link from "next/link";
@@ -27,10 +27,12 @@ import {
   ThinkingLevelPicker,
   type ThinkingLevel,
 } from "@/components/pickers/thinking-level-picker";
+import { RunList } from "@/components/runs/run-list";
+import { useLiveRuns } from "@/components/runs/use-live-runs";
 import { ErrorText } from "@/components/ui/error-text";
 import { stashPendingMessage } from "@/lib/pending-first-message";
-import type { ConversationCard } from "@/lib/concierge-home";
-import { relativeDate } from "@/lib/utils";
+import { conversationPulse } from "@/lib/concierge-home";
+import { buildRunForest, type RunIndexRow } from "@/lib/run-index";
 
 /** The concierge is a single, stable identity — one voice, every conversation. */
 const CONCIERGE_NAME = "Concierge";
@@ -43,14 +45,16 @@ const EXAMPLE_ASKS = [
   "Turn this idea into a small first step",
 ];
 
+/** Run trees home offers before sending the user on to /runs. */
+const HOME_RUN_LIMIT = 8;
+
 interface Props {
   defaultModel: string;
   repositories: RepositoryOption[];
-  conversations: ConversationCard[];
-  pulse: { needsYou: number; inMotion: number; total: number };
+  initialRows: RunIndexRow[];
 }
 
-export function ConciergeHome({ defaultModel, repositories, conversations, pulse }: Props) {
+export function ConciergeHome({ defaultModel, repositories, initialRows }: Props) {
   const router = useRouter();
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
 
@@ -63,7 +67,11 @@ export function ConciergeHome({ defaultModel, repositories, conversations, pulse
   const [reasoning, setReasoning] = React.useState<ThinkingLevel | null>(null);
   const [repoId, setRepoId] = React.useState<string>(repositories[0]?.id ?? "");
 
-  const firstTime = conversations.length === 0;
+  const { rows } = useLiveRuns(initialRows);
+  const forest = React.useMemo(() => buildRunForest(rows), [rows]);
+  const pulse = React.useMemo(() => conversationPulse(rows), [rows]);
+
+  const firstTime = rows.length === 0;
 
   function grow() {
     const el = textareaRef.current;
@@ -243,37 +251,18 @@ export function ConciergeHome({ defaultModel, repositories, conversations, pulse
       </div>
 
       {!firstTime && (
-        <section className="flex flex-col gap-1">
-          <div className="flex items-baseline justify-between pb-1">
-            <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Conversations
-            </h2>
+        <section className="flex flex-col gap-2">
+          {/* The list labels its own sections, so home adds only the way out. */}
+          <div className="flex justify-end px-3">
             <Link
               href="/runs"
               className="text-xs text-muted-foreground transition-colors hover:text-foreground"
             >
-              All work
+              All runs
             </Link>
           </div>
-          <ul className="flex flex-col">
-            {conversations.map((c) => (
-              <li key={c.id}>
-                <Link
-                  href={`/runs/${c.id}`}
-                  className="flex items-center gap-3 rounded-lg px-2 py-2.5 transition-colors hover:bg-muted/30"
-                >
-                  <span className="min-w-0 flex-1 truncate text-sm text-foreground">
-                    {c.title}
-                  </span>
-                  {c.stateLabel && <StateTag state={c.state} label={c.stateLabel} />}
-                  <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
-                    {relativeDate(c.updatedAt)}
-                  </span>
-                </Link>
-              </li>
-            ))}
-          </ul>
-          <p className="px-2 pt-2 text-xs text-muted-foreground">{pulseLine(pulse)}</p>
+          <RunList trees={forest} limit={HOME_RUN_LIMIT} empty="No runs yet." />
+          <p className="px-3 text-xs text-muted-foreground">{pulseLine(pulse)}</p>
         </section>
       )}
     </div>
@@ -289,7 +278,7 @@ function postRun(body: Record<string, unknown>) {
 }
 
 /** Attention, not activity: one line, and only when it says something true. */
-function pulseLine(pulse: Props["pulse"]): string {
+function pulseLine(pulse: { needsYou: number; inMotion: number }): string {
   if (pulse.needsYou > 0) {
     return pulse.needsYou === 1
       ? "1 conversation needs you."
@@ -297,24 +286,10 @@ function pulseLine(pulse: Props["pulse"]): string {
   }
   if (pulse.inMotion > 0) {
     return pulse.inMotion === 1
-      ? "Nothing needs you right now — 1 conversation is in motion."
-      : `Nothing needs you right now — ${pulse.inMotion} conversations are in motion.`;
+      ? "Nothing needs you right now. 1 conversation is in motion."
+      : `Nothing needs you right now. ${pulse.inMotion} conversations are in motion.`;
   }
   return "Nothing needs you right now.";
-}
-
-function StateTag({ state, label }: { state: ConversationCard["state"]; label: string }) {
-  const tone =
-    state === "needs_you"
-      ? "border-state-blocked/40 text-state-blocked"
-      : state === "in_motion"
-        ? "border-state-progress/40 text-state-progress"
-        : "border-border/60 text-muted-foreground";
-  return (
-    <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium ${tone}`}>
-      {label}
-    </span>
-  );
 }
 
 /**

@@ -7,8 +7,10 @@ import {
   filterForest,
   groupForStatus,
   groupForTree,
+  groupTrees,
   kindForRun,
   latestActivity,
+  orderTrees,
   runGoalTag,
   runHeading,
   treeSize,
@@ -123,6 +125,43 @@ describe("latestActivity", () => {
       row({ id: 2, parentRunId: 1, startedAt: "2026-07-03T10:00:00.000Z" }),
     ]);
     expect(latestActivity(forest[0])).toBe(Date.parse("2026-07-03T10:00:00.000Z"));
+  });
+});
+
+describe("orderTrees / groupTrees", () => {
+  // The shared <RunList> renders this order, and a capped list (home) slices
+  // the same order the full page shows, so both must agree.
+  const forest = buildRunForest([
+    row({ id: 1, status: "completed", startedAt: "2026-07-05T10:00:00.000Z" }),
+    row({ id: 2, status: "idle", startedAt: "2026-07-02T10:00:00.000Z" }),
+    row({ id: 3, status: "running", startedAt: "2026-07-01T10:00:00.000Z" }),
+    row({ id: 4, status: "idle", startedAt: "2026-07-04T10:00:00.000Z" }),
+  ]);
+
+  it("puts active trees first, then recency inside each group", () => {
+    expect(orderTrees(forest).map((t) => t.run.id)).toEqual([3, 4, 2, 1]);
+  });
+
+  it("leaves the caller's array untouched", () => {
+    const before = forest.map((t) => t.run.id);
+    orderTrees(forest);
+    expect(forest.map((t) => t.run.id)).toEqual(before);
+  });
+
+  it("buckets by tree group, each bucket most recent first", () => {
+    const grouped = groupTrees(forest);
+    expect(grouped.get("active")!.map((t) => t.run.id)).toEqual([3]);
+    expect(grouped.get("idle")!.map((t) => t.run.id)).toEqual([4, 2]);
+    expect(grouped.get("closed")!.map((t) => t.run.id)).toEqual([1]);
+  });
+
+  it("buckets a tree by its liveliest member, not its root", () => {
+    const trees = buildRunForest([
+      row({ id: 10, status: "completed" }),
+      row({ id: 11, parentRunId: 10, status: "running" }),
+    ]);
+    expect(groupTrees(trees).get("active")!.map((t) => t.run.id)).toEqual([10]);
+    expect(orderTrees(trees).map((t) => t.run.id)).toEqual([10]);
   });
 });
 
