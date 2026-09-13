@@ -10,7 +10,10 @@ export const SPRITE_CHECKOUT_PATH = "/home/user/session/repo";
 export const SPRITE_NPM_CACHE_PATH = "/home/user/session/.npm-cache";
 export const SPRITE_BASELINE_DIR = "/home/user/session/.sprite-baseline";
 export const SPRITE_NPM_CONFIG_ARGS = ["--userconfig=/dev/null", "--globalconfig=/nonexistent/task-orchestrator-empty-npmrc"] as const;
-export const SPRITE_BASELINE_PROCESS_CONCURRENCY = 2;
+// Sprites have repeatedly terminated one of two concurrent TypeScript builds
+// without a cgroup PID or OOM event. Keep repository setup single-process so
+// provider-level pressure cannot turn baseline creation into a retry storm.
+export const SPRITE_BASELINE_PROCESS_CONCURRENCY = 1;
 export const SPRITE_NPM_RESOURCE_ARGS = [
   "--foreground-scripts",
   `--jobs=${SPRITE_BASELINE_PROCESS_CONCURRENCY}`,
