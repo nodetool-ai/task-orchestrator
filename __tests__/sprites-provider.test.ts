@@ -121,6 +121,15 @@ describe("buildSpritesWorkerEnv", () => {
     });
   });
 
+  it("keeps agent-invoked repository builds within the Sprite process budget", async () => {
+    await expect(buildSpritesWorkerEnv(42)).resolves.toMatchObject({
+      TURBO_CONCURRENCY: "1",
+      npm_config_jobs: "1",
+      CMAKE_BUILD_PARALLEL_LEVEL: "1",
+      MAKEFLAGS: "-j1",
+    });
+  });
+
   it("forwards an explicit Codex sandbox override to the Sprite worker", async () => {
     vi.stubEnv("TASK_ORCH_CODEX_SANDBOX", "workspace-write");
 

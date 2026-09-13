@@ -23,7 +23,7 @@ export const SPRITE_NPM_RESOURCE_ARGS = [
 // common build schedulers through their standard environment contracts. This
 // remains a per-Sprite safety boundary even if another preparation call site
 // permits more than one baseline to make progress concurrently.
-const REPOSITORY_BUILD_ENV: Readonly<Record<string, string>> = {
+export const SPRITE_REPOSITORY_BUILD_ENV: Readonly<Record<string, string>> = {
   TURBO_CONCURRENCY: String(SPRITE_BASELINE_PROCESS_CONCURRENCY),
   npm_config_jobs: String(SPRITE_BASELINE_PROCESS_CONCURRENCY),
   CMAKE_BUILD_PARALLEL_LEVEL: String(SPRITE_BASELINE_PROCESS_CONCURRENCY),
@@ -341,7 +341,7 @@ export async function prepareSpriteBaseline(client: SpritesClient, spriteName: s
     await execChecked(client, spriteName, `cd ${shellQuote(SPRITE_CHECKOUT_PATH)} && ${controlledNpmCiCommand(SPRITE_NPM_CACHE_PATH, dependency.installOptions)}`,
       "baseline dependency installation", { timeoutMs: 20 * 60_000 });
     await runRepositoryCommands(client, spriteName, dependency.buildCommands, "repository build", {
-      env: { ...REPOSITORY_BUILD_ENV },
+      env: { ...SPRITE_REPOSITORY_BUILD_ENV },
     });
   } else if (opts.dependency) throw new Error("Dependency preparation requires a manifest");
   await writeBaselineManifest(client, spriteName, opts.manifest);

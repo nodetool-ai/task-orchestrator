@@ -9,7 +9,7 @@ import { config } from "../config";
 import { spritesPoolStore as databaseStore } from "./sprites-pool-store";
 import { baselineFingerprint, prepareSpriteBaseline, type SpriteBaselineManifest } from "./sprites-baseline";
 import { configureSpriteSwap } from "./sprites-bootstrap";
-import type { SpritesClient } from "./sprites-client";
+import { SpritesApiError, type SpritesClient } from "./sprites-client";
 import { db } from "../../db";
 import { runnerInstances, agentSessions } from "../../db/schema";
 import { and, eq, isNull, or } from "drizzle-orm";
@@ -84,8 +84,8 @@ export interface SpritePoolOptions {
 
 const DEFAULT_LEASE_MS = 10 * 60_000;
 const DEFAULT_MAX_CONCURRENT = 2;
-const DEFAULT_BACKOFF_MS = 1_000;
-const DEFAULT_MAX_BACKOFF_MS = 60_000;
+const DEFAULT_BACKOFF_MS = 60_000;
+const DEFAULT_MAX_BACKOFF_MS = 5 * 60_000;
 
 function asNonNegativeInt(value: number | undefined, fallback: number): number {
   return Number.isFinite(value) && (value as number) >= 0 ? Math.floor(value as number) : fallback;
@@ -285,7 +285,13 @@ export class SpritePoolManager {
     } catch (error) {
       await stopRenewal();
       this.failures++;
-      const delay = Math.min(this.maxBackoffMs, this.initialBackoffMs * 2 ** Math.min(this.failures - 1, 8));
+      // A provider concurrency rejection cannot improve on the next dispatch
+      // tick. Hold the durable failed reservation for the full cooldown so a
+      // busy account does not produce a create/delete row every 15 seconds.
+      const providerAtCapacity = error instanceof SpritesApiError && error.status === 429;
+      const delay = providerAtCapacity
+        ? this.maxBackoffMs
+        : Math.min(this.maxBackoffMs, this.initialBackoffMs * 2 ** Math.min(this.failures - 1, 8));
       const retryAt = this.now() + delay;
       spriteLog("sprites_pool_preparation_failed", { ...context, ...spriteErrorFields(error), durationMs: Math.round(performance.now() - started),
         retryAt, retryDelayMs: delay, attempt: this.failures }, "warn");

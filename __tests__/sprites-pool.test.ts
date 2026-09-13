@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { SpritePoolManager, type SpritePoolStore } from "@/lib/runner/sprites-pool";
+import { SpritesApiError } from "@/lib/runner/sprites-client";
 
 function store(overrides: Partial<SpritePoolStore> = {}): SpritePoolStore {
   return {
@@ -55,6 +56,25 @@ describe("SpritePoolManager", () => {
     await manager.requestRefill();
     expect(s.failPreparation).toHaveBeenCalledWith(expect.objectContaining({
       reservationId: "r1", leaseToken: "lease", reason: "provider unavailable", retryAt: expect.any(Number),
+    }));
+  });
+
+  it("uses the maximum durable backoff when provider concurrency is full", async () => {
+    const s = store();
+    const now = 1_000_000;
+    const manager = new SpritePoolManager({
+      store: s,
+      target: 1,
+      requestRefill: async () => { throw new SpritesApiError(429, "concurrent_sprite_limit_exceeded"); },
+      initialBackoffMs: 10,
+      maxBackoffMs: 300_000,
+      now: () => now,
+    });
+
+    await manager.requestRefill();
+
+    expect(s.failPreparation).toHaveBeenCalledWith(expect.objectContaining({
+      retryAt: now + 300_000,
     }));
   });
 
