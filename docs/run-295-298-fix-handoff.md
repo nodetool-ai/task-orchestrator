@@ -46,6 +46,7 @@ authorized operation.
 | Same suite, ordinary user with noninteractive sudo delegation | 27 passed |
 | Focused shutdown/channel/watchdog regression suite | 77 passed across 6 files |
 | Final adapter/shell suite after cleanup-diagnostics correction | 48 passed across 4 files |
+| Pre-merge configuration guard and adapter verification | 69 passed across 6 files; supervisor settings use central config |
 | Real installed Codex CLI with local mock Responses API | 4 passed, included in the adapter suite; no billable model API calls |
 | Affected regression suite, serial retry | 927 passed across 85 files in 105.75 seconds |
 | Standalone worker build | Passed |
@@ -123,6 +124,7 @@ Local logs retained outside the repository:
 
 Runtime and backend integration:
 
+- `lib/config.ts` — central accessors for supervisor-installed worker configuration.
 - `lib/agent-backend/worker-shell.ts` — supervised shell scope and cancellation.
 - `lib/agent-backend/codex-backend.ts` — shell routing, nested-agent limits, cleanup.
 - `lib/agent-backend/claude-backend.ts` — shell routing, MCP timeout, cleanup.

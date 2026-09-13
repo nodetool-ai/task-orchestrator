@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { runInterceptors, type CollectedCapabilities } from "./collect";
 import { scrubEnv } from "./env-scrub";
 import type { RunTurnArgs, ToolResult } from "./types";
+import { config } from "../config";
 
 const MAX_OUTPUT_BYTES = 64 * 1024;
 export const WORKER_SHELL_GUIDANCE = "Run shell commands with worker_shell. All agents in this worker share one command slot and an aggregate memory/process budget. A command owns its descendants: background processes are terminated when that command finishes. Give one agent ownership of full-repository verification; reviewers should reuse its results and request focused checks. Set timeout_seconds for a deliberately silent long operation (maximum 1800 seconds).";
@@ -10,8 +11,8 @@ export const WORKER_SHELL_GUIDANCE = "Run shell commands with worker_shell. All 
 /** Sprite's process supervisor supplies these variables only after installing
  * the kernel resource boundary. Other runners retain their existing tools. */
 export function createWorkerShellScope(args: RunTurnArgs): WorkerShellScope | null {
-  if (!process.env.TASK_ORCH_PROCESS_SUPERVISOR || args.nativeToolPolicy === "orchestration-only") return null;
-  if (!process.env.TASK_ORCH_PROCESS_CGROUP || !process.env.TASK_ORCH_PROCESS_LOCK) {
+  if (!config.worker.processSupervisorPath || args.nativeToolPolicy === "orchestration-only") return null;
+  if (!config.worker.processCgroupPath || !config.worker.processLockPath) {
     throw new Error("Worker process containment is not initialized; refusing unbounded shell execution");
   }
   return new WorkerShellScope(args);
@@ -52,8 +53,10 @@ export class WorkerShellScope {
     }
     const env = scrubEnv({ ...process.env, ...this.args.env });
     // These are scheduler-owned, never supplied by a model or repository.
-    for (const key of ["TASK_ORCH_PROCESS_CGROUP", "TASK_ORCH_PROCESS_LOCK", "TASK_ORCH_PROCESS_SUPERVISOR"]) env[key] = process.env[key];
-    const child = spawn("python3", [process.env.TASK_ORCH_PROCESS_SUPERVISOR!, "command", "--timeout-seconds", String(seconds), "--", "bash", "-lc", input.command], {
+    env.TASK_ORCH_PROCESS_CGROUP = config.worker.processCgroupPath;
+    env.TASK_ORCH_PROCESS_LOCK = config.worker.processLockPath;
+    env.TASK_ORCH_PROCESS_SUPERVISOR = config.worker.processSupervisorPath;
+    const child = spawn("python3", [config.worker.processSupervisorPath!, "command", "--timeout-seconds", String(seconds), "--", "bash", "-lc", input.command], {
       cwd: this.args.cwd, env: { ...env, NODE_ENV: process.env.NODE_ENV }, stdio: ["ignore", "pipe", "pipe"],
     });
     const abort = () => { child.kill("SIGTERM"); }; // supervisor owns TERM -> KILL + waitpid for the whole tree
