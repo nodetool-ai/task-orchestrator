@@ -14,6 +14,12 @@ export const SPRITE_NPM_CONFIG_ARGS = ["--userconfig=/dev/null", "--globalconfig
 // without a cgroup PID or OOM event. Keep repository setup single-process so
 // provider-level pressure cannot turn baseline creation into a retry storm.
 export const SPRITE_BASELINE_PROCESS_CONCURRENCY = 1;
+// A Sprite sees the provider host's CPU inventory even though its memory and
+// PID budgets are much smaller. Native compilers and test runners otherwise
+// size their own thread pools for the host (140 threads in run 301). Keep the
+// per-process native pools small while the outer repository scheduler remains
+// serialized.
+export const SPRITE_REPOSITORY_CPU_CONCURRENCY = 2;
 export const SPRITE_NPM_RESOURCE_ARGS = [
   "--foreground-scripts",
   `--jobs=${SPRITE_BASELINE_PROCESS_CONCURRENCY}`,
@@ -28,6 +34,8 @@ export const SPRITE_REPOSITORY_BUILD_ENV: Readonly<Record<string, string>> = {
   npm_config_jobs: String(SPRITE_BASELINE_PROCESS_CONCURRENCY),
   CMAKE_BUILD_PARALLEL_LEVEL: String(SPRITE_BASELINE_PROCESS_CONCURRENCY),
   MAKEFLAGS: `-j${SPRITE_BASELINE_PROCESS_CONCURRENCY}`,
+  GOMAXPROCS: String(SPRITE_REPOSITORY_CPU_CONCURRENCY),
+  RAYON_NUM_THREADS: String(SPRITE_REPOSITORY_CPU_CONCURRENCY),
 };
 
 export interface SpriteDependencyManifest {

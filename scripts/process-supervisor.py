@@ -82,6 +82,28 @@ def command_memory_limit(worker_memory):
     return worker_memory - reserve
 
 
+def limit_cpu_affinity(environ=None):
+    """Keep command descendants from sizing pools for the provider host.
+
+    Linux inherits CPU affinity across fork/exec. Node's availableParallelism,
+    Jest workers, and most native runtimes therefore observe the bounded CPU
+    set without repository-specific command rewriting.
+    """
+    environ = os.environ if environ is None else environ
+    value = environ.get("TASK_ORCH_PROCESS_CPU_MAX")
+    if value is None:
+        return
+    maximum = positive_integer(value)
+    get_affinity = getattr(os, "sched_getaffinity", None)
+    set_affinity = getattr(os, "sched_setaffinity", None)
+    if get_affinity is None or set_affinity is None:
+        raise ContainmentError("command CPU affinity requires Linux sched affinity support")
+    available = sorted(get_affinity(0))
+    if not available:
+        raise ContainmentError("command CPU affinity is empty")
+    set_affinity(0, available[:maximum])
+
+
 def validate_instance(instance):
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", instance):
         raise ContainmentError("instance must be a safe, fresh channel instanceId")
@@ -418,7 +440,7 @@ def normalized_exit(code):
     return 128 - code if code < 0 else code
 
 
-def supervise_workload(scope, leaf, command, environ, deadline, expected_parent):
+def supervise_workload(scope, leaf, command, environ, deadline, expected_parent, limit_cpu=False):
     state = configure_supervisor(expected_parent)
     results = {}
     if state.signal:
@@ -442,6 +464,8 @@ def supervise_workload(scope, leaf, command, environ, deadline, expected_parent)
                 os.execvp("sudo", ["sudo", "-n", sys.executable, str(Path(__file__).resolve()), "enter",
                                    "--scope", str(scope), "--uid", str(os.getuid()), "--gid", str(os.getgid())])
             write(leaf / "cgroup.procs", os.getpid())
+            if limit_cpu:
+                limit_cpu_affinity(environ)
             os.execvpe(command[0], command, environ)
         except BaseException as exc:
             log("cannot start contained workload: " + str(exc))
@@ -466,7 +490,7 @@ def supervise_workload(scope, leaf, command, environ, deadline, expected_parent)
     return code
 
 
-def run_guarded(scope, leaf, command, environ, deadline, outer_state):
+def run_guarded(scope, leaf, command, environ, deadline, outer_state, limit_cpu=False):
     """Two supervisors survive loss of either one; neither enters the target.
 
     The inner adopts/reaps workload descendants. If it dies, the outer adopts
@@ -477,7 +501,7 @@ def run_guarded(scope, leaf, command, environ, deadline, outer_state):
     guardian = os.fork()
     if guardian == 0:
         try:
-            code = supervise_workload(scope, leaf, command, environ, deadline, parent)
+            code = supervise_workload(scope, leaf, command, environ, deadline, parent, limit_cpu)
             remove_empty_scope(scope)
         except BaseException as exc:
             log("inner supervisor failed: " + str(exc))
@@ -582,7 +606,8 @@ def main(argv=None):
             leaf = scope
         if state.signal:
             return 128 + state.signal
-        return run_guarded(scope, leaf, command, environ, deadline, state)
+        return run_guarded(scope, leaf, command, environ, deadline, state,
+                           limit_cpu=args.mode == "command")
     except TimeoutError as exc:
         log(str(exc))
         return 124

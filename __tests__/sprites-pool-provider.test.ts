@@ -11,7 +11,7 @@ import { createDatabaseSpritePoolStore, requestSpritePoolMaintenance, requestSpr
 import { spritesPoolStore } from "@/lib/runner/sprites-pool-store";
 import type { SpritesClient } from "@/lib/runner/sprites-client";
 import { spriteNodeSetupCommand } from "@/lib/runner/sprites-bootstrap";
-import { baselineFingerprint, controlledNpmCiCommand, dependencyFingerprint, SPRITE_BASELINE_PROCESS_CONCURRENCY, SPRITE_CHECKOUT_PATH, SPRITE_NPM_CACHE_PATH } from "@/lib/runner/sprites-baseline";
+import { baselineFingerprint, controlledNpmCiCommand, dependencyFingerprint, SPRITE_BASELINE_PROCESS_CONCURRENCY, SPRITE_CHECKOUT_PATH, SPRITE_NPM_CACHE_PATH, SPRITE_REPOSITORY_CPU_CONCURRENCY } from "@/lib/runner/sprites-baseline";
 import { getConfiguredSpriteBaselines } from "@/lib/runner/sprites-pool-config";
 
 const manifest = {
@@ -194,6 +194,8 @@ describe("Sprite pool provider integration", () => {
       npm_config_jobs: String(SPRITE_BASELINE_PROCESS_CONCURRENCY),
       CMAKE_BUILD_PARALLEL_LEVEL: String(SPRITE_BASELINE_PROCESS_CONCURRENCY),
       MAKEFLAGS: `-j${SPRITE_BASELINE_PROCESS_CONCURRENCY}`,
+      GOMAXPROCS: String(SPRITE_REPOSITORY_CPU_CONCURRENCY),
+      RAYON_NUM_THREADS: String(SPRITE_REPOSITORY_CPU_CONCURRENCY),
     });
     expect(vi.mocked(c.exec).mock.calls.every(([, input]) => !input.env?.OPENAI_API_KEY)).toBe(true);
 

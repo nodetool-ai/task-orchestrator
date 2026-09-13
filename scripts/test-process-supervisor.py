@@ -71,6 +71,24 @@ class SupervisorUnitTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             SUPERVISOR.command_memory_limit("max")
 
+    def test_command_cpu_affinity_is_bounded_to_available_cpus(self):
+        with mock.patch.object(SUPERVISOR.os, "sched_getaffinity", return_value={7, 3, 11}, create=True), mock.patch.object(SUPERVISOR.os, "sched_setaffinity", create=True) as set_affinity:
+            SUPERVISOR.limit_cpu_affinity({"TASK_ORCH_PROCESS_CPU_MAX": "2"})
+            set_affinity.assert_called_once_with(0, [3, 7])
+
+    def test_command_cpu_affinity_rejects_invalid_or_empty_limits(self):
+        for value in ("0", "bad"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                SUPERVISOR.limit_cpu_affinity({"TASK_ORCH_PROCESS_CPU_MAX": value})
+        with mock.patch.object(SUPERVISOR.os, "sched_getaffinity", return_value=set(), create=True), mock.patch.object(SUPERVISOR.os, "sched_setaffinity", create=True):
+            with self.assertRaisesRegex(SUPERVISOR.ContainmentError, "affinity is empty"):
+                SUPERVISOR.limit_cpu_affinity({"TASK_ORCH_PROCESS_CPU_MAX": "1"})
+
+    def test_command_cpu_affinity_is_optional(self):
+        with mock.patch.object(SUPERVISOR.os, "sched_getaffinity", create=True) as get_affinity:
+            SUPERVISOR.limit_cpu_affinity({})
+            get_affinity.assert_not_called()
+
     def test_privileged_entry_rejects_an_unrelated_user_before_migration(self):
         with mock.patch.object(SUPERVISOR.os, "geteuid", return_value=0), mock.patch.dict(SUPERVISOR.os.environ, {"SUDO_UID": "1001", "SUDO_GID": "1001"}), mock.patch.object(SUPERVISOR, "write") as write:
             with self.assertRaisesRegex(SUPERVISOR.ContainmentError, "does not match"):
@@ -289,6 +307,17 @@ class LinuxProcessIntegrationTests(unittest.TestCase):
         child = self.launch(code)
         self.assertEqual(child.wait(timeout=15), 0, self.logs())
         self.assertEqual(path.read_text().splitlines(), ["start", "end"] * 4)
+
+    def test_command_cpu_affinity_is_inherited_by_descendants(self):
+        marker = self.work / "command-affinity"
+        command = ("import os\nopen(" + repr(str(marker))
+                   + ",'w').write(str(len(os.sched_getaffinity(0))))\n")
+        code = ("import os,subprocess,sys\n"
+                "assert subprocess.run([sys.executable,os.environ['TASK_ORCH_PROCESS_SUPERVISOR'],'command','--',sys.executable,'-c',"
+                + repr(command) + "]).returncode == 0\n")
+        child = self.launch(code, {"TASK_ORCH_PROCESS_CPU_MAX": "2"})
+        self.assertEqual(child.wait(timeout=15), 0, self.logs())
+        self.assertEqual(self.wait_for(marker), "2")
 
     def test_cancelled_command_reaps_orphan_without_stopping_worker(self):
         marker = self.work / "cancel-orphan.pid"

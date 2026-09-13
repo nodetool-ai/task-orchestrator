@@ -151,6 +151,13 @@ already cost real time once.
   Assign full-repository checks to one agent and bound test-runner workers.
   Resource limits are configurable via `TASK_ORCH_PROCESS_MEMORY_MAX_BYTES`,
   `TASK_ORCH_PROCESS_SWAP_MAX_BYTES`, and `TASK_ORCH_PROCESS_PIDS_MAX`.
+  Run 301 showed that serializing package builds alone is insufficient: the
+  native TypeScript compiler saw the provider host and created 140 threads,
+  while run 302's Jest process selected enough workers to consume the full
+  6 GiB. Agent shell commands now inherit a two-CPU affinity and native Go/Rayon
+  pool bounds (`TASK_ORCH_PROCESS_CPU_MAX`, `GOMAXPROCS`,
+  `RAYON_NUM_THREADS`), so tools size themselves for the Sprite budget rather
+  than the host. The worker/model runtime remains outside that affinity cap.
   Each command reserves the smaller of 1 GiB or one quarter of the memory
   budget for the runtime; a command-local OOM kills that command group while
   allowing the worker to report the failure. The aggregate limit is the backstop.

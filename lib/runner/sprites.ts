@@ -20,7 +20,7 @@ import { newChannelInstanceId } from "../worker-channel/credential";
 import { hasReconnectableWork } from "../worker-channel/repository";
 import { spritesDialEndpoint, spritesListenEndpoint, workerChannelDispatchEnv } from "../worker-channel/dispatch-env";
 import { spritesPoolStore, type SpritePoolEntry } from "./sprites-pool-store";
-import { verifyBaseline, dependencyFingerprint, SPRITE_REPOSITORY_BUILD_ENV, type SpriteBaselineManifest } from "./sprites-baseline";
+import { verifyBaseline, dependencyFingerprint, SPRITE_REPOSITORY_BUILD_ENV, SPRITE_REPOSITORY_CPU_CONCURRENCY, type SpriteBaselineManifest } from "./sprites-baseline";
 import { getEffectiveSpriteBaselines } from "./sprites-managed-config";
 import { SpritePoolManager, createDatabaseSpritePoolStore, requestSpritePoolMaintenance, requestSpritePoolRefill } from "./sprites-pool";
 import { cloneUrlFromRemote } from "../repo-checkout";
@@ -253,6 +253,9 @@ export async function buildSpritesWorkerEnv(
     // Carry the proven scheduler limits into the worker so an agent invoking
     // the repository build cannot reintroduce the baseline's fork storm.
     ...SPRITE_REPOSITORY_BUILD_ENV,
+    // The command supervisor applies this affinity only to agent-invoked shell
+    // commands and their descendants, not to the worker/model runtime itself.
+    TASK_ORCH_PROCESS_CPU_MAX: String(SPRITE_REPOSITORY_CPU_CONCURRENCY),
     TASK_ORCH_LOG_LEVEL: envValue("TASK_ORCH_LOG_LEVEL"),
     TASK_ORCH_LOG_FORMAT: envValue("TASK_ORCH_LOG_FORMAT"),
     GH_TOKEN: envValue("GH_TOKEN"),

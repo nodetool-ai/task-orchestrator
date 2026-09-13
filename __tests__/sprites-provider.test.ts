@@ -127,6 +127,9 @@ describe("buildSpritesWorkerEnv", () => {
       npm_config_jobs: "1",
       CMAKE_BUILD_PARALLEL_LEVEL: "1",
       MAKEFLAGS: "-j1",
+      GOMAXPROCS: "2",
+      RAYON_NUM_THREADS: "2",
+      TASK_ORCH_PROCESS_CPU_MAX: "2",
     });
   });
 
