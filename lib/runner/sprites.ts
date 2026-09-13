@@ -277,6 +277,7 @@ export async function buildSpritesWorkerEnv(
     TASK_ORCH_PROCESS_MEMORY_MAX_BYTES: envValue("TASK_ORCH_PROCESS_MEMORY_MAX_BYTES"),
     TASK_ORCH_PROCESS_SWAP_MAX_BYTES: envValue("TASK_ORCH_PROCESS_SWAP_MAX_BYTES"),
     TASK_ORCH_PROCESS_PIDS_MAX: envValue("TASK_ORCH_PROCESS_PIDS_MAX"),
+    TASK_ORCH_PROCESS_NAMESPACE_ROOT: "1",
     TASK_ORCH_CODEACT_THREAD_WORKER: "/home/user/worker/codeact/thread-worker.js",
     RUN_ID: String(runId),
     ...(opts.workerGeneration != null ? { TASK_ORCH_WORKER_GENERATION: String(opts.workerGeneration) } : {}),
@@ -928,7 +929,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
       // next start runs the new code.
       let staleBundle = false;
       const bundleUrl = config.sprites.workerBundleUrl;
-      if (!poolEntry && bundleUrl && config.sprites.token) {
+      if (bundleUrl && config.sprites.token) {
         const workerSha = await workerBundleId();
         const checkpoints = await this.spritesClient.listCheckpoints(spriteName).catch(() => []);
         staleBundle = !checkpoints.some((cp) => cp.comment === spriteBootstrapComment(workerSha));

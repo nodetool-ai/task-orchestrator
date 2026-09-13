@@ -85,7 +85,7 @@ describe("reapOrphans (orphan reaper in lib/agent.ts)", () => {
     expect(after?.completedAt).not.toBeNull();
   });
 
-  it("reaps a stale-heartbeat preparing run (no grace period for lease statuses)", async () => {
+  it("reaps a dead preparing run without a recoverable branch", async () => {
     // Non-pending lease statuses (preparing, running, pushing, opening_pr)
     // are not part of the dispatch queue — they indicate mid-turn activity.
     // Stale heartbeat means the owner crashed mid-turn; reap immediately.
@@ -100,6 +100,7 @@ describe("reapOrphans (orphan reaper in lib/agent.ts)", () => {
       .update(agentSessions)
       .set({ status: "preparing", startedAt: YOUNG})
       .where(eq(agentSessions.id, run.id));
+    await db.update(tasks).set({ branch: null }).where(eq(tasks.id, taskId));
 
     await _reapOrphansForTest();
 
@@ -131,7 +132,7 @@ describe("reapOrphans (orphan reaper in lib/agent.ts)", () => {
     expect(after?.error).toBeNull();
   });
 
-  it("leaves a tokenless v2 worktree run for transcript-based pump recovery", async () => {
+  it.each([false, true])("leaves a tokenless v2 worktree run for pump recovery (task branch only=%s)", async (taskBranchOnly) => {
     const taskId = await createTestTask();
     const run = await create({
       goal: "<implement>",
@@ -142,12 +143,13 @@ describe("reapOrphans (orphan reaper in lib/agent.ts)", () => {
       .update(agentSessions)
       .set({
         status: "preparing",
-        branch: `claude/${taskId.toLowerCase()}`,
-        worktreePath: "/mnt/session/repo",
+        branch: taskBranchOnly ? null : `claude/${taskId.toLowerCase()}`,
+        worktreePath: taskBranchOnly ? null : "/mnt/session/repo",
         sdkSessionId: null,
         deliveryVersion: 2,
       })
       .where(eq(agentSessions.id, run.id));
+    await db.update(tasks).set({ branch: `claude/${taskId.toLowerCase()}` }).where(eq(tasks.id, taskId));
 
     await _reapOrphansForTest();
 

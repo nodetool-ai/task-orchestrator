@@ -106,7 +106,35 @@ def delegate_directory(path, uid, gid):
             os.chown(target, uid, gid)
 
 
-def prepare_cgroup(root, instance, uid, gid, limits):
+def namespace_budget(limits=None):
+    """A Sprite's populated namespace root owns the aggregate controllers.
+
+    Keep provider init/exec tasks where the provider put them. Core child
+    cgroups still support cgroup.kill without delegated memory controllers.
+    This mode is explicit, and never applies to the host hierarchy root.
+    """
+    mount = Path("/sys/fs/cgroup")
+    if (read("/proc/1/cgroup") != "0::/"
+            or 1 not in {int(pid) for pid in read(mount / "cgroup.procs").split()}
+            or read("/proc/1/comm") not in {"tini", "docker-init"}
+            or not (mount / "memory.max").exists()
+            or read(mount / "cgroup.subtree_control")):
+        raise ContainmentError("namespace budget requires an isolated, populated container cgroup root")
+    if read(mount / "memory.oom.group") != "0":
+        raise ContainmentError("namespace budget must not group-kill the provider init process")
+    for name, requested in zip(("memory.max", "memory.swap.max", "pids.max"), limits or (None,) * 3):
+        current = read(mount / name)
+        if requested is not None:
+            # Never loosen a provider/operator limit, including on a restart.
+            bound = requested if current == "max" else min(int(current), requested)
+            write(mount / name, bound)
+            current = read(mount / name)
+        if current == "max" or int(current) < (0 if name == "memory.swap.max" else 1):
+            raise ContainmentError("namespace workload requires a finite " + name)
+    return mount
+
+
+def prepare_cgroup(root, instance, uid, gid, limits, namespace_root=False):
     """Provision empty internal nodes; never migrate unrelated host processes."""
     root = root.absolute()
     # Resolve existing ancestors before creating anything; do not follow an
@@ -114,26 +142,35 @@ def prepare_cgroup(root, instance, uid, gid, limits):
     if not str(root).startswith("/sys/fs/cgroup/") or root.resolve() != root:
         raise ContainmentError("cgroup root must be a real directory below /sys/fs/cgroup")
     validate_instance(instance)
-    enable_controllers(root.parent)
+    if namespace_root:
+        if root.parent != Path("/sys/fs/cgroup"):
+            raise ContainmentError("namespace containment must be directly below /sys/fs/cgroup")
+        namespace_budget(limits)
+    else:
+        enable_controllers(root.parent)
     root.mkdir(exist_ok=True)
-    enable_controllers(root)
+    if not namespace_root:
+        enable_controllers(root)
     owner = root / ("u" + str(uid))
     owner.mkdir(exist_ok=True)
-    enable_controllers(owner)
+    if not namespace_root:
+        enable_controllers(owner)
     delegate_directory(owner, uid, gid)
     scope = owner / instance
     # Existing scopes may contain retained work from a prior process. Never
     # adopt, empty, or kill them: each service launch needs a new incarnation.
     scope.mkdir()
     try:
-        memory, swap, pids = limits
-        write(scope / "memory.max", memory)
-        write(scope / "memory.swap.max", swap)
-        write(scope / "pids.max", pids)
-        write(scope / "memory.oom.group", 1)
+        if not namespace_root:
+            memory, swap, pids = limits
+            write(scope / "memory.max", memory)
+            write(scope / "memory.swap.max", swap)
+            write(scope / "pids.max", pids)
+            write(scope / "memory.oom.group", 1)
         if not (scope / "cgroup.kill").exists():
             raise ContainmentError("Linux cgroup.kill support is required (Linux 5.14+)")
-        enable_controllers(scope)
+        if not namespace_root:
+            enable_controllers(scope)
         runtime = scope / "runtime"
         runtime.mkdir()
         delegate_directory(runtime, uid, gid)
@@ -148,13 +185,15 @@ def create_worker_scope(args):
     limits = resource_limits()
     root = args.cgroup_root
     if os.geteuid() == 0:
-        return prepare_cgroup(root, args.instance, os.getuid(), os.getgid(), limits)
+        return prepare_cgroup(root, args.instance, os.getuid(), os.getgid(), limits, args.namespace_root)
     # Provisioning and the initial cross-delegation migration need privilege.
     # The worker and both supervisors retain their ordinary user identity.
     command = ["sudo", "-n", sys.executable, str(Path(__file__).resolve()), "prepare",
                "--cgroup-root", str(root), "--instance", args.instance,
                "--uid", str(os.getuid()), "--gid", str(os.getgid()),
                "--memory", str(limits[0]), "--swap", str(limits[1]), "--pids", str(limits[2])]
+    if args.namespace_root:
+        command.append("--namespace-root")
     try:
         result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -474,6 +513,9 @@ def parser():
         subparser = subcommands.add_parser(mode)
         subparser.add_argument("--instance", required=True, type=validate_instance)
         subparser.add_argument("--cgroup-root", type=Path, default=CGROUP_ROOT)
+        subparser.add_argument("--namespace-root", action="store_true",
+                               default=os.environ.get("TASK_ORCH_PROCESS_NAMESPACE_ROOT") == "1",
+                               help="bound an isolated Sprite/container at its populated cgroup namespace root")
         if mode == "prepare":
             for name in ("uid", "gid", "memory", "swap", "pids"):
                 subparser.add_argument("--" + name, type=int, required=True)
@@ -499,7 +541,7 @@ def main(argv=None):
     if args.mode == "prepare":
         if args.uid < 0 or args.gid < 0 or args.memory <= 0 or args.swap < 0 or args.pids <= 0:
             raise ContainmentError("invalid cgroup ownership or limits")
-        prepare_cgroup(args.cgroup_root, args.instance, args.uid, args.gid, (args.memory, args.swap, args.pids))
+        prepare_cgroup(args.cgroup_root, args.instance, args.uid, args.gid, (args.memory, args.swap, args.pids), args.namespace_root)
         return 0
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
@@ -518,6 +560,7 @@ def main(argv=None):
             lock_dir = tempfile.mkdtemp(prefix="task-orch-process-")
             environ.update(TASK_ORCH_PROCESS_CGROUP=str(scope),
                            TASK_ORCH_PROCESS_LOCK=str(Path(lock_dir) / "command.lock"),
+                           TASK_ORCH_PROCESS_NAMESPACE_ROOT="1" if args.namespace_root else "0",
                            TASK_ORCH_PROCESS_SUPERVISOR=str(Path(__file__).resolve()))
             deadline = float("inf")
         else:
@@ -531,8 +574,11 @@ def main(argv=None):
             lock_fd = acquire_permit(lock_path, state, deadline)
             scope = parent_scope / ("command-" + uuid.uuid4().hex)
             scope.mkdir()
-            write(scope / "memory.max", command_memory_limit(read(parent_scope / "memory.max")))
-            write(scope / "memory.oom.group", 1)
+            if environ.get("TASK_ORCH_PROCESS_NAMESPACE_ROOT") == "1":
+                namespace_budget()  # Recheck the aggregate backstop before every tool.
+            else:
+                write(scope / "memory.max", command_memory_limit(read(parent_scope / "memory.max")))
+                write(scope / "memory.oom.group", 1)
             leaf = scope
         if state.signal:
             return 128 + state.signal

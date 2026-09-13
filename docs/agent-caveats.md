@@ -124,6 +124,22 @@ already cost real time once.
 
 ## Codex on Sprite
 
+- Sprite's cgroup namespace root contains provider init/exec processes, so
+  enabling its child memory controller fails with `EBUSY`. Sprite dispatch and
+  bootstrap explicitly select the supervisor's namespace-root mode: memory,
+  swap and task caps apply at that isolated root, while core child cgroups
+  retain descendant cleanup and the shared command permit. Never migrate
+  provider processes to make controller delegation work: future provider execs
+  still attach at the root. This mode has no command-local OOM isolation or
+  protected runtime reserve; an aggregate OOM may kill the worker too. Existing
+  provider limits are only tightened, and the root must keep OOM grouping off.
+  Test this layout with `--cgroupns=private`, including an ordinary user with
+  sudo. Host-namespace Docker tests alone do not reproduce it.
+- Retained pooled Sprites need the same bundle refresh as cold Sprites during
+  resume. Refresh worker files without restoring their original baseline; a
+  baseline restore would erase unpublished changes. All orphan reapers,
+  including the legacy `lib/agent.ts` startup handler, must recognize the
+  canonical task branch when run-level branch/path fields are still null.
 - Runs 295/298 combined nested-agent verification fan-out, exhausted swap, and
   orphaned compiler/test processes. A shell's parent exiting is not proof its
   descendants exited. Sprite services now start through `process-supervisor.py`:

@@ -9,11 +9,11 @@
 import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, asc, desc, eq, gt, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gt, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 
 import { db } from "@/db";
 import { isDispatchInFlight } from "@/lib/run-dispatch";
-import { agentEvents, agentSessions, runnerInstances } from "@/db/schema";
+import { agentEvents, agentSessions, runnerInstances, tasks } from "@/db/schema";
 import { autoLaunchEligibleTasks, autoLaunchEnabled, autoLaunchIntervalMs } from "./auto-launch";
 import { syncPrBackedTasks } from "./pr-task-state";
 import * as repo from "./repo";
@@ -112,8 +112,9 @@ async function reapOrphans() {
   const now = new Date();
   const orphans = (
     await db
-      .select()
+      .select({ ...getTableColumns(agentSessions), taskBranch: tasks.branch })
       .from(agentSessions)
+      .leftJoin(tasks, eq(tasks.id, agentSessions.taskId))
       .where(
         and(
           eq(agentSessions.goal, "<implement>"),
@@ -130,7 +131,7 @@ async function reapOrphans() {
     if (
       (row.status === "preparing" || row.status === "running") &&
       row.cwdStrategy === "worktree" &&
-      !!row.branch &&
+      !!(row.branch || row.taskBranch) &&
       (!!row.sdkSessionId || row.deliveryVersion === 2)
     ) {
       return false;

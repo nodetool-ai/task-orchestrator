@@ -31,9 +31,29 @@ SPEC = importlib.util.spec_from_file_location("process_supervisor", SCRIPT)
 SUPERVISOR = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SUPERVISOR)
 LINUX_ROOT = os.environ.get("TASK_ORCH_TEST_CGROUP_ROOT")
+NAMESPACE_ROOT = os.environ.get("TASK_ORCH_PROCESS_NAMESPACE_ROOT") == "1"
 
 
 class SupervisorUnitTests(unittest.TestCase):
+    def test_namespace_budget_rejects_a_host_root_before_writing_limits(self):
+        with mock.patch.object(SUPERVISOR, "read", return_value="0::/system.slice/init.scope"), mock.patch.object(SUPERVISOR, "write") as write:
+            with self.assertRaisesRegex(SUPERVISOR.ContainmentError, "isolated"):
+                SUPERVISOR.namespace_budget((100, 0, 4))
+            write.assert_not_called()
+
+    def test_namespace_budget_never_relaxes_existing_provider_limits(self):
+        values = {"/proc/1/cgroup": "0::/", "/proc/1/comm": "tini",
+                  "cgroup.procs": "1\n3", "cgroup.subtree_control": "", "memory.oom.group": "0",
+                  "memory.max": "50", "memory.swap.max": "0", "pids.max": "8"}
+        def get(path):
+            return values.get(str(path), values.get(Path(path).name))
+        with mock.patch.object(SUPERVISOR, "read", side_effect=get), mock.patch.object(SUPERVISOR.Path, "exists", return_value=True), mock.patch.object(SUPERVISOR, "write") as write:
+            SUPERVISOR.namespace_budget((100, 10, 16))
+            self.assertEqual([call.args[1] for call in write.call_args_list], [50, 0, 8])
+            values["memory.max"] = "max"
+            with self.assertRaisesRegex(SUPERVISOR.ContainmentError, "finite memory.max"):
+                SUPERVISOR.namespace_budget()
+
     def test_worker_reserves_ram_and_bounds_swap_and_forks(self):
         self.assertEqual(SUPERVISOR.resource_limits({}, 8 * 1024**3), (6 * 1024**3, 256 * 1024**2, 256))
         self.assertEqual(SUPERVISOR.resource_limits({}, 2 * 1024**3)[0], int(1.5 * 1024**3))
@@ -322,12 +342,14 @@ class LinuxProcessIntegrationTests(unittest.TestCase):
         self.assertEqual(child.wait(timeout=15), 0, self.logs())
         self.assert_gone(int(marker.read_text()))
 
+    @unittest.skipIf(NAMESPACE_ROOT, "namespace OOM uses the aggregate budget test")
     def test_memory_limit_ooms_workload_but_surviving_supervisor_cleans_scope(self):
         child = self.launch("data=[]\nwhile True: data.append(bytearray(8*1024*1024))\n",
                             {"TASK_ORCH_PROCESS_MEMORY_MAX_BYTES": str(64 * 1024**2)})
         self.assertEqual(child.wait(timeout=15), 137, self.logs())
         self.assertFalse(self.scopes[-1].exists())
 
+    @unittest.skipIf(NAMESPACE_ROOT, "populated namespace cannot delegate command-local memory isolation")
     def test_compiler_command_oom_fails_only_its_tool_and_worker_can_continue(self):
         marker = self.work / "after-compiler-oom"
         compiler = "data=[]\nwhile True: data.append(bytearray(8*1024*1024))\n"
@@ -369,10 +391,26 @@ class LinuxProcessIntegrationTests(unittest.TestCase):
                 "except OSError as error:\n"
                 " assert error.errno == errno.EAGAIN\n"
                 " open(" + repr(str(marker)) + ",'w').write(str(len(children)))\n")
-        child = self.launch(code, {"TASK_ORCH_PROCESS_PIDS_MAX": "16"})
+        limit = 48 if NAMESPACE_ROOT else 16
+        child = self.launch(code, {"TASK_ORCH_PROCESS_PIDS_MAX": str(limit)})
         self.assertEqual(child.wait(timeout=15), 0, self.logs())
-        self.assertLess(int(self.wait_for(marker)), 16)
+        self.assertLess(int(self.wait_for(marker)), limit)
         self.assertFalse(self.scopes[-1].exists())
+
+    @unittest.skipUnless(NAMESPACE_ROOT, "requires an isolated populated cgroup namespace")
+    def test_namespace_budget_bounds_oom_and_preserves_provider_init(self):
+        mount = Path("/sys/fs/cgroup")
+        initial = (mount / "cgroup.procs").read_text().split()
+        child = self.launch("data=[]\nwhile True: data.append(bytearray(8*1024*1024))\n")
+        self.assertEqual(child.wait(timeout=20), 137, self.logs())
+        self.assertFalse(self.scopes[-1].exists())
+        self.assertEqual((mount / "memory.max").read_text().strip(), str(512 * 1024**2))
+        self.assertEqual((mount / "memory.swap.max").read_text().strip(), "0")
+        self.assertEqual((mount / "pids.max").read_text().strip(), "48")
+        self.assertEqual((mount / "cgroup.subtree_control").read_text().strip(), "")
+        self.assertIn("1", initial)
+        self.assertIn("1", (mount / "cgroup.procs").read_text().split())
+        self.assertGreater(int(dict(line.split() for line in (mount / "memory.events").read_text().splitlines())["oom_kill"]), 0)
 
 
 if __name__ == "__main__":
