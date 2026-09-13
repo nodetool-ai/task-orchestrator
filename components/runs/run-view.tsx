@@ -7,6 +7,7 @@ import {
   ChevronLeft,
   Brain,
   Cpu,
+  FileDiff,
   FolderClosed,
   GitBranch,
   GitFork,
@@ -39,6 +40,8 @@ import { PlanningReviewCard } from "@/components/runs/planning-review-card";
 import { StartupIndicator, isRunnerBooting } from "@/components/runs/startup-indicator";
 import { useConfirm } from "@/components/ui/dialog-provider";
 import { WorkerLogPanel } from "@/components/runs/worker-log-panel";
+import { GitStatusPanel, summarizeGitStatus } from "@/components/runs/git-status-panel";
+import type { RunGitStatus } from "@/lib/run-git-status";
 import { takePendingMessage } from "@/lib/pending-first-message";
 
 interface SidebarRepo {
@@ -66,6 +69,9 @@ interface Props {
   }>;
   task: { id: string; title: string } | null;
   personaName: string | null;
+  /** Git snapshot of the run's checkout, read at server render. Null when the
+   *  page could not take one (it is best-effort, never a render blocker). */
+  gitStatus: RunGitStatus | null;
 }
 
 // In-flight optimistic messages get a temporary negative id so they don't
@@ -139,6 +145,7 @@ export function RunView({
   childRuns,
   task,
   personaName,
+  gitStatus,
 }: Props) {
   const router = useRouter();
   const confirm = useConfirm();
@@ -155,6 +162,7 @@ export function RunView({
   const [awaitingFirstToken, setAwaitingFirstToken] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [showWorkerLog, setShowWorkerLog] = useState(false);
+  const [showGitStatus, setShowGitStatus] = useState(false);
   const [showInbox, setShowInbox] = useState(false);
   const [showChildRuns, setShowChildRuns] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -184,6 +192,14 @@ export function RunView({
   const composerDisabled = closed;
   const canCancel = status === "running" || status === "preparing";
   const canClose = !closed;
+
+  // Line/file totals for the header toggle. Only worth a badge when the
+  // snapshot found a checkout and that checkout actually changed.
+  const gitSummary = useMemo(() => {
+    if (!gitStatus?.available) return null;
+    const totals = summarizeGitStatus(gitStatus);
+    return totals.files > 0 ? totals : null;
+  }, [gitStatus]);
 
   const selectedRepo = useMemo(
     () => repositories.find((r) => r.id === run.repoId),
@@ -737,6 +753,31 @@ export function RunView({
           )}
           <button
             type="button"
+            onClick={() => setShowGitStatus((v) => !v)}
+            aria-expanded={showGitStatus}
+            title={
+              gitSummary
+                ? `${gitSummary.files} file${gitSummary.files === 1 ? "" : "s"} changed in this run's checkout`
+                : "Files this run's checkout changed, with lines added and removed"
+            }
+            className={
+              "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] transition-colors shrink-0 " +
+              (showGitStatus
+                ? "border-foreground/30 bg-muted/60 text-foreground"
+                : "border-border/60 bg-background/60 text-muted-foreground hover:text-foreground hover:bg-muted/40")
+            }
+          >
+            <FileDiff className="size-3" /> Diff
+            {gitSummary && (
+              <span className="ml-0.5 font-mono tabular-nums">
+                <span className="text-state-done">+{gitSummary.additions}</span>
+                {" "}
+                <span className="text-state-blocked">−{gitSummary.deletions}</span>
+              </span>
+            )}
+          </button>
+          <button
+            type="button"
             onClick={() => setShowInbox((v) => !v)}
             title="Agent events addressed to this run (inbox, timers, wake trail)"
             className={
@@ -837,6 +878,9 @@ export function RunView({
           )}
         </div>
 
+        {showGitStatus && (
+          <GitStatusPanel runId={run.id} initial={gitStatus} />
+        )}
         {showInbox && <InboxPanel runId={run.id} />}
         {showWorkerLog && <WorkerLogPanel runId={run.id} />}
       </header>
