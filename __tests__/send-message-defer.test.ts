@@ -95,6 +95,32 @@ describe("sendMessageToRun inside an isolate-mode worker", () => {
     expect(after?.workerScope).toBe(`fake-runner-${run.id}`); // claim intact
     expect(spy).not.toHaveBeenCalled();
   });
+
+  it("queues a completed child while its old worker is still tearing down", async () => {
+    workerIsolateEnv();
+    const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
+    const run = await create({ goal: "<implement>", defer: true });
+    await db.update(agentSessions)
+      .set({ status: "completed", branch: "claude/t-x-race", sdkSessionId: "sess-race" })
+      .where(eq(agentSessions.id, run.id));
+    installFakeRunnerProvider();
+    await setFakeRunLiveness(run.id, { status: "alive", incarnation: "old-worker" }, "old-worker");
+
+    await fireAppend(run.id, "publish the completed branch");
+
+    const after = await get(run.id);
+    expect(after?.status).toBe("pending");
+    expect(after?.attempt).toBe(run.attempt + 1);
+    // Terminal cleanup still owns the old generation. The server pump must wait
+    // for its fenced clearChannelClaim before dispatching the replacement.
+    expect(after?.workerScope).toBe(`fake-runner-${run.id}`);
+    expect(after?.completedAt).toBeNull();
+    expect(spy).not.toHaveBeenCalled();
+    const deferred = await db.select().from(agentEvents)
+      .where(and(eq(agentEvents.sessionId, run.id), eq(agentEvents.type, "runner_deferred")))
+      .orderBy(desc(agentEvents.id)).limit(1);
+    expect(deferred.length).toBe(1);
+  });
 });
 
 describe("sendMessageToRun on the server (unchanged behavior)", () => {

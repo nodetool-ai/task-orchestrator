@@ -1154,15 +1154,38 @@ export async function deferRunForServerDispatch(
   const [instance] = await db.select({ incarnation: runnerInstances.workerIncarnation })
     .from(runnerInstances).where(eq(runnerInstances.runId, runId));
   const verdict = before ? (await resolveLiveness(runId)).verdict : "unowned";
-  // Never park a run whose worker may still be alive (unknown is not permission).
-  if (!before || verdict === "alive" || verdict === "unknown") return false;
+  const runnerMayStillOwnTurn = verdict === "alive" || verdict === "unknown";
+  const terminalFollowUp = before?.deliveryVersion === 2 &&
+    ["completed", "failed", "budget_exhausted"].includes(before.status);
+  // A live NON-TERMINAL worker owns the turn and will drain the message itself.
+  // A terminal run is different: its worker has already committed the outcome
+  // and is only tearing its provider generation down, so it will never claim a
+  // newly-arrived input. Queue that follow-up now while preserving the old
+  // worker_scope; the server pump will see `pending`, wait until terminal
+  // cleanup releases the scope, then dispatch the next generation. Returning
+  // false here used to strand messages on `completed` runs forever (run 302).
+  if (!before || (runnerMayStillOwnTurn && !terminalFollowUp)) return false;
   const parked = await db.transaction(async tx => {
     await lockSourceTx(tx, runId);
     const [current] = await tx.select().from(agentSessions).where(eq(agentSessions.id, runId)).for("update");
-    const renew = current?.deliveryVersion === 2 && ["completed", "failed"].includes(current.status);
+    const renew = current?.deliveryVersion === 2 &&
+      ["completed", "failed", "budget_exhausted"].includes(current.status);
+    // The provider observation above is only permission to queue the exact
+    // terminal generation we observed. If another caller already resumed it,
+    // leave that new owner/status alone; it will consume the durable input.
+    if (runnerMayStillOwnTurn && (!renew || current.status !== before.status || current.attempt !== before.attempt)) {
+      return [];
+    }
     const resumedAt = new Date();
     const written = await tx.update(agentSessions)
-    .set({ status: "pending", pendingSince: resumedAt, workerScope: null, ...(renew ? {
+    .set({
+      status: "pending",
+      pendingSince: resumedAt,
+      // Preserve a terminal generation's live teardown ownership. Its fenced
+      // clearChannelClaim releases this after cleanup; clearing it here would
+      // let the pump race a replacement generation against that cleanup.
+      ...(runnerMayStillOwnTurn ? {} : { workerScope: null }),
+      ...(renew ? {
       attempt: current.attempt + 1,
       result: null,
       parkReason: null,
@@ -3575,7 +3598,21 @@ export async function* sendMessageToRun(opts: {
         // Machine. Running this turn in-process would put the child's build
         // tooling inside the parent's Machine — the 2026-07-05 incident where
         // one typecheck OOM wedged the parent and every in-flight child.
-        await deferRunForServerDispatch(runId, run.parentRunId ?? null);
+        const deferred = await deferRunForServerDispatch(runId, run.parentRunId ?? null);
+        if (!deferred) {
+          const after = await get(runId);
+          // A live non-terminal worker can legitimately win the defer race and
+          // drain this input. A run that is still terminal cannot: report the
+          // failed handoff instead of telling spawn__append_message it is
+          // running while leaving the message stranded.
+          if (after && isTerminalStatus(after.status)) {
+            yield {
+              type: "error",
+              error: `Run ${runId} accepted the message but could not queue its follow-up turn; retry the message.`,
+            };
+            return;
+          }
+        }
       } else if ((await runDispatch.dispatchRun(runId)) === "spawn-failed") {
         // Dispatch failed synchronously (admission reject, spawn error): no
         // worker will ever write to the run stream, so relaying would hang the
