@@ -177,7 +177,9 @@ async function main() {
       credential,
       endpoint,
       disconnectGraceMs: waitMs,
-      idleExitMs: Math.max(appConfig.worker.idleExitMs, waitMs),
+      // Leave a small post-abort window for the driver to spool its durable
+      // interruption outcome before onIdleExit closes the session.
+      idleExitMs: Math.max(appConfig.worker.idleExitMs, waitMs + 10_000),
       diagnostics,
       onIdleExit: () => exitAfterShutdown("idle_backstop"),
       onControllerLoss: () => exitAfterShutdown("controller_lost"),

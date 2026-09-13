@@ -213,6 +213,20 @@ describe("Sprite pool store (Postgres)", () => {
     expect(reservations.filter(Boolean)).toHaveLength(2);
   });
 
+  it("enforces preparation concurrency across independent controllers", async () => {
+    const reservations = await Promise.all(Array.from({ length: 6 }, () =>
+      spritesPoolStore.reservePreparation({
+        fingerprint: "fp-global-preparation-cap",
+        maxTotal: 0,
+        maxReady: 6,
+        maxPreparing: 2,
+        leaseMs: 60_000,
+      })));
+
+    expect(reservations.filter(Boolean)).toHaveLength(2);
+    await expect(spritesPoolStore.countCapacity()).resolves.toMatchObject({ preparing: 2 });
+  });
+
   it("honors failed preparation backoff for the same fingerprint", async () => {
     const row = await spritesPoolStore.reservePreparation({ spriteName: `pool-backoff-${crypto.randomUUID()}`, fingerprint: "fp-backoff", checkpointId: "pending", baselineManifest: {}, leaseMs: 30_000 }, 0);
     await spritesPoolStore.failPreparation({ reservationId: String(row!.id), leaseToken: String(row!.leaseToken), reason: "provider unavailable", retryAt: Date.now() + 30_000 });

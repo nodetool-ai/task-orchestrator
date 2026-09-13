@@ -145,6 +145,25 @@ describe("mapCodexEvent", () => {
     });
   });
 
+  it("preserves structured MCP error content when the SDK omits error.message", () => {
+    const [, result] = mapCodexEvent({
+      type: "item.completed",
+      item: {
+        id: "mcp-3",
+        type: "mcp_tool_call",
+        server: "task_orch",
+        tool: "codeact_execute",
+        arguments: {},
+        status: "failed",
+        result: { content: [{ type: "text", text: "checkpoint timed out after 600000ms" }] },
+      },
+    });
+    expect((result as any).message.content[0]).toMatchObject({
+      is_error: true,
+      content: [{ type: "text", text: "checkpoint timed out after 600000ms" }],
+    });
+  });
+
   it("closes the pair for web_search and todo_list so neither renders as pending", () => {
     expect(mapCodexEvent({ type: "item.completed", item: { id: "w", type: "web_search", query: "q" } })).toHaveLength(2);
     const [use, result] = mapCodexEvent({

@@ -97,6 +97,7 @@ const TOOL_OPS: OperationEntry[] = [
   t("snapshots", "snapshots_retire", "Sprite retire", "app.snapshots.retire"),
   t("snapshots", "snapshots_listCheckpoints", "Sprite listCheckpoints", "app.snapshots.listCheckpoints"),
   t("snapshots", "snapshots_checkpoint", "Sprite checkpoint", "app.snapshots.checkpoint"),
+  t("snapshots", "snapshots_checkpointStatus", "Sprite checkpoint status", "app.snapshots.checkpointStatus"),
   t("sprites", "sprites_list", "Sprite list", "app.sprites.list"),
   t("sprites", "sprites_exec", "Sprite exec", "app.sprites.exec"),
   t("sprites", "sprites_startCommand", "Sprite startCommand", "app.sprites.startCommand"),
@@ -153,6 +154,7 @@ const TOOL_OPS: OperationEntry[] = [
   t("sessions", "get_session", "Get a session and event tail", "app.sessions.get"),
   t("sessions", "start_session", "Start a background agent on a task", "app.sessions.start"),
   t("sessions", "await_session", "Legacy wait alias; new runs subscribe and receive conversation events", "app.sessions.await"),
+  t("sessions", "interrupt_session", "Non-destructively interrupt an active session turn", "app.sessions.interrupt"),
   t("sessions", "cancel_session", "Cancel a running session", "app.sessions.cancel"),
   // Planning (planning profile)
   t("planning", "propose_spec", "Present a drafted spec for review", "app.planning.proposeSpec"),
@@ -257,6 +259,7 @@ const REST_OPS: OperationEntry[] = [
   r("sessions", "GET /api/sessions", "List agent sessions", "alias", { aliasOf: "tool:list_sessions" }),
   r("sessions", "GET /api/sessions/:id", "Get a session + events", "alias", { aliasOf: "tool:get_session" }),
   r("sessions", "POST /api/sessions/:id/cancel", "Cancel a session", "alias", { aliasOf: "tool:cancel_session" }),
+  r("sessions", "POST /api/sessions/:id/interrupt", "Interrupt a session turn", "alias", { aliasOf: "tool:interrupt_session" }),
   r("sessions", "POST /api/sessions/:id/resume", "Resume a prior session", "sdk", { sdk: "app.sessions.resume" }),
   // Schedules
   r("schedules", "GET /api/schedules", "List schedules", "sdk", { sdk: "app.schedules.list" }),
@@ -427,7 +430,7 @@ const ORCHESTRATOR_BARE_NAMES = new Set<string>([
   "add_note", "list_notes",
   "list_criteria", "add_criterion", "check_criterion", "uncheck_criterion", "update_criterion", "delete_criterion",
   "list_attachments", "get_attachment", "add_attachment", "delete_attachment",
-  "list_sessions", "get_session", "start_session", "await_session", "cancel_session",
+  "list_sessions", "get_session", "start_session", "await_session", "interrupt_session", "cancel_session",
 ]);
 
 const ORCHESTRATOR_PREFIXED = TOOL_OPS

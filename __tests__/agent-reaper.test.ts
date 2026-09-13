@@ -2,9 +2,8 @@
 //
 // Tests for the orphan reaper in lib/agent.ts. The reaper runs on module
 // import in every process sharing the DB and must not aggressively reap
-// valid pending runs. Pending rows are the dispatch queue and remain young
-// until actually dispatched; only stale ones (older than a grace period)
-// indicate their owning process died before dispatch.
+// valid pending runs. Pending rows are the durable dispatch queue; their age
+// does not imply abandonment because provider capacity waits can be long.
 
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
@@ -63,9 +62,9 @@ describe("reapOrphans (orphan reaper in lib/agent.ts)", () => {
     expect(after?.error).toBeNull();
   });
 
-  it("reaps an old pending implement run without a live lease", async () => {
-    // An old pending run indicates its owning process died before dispatch.
-    // After the grace period, it is safe to assume the process is gone.
+  it("spares an old pending implement run for the durable dispatch pump", async () => {
+    // Capacity waits can exceed the old fixed grace period. The pump retries
+    // these rows on every process, including after a restart.
     const taskId = await createTestTask();
     const run = await create({
       goal: "<implement>",
@@ -80,9 +79,9 @@ describe("reapOrphans (orphan reaper in lib/agent.ts)", () => {
     await _reapOrphansForTest();
 
     const after = await get(run.id);
-    expect(after?.status).toBe("failed");
-    expect(after?.error).toMatch(/[Oo]rphaned/);
-    expect(after?.completedAt).not.toBeNull();
+    expect(after?.status).toBe("pending");
+    expect(after?.error).toBeNull();
+    expect(after?.completedAt).toBeNull();
   });
 
   it("reaps a dead preparing run without a recoverable branch", async () => {

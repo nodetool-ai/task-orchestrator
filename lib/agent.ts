@@ -60,12 +60,6 @@ declare global {
 // (empty test DBs never enter the filter callback, so the suite stayed green).
 const NON_TERMINAL_BUT_DEAD = ["pending", "preparing", "running"];
 
-// Grace period for pending rows before treating as orphaned. Fresh pending rows
-// are the dispatch queue — owned by the creating process's kickoff or the
-// detached pump in lib/run-dispatch.ts. Only an old one indicates the owning
-// process died before dispatch.
-const PENDING_GRACE_PERIOD_MS = 15 * 60_000; // 15 minutes
-
 if (!insideWorker() && !globalThis.__agentReaperRan) {
   globalThis.__agentReaperRan = true;
   reapOrphans().catch((err) => {
@@ -145,12 +139,11 @@ async function reapOrphans() {
     ) {
       return false;
     }
-    // pending rows are fresh dispatch-queue entries; only reap if genuinely
-    // stale. Measure from pending_since (the pump re-defers long-lived runs into
-    // `pending` and stamps it), falling back to startedAt.
+    // Pending rows belong to the durable dispatch queue, regardless of age.
+    // Capacity deferrals can legitimately outlive any fixed grace period; the
+    // boot/pending pump owns retrying them after the creating process exits.
     if (row.status === "pending") {
-      const since = (row.pendingSince ?? row.startedAt).getTime();
-      return now.getTime() - since > PENDING_GRACE_PERIOD_MS;
+      return false;
     }
     return true;
   });
@@ -457,6 +450,15 @@ export async function cancelSession(sessionId: number): Promise<AgentSessionFull
   if (isTerminalStatus(session.status)) return session;
   const cancelled = await runs.cancel(sessionId);
   return runs.toAgentSessionFull(cancelled);
+}
+
+/** Stop only the current model turn while retaining the session and checkout. */
+export async function interruptSession(sessionId: number): Promise<AgentSessionFull> {
+  const session = await getSession(sessionId);
+  if (!session) throw new repo.RepoError(`Session ${sessionId} not found`, 404);
+  const interrupted = await runs.interrupt(sessionId);
+  if (!interrupted) throw new repo.RepoError(`Session ${sessionId} has no active turn to interrupt`, 409);
+  return runs.toAgentSessionFull((await runs.get(sessionId))!);
 }
 
 // ──────────────────────────────────────────────────────────

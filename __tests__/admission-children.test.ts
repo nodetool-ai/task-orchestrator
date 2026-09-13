@@ -11,7 +11,7 @@ import { eq } from "drizzle-orm";
 import { db } from "../db";
 import { agentSessions } from "../db/schema";
 import { create, get } from "../lib/runs";
-import { dispatchRun } from "../lib/run-dispatch";
+import { dispatchRun, hasActiveRunSupervisor } from "../lib/run-dispatch";
 
 const KNOBS = ["TASK_ORCH_WORKER_IMAGE"];
 afterEach(() => {
@@ -103,5 +103,37 @@ describe("dispatchRun admission: parent-blocked-on-child deadlock breaker", () =
     const row = (await get(child.id))!;
     expect(row.status).toBe("failed");
     expect(row.error).toMatch(/insufficient host memory/i);
+  });
+});
+
+describe("pending child max-defer protection", () => {
+  it("protects descendants of a parked supervisor without a worker claim", async () => {
+    const supervisor = await create({ goal: "<implement>", defer: true });
+    await db.update(agentSessions).set({ status: "parked", workerScope: null, parkReason: "waiting" })
+      .where(eq(agentSessions.id, supervisor.id));
+    const middle = await create({ goal: "<implement>", defer: true, parentRunId: supervisor.id });
+    await db.update(agentSessions).set({ status: "completed" }).where(eq(agentSessions.id, middle.id));
+    const leaf = await create({ goal: "<implement>", defer: true, parentRunId: middle.id });
+
+    expect(await hasActiveRunSupervisor((await get(leaf.id))!)).toBe(true);
+  });
+
+  it("does not protect a child when every ancestor is terminal", async () => {
+    const parent = await create({ goal: "<implement>", defer: true });
+    await db.update(agentSessions).set({ status: "failed" }).where(eq(agentSessions.id, parent.id));
+    const child = await create({ goal: "<implement>", defer: true, parentRunId: parent.id });
+
+    expect(await hasActiveRunSupervisor((await get(child.id))!)).toBe(false);
+  });
+
+  it("protects a child while its running supervisor cannot be proven dead", async () => {
+    const parent = await create({ goal: "<implement>", defer: true });
+    await db.update(agentSessions).set({ status: "running", workerScope: `parent-${parent.id}-scope` })
+      .where(eq(agentSessions.id, parent.id));
+    installFakeRunnerProvider();
+    await setFakeRunLiveness(parent.id, { status: "unknown", detail: "provider unavailable" }, undefined);
+    const child = await create({ goal: "<implement>", defer: true, parentRunId: parent.id });
+
+    expect(await hasActiveRunSupervisor((await get(child.id))!)).toBe(true);
   });
 });

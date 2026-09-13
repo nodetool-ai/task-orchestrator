@@ -140,11 +140,86 @@ export function dependencyPreparationCommand(opts: {
 
 function nodeCommand(program: string): string { return `node -e ${shellQuote(program)}`; }
 
+const EXEC_FAILURE_DIAGNOSTIC_BYTES = 2 * 1024;
+
+const SIGNAL_EXITS: Readonly<Record<number, string>> = {
+  129: "SIGHUP",
+  130: "SIGINT",
+  131: "SIGQUIT",
+  132: "SIGILL",
+  133: "SIGTRAP",
+  134: "SIGABRT",
+  135: "SIGBUS",
+  136: "SIGFPE",
+  137: "SIGKILL",
+  138: "SIGUSR1",
+  139: "SIGSEGV",
+  140: "SIGUSR2",
+  141: "SIGPIPE",
+  142: "SIGALRM",
+  143: "SIGTERM",
+};
+
+// Never include the command or environment in a failure diagnostic. Commands
+// may contain credential helpers, while even otherwise-useful stderr can echo
+// a token. Keep a deliberately small redaction layer here as the last boundary
+// before provider output enters durable pool failure state.
+function redactDiagnostic(value: string): string {
+  return value
+    .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|sk-(?:proj-)?[A-Za-z0-9_-]{16,})\b/g, "[REDACTED_TOKEN]")
+    .replace(/(\b(?:authorization|proxy-authorization)\s*:\s*bearer\s+)[^\s]+/gi, "$1[REDACTED]")
+    .replace(/(\b(?:GH_TOKEN|GITHUB_TOKEN|SPRITES_TOKEN|TASK_ORCH_SPRITES_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY)=)[^\s]+/g, "$1[REDACTED]");
+}
+
+function execFailureDiagnostic(result: { stdout: string; stderr: string }): string {
+  const output = [
+    result.stdout ? `stdout:\n${result.stdout}` : "",
+    result.stderr ? `stderr:\n${result.stderr}` : "",
+  ].filter(Boolean).join("\n").trimEnd();
+  if (!output) return "";
+  const redacted = redactDiagnostic(output);
+  const bytes = Buffer.from(redacted);
+  const tail = bytes.length > EXEC_FAILURE_DIAGNOSTIC_BYTES
+    ? bytes.subarray(bytes.length - EXEC_FAILURE_DIAGNOSTIC_BYTES).toString("utf8")
+    : redacted;
+  return `\n${tail}`;
+}
+
+const RESOURCE_DIAGNOSTIC_COMMAND = String.raw`set +e
+printf '%s\n' '[resource snapshot]'
+awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/{print}' /proc/meminfo 2>/dev/null
+for f in /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.pressure /proc/pressure/memory /proc/pressure/io; do
+  if [ -r "$f" ]; then printf '%s\n' "[$f]"; head -c 1024 "$f"; printf '\n'; fi
+done
+true`;
+
+async function resourceFailureDiagnostic(client: SpritesClient, name: string): Promise<string> {
+  try {
+    const result = await client.exec(name, {
+      cmd: RESOURCE_DIAGNOSTIC_COMMAND,
+      timeoutMs: 10_000,
+      maxOutputBytes: EXEC_FAILURE_DIAGNOSTIC_BYTES,
+    });
+    if (result.exitCode !== 0) return "";
+    return execFailureDiagnostic(result);
+  } catch {
+    // Diagnostics must never replace the original build failure.
+    return "";
+  }
+}
+
 async function execChecked(client: SpritesClient, name: string, cmd: string, label: string,
   options: { env?: Record<string, string>; timeoutMs?: number } = {}): Promise<void> {
   await logSpritePhase(label, { spriteName: name }, async () => {
     const result = await client.exec(name, { cmd, ...options });
-    if (result.exitCode !== 0) throw Object.assign(new Error(`${label} failed (exit ${result.exitCode})`), { exitCode: result.exitCode });
+    if (result.exitCode !== 0) {
+      const signal = SIGNAL_EXITS[result.exitCode];
+      const resources = await resourceFailureDiagnostic(client, name);
+      throw Object.assign(
+        new Error(`${label} failed (exit ${result.exitCode}${signal ? `, ${signal}` : ""})${execFailureDiagnostic(result)}${resources}`),
+        { exitCode: result.exitCode, ...(signal ? { signal } : {}) },
+      );
+    }
   });
 }
 

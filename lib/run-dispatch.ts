@@ -37,7 +37,7 @@ import {
   type RunnerAdmissionInput,
 } from "./runner/provider";
 import { recordDispatch, recordRunnerEvent, timeRunnerPhase } from "./runner/telemetry";
-import { SpriteCapacityError } from "./runner/sprites-capacity";
+import { isSpriteCapacityError } from "./runner/sprites-capacity";
 import { isTerminalStatus } from "./types";
 import { newChannelInstanceId } from "./worker-channel/credential";
 import {
@@ -634,6 +634,13 @@ async function dispatchRunInner(
         })
         .from(runnerInstances)
         .where(eq(runnerInstances.runId, runId));
+      // A capacity-only attempt advances the generation high-water mark but
+      // clears spriteName because no provider resource was created. Preserve
+      // that monotonic generation without presenting it to the provider as a
+      // retained environment that must be resumed. Otherwise the retry sees
+      // its freshly pre-seeded deterministic name, probes a Sprite that never
+      // existed, and fails closed instead of waiting for the warm pool.
+      const hasPreviousSprite = Boolean(existing?.spriteName);
       const nextGeneration = Math.max(1, (existing?.workerGeneration ?? 0) + 1);
       const channelInstanceId = newChannelInstanceId();
       const providerOperationId = randomUUID();
@@ -698,8 +705,8 @@ async function dispatchRunInner(
         channelInstanceId,
         providerOperationId,
         providerServiceName,
-        previousProviderServiceName: existing?.providerServiceName ?? null,
-        previousWorkerGeneration: existing?.workerGeneration ?? null,
+        previousProviderServiceName: hasPreviousSprite ? existing?.providerServiceName ?? null : null,
+        previousWorkerGeneration: hasPreviousSprite ? existing?.workerGeneration ?? null : null,
         deferStartedAt: priorRun?.status === "pending" ? priorRun.pendingSince ?? priorRun.startedAt : new Date(),
       };
     });
@@ -844,10 +851,19 @@ async function dispatchRunInner(
       return finish(await failCurrent(unsupportedWsProviderMessage(provider)));
     }
   } catch (err) {
-    if (err instanceof SpriteCapacityError) {
+    if (isSpriteCapacityError(err)) {
       const deferred = await db.transaction(async (tx) => {
-        const rows = await tx.update(runnerInstances).set({ state: "gone", spriteName: null,
-          generationState: "stopped", providerOperationId: null }).where(and(
+        const rows = await tx.update(runnerInstances).set({
+          state: "gone",
+          spriteName: null,
+          generationState: "stopped",
+          providerOperationId: null,
+          providerServiceName: null,
+          channelInstanceId: null,
+          channelEndpoint: null,
+          workerIncarnation: null,
+          controllerId: null,
+        }).where(and(
           eq(runnerInstances.runId, runId), eq(runnerInstances.workerGeneration, outcome.workerGeneration),
           eq(runnerInstances.providerOperationId, outcome.providerOperationId),
         )).returning({ runId: runnerInstances.runId });
@@ -1460,6 +1476,34 @@ const DEFAULT_MAX_DEFER_MS = 30 * 60_000;
 const PUMP_KEY = "__taskOrchPendingPump";
 const PUMP_TICK_KEY = "__taskOrchPendingPumpTick";
 
+/**
+ * A child waiting for capacity is still part of useful work while any ancestor
+ * is actively supervising the tree. In particular, a parked executor has
+ * intentionally yielded until a child reports back and no longer owns a
+ * worker claim. Expiring that child solely because the pool stayed empty turns
+ * a recoverable capacity incident into an unrecoverable tree failure.
+ *
+ * Provider `unknown` is treated as potentially alive, matching the system-wide
+ * liveness rule. The bounded/visited walk also makes legacy malformed cycles
+ * harmless rather than letting them wedge the pump.
+ */
+export async function hasActiveRunSupervisor(run: Pick<RunRow, "parentRunId">): Promise<boolean> {
+  let parentId = run.parentRunId;
+  const visited = new Set<number>();
+  for (let depth = 0; parentId != null && depth < 32 && !visited.has(parentId); depth++) {
+    visited.add(parentId);
+    const parent = await runs().get(parentId);
+    if (!parent) return false;
+    if (parent.status === "parked") return true;
+    if (["preparing", "running"].includes(parent.status)) {
+      const verdict = (await resolveLiveness(parent.id)).verdict;
+      if (verdict !== "dead") return true;
+    }
+    parentId = parent.parentRunId;
+  }
+  return false;
+}
+
 function pumpIntervalMs(): number {
   return intEnv("TASK_ORCH_PENDING_PUMP_MS", DEFAULT_PUMP_MS);
 }
@@ -1516,6 +1560,17 @@ async function pumpTick(): Promise<void> {
     // no stamp and is measured from startedAt (≈ its enqueue time).
     const pendingSince = run.pendingSince ?? run.startedAt;
     if (maxDeferMs > 0 && pendingSince && now - pendingSince.getTime() > maxDeferMs) {
+      // A child/tree run with an active or deliberately parked supervisor is a
+      // recoverable capacity wait. Keep it queued; the supervisor may be
+      // waiting on precisely this run and terminal failure here would collapse
+      // the tree based only on elapsed wall time. Standalone runs and children
+      // whose whole ancestor chain is terminal/dead retain the configured
+      // finite queue bound.
+      if (await hasActiveRunSupervisor(run)) {
+        const r = await dispatchRun(id);
+        if (r === "deferred") break;
+        continue;
+      }
       // Atomically take the terminal transition in ONE guarded write (status
       // column + status event in the same tx). Guarded against a claim that
       // raced our get() above: only fail a run still parked in 'pending' with no

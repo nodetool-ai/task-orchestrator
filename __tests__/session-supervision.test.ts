@@ -37,6 +37,16 @@ describe("replacement supervision", () => {
       title: "Observe active tooling",
     });
     const child = await startSession({ taskId: task.id });
+    await db.insert(runTurns).values({
+      id: randomUUID(),
+      runId: child.id,
+      ordinal: 1,
+      attempt: (await runs.get(child.id))!.attempt,
+      state: "active",
+      inputManifest: [],
+      executionGeneration: 1,
+      startedAt: new Date(Date.now() - 1_000),
+    });
     await db.insert(agentMessages).values({
       runId: child.id,
       role: "agent",
@@ -151,6 +161,43 @@ describe("replacement supervision", () => {
     expect(input).toMatchObject({ status: "pending", assignedTurnId: null, messageId: message.id, inputSeq: 1 });
     expect(turn.state).toBe("superseded");
     expect((await runs.get(prior.id))!.startedAt.getTime()).toBeGreaterThanOrEqual(before.getTime());
+  });
+
+  it("starts a renewed attempt with a fresh queue clock and no terminal diagnostics", async () => {
+    const { task, prior } = await fixture();
+    const old = new Date(Date.now() - 60 * 60 * 1_000);
+    await db.update(agentSessions).set({
+      status: "failed",
+      error: "old infrastructure failure",
+      pendingReason: "old capacity wait",
+      pendingSince: old,
+      claimedAt: old,
+      cancelRequested: 1,
+      workerLog: "old worker log",
+      workerExitCode: 137,
+      completedAt: old,
+    }).where(eq(agentSessions.id, prior.id));
+
+    await startSession({ taskId: task.id, resumeOf: prior.id });
+    const resumed = (await runs.get(prior.id))!;
+
+    expect(resumed).toMatchObject({
+      id: prior.id,
+      status: "pending",
+      attempt: 2,
+      error: null,
+      pendingReason: null,
+      claimedAt: null,
+      cancelRequested: 0,
+      completedAt: null,
+    });
+    expect(resumed.pendingSince).not.toBeNull();
+    expect(resumed.pendingSince!.getTime()).toBeGreaterThan(old.getTime());
+    const [diagnostics] = await db.select({
+      workerLog: agentSessions.workerLog,
+      workerExitCode: agentSessions.workerExitCode,
+    }).from(agentSessions).where(eq(agentSessions.id, prior.id));
+    expect(diagnostics).toEqual({ workerLog: null, workerExitCode: null });
   });
 
   it("does not create a second durable session after completion without resume_of", async () => {

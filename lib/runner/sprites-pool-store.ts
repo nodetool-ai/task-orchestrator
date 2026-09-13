@@ -39,7 +39,7 @@ function expiry(ms = 10 * 60_000): Date {
  * creating a Sprite, then mark it ready only after checkpoint verification.
  */
 export const spritesPoolStore = {
-  async reservePreparation(input: BaselineInput | { fingerprint: string; maxTotal: number; leaseMs: number; maxReady?: number; fingerprintTarget?: number }, maxSprites?: number): Promise<SpritePoolEntry | { id: string; fingerprint: string; leaseToken: string; spriteName: string } | null> {
+  async reservePreparation(input: BaselineInput | { fingerprint: string; maxTotal: number; leaseMs: number; maxReady?: number; maxPreparing?: number; fingerprintTarget?: number }, maxSprites?: number): Promise<SpritePoolEntry | { id: string; fingerprint: string; leaseToken: string; spriteName: string } | null> {
     const managerInput = !("spriteName" in input);
     const baselineInput: BaselineInput = managerInput ? {
       spriteName: `pool-${crypto.randomUUID()}`,
@@ -64,6 +64,19 @@ export const spritesPoolStore = {
               AND ri.state NOT IN ('gone','stopped') AND pe.id IS NULL))::int AS count
       `);
       if (Number(countRows[0]?.count ?? 0) >= effectiveLimit) { spriteLog("sprites_pool_reservation_declined", { fingerprint: baselineInput.fingerprint, reason: "total_capacity" }, "debug"); return null; }
+      if (managerInput && input.maxPreparing !== undefined) {
+        const preparingRows = await tx.execute<{ count: number | string }>(sql`
+          SELECT count(*)::int AS count FROM sprite_pool_entries WHERE state='preparing'
+        `);
+        if (Number(preparingRows[0]?.count ?? 0) >= Math.max(1, input.maxPreparing)) {
+          spriteLog("sprites_pool_reservation_declined", {
+            fingerprint: baselineInput.fingerprint,
+            reason: "preparation_concurrency",
+            maxPreparing: Math.max(1, input.maxPreparing),
+          }, "debug");
+          return null;
+        }
+      }
       if (readyTarget !== undefined) {
         // Failed/deleting unused resources still consume the warm budget until
         // deletion is confirmed; an API outage must not cause unbounded refill.

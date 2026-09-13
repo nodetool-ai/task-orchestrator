@@ -7,7 +7,7 @@ const log = createLogger("sprites.lifecycle");
 const keys = ["runId", "spriteName", "poolEntryId", "fingerprint", "baselineFingerprint",
   "checkpointId", "workerGeneration", "instanceId", "operationId", "serviceName",
   "phase", "outcome", "reason", "durationMs", "target", "total", "ready", "preparing",
-  "maxSprites", "inFlight", "retryAt", "retryDelayMs", "attempt", "count", "reused",
+  "maxSprites", "maxPreparing", "inFlight", "retryAt", "retryDelayMs", "attempt", "count", "reused",
   "revision", "baselineRevision", "hasTree", "hasReceipt", "errorKind", "httpStatus", "errorCode", "exitCode"] as const;
 type Key = typeof keys[number];
 export type SpriteLogFields = Partial<Record<Key, string | number | boolean | null | undefined>>;

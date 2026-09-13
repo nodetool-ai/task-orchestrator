@@ -1210,6 +1210,19 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
   },
 
   {
+    name: "interrupt_session",
+    label: "Interrupt Session",
+    description:
+      "Non-destructively stop a session's active turn. Preserves the Sprite/worktree, dependencies, SDK session, conversation, PR and supervision. The interrupted turn receipt is retired; already-queued follow-up input is dispatched on a fresh worker generation.",
+    parameters: Type.Object({ session_id: Type.Integer() }),
+    execute: async ({ session_id }) => {
+      const result = await safe(() => agentLib.interruptSession(session_id));
+      if ("_error" in result) return errResult(`Error: ${result._error}`);
+      return ok(`Session #${result.id} turn interrupted; status: ${result.status}.`);
+    },
+  },
+
+  {
     name: "cancel_session",
     label: "Cancel Session",
     description:

@@ -131,9 +131,13 @@ function mapItem(item: any, started = false): RunEnvelope[] {
           ? (item.arguments as Record<string, unknown>)
           : {};
       const failed = item.status === "failed" || item.error != null;
+      const resultText = renderMcpContent(item.result);
       const text = failed
-        ? (item.error?.message ?? "MCP tool call failed")
-        : renderMcpContent(item.result);
+        ? codexErrorMessage(
+            item.error,
+            resultText === "(no content)" ? "MCP tool call failed" : resultText,
+          )
+        : resultText;
       return [toolUse(item.id, name, input), toolResult(item.id, text, failed)];
     }
     case "web_search": {

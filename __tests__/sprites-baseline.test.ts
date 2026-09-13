@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   SPRITE_CHECKOUT_PATH,
@@ -146,6 +146,41 @@ describe("Sprite baseline identity", () => {
 });
 
 describe("Sprite baseline verification", () => {
+  it("retains only a bounded tail of failed command output", async () => {
+    const client = {
+      exec: vi.fn()
+        .mockResolvedValueOnce({
+          exitCode: 139,
+          stdout: `hidden-head-${"x".repeat(3_000)}`,
+          stderr: "native build crashed at the useful tail",
+        })
+        .mockResolvedValueOnce({
+          exitCode: 0,
+          stdout: "[resource snapshot]\nMemAvailable: 1024 kB\n[/sys/fs/cgroup/memory.events]\noom_kill 2\n",
+          stderr: "",
+        }),
+    } as never;
+
+    const failure = verifyBaseline(client, "fixture", manifest(), "/unused/codex");
+    await expect(failure).rejects.toThrow(/baseline verification failed \(exit 139, SIGSEGV\)/);
+    await expect(failure).rejects.toThrow(/native build crashed at the useful tail/);
+    await expect(failure).rejects.toThrow(/oom_kill 2/);
+    await expect(failure).rejects.not.toThrow(/hidden-head/);
+  });
+
+  it("redacts credential-shaped values from failed command diagnostics", async () => {
+    const client = {
+      exec: vi.fn()
+        .mockResolvedValueOnce({ exitCode: 134, stdout: "", stderr: "GH_TOKEN=ghp_1234567890abcdefghijklmnop" })
+        .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }),
+    } as never;
+
+    const failure = verifyBaseline(client, "fixture", manifest(), "/unused/codex");
+    await expect(failure).rejects.toThrow(/exit 134, SIGABRT/);
+    await expect(failure).rejects.toThrow(/GH_TOKEN=\[REDACTED\]/);
+    await expect(failure).rejects.not.toThrow(/ghp_1234567890abcdefghijklmnop/);
+  });
+
   it("executes real checks for worker, tools, and sealed manifest", async () => {
     const root = await mkdtemp(join(tmpdir(), "sprite-baseline-"));
     await mkdir(join(root, "worker/dist"), { recursive: true });

@@ -757,6 +757,8 @@ class WorkerServerImpl implements WorkerServer {
       if (this.active || this.draining || this.closed) return;
       // Do not close the outbox before the driver observes the abort. The
       // process owner records local evidence and bounds all later draining.
+      // This is infrastructure shutdown, not user cancellation; the replacement
+      // generation recovers the outstanding logical turn under the DB fences.
       if (this.config.onControllerLoss) {
         void Promise.resolve().then(() => this.config.onControllerLoss!("worker controller disconnect grace expired"))
           .catch((error) => this.logError("worker controller-loss shutdown failed", error));

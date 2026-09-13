@@ -275,7 +275,8 @@ describe("worker WebSocket supervisor", () => {
 
   it("holds the session through disconnect grace and aborts after expiry", async () => {
     const abort = vi.fn();
-    const session = fakeSession({ abort, close: vi.fn(async () => {}) });
+    const close = vi.fn(async () => {});
+    const session = fakeSession({ abort, close });
     const { server, token } = await makeServer({ session, disconnectGraceMs: 40 });
     const socket = connect(server, token);
     await openSocket(socket);
@@ -287,6 +288,9 @@ describe("worker WebSocket supervisor", () => {
     await closed(socket);
     await new Promise((resolve) => setTimeout(resolve, 80));
     expect(abort).toHaveBeenCalledWith(expect.objectContaining({ name: "WorkerShutdownError", exitReason: "controller_lost" }));
+    // Controller loss aborts without closing the outbox in the channel layer;
+    // the process owner records evidence and performs bounded shutdown.
+    expect(close).not.toHaveBeenCalled();
     void server;
   });
 

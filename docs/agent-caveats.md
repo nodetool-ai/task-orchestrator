@@ -271,9 +271,32 @@ repository whose tests require Postgres, a bounded probe can be configured as:
 Keep probes non-destructive and bounded. Failures retain only the final 2 KiB
 of command output in the diagnostic, which is enough to identify the missing
 service or tool without flooding the durable runner history.
+Keep that bound in `execChecked`, not only in readiness probes: runs 289/292
+exposed install and build exits before readiness, where an exit code without the
+command's tail made native crashes (for example signal 139) opaque.
 
 ## Reusable Sprite fences
 
+- Do not classify retryable provider conditions with `instanceof` across Next.js
+  server boundaries. Production builds may place the provider and dispatcher in
+  chunks containing different copies of the error constructor. Give the error a
+  stable code and use a structural guard; otherwise a temporary warm-pool miss can
+  be misreported as a terminal spawn failure, as happened to run 289.
+- A capacity-only allocation still advances the worker-generation high-water
+  mark, but it created no Sprite. Clear its transient runner identity and do not
+  pass that generation back as `replacesGeneration`; run 292 showed that doing so
+  falsely trips the missing-retained-filesystem fence on the next pump retry.
+- Foreground-priority pool maintenance must not suppress replenishment when a
+  queued run requires a reusable repository baseline. Those runs deliberately
+  cannot cold-spawn; skipping refill while they wait creates a permanent
+  capacity loop after every ready entry has been claimed.
+- Pending worker runs are durable queue entries, not boot orphans. Never reap
+  them based on age: a legitimate capacity wait can exceed a fixed grace period,
+  and the pending pump is responsible for retrying them across server restarts.
+- Renewing a terminal run begins a new pending episode. Reset `pending_since`
+  and clear the prior attempt's error, pending reason, claim, cancellation flag,
+  worker log, and exit code atomically with the attempt increment. Reusing the
+  old queue clock makes the max-defer guard fail the new attempt immediately.
 - Runs 283/285/286 exposed mount-relative swap reporting: `/proc/swaps` can
   report `/task-orchestrator.swap` while the same file is accessed at
   `/tmp/task-orchestrator.swap`. Resolve the mount root or file identity before

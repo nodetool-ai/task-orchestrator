@@ -38,7 +38,7 @@ export interface SpritePoolReservation {
 /** Implementations must make reserve/claim transitions atomic in the DB. */
 export interface SpritePoolStore {
   countCapacity(): Promise<{ total: number; preparing: number; ready: number; byFingerprint?: Record<string, { preparing: number; ready: number }> }>;
-  reservePreparation(input: { fingerprint: string; maxTotal: number; maxReady?: number; fingerprintTarget?: number; leaseMs: number; spriteName?: string; baselineManifest?: Record<string, unknown>; checkpointId?: string }): Promise<SpritePoolReservation | null>;
+  reservePreparation(input: { fingerprint: string; maxTotal: number; maxReady?: number; maxPreparing?: number; fingerprintTarget?: number; leaseMs: number; spriteName?: string; baselineManifest?: Record<string, unknown>; checkpointId?: string }): Promise<SpritePoolReservation | null>;
   /** Extend a live preparation lease only while the same token still owns it. */
   renewPreparation(input: { reservationId: string; leaseToken: string; leaseMs: number }): Promise<boolean>;
   completePreparation(input: { reservationId: string; leaseToken: string; fingerprint?: string; spriteName: string; checkpointId: string; baselineManifest?: Record<string, unknown> }): Promise<void>;
@@ -207,6 +207,9 @@ export class SpritePoolManager {
         fingerprint,
         maxTotal: this.maxSprites,
         maxReady: this.target,
+        // `inFlight` is process-local. Persist the same cap into the atomic
+        // reservation so concurrent controllers/replicas cannot each spend it.
+        maxPreparing: this.maxConcurrent,
         fingerprintTarget: this.fingerprintTargets?.(fingerprint),
         leaseMs: this.leaseMs,
         spriteName: this.spriteName(fingerprint),
@@ -320,6 +323,7 @@ export function createDatabaseSpritePoolStore(): SpritePoolStore {
         baselineManifest: input.baselineManifest,
         leaseMs: input.leaseMs,
         maxReady: input.maxReady,
+        maxPreparing: input.maxPreparing,
         fingerprintTarget: input.fingerprintTarget,
         baselineClass: input.baselineManifest.dependency ? "repository" : "generic",
       }, input.maxTotal || Number.MAX_SAFE_INTEGER);
@@ -409,7 +413,11 @@ export function requestSpritePoolRefill(client: SpritesClient, options: SpritePo
 /** One provider maintenance pass used by create/sweep paths. Deletion is
  * fenced in the DB before the remote call and finalized only after a confirmed
  * provider delete. Inspection errors leave the row pending. */
-export async function requestSpritePoolMaintenance(client: SpritesClient, manager: SpritePoolManager): Promise<void> {
+export async function requestSpritePoolMaintenance(
+  client: SpritesClient,
+  manager: SpritePoolManager,
+  options: { refillWhileQueued?: boolean } = {},
+): Promise<void> {
   await manager.reconcile();
   await manager.drain();
   const rows = await databaseStore.listActive();
@@ -436,7 +444,7 @@ export async function requestSpritePoolMaintenance(client: SpritesClient, manage
     .leftJoin(runnerInstances, eq(runnerInstances.runId, agentSessions.id))
     .where(and(eq(agentSessions.status, "pending"), eq(agentSessions.runtime, "worker"),
       or(isNull(runnerInstances.spriteName), eq(runnerInstances.state, "gone")))).limit(1);
-  if (waiting) {
+  if (waiting && !options.refillWhileQueued) {
     spriteLog("sprites_pool_refill_skipped", { reason: "queued_run_priority", runId: waiting.id }, "debug");
     return;
   } // Foreground demand gets newly freed capacity first.

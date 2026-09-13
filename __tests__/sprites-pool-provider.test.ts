@@ -52,6 +52,17 @@ describe("Sprite pool provider integration", () => {
     await requestSpritePoolMaintenance(client(), manager);
     expect(refill).toHaveBeenCalledTimes(bound ? 1 : 0);
   });
+
+  it("continues refill while a queued run waits for a required repository baseline", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
+    await db.update(agentSessions).set({ status: "pending", runtime: "worker" }).where(eq(agentSessions.id, run.id));
+    const manager = new SpritePoolManager({ store: createDatabaseSpritePoolStore(), target: 0 });
+    const refill = vi.spyOn(manager, "requestRefill").mockResolvedValue(undefined);
+
+    await requestSpritePoolMaintenance(client(), manager, { refillWhileQueued: true });
+
+    expect(refill).toHaveBeenCalledTimes(1);
+  });
   it("prepares and checkpoints only after baseline verification", async () => {
     const c = client();
     const refill = requestSpritePoolRefill(c, { baseline: manifest, workerSha: manifest.workerBundleSha, bundleUrl: "https://example/worker.tgz", swapMb: 4096 });

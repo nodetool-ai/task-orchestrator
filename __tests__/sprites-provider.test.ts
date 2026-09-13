@@ -994,11 +994,12 @@ describe("SpritesRunnerProvider sweep orphan reaper", () => {
     const provider = new SpritesRunnerProvider(fakeSpritesClient({ listAllSprites: vi.fn(async () => []) }));
 
     await provider.sweep();
+    await provider.sweep();
 
     expect((await db.select().from(runnerInstances).where(eq(runnerInstances.runId, run.id)))[0])
       .toMatchObject({ state: "gone", spriteName: null, generationState: "stopped", providerOperationId: null });
     const events = await db.select().from(agentEvents).where(eq(agentEvents.sessionId, run.id));
-    expect(events.some((event) => event.type === "runner_mapping_reconciled")).toBe(true);
+    expect(events.filter((event) => event.type === "runner_mapping_reconciled")).toHaveLength(1);
   });
 
   it("destroys an expired terminal warm Sprite without waking its worker service", async () => {

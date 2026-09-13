@@ -41,6 +41,7 @@ describe("SpritePoolManager", () => {
     const running = manager.requestRefill();
     await vi.waitFor(() => expect(refill).toHaveBeenCalledTimes(2));
     expect(manager.activeRefills).toBe(2);
+    expect(s.reservePreparation).toHaveBeenCalledWith(expect.objectContaining({ maxPreparing: 2 }));
     release.forEach((resolve) => resolve());
     await running;
     expect(s.completePreparation).toHaveBeenCalledTimes(2);

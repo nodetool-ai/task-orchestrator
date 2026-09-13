@@ -8,6 +8,8 @@ import { codeActCatalogForContext } from "../lib/codeact/catalog";
 import { executeAppCodeAct } from "../lib/codeact/app-bridge";
 import { SPRITE_TOOLS } from "../lib/sprite-tools";
 import {
+  checkpointRun,
+  checkpointRunStatus,
   spriteCommandStatus,
   startSpriteCommand,
 } from "../lib/sprite-commands";
@@ -20,6 +22,7 @@ const sprites = vi.hoisted(() => ({
 
 vi.mock("../lib/runner/sprites-client", () => ({
   makeSpritesClient: () => sprites,
+  SPRITE_CHECKPOINT_TIMEOUT_MS: 10 * 60_000,
 }));
 
 const COMMAND_ID = "11111111-1111-4111-8111-111111111111";
@@ -72,7 +75,7 @@ describe("Sprite operations in CodeAct", () => {
     };
 
     expect(codeActCatalogForContext(allowedContext, {}, { query: "app.sprites." }).operations).toHaveLength(4);
-    expect(codeActCatalogForContext(allowedContext, {}, { query: "app.snapshots." }).operations).toHaveLength(6);
+    expect(codeActCatalogForContext(allowedContext, {}, { query: "app.snapshots." }).operations).toHaveLength(7);
     expect(codeActCatalogForContext({
       ...allowedContext,
       capabilities: appCapabilitiesForTools(denied),
@@ -109,6 +112,57 @@ describe("Sprite operations in CodeAct", () => {
       repoId: "R-default",
       directory: "/mnt/session/repo",
     })]);
+  });
+});
+
+describe("owned Sprite checkpoints", () => {
+  it("submits asynchronously and exposes completion through checkpointStatus", async () => {
+    const owned = await seedRun("checkpoint@example.com");
+    let release!: (value: { id: string; comment: string }) => void;
+    sprites.listCheckpoints.mockResolvedValue([]);
+    sprites.checkpoint.mockReturnValue(new Promise((resolve) => { release = resolve; }));
+    const input = { runId: owned.runId, generation: owned.generation,
+      operationId: "22222222-2222-4222-8222-222222222222", comment: "recover me" };
+
+    await expect(checkpointRun(context(owned.userId), input)).resolves.toMatchObject({ status: "submitted" });
+    expect(sprites.checkpoint).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(sprites.checkpoint).toHaveBeenCalledTimes(1));
+    const providerComment = sprites.checkpoint.mock.calls[0][1];
+    release({ id: "checkpoint-7", comment: providerComment });
+    await vi.waitFor(async () => expect(await checkpointRunStatus(context(owned.userId), input))
+      .toMatchObject({ status: "completed", checkpointId: "checkpoint-7" }));
+  });
+
+  it("does not launch a duplicate for a repeated operation ID", async () => {
+    const owned = await seedRun("checkpoint-repeat@example.com");
+    sprites.listCheckpoints.mockResolvedValue([]);
+    sprites.checkpoint.mockResolvedValue({ id: "checkpoint-8" });
+    const input = { runId: owned.runId, generation: owned.generation,
+      operationId: "33333333-3333-4333-8333-333333333333", comment: "once" };
+
+    await checkpointRun(context(owned.userId), input);
+    await vi.waitFor(async () => expect(await checkpointRunStatus(context(owned.userId), input))
+      .toMatchObject({ status: "completed" }));
+    await checkpointRun(context(owned.userId), input);
+    expect(sprites.checkpoint).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists detailed redacted provider failures for inspection", async () => {
+    const owned = await seedRun("checkpoint-error@example.com");
+    sprites.listCheckpoints.mockResolvedValue([]);
+    sprites.checkpoint.mockRejectedValue(Object.assign(
+      new Error("Sprites API error 507: disk full token=super-secret-value"), { status: 507 },
+    ));
+    const input = { runId: owned.runId, generation: owned.generation,
+      operationId: "44444444-4444-4444-8444-444444444444" };
+
+    await checkpointRun(context(owned.userId), input);
+    await vi.waitFor(async () => expect(await checkpointRunStatus(context(owned.userId), input))
+      .toMatchObject({ status: "failed", retryable: true }));
+    const status = await checkpointRunStatus(context(owned.userId), input);
+    expect(status.error).toContain("HTTP 507");
+    expect(status.error).toContain("disk full");
+    expect(status.error).not.toContain("super-secret-value");
   });
 });
 

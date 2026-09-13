@@ -111,12 +111,16 @@ Calls using an old worker generation are rejected even if a prior job survives.
 
 ## Personal run checkpoints
 
-`app.snapshots.checkpoint({runId, generation, comment})` saves a personal
-checkpoint of an owned Sprite; `listCheckpoints({runId, generation})` lists it.
-Checkpoint creation is not idempotent: after an ambiguous result, list existing
-checkpoints before retrying. Pause concurrent writers before requesting a
-consistent filesystem checkpoint. Personal checkpoints can contain run
-credentials, remain inside the owned Sprite, and are never promoted to a pool
-baseline. Restoring an active agent runner is deliberately not exposed because
-it would rewind worker-channel state. Pool restore remains controlled by the
-first-assignment lifecycle.
+`app.snapshots.checkpoint({runId, generation, operationId, comment})` submits a
+personal checkpoint of an owned Sprite and returns immediately. Choose one UUID
+per logical checkpoint and reuse that literal on retries. Inspect completion or
+the detailed provider error with
+`app.snapshots.checkpointStatus({runId, generation, operationId})`;
+`listCheckpoints({runId, generation})` lists completed checkpoints. The UUID is
+also embedded in the provider comment, so a retry after an ambiguous process
+failure discovers an already-created checkpoint rather than creating another.
+Pause concurrent writers before requesting a consistent filesystem checkpoint.
+Personal checkpoints can contain run credentials, remain inside the owned
+Sprite, and are never promoted to a pool baseline. Restoring an active agent
+runner is deliberately not exposed because it would rewind worker-channel
+state. Pool restore remains controlled by the first-assignment lifecycle.

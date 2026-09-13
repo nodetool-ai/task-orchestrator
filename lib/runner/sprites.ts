@@ -25,7 +25,7 @@ import { getEffectiveSpriteBaselines } from "./sprites-managed-config";
 import { SpritePoolManager, createDatabaseSpritePoolStore, requestSpritePoolMaintenance, requestSpritePoolRefill } from "./sprites-pool";
 import { cloneUrlFromRemote } from "../repo-checkout";
 import { recycleCompletedSprite } from "./sprites-reuse";
-import { SpriteCapacityError } from "./sprites-capacity";
+import { isSpriteCapacityError, SpriteCapacityError } from "./sprites-capacity";
 import { logSpritePhase, spriteLog, spriteErrorFields } from "./sprites-log";
 import { inspectSpriteProcess, isSpriteScopeQuiescent } from "./sprites-process-probe";
 
@@ -312,7 +312,10 @@ export class SpritesRunnerProvider implements RunnerProvider {
       const byFingerprint = new Map(specs.map((spec) => [spec.fingerprint, spec]));
       const manager = new SpritePoolManager({
         store: createDatabaseSpritePoolStore(), target: config.sprites.poolSize,
-        maxSprites: config.sprites.maxSprites, maxConcurrent: config.sprites.poolReuse ? 3 : 2, leaseMs: 30 * 60_000,
+        // Repository baselines are dependency- and build-heavy. Keep their
+        // preparation pressure below the three-Sprite warm target; the store
+        // enforces this same value globally across controller instances.
+        maxSprites: config.sprites.maxSprites, maxConcurrent: 2, leaseMs: 30 * 60_000,
         fingerprints: () => specs.filter((spec) => spec.target > 0).map((spec) => spec.fingerprint),
         fingerprintTargets: (fingerprint) => byFingerprint.get(fingerprint)?.target ?? 0,
         baseline: (fingerprint) => ({ manifest: byFingerprint.get(fingerprint)!.manifest as unknown as Record<string, unknown> }),
@@ -326,7 +329,15 @@ export class SpritesRunnerProvider implements RunnerProvider {
           })!(request);
         },
       });
-      await requestSpritePoolMaintenance(this.spritesClient, manager);
+      // Reusable repository runs cannot fall back to a cold Sprite. Keep
+      // replenishing their required baseline even while those runs are queued;
+      // otherwise the foreground-priority guard permanently starves them once
+      // every ready entry has been claimed.
+      const hasRequiredRepositoryBaseline = config.sprites.poolReuse && specs.some((spec) =>
+        spec.target > 0 && Boolean(spec.manifest.dependency) && spec.allowedUserIds?.length === 1);
+      await requestSpritePoolMaintenance(this.spritesClient, manager, {
+        refillWhileQueued: hasRequiredRepositoryBaseline,
+      });
     })().catch((error) => spriteLog("sprites_pool_maintenance_failed", spriteErrorFields(error), "warn"))
       .finally(() => { this.poolMaintenance = null; });
   }
@@ -602,7 +613,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
 
     if (!poolEntry) {
       try { poolEntry = await this.claimPoolAssignment(input); }
-      catch (error) { if (error instanceof SpriteCapacityError) throw error; await emitRunnerEvent(input.runId, "runner_pool_unavailable", { reason: error instanceof Error ? error.message : String(error) }); }
+      catch (error) { if (isSpriteCapacityError(error)) throw error; await emitRunnerEvent(input.runId, "runner_pool_unavailable", { reason: error instanceof Error ? error.message : String(error) }); }
     }
     const spriteName = poolEntry?.spriteName ?? spriteNameForRun(input.runId);
     const channelInstanceId = input.channelInstanceId ?? existing?.channelInstanceId ?? newChannelInstanceId();
@@ -645,7 +656,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
           )).returning({ runId: runnerInstances.runId });
           return updated.length > 0;
         }).catch(async (error) => {
-          if (error instanceof SpriteCapacityError) {
+          if (isSpriteCapacityError(error)) {
             const unused = await spritesPoolStore.listUnused();
             if (unused[0]) await spritesPoolStore.requestDrain(Number(unused[0].id), "release capacity for a queued run");
           }
@@ -1210,15 +1221,21 @@ export class SpritesRunnerProvider implements RunnerProvider {
         // Normalize it so operational views agree with reality. The null-name
         // and generation guards keep this from racing a fresh allocation.
         if (row.runStatus && isTerminalStatus(row.runStatus as SessionStatus)) {
-          const normalized = await this.updateInstance(row.runId, {
+          const normalized = await db.update(runnerInstances).set({
             state: "gone",
             generationState: "stopped",
             providerOperationId: null,
-          }, {
-            workerGeneration: row.workerGeneration ?? undefined,
-            spriteName: null,
-          });
-          if (normalized) await emitRunnerEvent(row.runId, "runner_mapping_reconciled", {
+          }).where(and(
+            eq(runnerInstances.runId, row.runId),
+            isNull(runnerInstances.spriteName),
+            ...(row.workerGeneration == null
+              ? []
+              : [eq(runnerInstances.workerGeneration, row.workerGeneration)]),
+            sql`(${runnerInstances.state} <> 'gone'
+              OR ${runnerInstances.generationState} <> 'stopped'
+              OR ${runnerInstances.providerOperationId} IS NOT NULL)`,
+          ));
+          if (normalized.count > 0) await emitRunnerEvent(row.runId, "runner_mapping_reconciled", {
             reason: "terminal-run-without-sprite",
           });
         }

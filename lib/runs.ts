@@ -1160,8 +1160,21 @@ export async function deferRunForServerDispatch(
     await lockSourceTx(tx, runId);
     const [current] = await tx.select().from(agentSessions).where(eq(agentSessions.id, runId)).for("update");
     const renew = current?.deliveryVersion === 2 && ["completed", "failed"].includes(current.status);
+    const resumedAt = new Date();
     const written = await tx.update(agentSessions)
-    .set({ status: "pending", pendingSince: new Date(), workerScope: null, ...(renew ? { attempt: current.attempt + 1, result: null, parkReason: null, completedAt: null } : {}) })
+    .set({ status: "pending", pendingSince: resumedAt, workerScope: null, ...(renew ? {
+      attempt: current.attempt + 1,
+      result: null,
+      parkReason: null,
+      pendingReason: null,
+      error: null,
+      completedAt: null,
+      claimedAt: null,
+      cancelRequested: 0,
+      workerLog: null,
+      workerExitCode: null,
+      startedAt: resumedAt,
+    } : {}) })
     .where(and(
       eq(agentSessions.id, runId),
       notInArray(agentSessions.status, HARD_TERMINAL_STATUSES),
@@ -1863,18 +1876,120 @@ export async function interrupt(id: number): Promise<boolean> {
   const run = await get(id);
   if (!run) return false;
   const runner = runners.get(id);
-  if (!runner) return false; // nothing in flight
-  runner.abort.abort();
-  // Keep the worktree intact (no cleanupWorktree) so the next message resumes
-  // instantly. Clear completedAt: an idle run is mid-conversation, not finished.
-  // Guard on a non-terminal status (mirror cancel()): a cancel()/close() that
-  // raced this /stop already landed the row terminal — flipping it back to 'idle'
-  // here would resurrect a cancelled/closed run. The guard matches 0 rows in that
-  // case (no write, no event), leaving the terminal landing intact.
-  await applyStatusTx(id, "idle", {
-    set: { completedAt: null },
-    guard: notInArray(agentSessions.status, TERMINAL_STATUSES),
+  if (runner) {
+    runner.abort.abort();
+    // Keep the worktree intact (no cleanupWorktree) so the next message resumes
+    // instantly. Clear completedAt: an idle run is mid-conversation, not finished.
+    // Guard on a non-terminal status (mirror cancel()): a cancel()/close() that
+    // raced this /stop already landed the row terminal — flipping it back to 'idle'
+    // here would resurrect a cancelled/closed run.
+    await applyStatusTx(id, "idle", {
+      set: { completedAt: null },
+      guard: notInArray(agentSessions.status, TERMINAL_STATUSES),
+    });
+    return true;
+  }
+
+  // Detached workers do not share the in-process AbortController. Resolve the
+  // exact provider generation and stop ONLY that process/service. stopGeneration
+  // deliberately retains a Sprite, checkout, dependencies and SDK state; unlike
+  // stopRunner/cancel it never destroys the run-scoped environment.
+  const [generation] = await db.select({
+    provider: runnerInstances.provider,
+    spriteName: runnerInstances.spriteName,
+    workerGeneration: runnerInstances.workerGeneration,
+    channelInstanceId: runnerInstances.channelInstanceId,
+    providerServiceName: runnerInstances.providerServiceName,
+  }).from(runnerInstances).where(eq(runnerInstances.runId, id)).limit(1);
+  if (!LEASE_STATUSES.includes(run.status) || !generation?.channelInstanceId) return false;
+  const providerHandle = generation.spriteName ?? run.workerScope;
+  if (!providerHandle) return false;
+  const providerModule = await import("./runner/provider");
+  const configuredProvider = providerModule.getRunnerProvider();
+  const provider = configuredProvider.kind === generation.provider
+    ? configuredProvider
+    : providerModule.createRunnerProvider(generation.provider as RunnerProviderKind);
+  if (!provider.stopGeneration) {
+    throw new repo.RepoError(`Runner provider '${generation.provider}' cannot safely interrupt one generation`, 409);
+  }
+  const ref = {
+    runId: id,
+    generation: generation.workerGeneration,
+    instanceId: generation.channelInstanceId,
+    providerHandle,
+    ...(run.workerScope ? { processHandle: run.workerScope } : {}),
+    ...(generation.providerServiceName ? { providerServiceName: generation.providerServiceName } : {}),
+  };
+  // Fail closed. Releasing the claim after an unconfirmed stop could admit a
+  // replacement while the old process is still modifying the same checkout.
+  await provider.stopGeneration(ref);
+
+  const outcome = await db.transaction(async (tx) => {
+    const rows = await tx.execute(sql`
+      SELECT ri.worker_generation, ri.channel_instance_id, ar.status
+      FROM runner_instances ri JOIN agent_runs ar ON ar.id = ri.run_id
+      WHERE ri.run_id = ${id} FOR UPDATE OF ri, ar
+    `);
+    const current = rows[0] as Record<string, unknown> | undefined;
+    if (!current
+      || Number(current.worker_generation) !== generation.workerGeneration
+      || String(current.channel_instance_id) !== generation.channelInstanceId
+      || TERMINAL_STATUSES.includes(coerceRunStatus(String(current.status)))) {
+      return { interrupted: false, redispatch: false };
+    }
+    // The prompt owned by the interrupted turn is an historical fact, not work
+    // that may be silently replayed after a human asked to stop. Cancel exactly
+    // its assigned inputs; inputs queued later stay pending for the next turn.
+    await tx.execute(sql`
+      UPDATE run_inputs SET status='cancelled', cancelled_at=NOW()
+      WHERE run_id=${id} AND status='assigned' AND assigned_turn_id IN (
+        SELECT id FROM run_turns WHERE run_id=${id} AND state IN ('active','running')
+      )
+    `);
+    await tx.execute(sql`
+      UPDATE run_turns SET state='superseded', completed_at=NOW(),
+        checkpoint=jsonb_build_object('interrupted', true, 'worker_generation', execution_generation)
+      WHERE run_id=${id} AND state IN ('active','running')
+    `);
+    const pending = (await tx.execute(sql`
+      SELECT 1 FROM run_inputs WHERE run_id=${id} AND status='pending' LIMIT 1
+    `)).length > 0;
+    const nextStatus: SessionStatus = pending ? "pending" : "idle";
+    await tx.update(agentSessions).set({
+      status: nextStatus,
+      completedAt: null,
+      workerScope: null,
+      cancelRequested: 0,
+      error: null,
+    }).where(eq(agentSessions.id, id));
+    await tx.update(runnerInstances).set({
+      state: "stopped",
+      generationState: "stopped",
+      providerOperationId: null,
+      controllerId: null,
+    }).where(and(
+      eq(runnerInstances.runId, id),
+      eq(runnerInstances.workerGeneration, generation.workerGeneration),
+      eq(runnerInstances.channelInstanceId, generation.channelInstanceId),
+    ));
+    await tx.insert(agentEvents).values(buildStatusEventValues(id, nextStatus, {
+      interrupted: true,
+      workerGeneration: generation.workerGeneration,
+      instanceId: generation.channelInstanceId,
+    }));
+    return { interrupted: true, redispatch: pending };
   });
+  if (!outcome.interrupted) return false;
+
+  // Drop only the old controller object. The DB generation/instance guard above
+  // has already fenced its late events, and the next dispatch mints a fresh
+  // generation + channel instance over the retained environment.
+  await import("./worker-channel/registry").then((registry) => registry.disconnectRun(id, {
+    release: false,
+    instanceId: generation.channelInstanceId!,
+    workerGeneration: generation.workerGeneration,
+  })).catch(() => undefined);
+  if (outcome.redispatch) void runDispatch.dispatchRun(id).catch(() => undefined);
   return true;
 }
 
@@ -2035,6 +2150,13 @@ async function claimTaskFollowUp(
         attempt: run.attempt + 1,
         result: null,
         parkReason: null,
+        pendingReason: null,
+        pendingSince: status === "pending" ? resumedAt : null,
+        claimedAt: null,
+        cancelRequested: 0,
+        workerLog: null,
+        workerExitCode: null,
+        error: null,
         completedAt: null,
         // budgetMaxSeconds is per attempt. Reusing the original timestamp
         // would make every later attempt begin with an already-expired deadline.
