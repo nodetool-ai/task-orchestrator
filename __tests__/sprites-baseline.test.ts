@@ -8,6 +8,7 @@ import {
   dependencyFingerprint,
   dependencyPreparationCommand,
   dependencyVerificationProgram,
+  SPRITE_NPM_RESOURCE_ARGS,
   type SpriteBaselineManifest,
   verifyBaseline,
   writeBaselineManifest,
@@ -54,6 +55,7 @@ describe("Sprite baseline identity", () => {
     expect(command).toContain("args=[");
     expect(command).toContain("child_process");
     expect(command).toContain(" -- '--cache' '/home/user/session/.npm-cache'");
+    for (const option of SPRITE_NPM_RESOURCE_ARGS) expect(command).toContain(option);
     expect(command).not.toContain("|| true");
   });
 

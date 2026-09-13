@@ -10,6 +10,22 @@ export const SPRITE_CHECKOUT_PATH = "/home/user/session/repo";
 export const SPRITE_NPM_CACHE_PATH = "/home/user/session/.npm-cache";
 export const SPRITE_BASELINE_DIR = "/home/user/session/.sprite-baseline";
 export const SPRITE_NPM_CONFIG_ARGS = ["--userconfig=/dev/null", "--globalconfig=/nonexistent/task-orchestrator-empty-npmrc"] as const;
+export const SPRITE_BASELINE_PROCESS_CONCURRENCY = 2;
+export const SPRITE_NPM_RESOURCE_ARGS = [
+  "--foreground-scripts",
+  `--jobs=${SPRITE_BASELINE_PROCESS_CONCURRENCY}`,
+] as const;
+
+// Repository recipes are operator-authored shell commands, so constrain the
+// common build schedulers through their standard environment contracts. This
+// remains a per-Sprite safety boundary even if another preparation call site
+// permits more than one baseline to make progress concurrently.
+const REPOSITORY_BUILD_ENV: Readonly<Record<string, string>> = {
+  TURBO_CONCURRENCY: String(SPRITE_BASELINE_PROCESS_CONCURRENCY),
+  npm_config_jobs: String(SPRITE_BASELINE_PROCESS_CONCURRENCY),
+  CMAKE_BUILD_PARALLEL_LEVEL: String(SPRITE_BASELINE_PROCESS_CONCURRENCY),
+  MAKEFLAGS: `-j${SPRITE_BASELINE_PROCESS_CONCURRENCY}`,
+};
 
 export interface SpriteDependencyManifest {
   repository: string;
@@ -67,7 +83,7 @@ function canonical(value: unknown): string {
 }
 function shellQuote(value: string): string { return `'${value.replaceAll("'", "'\\''")}'`; }
 
-const controlledNpmProgram = `const cp=require('child_process'),env=Object.fromEntries(Object.entries(process.env).filter(([key])=>!/^npm_config_/i.test(key)&&key!=='NODE_ENV')),args=['ci',...${JSON.stringify(SPRITE_NPM_CONFIG_ARGS)},...process.argv.slice(1)],result=cp.spawnSync('npm',args,{env,stdio:'inherit'});if(result.error)throw result.error;process.exit(result.status??1);`;
+const controlledNpmProgram = `const cp=require('child_process'),env=Object.fromEntries(Object.entries(process.env).filter(([key])=>!/^npm_config_/i.test(key)&&key!=='NODE_ENV')),args=['ci',...${JSON.stringify(SPRITE_NPM_CONFIG_ARGS)},...${JSON.stringify(SPRITE_NPM_RESOURCE_ARGS)},...process.argv.slice(1)],result=cp.spawnSync('npm',args,{env,stdio:'inherit'});if(result.error)throw result.error;process.exit(result.status??1);`;
 
 /** Run npm with repository config represented by the manifest, never ambient
  * user/global config or inherited NPM_CONFIG_* overrides. */
@@ -188,7 +204,7 @@ function execFailureDiagnostic(result: { stdout: string; stderr: string }): stri
 const RESOURCE_DIAGNOSTIC_COMMAND = String.raw`set +e
 printf '%s\n' '[resource snapshot]'
 awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/{print}' /proc/meminfo 2>/dev/null
-for f in /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.pressure /proc/pressure/memory /proc/pressure/io; do
+for f in /sys/fs/cgroup/pids.current /sys/fs/cgroup/pids.max /sys/fs/cgroup/pids.events /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.pressure /proc/pressure/cpu /proc/pressure/memory /proc/pressure/io; do
   if [ -r "$f" ]; then printf '%s\n' "[$f]"; head -c 1024 "$f"; printf '\n'; fi
 done
 true`;
@@ -263,9 +279,13 @@ for(const rel of m.packageManifests.filter(x=>x.path!=='package.json'&&!outputEx
 for(const command of (m.readinessCommands||[])){const result=cp.spawnSync(command,{cwd:root,shell:true,stdio:'pipe',encoding:'utf8',timeout:120000});if(result.status!==0) throw Error('readiness command failed: '+command+'\\n'+String(result.stderr||result.stdout||'').slice(-2000));}})();`;
 }
 
-async function runRepositoryCommands(client: SpritesClient, spriteName: string, commands: string[] | undefined, label: string): Promise<void> {
+async function runRepositoryCommands(client: SpritesClient, spriteName: string, commands: string[] | undefined, label: string,
+  options: { env?: Record<string, string> } = {}): Promise<void> {
   for (const [index, command] of (commands ?? []).entries()) {
-    await execChecked(client, spriteName, `cd ${shellQuote(SPRITE_CHECKOUT_PATH)} && ${command}`, `${label} ${index + 1}`, { timeoutMs: 20 * 60_000 });
+    await execChecked(client, spriteName, `cd ${shellQuote(SPRITE_CHECKOUT_PATH)} && ${command}`, `${label} ${index + 1}`, {
+      timeoutMs: 20 * 60_000,
+      ...options,
+    });
   }
 }
 
@@ -317,7 +337,9 @@ export async function prepareSpriteBaseline(client: SpritesClient, spriteName: s
     await runRepositoryCommands(client, spriteName, dependency.setupCommands, "repository setup");
     await execChecked(client, spriteName, `cd ${shellQuote(SPRITE_CHECKOUT_PATH)} && ${controlledNpmCiCommand(SPRITE_NPM_CACHE_PATH, dependency.installOptions)}`,
       "baseline dependency installation", { timeoutMs: 20 * 60_000 });
-    await runRepositoryCommands(client, spriteName, dependency.buildCommands, "repository build");
+    await runRepositoryCommands(client, spriteName, dependency.buildCommands, "repository build", {
+      env: { ...REPOSITORY_BUILD_ENV },
+    });
   } else if (opts.dependency) throw new Error("Dependency preparation requires a manifest");
   await writeBaselineManifest(client, spriteName, opts.manifest);
   await verifyBaseline(client, spriteName, opts.manifest, opts.codexBinary ?? "/home/user/worker/.codex/bin/codex");

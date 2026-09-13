@@ -312,10 +312,11 @@ export class SpritesRunnerProvider implements RunnerProvider {
       const byFingerprint = new Map(specs.map((spec) => [spec.fingerprint, spec]));
       const manager = new SpritePoolManager({
         store: createDatabaseSpritePoolStore(), target: config.sprites.poolSize,
-        // Repository baselines are dependency- and build-heavy. Keep their
-        // preparation pressure below the three-Sprite warm target; the store
-        // enforces this same value globally across controller instances.
-        maxSprites: config.sprites.maxSprites, maxConcurrent: 2, leaseMs: 30 * 60_000,
+        // Repository baselines are dependency- and build-heavy. Bootstrap one
+        // canary at a time so a broken or over-parallel recipe cannot consume
+        // the host twice before proving that the current fingerprint builds.
+        // Build commands have their own bounded fan-out in sprites-baseline.
+        maxSprites: config.sprites.maxSprites, maxConcurrent: 1, leaseMs: 30 * 60_000,
         fingerprints: () => specs.filter((spec) => spec.target > 0).map((spec) => spec.fingerprint),
         fingerprintTargets: (fingerprint) => byFingerprint.get(fingerprint)?.target ?? 0,
         baseline: (fingerprint) => ({ manifest: byFingerprint.get(fingerprint)!.manifest as unknown as Record<string, unknown> }),

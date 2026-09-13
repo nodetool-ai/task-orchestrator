@@ -11,7 +11,7 @@ import { createDatabaseSpritePoolStore, requestSpritePoolMaintenance, requestSpr
 import { spritesPoolStore } from "@/lib/runner/sprites-pool-store";
 import type { SpritesClient } from "@/lib/runner/sprites-client";
 import { spriteNodeSetupCommand } from "@/lib/runner/sprites-bootstrap";
-import { baselineFingerprint, controlledNpmCiCommand, dependencyFingerprint, SPRITE_NPM_CACHE_PATH } from "@/lib/runner/sprites-baseline";
+import { baselineFingerprint, controlledNpmCiCommand, dependencyFingerprint, SPRITE_BASELINE_PROCESS_CONCURRENCY, SPRITE_CHECKOUT_PATH, SPRITE_NPM_CACHE_PATH } from "@/lib/runner/sprites-baseline";
 import { getConfiguredSpriteBaselines } from "@/lib/runner/sprites-pool-config";
 
 const manifest = {
@@ -187,6 +187,14 @@ describe("Sprite pool provider integration", () => {
     const credentialedPreparationCalls = vi.mocked(c.exec).mock.calls.filter(([, input]) => input.env?.GH_TOKEN);
     expect(credentialedPreparationCalls).toHaveLength(1);
     expect(credentialedPreparationCalls[0][1].env).toEqual({ GH_TOKEN: "test-gh-token" });
+    const buildPreparationCall = vi.mocked(c.exec).mock.calls.find(([, input]) =>
+      input.cmd === `cd '${SPRITE_CHECKOUT_PATH}' && ${dependency.buildCommands[0]}`);
+    expect(buildPreparationCall?.[1].env).toMatchObject({
+      TURBO_CONCURRENCY: String(SPRITE_BASELINE_PROCESS_CONCURRENCY),
+      npm_config_jobs: String(SPRITE_BASELINE_PROCESS_CONCURRENCY),
+      CMAKE_BUILD_PARALLEL_LEVEL: String(SPRITE_BASELINE_PROCESS_CONCURRENCY),
+      MAKEFLAGS: `-j${SPRITE_BASELINE_PROCESS_CONCURRENCY}`,
+    });
     expect(vi.mocked(c.exec).mock.calls.every(([, input]) => !input.env?.OPENAI_API_KEY)).toBe(true);
 
     const run = await create({ goal: "<implement>", repoId: repositoryId, userId: user.id, defer: true });
