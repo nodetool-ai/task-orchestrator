@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
 import {
   handleMcpRequest,
@@ -16,7 +16,7 @@ function tool(overrides: Partial<NeutralTool> = {}): NeutralTool {
   };
 }
 
-const rpc = (method: string, params?: unknown, id: number | null = 1) => ({
+const rpc = (method: string, params?: unknown, id: number | string | null = 1) => ({
   jsonrpc: "2.0",
   id,
   method,
@@ -132,9 +132,57 @@ describe("handleMcpRequest", () => {
     const bad = await handleMcpRequest({ id: 1, method: "ping" } as any, ctx());
     expect((bad.body as any).error.message).toMatch(/Invalid JSON-RPC envelope/);
   });
+
+  it("cancels a request during an asynchronous interceptor before its command can start", async () => {
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    const execute = vi.fn(async () => ({ content: [] }));
+    const context = ctx({ tools: [tool({ execute })], activeRequests: new Map(), interceptors: [async () => { await waiting; }] });
+    const pending = handleMcpRequest(rpc("tools/call", { name: "task_orch__create_task", arguments: { title: "cancel me" } }, 7), context);
+    expect(context.activeRequests!.has(7)).toBe(true);
+    await handleMcpRequest(rpc("notifications/cancelled", { requestId: 7 }, null), context);
+    release();
+    expect((await pending).body).toMatchObject({ result: { isError: true } });
+    expect(execute).not.toHaveBeenCalled();
+    expect(context.activeRequests!.size).toBe(0);
+  });
+
+  it("rejects duplicate active IDs without replacing the original cancellation owner", async () => {
+    const execute = vi.fn(async (_callId, _params, signal?: AbortSignal) => new Promise<never>((_resolve, reject) => {
+      signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
+    }));
+    const context = ctx({ tools: [tool({ execute })], activeRequests: new Map() });
+    const request = rpc("tools/call", { name: "task_orch__create_task", arguments: { title: "first" } }, "call");
+    const pending = handleMcpRequest(request, context);
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+    const duplicate = await handleMcpRequest(request, context);
+    expect(duplicate.body).toMatchObject({ error: { message: expect.stringMatching(/already active/) } });
+    await handleMcpRequest(rpc("notifications/cancelled", { requestId: "call" }, null), context);
+    expect((await pending).body).toMatchObject({ result: { isError: true } });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(context.activeRequests!.size).toBe(0);
+  });
 });
 
 describe("startCodexMcpBridge", () => {
+  function cancellableTool(signals: Map<string, AbortSignal>): NeutralTool {
+    return tool({ execute: async (_callId, params, signal) => {
+      signals.set(params.title, signal!);
+      return new Promise((_resolve, reject) => {
+        const abort = () => reject(signal!.reason);
+        signal!.addEventListener("abort", abort, { once: true });
+        if (signal!.aborted) abort();
+      });
+    } });
+  }
+
+  function post(bridge: Awaited<ReturnType<typeof startCodexMcpBridge>>, body: unknown, options: { session?: string; signal?: AbortSignal } = {}) {
+    return fetch(bridge.url, { method: "POST", headers: {
+      "content-type": "application/json", authorization: `Bearer ${bridge.token}`,
+      ...(options.session ? { "mcp-session-id": options.session } : {}),
+    }, body: JSON.stringify(body), signal: options.signal });
+  }
+
   it("binds loopback, requires the bearer token, and serves tools over HTTP", async () => {
     const bridge = await startCodexMcpBridge({ tools: [tool()] });
     try {
@@ -210,5 +258,78 @@ describe("startCodexMcpBridge", () => {
     const url = bridge.url;
     await bridge.close();
     await expect(fetch(url, { method: "POST", body: "{}" })).rejects.toThrow();
+  });
+
+  it("keeps same-numbered nested-client requests isolated when one receives a cancel notification", async () => {
+    const signals = new Map<string, AbortSignal>();
+    const bridge = await startCodexMcpBridge({ tools: [cancellableTool(signals)] });
+    try {
+      const initialized = await Promise.all([post(bridge, rpc("initialize")), post(bridge, rpc("initialize"))]);
+      const sessions = initialized.map((response) => response.headers.get("mcp-session-id")!);
+      await Promise.all(initialized.map((response) => response.json()));
+      expect(sessions[0]).toBeTruthy();
+      expect(sessions[0]).not.toBe(sessions[1]);
+      const calls = ["first", "second"].map((title, index) =>
+        post(bridge, rpc("tools/call", { name: "task_orch__create_task", arguments: { title } }, 1), { session: sessions[index] }).then((response) => response.json()));
+      await vi.waitFor(() => expect(signals.size).toBe(2));
+      expect((await post(bridge, rpc("notifications/cancelled", { requestId: 1 }, null), { session: sessions[0] })).status).toBe(202);
+      expect(await calls[0]).toMatchObject({ result: { isError: true } });
+      expect(signals.get("first")!.aborted).toBe(true);
+      expect(signals.get("second")!.aborted).toBe(false);
+      await post(bridge, rpc("notifications/cancelled", { requestId: 1 }, null), { session: sessions[1] });
+      expect(await calls[1]).toMatchObject({ result: { isError: true } });
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("aborts a running tool when its HTTP response connection is abandoned", async () => {
+    const signals = new Map<string, AbortSignal>();
+    const bridge = await startCodexMcpBridge({ tools: [cancellableTool(signals)] });
+    const controller = new AbortController();
+    try {
+      const pending = post(bridge, rpc("tools/call", { name: "task_orch__create_task", arguments: { title: "abandoned" } }), { signal: controller.signal }).catch((error) => error);
+      await vi.waitFor(() => expect(signals.has("abandoned")).toBe(true));
+      controller.abort();
+      await pending;
+      await vi.waitFor(() => expect(signals.get("abandoned")!.aborted).toBe(true));
+      expect(String(signals.get("abandoned")!.reason)).toMatch(/disconnected/);
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("aborts every outstanding tool when the bridge closes and allows repeated close", async () => {
+    const signals = new Map<string, AbortSignal>();
+    const bridge = await startCodexMcpBridge({ tools: [cancellableTool(signals)] });
+    const pending = [1, 2].map((id) => post(bridge, rpc("tools/call", {
+      name: "task_orch__create_task", arguments: { title: String(id) },
+    }, id)).catch((error) => error));
+    try {
+      await vi.waitFor(() => expect(signals.size).toBe(2));
+      await bridge.close();
+      await bridge.close();
+      expect([...signals.values()].every((signal) => signal.aborted)).toBe(true);
+      expect([...signals.values()].every((signal) => /bridge closed/.test(String(signal.reason)))).toBe(true);
+      await Promise.all(pending);
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("does not cancel completed tools when their normal HTTP response closes", async () => {
+    let signal: AbortSignal | undefined;
+    const bridge = await startCodexMcpBridge({ tools: [tool({ execute: async (_id, _params, inputSignal) => {
+      signal = inputSignal;
+      return { content: [] };
+    } })] });
+    try {
+      await (await post(bridge, rpc("tools/call", { name: "task_orch__create_task", arguments: { title: "complete" } }))).json();
+      expect(signal?.aborted).toBe(false);
+      await bridge.close();
+      expect(signal?.aborted).toBe(false);
+    } finally {
+      await bridge.close();
+    }
   });
 });

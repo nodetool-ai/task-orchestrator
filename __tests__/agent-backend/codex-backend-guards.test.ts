@@ -5,6 +5,7 @@ import path from "node:path";
 import { CodexBackend, __test } from "../../lib/agent-backend/codex-backend";
 import { __test as modelCache } from "../../lib/agent-backend/codex-models";
 import type { RunTurnArgs } from "../../lib/agent-backend/types";
+import { WorkerShellScope } from "../../lib/agent-backend/worker-shell";
 
 // Stand in for the whole SDK: the backend imports it dynamically, and a real
 // thread would spawn the `codex` CLI (and bill a model call).
@@ -136,6 +137,31 @@ describe("CodexBackend.runTurn guards", () => {
 });
 
 describe("CodexBackend.runTurn CLI configuration", () => {
+  it("reports cleanup failure instead of successful backend completion", async () => {
+    vi.stubEnv("TASK_ORCH_PROCESS_SUPERVISOR", "/worker/process-supervisor.py");
+    vi.stubEnv("TASK_ORCH_PROCESS_CGROUP", "/sys/fs/cgroup/task-orchestrator/test");
+    vi.stubEnv("TASK_ORCH_PROCESS_LOCK", "/worker/command.lock");
+    const close = vi.spyOn(WorkerShellScope.prototype, "close").mockRejectedValue(new Error("descendants did not drain"));
+    const emit = vi.fn();
+    sdk.scripts = [[started("th_1"), completed]];
+    try {
+      await expect(new CodexBackend().runTurn(makeArgs({ diagnostics: { emit } }))).rejects.toThrow("descendants did not drain");
+      expect(emit.mock.calls.filter(([event]) => event === "backend.finished")).toEqual([
+        ["backend.finished", expect.objectContaining({ outcome: "error" })],
+      ]);
+    } finally { close.mockRestore(); }
+  });
+  it("uses the supervised shell and bounded nested agents inside a Sprite", async () => {
+    vi.stubEnv("TASK_ORCH_PROCESS_SUPERVISOR", "/worker/process-supervisor.py");
+    vi.stubEnv("TASK_ORCH_PROCESS_CGROUP", "/sys/fs/cgroup/task-orchestrator/test");
+    vi.stubEnv("TASK_ORCH_PROCESS_LOCK", "/worker/command.lock");
+    sdk.scripts = [[started("th_1"), completed]];
+    await new CodexBackend().runTurn(makeArgs());
+    expect(sdk.ctorOptions.config.features).toMatchObject({ shell_tool: false, unified_exec: false });
+    expect(sdk.ctorOptions.config.agents).toEqual({ max_threads: 2, max_depth: 1 });
+    expect(sdk.ctorOptions.config.mcp_servers.task_orch.tool_timeout_sec).toBe(1810);
+    expect(sdk.inputs[0]).toContain("worker_shell");
+  });
   it("scrubs server secrets from the CLI env but keeps its own credential", async () => {
     vi.stubEnv("DATABASE_URL", "postgres://prod");
     vi.stubEnv("OPENAI_API_KEY", "sk-test");

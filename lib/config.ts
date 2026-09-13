@@ -210,6 +210,18 @@ export const config = Object.freeze({
 
   /** Worker identity + transport (set on the worker process by dispatch). */
   worker: Object.freeze({
+    /** Supervisor-installed command helper; unset outside contained workers. */
+    get processSupervisorPath(): string | undefined {
+      return strEnv("TASK_ORCH_PROCESS_SUPERVISOR");
+    },
+    /** Supervisor-owned aggregate cgroup, inherited by all nested commands. */
+    get processCgroupPath(): string | undefined {
+      return strEnv("TASK_ORCH_PROCESS_CGROUP");
+    },
+    /** Supervisor-owned cross-agent command admission lock. */
+    get processLockPath(): string | undefined {
+      return strEnv("TASK_ORCH_PROCESS_LOCK");
+    },
     /** Run-private checkout selected by the reusable Sprite provider. */
     get spriteRunWorktree(): boolean { return process.env.TASK_ORCH_SPRITE_RUN_WORKTREE === "1"; },
     /** Prepared checkout moved into the run-private directory after restore. */

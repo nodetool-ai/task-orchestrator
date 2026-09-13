@@ -15,7 +15,7 @@ import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
-import { agentSessions, agentMessages, runnerInstances } from "../db/schema";
+import { agentSessions, agentMessages, runnerInstances, runInputs, runTurns } from "../db/schema";
 import { create, get, listMessages } from "../lib/runs";
 import * as backend from "../lib/agent-backend";
 import * as runDispatch from "../lib/run-dispatch";
@@ -39,7 +39,7 @@ async function driveWorkerRun(context: unknown): Promise<unknown> {
 
 const instanceId = () => `wi_${randomUUID().replace(/-/g, "").slice(0, 32)}`;
 
-async function bootWorkerChannel(runId: number) {
+async function bootWorkerChannel(runId: number, options: { disconnectGraceMs?: number } = {}) {
   const id = instanceId();
   const secret = "ws-e2e-test-secret";
   const server: WorkerServer = await startWorkerServer({
@@ -48,6 +48,7 @@ async function bootWorkerChannel(runId: number) {
     credentialSecret: secret,
     transport: "unix",
     sessionRoot: `/tmp/ws-e2e-${runId}-${Date.now()}`,
+    ...options,
   });
   // server.endpoint is the bind form (unix://<path>); the control plane dials
   // the ws+unix://<path>:/worker/channel form (see localDialEndpoint).
@@ -92,6 +93,51 @@ function fakeChatBackend(replyText: string) {
 }
 
 describe("worker websocket e2e", () => {
+  it("preserves an active v2 implement receipt and pending follow-up after controller loss", async () => {
+    const run = await create({ goal: "<implement>", defer: true });
+    await db.update(agentSessions).set({ status: "running", deliveryVersion: 2 }).where(eq(agentSessions.id, run.id));
+    await db.transaction(async (tx) => {
+      const [message] = await tx.insert(agentMessages).values({
+        runId: run.id, role: "user", content: JSON.stringify([{ type: "text", text: "implement the change" }]),
+      }).returning({ id: agentMessages.id });
+      const { enqueueUserInputTx } = await import("../lib/run-inputs");
+      await enqueueUserInputTx(tx, run.id, message.id);
+    });
+    let started!: () => void;
+    const backendStarted = new Promise<void>((resolve) => { started = resolve; });
+    const fake = fakeChatBackend("unused");
+    fake.runTurn = async () => { started(); return new Promise(() => {}); };
+    vi.spyOn(backend, "getBackend").mockResolvedValue(fake);
+    const { server } = await bootWorkerChannel(run.id, { disconnectGraceMs: 40 });
+    try {
+      const start = (await server.session.waitForStart!()) as RunStart;
+      expect(start.turnId).toBeTruthy();
+      const driving = driveWorkerRun({ start, session: server.session });
+      await backendStarted;
+      const original = await db.select().from(runInputs).where(eq(runInputs.runId, run.id));
+      expect(original.some((input) => input.status === "assigned" && input.assignedTurnId === start.turnId)).toBe(true);
+      const [followup] = await db.insert(agentMessages).values({
+        runId: run.id, role: "user", content: JSON.stringify([{ type: "text", text: "follow up while disconnected" }]),
+      }).returning({ id: agentMessages.id });
+      const pendingId = randomUUID();
+      await db.insert(runInputs).values({
+        id: pendingId, runId: run.id, inputSeq: 1_000, messageId: followup.id, kind: "user", status: "pending",
+      });
+      await disconnectRun(run.id);
+      await driving;
+      const after = await db.select().from(runInputs).where(eq(runInputs.runId, run.id));
+      for (const input of original.filter((input) => input.status === "assigned")) {
+        expect(after.find((candidate) => candidate.id === input.id)).toMatchObject({ status: "assigned", assignedTurnId: start.turnId });
+      }
+      expect(after.find((input) => input.id === pendingId)?.status).toBe("pending");
+      expect((await db.select().from(runTurns).where(eq(runTurns.id, start.turnId!)))[0]?.state).toBe("active");
+      expect((await get(run.id))!.status).toBe("running");
+    } finally {
+      await disconnectRun(run.id);
+      await server.close();
+    }
+  });
+
   describe("chat run", () => {
     it("re-adopts a legacy idle chat without inventing a model turn", async () => {
       const run = await create({ goal: "<chat>", defer: true });

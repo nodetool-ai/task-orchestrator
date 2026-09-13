@@ -156,11 +156,13 @@ describe("Sprite baseline verification", () => {
     const wasm = join(root, "worker/codeact/emscripten-module.wasm");
     const wasmSha = `${wasm}.sha256`;
     const threadWorker = join(root, "worker/codeact/thread-worker.js");
+    const processSupervisor = join(root, "worker/process-supervisor.py");
     await writeFile(wasm, Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]));
     await writeFile(wasmSha, "fixture  emscripten-module.wasm\n");
     await writeFile(threadWorker, "// thread worker fixture\n");
+    await writeFile(processSupervisor, "# process supervisor fixture\n");
     const bundleHash = createHash("sha1");
-    for (const [name, file] of [["dist/run-worker.js", worker], ["codeact/emscripten-module.wasm", wasm], ["codeact/emscripten-module.wasm.sha256", wasmSha], ["codeact/thread-worker.js", threadWorker]]) {
+    for (const [name, file] of [["dist/run-worker.js", worker], ["codeact/emscripten-module.wasm", wasm], ["codeact/emscripten-module.wasm.sha256", wasmSha], ["codeact/thread-worker.js", threadWorker], ["process-supervisor.py", processSupervisor]]) {
       bundleHash.update(name).update("\0").update(await readFile(file));
     }
     const workerSha = bundleHash.digest("hex");

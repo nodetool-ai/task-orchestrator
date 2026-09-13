@@ -286,7 +286,7 @@ describe("worker WebSocket supervisor", () => {
     socket.close();
     await closed(socket);
     await new Promise((resolve) => setTimeout(resolve, 80));
-    expect(abort).toHaveBeenCalledWith("worker controller disconnect grace expired");
+    expect(abort).toHaveBeenCalledWith(expect.objectContaining({ name: "WorkerShutdownError", exitReason: "controller_lost" }));
     void server;
   });
 

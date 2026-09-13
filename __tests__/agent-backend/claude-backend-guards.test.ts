@@ -35,6 +35,18 @@ function makeArgs(overrides: Partial<RunTurnArgs> = {}): RunTurnArgs {
 }
 
 describe("ClaudeBackend.runTurn guards", () => {
+  it("routes Sprite commands through worker_shell with a sufficient MCP timeout", async () => {
+    vi.stubEnv("TASK_ORCH_PROCESS_SUPERVISOR", "/worker/process-supervisor.py");
+    vi.stubEnv("TASK_ORCH_PROCESS_CGROUP", "/sys/fs/cgroup/task-orchestrator/test");
+    vi.stubEnv("TASK_ORCH_PROCESS_LOCK", "/worker/command.lock");
+    try {
+      await new ClaudeBackend().runTurn(makeArgs());
+      expect(sdk.captured.options.disallowedTools).toEqual(["Bash"]);
+      expect(sdk.captured.options.env.MCP_TOOL_TIMEOUT).toBe("1810000");
+      expect(sdk.captured.options.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT).toBe("1810000");
+      expect(sdk.captured.options.mcpServers.task_orch.tools.map((t: any) => t.name)).toContain("worker_shell");
+    } finally { vi.unstubAllEnvs(); }
+  });
   // The backend no longer requires ANTHROPIC_API_KEY: auth is inherited from
   // the env and resolved like Claude Code (API key when set, otherwise the
   // claude.ai subscription). So there is no "missing key" guard to test — and

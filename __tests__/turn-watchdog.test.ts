@@ -112,6 +112,38 @@ describe("backend turn watchdog", () => {
     }));
   });
 
+
+  it("catches up a paused monotonic timer against the wall clock (run 298)", async () => {
+    const emit = vi.fn();
+    const turn = pendingTurn({ diagnostics: { emit } });
+    await vi.advanceTimersByTimeAsync(0);
+    turn.progress("Codex command_execution (item_43): started");
+    vi.setSystemTime(Date.now() + 61 * MINUTE);
+    expect(turn.abort.signal.aborted).toBe(false); // no timer has run during VM suspension
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((await turn.result as Error).message).toContain("item_43");
+    expect(emit).toHaveBeenCalledWith("watchdog.expired", expect.objectContaining({ "watchdog.fired": true }));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["progress", "result"])("checks expired wall time before accepting resumed backend %s", async (event) => {
+    const turn = pendingTurn();
+    await vi.advanceTimersByTimeAsync(0);
+    vi.setSystemTime(Date.now() + 31 * MINUTE);
+    if (event === "progress") turn.progress("late output");
+    else turn.finish();
+    expect((await turn.result as Error).message).toContain("no backend progress");
+    expect(turn.abort.signal.aborted).toBe(true);
+  });
+
+  it("catches up an explicit deadline with idle enforcement disabled", async () => {
+    const turn = pendingTurn({ idleTimeoutMs: 0, hardTimeoutMs: MINUTE });
+    await vi.advanceTimersByTimeAsync(0);
+    vi.setSystemTime(Date.now() + 2 * MINUTE);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((await turn.result as Error).message).toContain("explicit wall-clock deadline");
+  });
+
   it("clears warning and timeout state after recovery or normal errors", async () => {
     const turn = pendingTurn();
     await vi.advanceTimersByTimeAsync(15 * MINUTE);

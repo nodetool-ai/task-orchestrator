@@ -9,6 +9,7 @@
 // avoids baking a repo cache into the template — the per-turn fetch is the
 // source of truth, the bundle is just the runner.
 
+import { randomUUID } from "node:crypto";
 import type { SpritesClient } from "./sprites-client";
 
 // The standalone worker bundle cannot carry the Codex SDK's platform package:
@@ -249,7 +250,7 @@ export async function bootstrapSprite(
     const start = Date.now();
     onStep?.("verify-worker", "running", 0);
     const result = await client.exec(spriteName, {
-      cmd: `test -f /home/user/worker/dist/run-worker.js && test -f /home/user/worker/codeact/thread-worker.js && test -f ${shellQuote(SPRITE_CODEACT_WASM)} && (cd ${shellQuote(SPRITE_CODEACT_WASM.slice(0, SPRITE_CODEACT_WASM.lastIndexOf("/")))} && sha256sum -c ${shellQuote(SPRITE_CODEACT_WASM.split("/").at(-1)! + ".sha256")}) && TASK_ORCH_QUICKJS_WASM=${shellQuote(SPRITE_CODEACT_WASM)} TASK_ORCH_CODEACT_THREAD_WORKER=/home/user/worker/codeact/thread-worker.js node /home/user/worker/dist/run-worker.js --smoke-codeact && test -x ${shellQuote(codexBinary)} && ${shellQuote(codexBinary)} --version >/dev/null`,
+      cmd: `test -f /home/user/worker/process-supervisor.py && python3 /home/user/worker/process-supervisor.py worker --instance ${shellQuote("probe-" + randomUUID())} -- true && test -f /home/user/worker/dist/run-worker.js && test -f /home/user/worker/codeact/thread-worker.js && test -f ${shellQuote(SPRITE_CODEACT_WASM)} && (cd ${shellQuote(SPRITE_CODEACT_WASM.slice(0, SPRITE_CODEACT_WASM.lastIndexOf("/")))} && sha256sum -c ${shellQuote(SPRITE_CODEACT_WASM.split("/").at(-1)! + ".sha256")}) && TASK_ORCH_QUICKJS_WASM=${shellQuote(SPRITE_CODEACT_WASM)} TASK_ORCH_CODEACT_THREAD_WORKER=/home/user/worker/codeact/thread-worker.js node /home/user/worker/dist/run-worker.js --smoke-codeact && test -x ${shellQuote(codexBinary)} && ${shellQuote(codexBinary)} --version >/dev/null`,
     });
     const durationMs = Date.now() - start;
     if (result.exitCode !== 0) {

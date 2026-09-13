@@ -51,6 +51,7 @@ import { resolveCodexAuth } from "./codex-auth";
 import { codexModelCatalog } from "./codex-models";
 import { scrubCodexCliEnv, CODEX_CLI_AUTH_KEYS } from "./env-scrub";
 import { config } from "../config";
+import { createWorkerShellScope, type WorkerShellScope, WORKER_SHELL_GUIDANCE } from "./worker-shell";
 import { beginBackendInvocation, markTranscriptOutput, type BackendInvocation } from "./diagnostics";
 import type { AgentBackend, RunTurnArgs, TurnOutcome } from "./types";
 import type { RunEnvelope } from "../pi-event-mapper";
@@ -132,7 +133,8 @@ export class CodexBackend implements AgentBackend {
   async runTurn(args: RunTurnArgs): Promise<TurnOutcome> {
     const invocation = beginBackendInvocation(args);
     try {
-      const outcome = await this.runTurnInner(args, invocation);
+      const shell = createWorkerShellScope(args);
+      const outcome = await this.runTurnInner(args, invocation, shell).finally(() => shell?.close());
       invocation.finish("completed");
       return outcome;
     } catch (error) {
@@ -141,7 +143,7 @@ export class CodexBackend implements AgentBackend {
     }
   }
 
-  private async runTurnInner(args: RunTurnArgs, invocation: BackendInvocation): Promise<TurnOutcome> {
+  private async runTurnInner(args: RunTurnArgs, invocation: BackendInvocation, shell: WorkerShellScope | null): Promise<TurnOutcome> {
     const { cwd, model, thinkingLevel, extensions, abort, prompt, onEvent } = args;
     const progress = createBackendProgressReporter(args.onProgress, args.diagnostics, invocation.id);
 
@@ -164,7 +166,8 @@ export class CodexBackend implements AgentBackend {
       );
     }
 
-    const collected = withCodeActCapabilities(await collectExtensions(extensions), abort.signal);
+    const capabilities = withCodeActCapabilities(await collectExtensions(extensions), abort.signal);
+    const collected = shell ? shell.attach(capabilities) : capabilities;
     const { Codex } = await importCodexSdk();
 
     // Tools → loopback MCP server. Interceptors run inside it (see module note).
@@ -225,6 +228,13 @@ export class CodexBackend implements AgentBackend {
         ...(config.agent.codexBinary ? { codexPathOverride: config.agent.codexBinary } : {}),
         env: cliEnv,
         config: {
+          ...(shell ? {
+            // Native exec bypasses our tool lifecycle and shares no command
+            // admission limit with nested agents. Keep filesystem tools native,
+            // but route every shell through the worker's supervised capability.
+            features: { shell_tool: false, unified_exec: false },
+            agents: { max_threads: 2, max_depth: 1 },
+          } : {}),
           // Only OUR orchestrator server. The CLI would otherwise also load MCP
           // servers from its config.toml; a "task-orchestrator" entry there
           // pointed at a *remote* deployment would have the agent write
@@ -242,6 +252,7 @@ export class CodexBackend implements AgentBackend {
                     // window, or fail silently while the agent keeps working.
                     required: true,
                     startup_timeout_sec: 30,
+                    ...(shell ? { tool_timeout_sec: 1_810 } : {}),
                     // MCP approval is independent of approvalPolicy='never':
                     // without this, Codex rejects calls that would prompt.
                     // The run-scoped bridge already enforces interceptors and
@@ -338,7 +349,7 @@ export class CodexBackend implements AgentBackend {
             ? RESUME_LOST_NOTE
             : ""
           : [preamble, resumeLostRetried ? RESUME_LOST_NOTE : ""].filter(Boolean).join("\n\n");
-        const turnHeader = [header, toolGuidance].filter(Boolean).join("\n\n");
+        const turnHeader = [header, toolGuidance, shell ? WORKER_SHELL_GUIDANCE : ""].filter(Boolean).join("\n\n");
         const input = turnHeader ? `${turnHeader}\n\n---\n\n${prompt}` : prompt;
 
         const thread = threadId

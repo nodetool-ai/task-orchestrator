@@ -15,6 +15,7 @@
 // under the pi backend.
 
 import { execFile } from "node:child_process";
+import { createWorkerShellScope, type WorkerShellScope } from "./worker-shell";
 import { randomUUID } from "node:crypto";
 import { mapClaudeMessage } from "./claude-event-mapper";
 import { createBackendProgressReporter } from "./progress";
@@ -141,7 +142,8 @@ export class ClaudeBackend implements AgentBackend {
   async runTurn(args: RunTurnArgs): Promise<TurnOutcome> {
     const invocation = beginBackendInvocation(args);
     try {
-      const outcome = await this.runTurnInner(args, invocation);
+      const shell = createWorkerShellScope(args);
+      const outcome = await this.runTurnInner(args, invocation, shell).finally(() => shell?.close());
       invocation.finish("completed");
       return outcome;
     } catch (error) {
@@ -150,7 +152,7 @@ export class ClaudeBackend implements AgentBackend {
     }
   }
 
-  private async runTurnInner(args: RunTurnArgs, invocation: BackendInvocation): Promise<TurnOutcome> {
+  private async runTurnInner(args: RunTurnArgs, invocation: BackendInvocation, shell: WorkerShellScope | null): Promise<TurnOutcome> {
     const { cwd, model, thinkingLevel, extensions, abort, prompt, onEvent } = args;
     const progress = createBackendProgressReporter(args.onProgress, args.diagnostics, invocation.id);
 
@@ -192,7 +194,8 @@ export class ClaudeBackend implements AgentBackend {
       );
     }
 
-    const collected = withCodeActCapabilities(await collectExtensions(extensions), abort.signal);
+    const capabilities = withCodeActCapabilities(await collectExtensions(extensions), abort.signal);
+    const collected = shell ? shell.attach(capabilities) : capabilities;
     const { query, tool, createSdkMcpServer } = await import("@anthropic-ai/claude-agent-sdk");
 
     // Tools → in-process MCP server.
@@ -201,12 +204,13 @@ export class ClaudeBackend implements AgentBackend {
         t.name,
         t.description,
         toZodRawShape(t.parameters),
-        async (a: any) => {
+        async (a: any, extra: unknown) => {
           const callId = randomUUID();
           const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
           invocation.toolStarted(t.name, callId);
           try {
-            const r = await t.execute(callId, a);
+            const signal = (extra as { signal?: AbortSignal } | undefined)?.signal;
+            const r = await t.execute(callId, a, signal);
             invocation.toolFinished(t.name, callId, r.isError ? "error" : "completed", startedAt);
             return { content: r.content as any, isError: r.isError };
           } catch (error) {
@@ -271,6 +275,7 @@ export class ClaudeBackend implements AgentBackend {
     const sdkEnv: Record<string, string | undefined> = scrubClaudeCliEnv({
       ...process.env,
       ...args.env,
+      ...(shell ? { CLAUDE_CODE_STREAM_CLOSE_TIMEOUT: "1810000", MCP_TOOL_TIMEOUT: "1810000" } : {}),
     });
 
     const envelopes: RunEnvelope[] = [];
@@ -333,7 +338,7 @@ export class ClaudeBackend implements AgentBackend {
           permissionMode: "bypassPermissions",
           ...(args.nativeToolPolicy === "orchestration-only"
             ? { disallowedTools: [...ORCHESTRATION_ONLY_NATIVE_TOOLS] }
-            : {}),
+            : shell ? { disallowedTools: ["Bash"] } : {}),
           systemPrompt: {
             type: "preset",
             preset: "claude_code",

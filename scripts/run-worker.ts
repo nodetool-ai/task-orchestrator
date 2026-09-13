@@ -21,6 +21,7 @@ import { startWorkerServer, type WorkerServer } from "../lib/worker-channel/work
 import { createLogger } from "../lib/worker/log";
 import { executeInThread } from "../lib/codeact/thread";
 import { setupDiagnostics, type Diagnostics } from "../lib/worker-runtime/diagnostics";
+import { shutdownWorker, type WorkerExitReason } from "../lib/worker-runtime/worker-shutdown";
 import claudeSdkPackage from "../node_modules/@anthropic-ai/claude-agent-sdk/package.json";
 import piSdkPackage from "../node_modules/@earendil-works/pi-coding-agent/package.json";
 import codexSdkPackage from "../node_modules/@openai/codex-sdk/package.json";
@@ -81,6 +82,44 @@ async function main() {
   let exitCode = 0;
   let supervisor: WorkerServer | undefined;
   let diagnostics: Diagnostics | undefined;
+  let driver: Promise<void> | undefined;
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdown = (reason: WorkerExitReason): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = (async () => {
+      try { diagnostics?.emit("worker.shutdown", { reason }, { level: "INFO" }); } catch { /* best effort */ }
+      const result = await shutdownWorker({
+        sessionRoot: sessionRoot ?? process.cwd(),
+        evidence: {
+          version: 1, runId, instanceId, workerGeneration: appConfig.worker.generation,
+          pid: process.pid, state: "exiting", reason, at: new Date().toISOString(),
+        },
+        abort: (error) => supervisor?.session.abort(error),
+        driver,
+        flushLog: stopLogFlusher ?? undefined,
+        close: supervisor ? () => supervisor!.close({ reason: `worker shutdown: ${reason}` }) : undefined,
+        shutdownDiagnostics: diagnostics ? () => diagnostics!.shutdown(1_000) : undefined,
+      });
+      if (!result.evidenceWritten || !result.drained) {
+        log.warn("worker shutdown reached bounded cleanup", { runId, ...result });
+      }
+    })().catch(() => {
+      // A logger or cleanup callback must never bypass the final process exit.
+      try { log.error("worker shutdown failed", { runId }); } catch { /* best effort */ }
+    });
+    return shutdownPromise;
+  };
+  const exitAfterShutdown = async (reason: WorkerExitReason) => {
+    try { await shutdown(reason); }
+    finally {
+      // Infrastructure exit is clean at the process level: redispatch must mint
+      // a fresh generation, never restart this process's channel incarnation.
+      process.exit(0);
+    }
+  };
+  const onSignal = () => { void exitAfterShutdown("signal"); };
+  process.once("SIGTERM", onSignal);
+  process.once("SIGINT", onSignal);
   try {
     // Diagnostics are local-only and best effort. Keep setup inside the worker
     // after channel identity validation so a logger failure can never prevent
@@ -140,12 +179,8 @@ async function main() {
       disconnectGraceMs: waitMs,
       idleExitMs: Math.max(appConfig.worker.idleExitMs, waitMs),
       diagnostics,
-      onIdleExit: async (reason) => {
-        diagnostics?.emit("worker.shutdown", { reason }, { level: "INFO" });
-        await supervisor?.close({ code: 1000, reason: "worker idle backstop" }).catch(() => {});
-        await diagnostics?.shutdown(1_000).catch(() => false);
-        process.exit(0);
-      },
+      onIdleExit: () => exitAfterShutdown("idle_backstop"),
+      onControllerLoss: () => exitAfterShutdown("controller_lost"),
     });
 
     // Ship the tee'd runner.log over the CHANNEL, not the db. A worker holds no
@@ -175,7 +210,8 @@ async function main() {
     // until chatIdleMs passes with none. Passing `start` selected the single
     // drive, so the worker exited after every turn and the sprite service
     // restarted it — a new worker generation per message (2026-08-27).
-    await driveWorkerRun({ session: session as WorkerDriverSession, diagnostics });
+    driver = driveWorkerRun({ session: session as WorkerDriverSession, diagnostics });
+    await driver;
     log.info("worker finished", { runId });
   } catch (e) {
     log.error("worker fatal", { runId, error: e instanceof Error ? (e.stack ?? e.message) : String(e) });
@@ -187,9 +223,9 @@ async function main() {
     // and, critically, BEFORE supervisor.close(): the flush emits over the
     // channel, so closing the session first makes the most important flush of
     // the run fail with "worker session is closed" every time.
-    if (stopLogFlusher) await stopLogFlusher().catch(() => {});
-    await supervisor?.close().catch(() => {});
-    await diagnostics?.shutdown(1_000).catch(() => false);
+    await shutdown(exitCode === 0 ? "completed" : "fatal");
+    process.off("SIGTERM", onSignal);
+    process.off("SIGINT", onSignal);
   }
   process.exit(exitCode);
 }

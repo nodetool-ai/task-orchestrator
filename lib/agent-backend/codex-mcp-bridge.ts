@@ -91,6 +91,8 @@ async function readBody(req: IncomingMessage): Promise<string> {
 }
 
 function send(res: ServerResponse, status: number, body: unknown): void {
+  // A cancelled request can finish cleanup after its HTTP client disconnected.
+  if (res.destroyed || res.writableEnded) return;
   if (body === undefined) {
     res.writeHead(status).end();
     return;
@@ -109,7 +111,15 @@ function send(res: ServerResponse, status: number, body: unknown): void {
  */
 export async function handleMcpRequest(
   body: { jsonrpc?: string; id?: number | string | null; method?: string; params?: unknown },
-  ctx: { tools: NeutralTool[]; interceptors: ToolCallInterceptor[]; serverName: string; diagnostics?: BackendInvocation }
+  ctx: {
+    tools: NeutralTool[];
+    interceptors: ToolCallInterceptor[];
+    serverName: string;
+    diagnostics?: BackendInvocation;
+    /** One registry per MCP session: nested clients can reuse numeric IDs. */
+    activeRequests?: Map<string | number, AbortController>;
+    signal?: AbortSignal;
+  }
 ): Promise<{ status: number; body?: unknown }> {
   const id = body.id ?? null;
   if (body.jsonrpc !== JSONRPC_VERSION || typeof body.method !== "string") {
@@ -141,7 +151,14 @@ export async function handleMcpRequest(
       });
     // Notifications carry no id and get no body (spec: 202 Accepted).
     case "notifications/initialized":
+      return { status: 202 };
     case "notifications/cancelled":
+      if (typeof body.params === "object" && body.params !== null) {
+        const requestId = (body.params as { requestId?: unknown }).requestId;
+        if (typeof requestId === "string" || typeof requestId === "number") {
+          ctx.activeRequests?.get(requestId)?.abort(new Error("MCP tool call cancelled"));
+        }
+      }
       return { status: 202 };
     case "ping":
       return ok({});
@@ -172,30 +189,44 @@ export async function handleMcpRequest(
       if (!validated.ok) {
         return fail(InvalidParams, `Invalid params for tool '${name}': ${validated.message}`);
       }
-
-      // Interceptors run on the canonical vocabulary, exactly as they do behind
-      // Claude's PreToolUse hook and pi's tool_call event.
-      let args = validated.value;
-      const decision = await runInterceptors(ctx.interceptors, interceptorToolName(name), args);
-      if (decision && "block" in decision) {
-        // A denial is a tool ERROR, not a transport error: the agent should see
-        // the reason and adapt, the way it does on the other two backends.
-        return ok({ content: [{ type: "text", text: decision.reason }], isError: true });
+      if (typeof body.id !== "string" && typeof body.id !== "number") {
+        return fail(InvalidRequest, "tools/call requires a request ID");
       }
-      if (decision && "input" in decision) args = decision.input;
-
+      if (ctx.activeRequests?.has(body.id)) {
+        return fail(InvalidRequest, "Request ID is already active in this MCP session");
+      }
+      const controller = new AbortController();
+      ctx.activeRequests?.set(body.id, controller);
+      const disconnected = () => controller.abort(ctx.signal?.reason ?? new Error("MCP request disconnected"));
+      ctx.signal?.addEventListener("abort", disconnected, { once: true });
+      if (ctx.signal?.aborted) disconnected();
       const callId = randomUUID();
-      const sdkItemId = typeof body.id === "string" || typeof body.id === "number" ? String(body.id) : callId;
+      const sdkItemId = String(body.id);
       const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
-      ctx.diagnostics?.toolStarted(name, sdkItemId);
+      let started = false;
       try {
-        const result = await tool.execute(callId, args);
+        controller.signal.throwIfAborted();
+        // Register cancellation before asynchronous interceptors so a cancelled
+        // request cannot start a command after a delayed permission decision.
+        let args = validated.value;
+        const decision = await runInterceptors(ctx.interceptors, interceptorToolName(name), args);
+        controller.signal.throwIfAborted();
+        if (decision && "block" in decision) {
+          return ok({ content: [{ type: "text", text: decision.reason }], isError: true });
+        }
+        if (decision && "input" in decision) args = decision.input;
+        started = true;
+        ctx.diagnostics?.toolStarted(name, sdkItemId);
+        const result = await tool.execute(callId, args, controller.signal);
         ctx.diagnostics?.toolFinished(name, sdkItemId, result.isError ? "error" : "completed", startedAt);
         return ok({ content: result.content, isError: result.isError ?? false });
       } catch (err) {
-        ctx.diagnostics?.toolFinished(name, sdkItemId, "error", startedAt);
+        if (started) ctx.diagnostics?.toolFinished(name, sdkItemId, "error", startedAt);
         const message = err instanceof Error ? err.message : String(err);
         return ok({ content: [{ type: "text", text: message }], isError: true });
+      } finally {
+        ctx.signal?.removeEventListener("abort", disconnected);
+        ctx.activeRequests?.delete(body.id);
       }
     }
     default:
@@ -216,9 +247,16 @@ export async function startCodexMcpBridge(
     serverName,
     diagnostics: opts.diagnostics,
   };
+  // MCP clients retain this response header after initialize. Keep legacy
+  // stateless POST clients in their own namespace, but never conflate IDs from
+  // independent SDK/nested-agent connections.
+  const sessions = new Map<string, Map<string | number, AbortController>>([["", new Map()]]);
+  let closing = false;
+  let closePromise: Promise<void> | undefined;
 
   const server: Server = createServer((req, res) => {
     void (async () => {
+      if (closing) return send(res, 503, { error: "MCP bridge closed" });
       // The transport permits a server to refuse the optional GET/DELETE
       // session endpoints; 405 tells the client to stay POST-only.
       if (req.method !== "POST") return send(res, 405, { error: "Method Not Allowed" });
@@ -236,8 +274,25 @@ export async function startCodexMcpBridge(
           error: { code: ParseError, message: "Invalid JSON" },
         });
       }
+      const suppliedSession = req.headers["mcp-session-id"];
+      if (Array.isArray(suppliedSession) || (suppliedSession && !sessions.has(suppliedSession))) {
+        return send(res, 404, { error: "Unknown MCP session" });
+      }
+      let sessionId = suppliedSession ?? "";
+      if (parsed?.method === "initialize") {
+        sessionId = randomUUID();
+        sessions.set(sessionId, new Map());
+        res.setHeader("Mcp-Session-Id", sessionId);
+      }
+      const controller = new AbortController();
+      const disconnected = () => {
+        if (!res.writableEnded) controller.abort(new Error("MCP client disconnected"));
+      };
+      req.once("aborted", disconnected);
+      res.once("close", disconnected);
+      if (res.destroyed || closing) controller.abort(new Error("MCP client disconnected"));
       try {
-        const out = await handleMcpRequest(parsed, ctx);
+        const out = await handleMcpRequest(parsed, { ...ctx, activeRequests: sessions.get(sessionId), signal: controller.signal });
         send(res, out.status, out.body);
       } catch (err) {
         send(res, 200, {
@@ -248,6 +303,9 @@ export async function startCodexMcpBridge(
             message: err instanceof Error ? err.message : String(err),
           },
         });
+      } finally {
+        req.removeListener("aborted", disconnected);
+        res.removeListener("close", disconnected);
       }
     })();
   });
@@ -270,10 +328,16 @@ export async function startCodexMcpBridge(
     url: `http://127.0.0.1:${address.port}/mcp`,
     token,
     tokenEnvVar,
-    close: () =>
-      new Promise<void>((resolve) => {
+    close: () => {
+      closePromise ??= new Promise<void>((resolve) => {
+        closing = true;
+        for (const requests of sessions.values()) {
+          for (const controller of requests.values()) controller.abort(new Error("MCP bridge closed"));
+        }
         server.closeAllConnections?.();
         server.close(() => resolve());
-      }),
+      });
+      return closePromise;
+    },
   };
 }

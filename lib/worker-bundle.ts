@@ -15,6 +15,7 @@ const BUNDLE = path.join(process.cwd(), "dist", "run-worker.standalone.js");
 const CODEACT_WASM = path.join(process.cwd(), "dist", "codeact", "emscripten-module.wasm");
 const CODEACT_WASM_SHA = `${CODEACT_WASM}.sha256`;
 const CODEACT_THREAD_WORKER = path.join(process.cwd(), "dist", "codeact", "thread-worker.js");
+const PROCESS_SUPERVISOR = path.join(process.cwd(), "dist", "process-supervisor.py");
 export const BUNDLE_ENTRY_PATH = "dist/run-worker.js";
 export const CODEACT_WASM_ENTRY_PATH = "codeact/emscripten-module.wasm";
 
@@ -22,12 +23,13 @@ let cached: Promise<{ id: string; tarGz: Buffer }> | undefined;
 
 function load(): Promise<{ id: string; tarGz: Buffer }> {
   cached ??= (async () => {
-    const [js, wasm, wasmSha, threadWorker] = await Promise.all([readFile(BUNDLE), readFile(CODEACT_WASM), readFile(CODEACT_WASM_SHA), readFile(CODEACT_THREAD_WORKER)]);
+    const [js, wasm, wasmSha, threadWorker, processSupervisor] = await Promise.all([readFile(BUNDLE), readFile(CODEACT_WASM), readFile(CODEACT_WASM_SHA), readFile(CODEACT_THREAD_WORKER), readFile(PROCESS_SUPERVISOR)]);
     const files = [
       { path: BUNDLE_ENTRY_PATH, content: js, mode: 0o755 },
       { path: CODEACT_WASM_ENTRY_PATH, content: wasm, mode: 0o644 },
       { path: `${CODEACT_WASM_ENTRY_PATH}.sha256`, content: wasmSha, mode: 0o644 },
       { path: "codeact/thread-worker.js", content: threadWorker, mode: 0o644 },
+      { path: "process-supervisor.py", content: processSupervisor, mode: 0o755 },
     ];
     const identity = createHash("sha1");
     for (const file of files) identity.update(file.path).update("\0").update(file.content);

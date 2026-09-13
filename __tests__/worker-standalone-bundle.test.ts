@@ -17,6 +17,7 @@ describe("standalone worker bundle", () => {
     expect(existsSync("dist/codeact/emscripten-module.wasm")).toBe(true);
     expect(existsSync("dist/codeact/emscripten-module.wasm.sha256")).toBe(true);
     expect(existsSync("dist/codeact/thread-worker.js")).toBe(true);
+    expect(existsSync("dist/process-supervisor.py")).toBe(true);
 
     const dir = mkdtempSync(join(tmpdir(), "worker-bundle-iso-"));
     try {
