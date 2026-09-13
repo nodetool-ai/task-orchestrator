@@ -254,6 +254,45 @@ describe("completed Sprite recycling", () => {
     expect(mocks.verifyBaseline).not.toHaveBeenCalled();
   });
 
+  it("retains unpublished work after a deployment retires its pool fingerprint", async () => {
+    const fixture = await reusableAssignment();
+    mocks.baselines = [];
+    const client = fakeClient({
+      exec: vi.fn(async () => ({ exitCode: 3, stdout: "", stderr: "dirty checkout" })),
+    });
+
+    await expect(recycleCompletedSprite(client, fixture.ref, vi.fn(async () => undefined))).resolves.toBe(true);
+
+    expect(await spritesPoolStore.findBySpriteName(fixture.spriteName)).toMatchObject({
+      state: "claimed",
+      runId: fixture.run.id,
+      reuseCount: 0,
+    });
+    expect((await db.select().from(runnerInstances).where(eq(runnerInstances.runId, fixture.run.id)))[0]).toMatchObject({
+      spriteName: fixture.spriteName,
+      state: "stopped",
+      generationState: "stopped",
+    });
+    expect(client.restoreCheckpoint).not.toHaveBeenCalled();
+  });
+
+  it("drains a clean published assignment after its pool fingerprint retires", async () => {
+    const fixture = await reusableAssignment();
+    mocks.baselines = [];
+    const client = fakeClient();
+
+    await expect(recycleCompletedSprite(client, fixture.ref, vi.fn(async () => undefined))).resolves.toBe(true);
+
+    expect(client.exec).toHaveBeenCalledWith(fixture.spriteName, expect.objectContaining({
+      cmd: expect.stringContaining("https://github.com/acme/reusable.git"),
+    }));
+    expect(await spritesPoolStore.findBySpriteName(fixture.spriteName)).toMatchObject({
+      state: "draining",
+      runId: null,
+      reuseCount: 1,
+    });
+  });
+
   it("does not issue provider calls or release for a stale generation reference", async () => {
     const fixture = await reusableAssignment();
     const client = fakeClient();

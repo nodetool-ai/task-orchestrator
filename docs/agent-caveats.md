@@ -140,6 +140,12 @@ already cost real time once.
   baseline restore would erase unpublished changes. All orphan reapers,
   including the legacy `lib/agent.ts` startup handler, must recognize the
   canonical task branch when run-level branch/path fields are still null.
+  A deployment also retires the old worker-bundle pool fingerprint while runs
+  on that fingerprint are still finishing. Delivery validation must happen
+  before deciding whether the old fingerprint is reusable: dirty or unpublished
+  work stays attached to its stopped Sprite, while a clean published checkout
+  may be restored and drained. Run 301 lost its unpublished checkout when the
+  old ordering treated “no current target spec” as permission to delete first.
 - Runs 295/298 combined nested-agent verification fan-out, exhausted swap, and
   orphaned compiler/test processes. A shell's parent exiting is not proof its
   descendants exited. Sprite services now start through `process-supervisor.py`:

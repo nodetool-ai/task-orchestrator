@@ -23,10 +23,10 @@ export async function recycleCompletedSprite(client: SpritesClient, ref: WorkerG
   if (entry.state !== "recycling" && !config.sprites.poolReuse) return false;
   const [run] = await db.select().from(agentSessions).where(eq(agentSessions.id, ref.runId));
   if (!run?.userId || !run.repoId || entry.baselineClass !== "repository") return false;
+  const manifest = entry.baselineManifest as unknown as SpriteBaselineManifest;
   const specs = await getEffectiveSpriteBaselines(await workerBundleId());
   const spec = specs.find((s) => s.fingerprint === entry.fingerprint && s.repositoryId === run.repoId
     && s.allowedUserIds?.length === 1 && s.allowedUserIds[0] === run.userId && s.target > 0);
-  if (!spec && entry.state !== "recycling") return false;
   if ((entry.reuseUserId != null && entry.reuseUserId !== run.userId)
     || (entry.reuseRepositoryId != null && entry.reuseRepositoryId !== run.repoId)) throw new Error("Sprite reuse affinity mismatch");
   // Reusable resources with resumable work must not fall through to deletion.
@@ -47,10 +47,14 @@ export async function recycleCompletedSprite(client: SpritesClient, ref: WorkerG
       const repoPath = runner.repoPath;
       // Reuse must not discard unpublished work. An unchanged baseline commit
       // is already durable; otherwise HEAD must equal the published task branch.
-      const baselineRevision = (entry.baselineManifest as unknown as SpriteBaselineManifest).dependency?.revision ?? "";
+      // A deployment may retire the pool fingerprint before this worker
+      // finishes. Its sealed manifest remains authoritative for validating
+      // delivery even when there is no longer a matching target spec.
+      const baselineRevision = manifest.dependency?.revision ?? "";
+      const remote = spec?.remote ?? manifest.dependency?.repository ?? "";
       const delivery = await client.exec(ref.providerHandle, { timeoutMs: 30_000, maxOutputBytes: 4096,
         env: { GIT_TERMINAL_PROMPT: "0", ...(process.env.GH_TOKEN ? { GH_TOKEN: process.env.GH_TOKEN } : {}) },
-        cmd: `set -eu\ncd ${quote(repoPath)}\n[ -z "$(git status --porcelain --untracked-files=normal)" ] || exit 3\nhead=$(git rev-parse HEAD)\nif [ "$head" != ${quote(baselineRevision)} ]; then\nremote=$(git ls-remote --exit-code ${quote(spec!.remote!)} ${quote("refs/heads/" + (current.branch ?? ""))} | awk 'NR==1 { print $1 }')\n[ "$remote" = "$head" ] || exit 4\nfi\nprintf '%s' "$head"` });
+        cmd: `set -eu\ncd ${quote(repoPath)}\n[ -z "$(git status --porcelain --untracked-files=normal)" ] || exit 3\nhead=$(git rev-parse HEAD)\nif [ "$head" != ${quote(baselineRevision)} ]; then\n[ -n ${quote(remote)} ] || exit 4\nremote=$(git ls-remote --exit-code ${quote(remote)} ${quote("refs/heads/" + (current.branch ?? ""))} | awk 'NR==1 { print $1 }')\n[ "$remote" = "$head" ] || exit 4\nfi\nprintf '%s' "$head"` });
       if (delivery.exitCode !== 0 || !/^[a-f0-9]{40}$/.test(delivery.stdout.trim())) {
         await tx.update(runnerInstances).set({ state: "stopped", generationState: "stopped", providerOperationId: null }).where(eq(runnerInstances.runId, ref.runId));
         spriteLog("sprites_pool_reuse_retained", { runId: ref.runId, poolEntryId: entry.id, reason: "unpublished_or_unverified_work" });
@@ -76,7 +80,7 @@ export async function recycleCompletedSprite(client: SpritesClient, ref: WorkerG
   for (const service of await client.listServices(ref.providerHandle)) await stopService(ref.providerHandle, service.name);
   await client.restoreCheckpoint(ref.providerHandle, entry.checkpointId);
   if ((await client.listServices(ref.providerHandle)).length) throw new Error("Recycled baseline contains unexpected service definitions");
-  await verifyBaseline(client, ref.providerHandle, entry.baselineManifest as unknown as SpriteBaselineManifest,
+  await verifyBaseline(client, ref.providerHandle, manifest,
     config.sprites.codexBinary ?? SPRITE_CODEX_BINARY);
 
   await db.transaction(async (tx) => {
