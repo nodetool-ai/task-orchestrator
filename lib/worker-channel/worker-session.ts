@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { WorkerShutdownError } from "../worker-runtime/worker-shutdown";
+import { wallClockTimeout } from "../worker-runtime/wall-clock-timeout";
 import {
   assertEnvelopeScope,
   assertPostHandshakeEnvelope,
@@ -232,7 +234,7 @@ export class WorkerSession {
   private readonly commandIds = new Map<string, string>();
   private readonly sequenceFingerprints = new Map<number, Map<number, string>>();
   private active?: ActiveTransport;
-  private disconnectTimer?: NodeJS.Timeout;
+  private disconnectTimer?: () => void;
   private controllerEpoch: number;
   private lastCommandSeq = 0;
   private start?: RunStart;
@@ -352,7 +354,7 @@ export class WorkerSession {
     }
     this.active = { transport: options.transport, epoch };
     if (this.disconnectTimer) {
-      clearTimeout(this.disconnectTimer);
+      this.disconnectTimer();
       this.disconnectTimer = undefined;
     }
 
@@ -395,10 +397,9 @@ export class WorkerSession {
     if (!active) return;
     this.detachTransport(active.transport);
     if (!this.closed) {
-      this.disconnectTimer = setTimeout(() => {
+      this.disconnectTimer = wallClockTimeout(() => {
         this.disconnectTimer = undefined;
-        this.abort(`worker controller disconnect grace expired: ${reason}`);
-        void this.close();
+        this.abort(new WorkerShutdownError("controller_lost"));
       }, this.disconnectGraceMs);
     }
   }
@@ -411,13 +412,13 @@ export class WorkerSession {
   /** Compatibility hook used by worker-server after a new socket is active. */
   onReconnect(): void {
     if (this.disconnectTimer) {
-      clearTimeout(this.disconnectTimer);
+      this.disconnectTimer();
       this.disconnectTimer = undefined;
     }
   }
 
   /** Abort model work without destroying the durable session state. */
-  abort(reason = "worker session aborted"): void {
+  abort(reason: string | Error = "worker session aborted"): void {
     if (!this.abortSignal.aborted) this.abortController.abort(reason);
   }
 
@@ -606,7 +607,7 @@ export class WorkerSession {
 
   private async closeInner(): Promise<void> {
     this.closed = true;
-    if (this.disconnectTimer) clearTimeout(this.disconnectTimer);
+    if (this.disconnectTimer) this.disconnectTimer();
     this.disconnectTimer = undefined;
     this.commandsQueue.close();
     this.abort("worker session closed");

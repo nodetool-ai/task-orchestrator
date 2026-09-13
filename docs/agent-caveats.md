@@ -124,6 +124,26 @@ already cost real time once.
 
 ## Codex on Sprite
 
+- Runs 295/298 combined nested-agent verification fan-out, exhausted swap, and
+  orphaned compiler/test processes. A shell's parent exiting is not proof its
+  descendants exited. Sprite services now start through `process-supervisor.py`:
+  cgroup v2 bounds the aggregate workload to the smaller of 6 GiB or 75% of RAM,
+  256 MiB swap and 256 tasks; supervisors remain outside that workload. Each
+  `worker_shell` invocation shares one cross-agent execution permit and reaps
+  its entire cgroup on completion, cancellation or parent loss, including
+  double-fork/setsid descendants. Native shell tools are disabled on this path.
+  Assign full-repository checks to one agent and bound test-runner workers.
+  Resource limits are configurable via `TASK_ORCH_PROCESS_MEMORY_MAX_BYTES`,
+  `TASK_ORCH_PROCESS_SWAP_MAX_BYTES`, and `TASK_ORCH_PROCESS_PIDS_MAX`.
+  Each command reserves the smaller of 1 GiB or one quarter of the memory
+  budget for the runtime; a command-local OOM kills that command group while
+  allowing the worker to report the failure. The aggregate limit is the backstop.
+- Bootstrap runs a real supervisor preflight. Python 3.9+, cgroup v2 memory/pids,
+  `cgroup.kill`/pidfds, and noninteractive sudo for delegation are required;
+  unsupported images fail closed. The helper is included in the worker bundle
+  digest, so replacing Node code alone is insufficient. Kernel-uninterruptible
+  tasks can survive pending SIGKILL; a bounded cleanup failure must retain its
+  scope and be investigated, never reported as successful reaping.
 - Sprite's base-image Node version floats. Run 220 received Node 24/npm 12
   despite the repository requiring Node 22, and `npm install` failed with
   `EALLOWREMOTE` for the SheetJS URL dependency (npm 12 defaults remote
@@ -147,6 +167,30 @@ already cost real time once.
   and verification contract.
 
 ## Liveness
+
+- Sprite service inventory is cached supervisor metadata, not process evidence.
+  Runs 295/298 still reported `running`, PID 1452 and the original start time
+  after their workers had exited. Exact-service inspection now checks procfs
+  with a bounded non-login probe; missing/replaced process identity proves
+  death, while API failures, inaccessible procfs and uncertain process state
+  remain `unknown`. The probe may wake a hibernated Sprite. Never print raw
+  service inventories or `/proc/*/environ`: both can contain credentials.
+- VM hibernation pauses Node's timer clock. Turn, idle and disconnect checks
+  catch up against `Date.now()` after resume; late SDK output cannot erase a
+  deadline that already expired. Local deadline checks are not progress or
+  transport heartbeats. Controller loss is infrastructure shutdown, not user
+  cancellation: keep the active logical turn and assigned inputs recoverable.
+  Worker shutdown writes fsynced, incarnation-scoped `workers/<instance>/exit.json`
+  before a bounded drain. This is forensic evidence, not authority to recover
+  while the supervisor is still alive, and the old instance's outbox must never
+  be replayed under a new channel identity.
+- Remote v2 implement recovery uses the task's canonical `tasks.branch` even
+  when `agent_runs.branch` and `worktree_path` are null. A new generation owns
+  recovery of the active turn and pending follow-ups under the existing CAS
+  fences. For the pre-fix 295/298 Sprites, preserve unpublished checkout changes
+  and inspect remaining descendant processes before recovery; deploying this
+  code does not retroactively contain those old processes. Manual cleanup or
+  service replacement is a separate authorized production operation.
 
 - Turn progress and worker liveness are separate. The default watchdog aborts
   after 30 minutes without observed SDK progress, not 30 minutes since turn

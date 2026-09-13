@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,7 +25,7 @@ class LocalResponsesApi {
   private connectionCount = 0;
   private readonly sockets = new Set<WebSocket>();
 
-  constructor(private readonly mode: "tool" | "failed") {
+  constructor(private readonly mode: "tool" | "failed" | "shell") {
     this.server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
     this.server.on("connection", (socket) => {
       this.sockets.add(socket);
@@ -86,7 +86,9 @@ class LocalResponsesApi {
         // CodeAct is always on (lib/agent-backend/codeact-capabilities.ts), so the
         // only MCP tools the bridge exposes are codeact_catalog/codeact_execute:
         // the probe is reached as a catalogued operation inside the sandbox.
-        input: "text(await tools.mcp__task_orch__codeact_execute({ code: 'return await tools.orch_probe({});' }));",
+        input: this.mode === "shell"
+          ? "text(await tools.mcp__task_orch__worker_shell({ command: 'printf WORKER_SHELL_CLI_OK', timeout_seconds: 10 }));"
+          : "text(await tools.mcp__task_orch__codeact_execute({ code: 'return await tools.orch_probe({});' }));",
       };
       socket.send(JSON.stringify({ type: "response.output_item.added", output_index: 0, item: { ...call, input: "" } }));
       socket.send(JSON.stringify({ type: "response.output_item.done", output_index: 0, item: call }));
@@ -171,6 +173,32 @@ afterAll(() => {
 });
 
 describe("CodexBackend with the real Codex CLI", () => {
+  it("executes the supervised shell replacement with native shells disabled", async (ctx) => {
+    if (!cliAvailable) return ctx.skip();
+    const api = new LocalResponsesApi("shell");
+    await api.ready();
+    const home = mkdtempSync(path.join(tmpdir(), "task-orch-codex-shell-"));
+    scratchRoots.push(home);
+    writeFileSync(path.join(home, "config.toml"), `openai_base_url = ${JSON.stringify(api.url)}\n`);
+    // Cross-platform protocol fixture only. The real helper's cgroups,
+    // permissions and descendant cleanup run in scripts/test-process-supervisor.py.
+    const helper = path.join(home, "supervisor-fixture.py");
+    writeFileSync(helper, "import subprocess,sys\nassert sys.argv[1:4] == ['command','--timeout-seconds','10']\nsys.exit(subprocess.call(sys.argv[5:]))\n");
+    vi.stubEnv("TASK_ORCH_PROCESS_SUPERVISOR", helper);
+    vi.stubEnv("TASK_ORCH_PROCESS_CGROUP", "/sys/fs/cgroup/fixture");
+    vi.stubEnv("TASK_ORCH_PROCESS_LOCK", path.join(home, "command.lock"));
+    try {
+      const outcome = await runBounded(new CodexBackend(), args(home, [], {
+        env: { CODEX_API_KEY: "fake-local-key", TASK_ORCH_CODEX_HOME: home, HOME: home },
+      }));
+      expect(api.executed).toBe(1);
+      expect(JSON.stringify(api.inputs)).toContain("WORKER_SHELL_CLI_OK");
+      expect(JSON.stringify(outcome.envelopes)).toContain("WORKER_SHELL_CLI_OK");
+    } finally {
+      vi.unstubAllEnvs();
+      await api.close();
+    }
+  }, 30_000);
   it("executes a bridged MCP tool against a local Responses API", async (ctx) => {
     if (!cliAvailable) return ctx.skip();
     const api = new LocalResponsesApi("tool");

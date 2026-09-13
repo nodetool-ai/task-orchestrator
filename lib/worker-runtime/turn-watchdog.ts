@@ -22,6 +22,7 @@ export async function runWithTurnWatchdog<T>(
   let warningTimer: NodeJS.Timeout | undefined;
   let hardTimer: NodeJS.Timeout | undefined;
   let progressSummaryTimer: NodeJS.Timeout | undefined;
+  let wallClockTimer: NodeJS.Timeout | undefined;
   let settled = false;
   let resetCount = 0;
   let lastResetReason = "initial arm";
@@ -56,7 +57,23 @@ export async function runWithTurnWatchdog<T>(
     rejectGuard(error);
     options.abort.abort(error);
   };
+  // Linux monotonic timers pause while a Sprite hibernates. Date.now() does
+  // not: check it on a short wake-up tick and before accepting any late SDK
+  // progress/result, so a resumed event cannot erase an expired idle period.
+  const checkWallClock = () => {
+    if (settled) return;
+    const now = Date.now();
+    if (now >= effectiveDeadline) {
+      fail(new Error("Agent turn exceeded its explicit wall-clock deadline"));
+    } else if (options.idleTimeoutMs > 0 && now >= lastMeaningfulProgressAt + options.idleTimeoutMs) {
+      fail(new Error(
+        `Agent turn stalled: no backend progress for ${options.idleTimeoutMs}ms. ` +
+        `Last activity: ${lastActivity}. Turn elapsed: ${now - startedAt}ms.`,
+      ));
+    }
+  };
   const progress = (activity: string) => {
+    checkWallClock();
     if (settled) return;
     lastActivity = activity.slice(0, 200);
     lastMeaningfulProgressAt = Date.now();
@@ -66,6 +83,7 @@ export async function runWithTurnWatchdog<T>(
     clearTimeout(warningTimer);
     if (!progressSummaryTimer) {
       progressSummaryTimer = setInterval(() => {
+        checkWallClock();
         if (settled) return;
         let snapshot: Record<string, unknown> = {};
         try { snapshot = options.diagnostics?.snapshot?.() ?? {}; } catch { /* best effort */ }
@@ -88,6 +106,8 @@ export async function runWithTurnWatchdog<T>(
     }
     if (options.idleTimeoutMs <= 0) return;
     warningTimer = setTimeout(() => {
+      checkWallClock();
+      if (settled) return;
       const message = `No backend progress for ${Math.floor(options.idleTimeoutMs / 2)}ms. Last activity: ${lastActivity}. ` +
         `The turn will be interrupted after ${options.idleTimeoutMs}ms without progress.`;
       try {
@@ -132,6 +152,10 @@ export async function runWithTurnWatchdog<T>(
       hardTimer = setTimeout(() => fail(new Error("Agent turn exceeded its explicit wall-clock deadline")), effectiveDeadline - startedAt);
       hardTimer.unref?.();
     }
+    if (options.idleTimeoutMs > 0 || Number.isFinite(effectiveDeadline)) {
+      wallClockTimer = setInterval(checkWallClock, 1_000);
+      wallClockTimer.unref?.();
+    }
     progress(lastActivity);
     // Arming the timers is not backend progress. Preserve the initial state so
     // a stalled adapter's first summary cannot claim an SDK-originated reset.
@@ -139,7 +163,11 @@ export async function runWithTurnWatchdog<T>(
     lastResetReason = "initial arm";
     resetCount = 0;
     // Promise.resolve also captures a synchronous throw from an adapter.
-    running = Promise.resolve().then(() => operation(progress));
+    running = Promise.resolve().then(() => operation(progress)).then((value) => {
+      checkWallClock();
+      if (options.abort.signal.aborted) return guard;
+      return value;
+    });
     return await Promise.race([running, guard]);
   } finally {
     settled = true;
@@ -147,6 +175,7 @@ export async function runWithTurnWatchdog<T>(
     clearTimeout(warningTimer);
     clearTimeout(hardTimer);
     clearInterval(progressSummaryTimer);
+    clearInterval(wallClockTimer);
     options.abort.signal.removeEventListener("abort", onAbort);
     // A slow/ignoring adapter may settle after the watchdog has returned.
     void running?.catch(() => undefined);

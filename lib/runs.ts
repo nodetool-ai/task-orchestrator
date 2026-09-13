@@ -4809,6 +4809,17 @@ async function latestEventStatus(
   }
 }
 
+/** v2 remote workers can establish their checkout without copying its path or
+ * branch back to the legacy run columns. The task reservation is authoritative
+ * and survives controller loss; do not fabricate a branch if neither has one. */
+async function canonicalRecoveryBranch(row: { taskId: string | null; branch: string | null }): Promise<string | null> {
+  if (row.taskId) {
+    const [task] = await db.select({ branch: tasks.branch }).from(tasks).where(eq(tasks.id, row.taskId));
+    if (task?.branch) return task.branch;
+  }
+  return row.branch;
+}
+
 /**
  * Demote runs left in an active status by a process that died mid-turn (e.g.
  * OOM-killed) — identified by a stale/absent heartbeat. Chat runs go back to
@@ -4907,6 +4918,7 @@ export async function reconcileOrphanedRuns(): Promise<number> {
     // a runner-Machine volume path (/mnt/session/repo) that NEVER exists on the
     // server, so an existsSync gate would wrongly fail every resumable orphan.
     // Host/dev mode still requires the on-disk worktree.
+    const recoveryBranch = await canonicalRecoveryBranch(row);
     const resumable = isResumableDeadRun({
       detached: runDispatch.detachedRunsEnabled(),
       remote: runDispatch.remoteRunnerEnabled(),
@@ -4915,7 +4927,7 @@ export async function reconcileOrphanedRuns(): Promise<number> {
       // turns, and pending inputs even when a backend (notably Codex) did not
       // issue an opaque SDK session token. Keep v1 on the old token gate.
       hasContinuationState: !!row.sdkSessionId || row.deliveryVersion === 2,
-      hasBranch: !!row.branch,
+      hasBranch: !!recoveryBranch,
       worktreeOnDisk: !!row.worktreePath && existsSync(row.worktreePath),
     });
     // A plan executor is resumable too, just not via the worktree predicate
@@ -5078,12 +5090,13 @@ export async function handleWorkerDeath(
   // set and remoteRunnerEnabled() reduces to its presence (given detached), so
   // this preserves the old `!!TASK_ORCH_WORKER_IMAGE` gate; on Fly it is now also
   // correct (branch check, not the never-present server worktree path).
+  const recoveryBranch = await canonicalRecoveryBranch(row);
   const worktreeResumable = isResumableDeadRun({
     detached: runDispatch.detachedRunsEnabled(),
     remote: runDispatch.remoteRunnerEnabled(),
     isImplementWorktree: isImplementWorktree(row),
     hasContinuationState: !!row.sdkSessionId || row.deliveryVersion === 2,
-    hasBranch: !!row.branch,
+    hasBranch: !!recoveryBranch,
     worktreeOnDisk: !!row.worktreePath && existsSync(row.worktreePath),
   });
   // Same carve-out as reconcileOrphanedRuns: a plan executor's whole state

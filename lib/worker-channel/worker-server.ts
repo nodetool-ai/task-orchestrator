@@ -40,6 +40,8 @@ import {
   type WorkerSessionTransport,
 } from "./worker-session";
 import type { BackendDiagnostics } from "../agent-backend/types";
+import { WorkerShutdownError, boundedShutdownStep } from "../worker-runtime/worker-shutdown";
+import { wallClockTimeout } from "../worker-runtime/wall-clock-timeout";
 
 const CHANNEL_PATH = "/worker/channel";
 const DEFAULT_ACCEPT_TIMEOUT_MS = 10_000;
@@ -69,7 +71,7 @@ export interface WorkerSessionLike {
   /** Numbers advertised in `channel.hello`. */
   handshakeState(): WorkerHandshakeState;
   /** Abort model work without discarding durable session state. */
-  abort(reason?: string): void;
+  abort(reason?: string | Error): void;
   /** Drain and release the durable spool. */
   close(): Promise<void>;
   /** Driver-facing helpers surfaced through {@link WorkerServer.session}. */
@@ -119,6 +121,9 @@ export interface WorkerServerConfig {
   /** What to do when idleExitMs elapses. Defaults to a clean drain + exit(0).
    *  Injected by tests so nothing calls process.exit under vitest. */
   onIdleExit?: (reason: string) => void | Promise<void>;
+  /** Process owner persists generation-scoped shutdown evidence and exits with
+   * a hard drain bound when controller loss interrupts an active worker. */
+  onControllerLoss?: (reason: string) => void | Promise<void>;
   /** Override the protocol range advertised in `channel.hello`. Tests use it to
    * force a protocol mismatch; production always advertises the current major. */
   helloProtocol?: { min: number; max: number };
@@ -277,13 +282,13 @@ class WorkerServerImpl implements WorkerServer {
   private readonly diagnostics?: BackendDiagnostics;
   private readonly listener: ListenerAddress;
   private readonly idleExitMs: number = 0;
-  private idleTimer: ReturnType<typeof setTimeout> | undefined;
+  private idleTimer: (() => void) | undefined;
   private readonly acceptTimeoutMs: number;
   private readonly defaultGraceMs: number;
   private active?: ControllerConnection;
   private readonly connections = new Set<ControllerConnection>();
   private acceptTail: Promise<void> = Promise.resolve();
-  private graceTimer?: NodeJS.Timeout;
+  private graceTimer?: () => void;
   private started = false;
   private draining = false;
   private closed = false;
@@ -381,7 +386,7 @@ class WorkerServerImpl implements WorkerServer {
   private async performClose(options: WorkerServerCloseOptions): Promise<void> {
     this.draining = true;
     this.disarmIdleTimer();
-    if (this.graceTimer) clearTimeout(this.graceTimer);
+    this.graceTimer?.();
     const code = options.code ?? CLOSE_CODE_CLEAN_DRAIN;
     const reason = safeReason(options.reason ?? "worker server closed");
     for (const connection of [...this.connections]) this.closeConnection(connection, code, reason, true);
@@ -600,7 +605,7 @@ class WorkerServerImpl implements WorkerServer {
     this.disarmIdleTimer();
     if (connection.acceptTimer) clearTimeout(connection.acceptTimer);
     if (this.graceTimer) {
-      clearTimeout(this.graceTimer);
+      this.graceTimer();
       this.graceTimer = undefined;
     }
     // The session has fenced the older epoch; close its socket (transport duty).
@@ -689,19 +694,17 @@ class WorkerServerImpl implements WorkerServer {
   private armIdleTimer(): void {
     if (!this.idleExitMs || this.draining || this.closed) return;
     if (this.idleTimer) return;
-    this.idleTimer = setTimeout(() => {
+    this.idleTimer = wallClockTimeout(() => {
       this.idleTimer = undefined;
       // Re-check: a controller may have attached between the last arm and now.
       if (this.active || this.draining || this.closed) return;
       void this.onIdleExpired();
     }, this.idleExitMs);
-    // Never let this timer alone hold the process open.
-    (this.idleTimer as { unref?: () => void }).unref?.();
   }
 
   private disarmIdleTimer(): void {
     if (!this.idleTimer) return;
-    clearTimeout(this.idleTimer);
+    this.idleTimer();
     this.idleTimer = undefined;
   }
 
@@ -717,11 +720,11 @@ class WorkerServerImpl implements WorkerServer {
     // policy is on-failure/max_retries=3: a non-zero exit here would RESTART the
     // Machine, re-bind, re-arm this very timer, and burn 4x the billing this is
     // meant to save.
-    try {
-      await this.close({ code: CLOSE_CODE_CLEAN_DRAIN, reason: "worker idle backstop" });
-    } catch {
-      // Never let a drain failure keep a dead worker (and its Machine) alive.
-    }
+    this.session.abort(new WorkerShutdownError("idle_backstop"));
+    await boundedShutdownStep(
+      () => this.close({ code: CLOSE_CODE_CLEAN_DRAIN, reason: "worker idle backstop" }),
+      DEFAULT_CLOSE_WAIT_MS,
+    );
     process.exit(0);
   }
 
@@ -749,11 +752,17 @@ class WorkerServerImpl implements WorkerServer {
     this.armIdleTimer();
     if (connection.superseded || this.draining || this.closed) return;
     const graceMs = this.defaultGraceMs;
-    this.graceTimer = setTimeout(() => {
+    this.graceTimer = wallClockTimeout(() => {
       this.graceTimer = undefined;
       if (this.active || this.draining || this.closed) return;
-      this.session.abort("worker controller disconnect grace expired");
-      void this.session.close();
+      // Do not close the outbox before the driver observes the abort. The
+      // process owner records local evidence and bounds all later draining.
+      if (this.config.onControllerLoss) {
+        void Promise.resolve().then(() => this.config.onControllerLoss!("worker controller disconnect grace expired"))
+          .catch((error) => this.logError("worker controller-loss shutdown failed", error));
+      } else {
+        this.session.abort(new WorkerShutdownError("controller_lost"));
+      }
     }, graceMs);
   }
 

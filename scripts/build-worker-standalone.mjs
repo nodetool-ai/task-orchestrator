@@ -6,7 +6,7 @@
 // runtime), this bundles EVERY runtime dependency into one file so a Box
 // needs no node_modules for the worker at all.
 import { execSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, copyFileSync } from "node:fs";
 import { build } from "esbuild";
 import { packageCodeActWasm } from "../lib/codeact/wasm-fixture.ts";
 
@@ -57,6 +57,8 @@ await build({
 // it as part of the worker build rather than relying on a second operator step.
 // The helper verifies size and sha256 before writing the artifact + sidecar.
 await packageCodeActWasm("dist/codeact");
+// Linux stdlib-only subreaper and cgroup guardian; part of the bundle identity.
+copyFileSync("scripts/process-supervisor.py", "dist/process-supervisor.py");
 
 // Bake the sha next to the bundle so the control plane can identify exactly
 // what bytes this artifact contains without a git/ls-remote round-trip at

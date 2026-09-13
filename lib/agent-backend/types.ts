@@ -32,7 +32,7 @@ export interface NeutralTool {
   label?: string;
   description: string;
   parameters: TSchema;
-  execute: (callId: string, params: any) => Promise<ToolResult>;
+  execute: (callId: string, params: any, signal?: AbortSignal) => Promise<ToolResult>;
 }
 
 /**

@@ -7,6 +7,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { createWorkerShellScope, type WorkerShellScope } from "./worker-shell";
 import {
   createAgentSession,
   SessionManager,
@@ -78,7 +79,8 @@ export class PiBackend implements AgentBackend {
   async runTurn(args: RunTurnArgs): Promise<TurnOutcome> {
     const invocation = beginBackendInvocation(args);
     try {
-      const outcome = await this.runTurnInner(args, invocation);
+      const shell = createWorkerShellScope(args);
+      const outcome = await this.runTurnInner(args, invocation, shell).finally(() => shell?.close());
       invocation.finish("completed");
       return outcome;
     } catch (error) {
@@ -87,7 +89,7 @@ export class PiBackend implements AgentBackend {
     }
   }
 
-  private async runTurnInner(args: RunTurnArgs, invocation: BackendInvocation): Promise<TurnOutcome> {
+  private async runTurnInner(args: RunTurnArgs, invocation: BackendInvocation, shell: WorkerShellScope | null): Promise<TurnOutcome> {
     // Postgres mode: no session files — replay the conversation from the DB and
     // drive pi-ai's completeSimple directly. This is the former lib/chat-ai-loop
     // machinery, now a mode of this backend (R3).
@@ -98,11 +100,12 @@ export class PiBackend implements AgentBackend {
     const { cwd, model, thinkingLevel, extensions, abort, prompt, onEvent } = args;
     const progress = createBackendProgressReporter(args.onProgress, args.diagnostics, invocation.id);
 
-    const collected = withCodeActTools(
+    const capabilities = withCodeActTools(
       await collectExtensions(extensions),
       args.codeActInvoker,
       abort.signal,
     );
+    const collected = shell ? shell.attach(capabilities) : capabilities;
 
     // Skills must exist on disk before pi scans .pi/skills during session setup.
     for (const skill of collected.skills) writeSkill(cwd, skill);
@@ -114,11 +117,11 @@ export class PiBackend implements AgentBackend {
           label: tool.label,
           description: tool.description,
           parameters: tool.parameters,
-          execute: async (id: string, params: any) => {
+          execute: async (id: string, params: any, signal?: AbortSignal) => {
             // Pi's SDK emits tool_execution_start/end for both registered and
             // native tools; the progress reporter owns the single lifecycle
             // record so these calls are not double-counted.
-            const r = await tool.execute(id, params);
+            const r = await tool.execute(id, params, signal);
             return { content: r.content, details: r.details, isError: r.isError ?? false };
           },
         });
@@ -131,9 +134,10 @@ export class PiBackend implements AgentBackend {
         });
       }
 
-      if (args.nativeToolPolicy === "orchestration-only" || collected.interceptors.length > 0) {
+      if (shell || args.nativeToolPolicy === "orchestration-only" || collected.interceptors.length > 0) {
         pi.on("tool_call", async (event: any) => {
           const toolName = interceptorToolName(event.toolName);
+          if (shell && toolName === "bash") return { block: true, reason: "Use worker_shell for supervised commands in this worker." };
           if (
             args.nativeToolPolicy === "orchestration-only" &&
             // Canonical (lowercased) names — interceptorToolName has already

@@ -9,8 +9,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../db";
-import { agentSessions, agentEvents, runnerInstances } from "../db/schema";
-import { create, get, reconcileOrphanedRuns } from "../lib/runs";
+import { agentSessions, agentEvents, agentMessages, runInputs, runTurns, runnerInstances, tasks } from "../db/schema";
+import { create, get, handleWorkerDeath, reconcileOrphanedRuns } from "../lib/runs";
+import { randomUUID } from "node:crypto";
 import * as dispatch from "../lib/run-dispatch";
 import * as repo from "../lib/repo";
 import {
@@ -285,6 +286,45 @@ describe("reconcileOrphanedRuns", () => {
     } finally {
       delete process.env.TASK_ORCH_RUNNER;
       delete process.env.TASK_ORCH_DETACHED_RUNS;
+      vi.restoreAllMocks();
+    }
+  });
+
+  it.each(["reconcile", "death-handler"])("%s recovers remote v2 implement work from tasks.branch with null run checkout metadata", async (reaper) => {
+    // Keep the injected fake local provider observable while exercising the
+    // remote branch-existence policy. Switching providers here bypasses it.
+    vi.stubEnv("TASK_ORCH_RUNNER", "local");
+    vi.stubEnv("TASK_ORCH_DETACHED_RUNS", "1");
+    vi.spyOn(dispatch, "remoteRunnerEnabled").mockReturnValue(true);
+    const spy = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
+    try {
+      const plan = await repo.createPlan({ title: `Canonical branch ${reaper}` });
+      const task = await repo.createTask({ planId: plan.id, title: `Retained Sprite checkout ${reaper}` });
+      const run = await create({ goal: "<implement>", taskId: task.id, backend: "codex", model: "openai/gpt-5.6-terra", defer: true });
+      const branch = `claude/${task.id.toLowerCase()}`;
+      await db.update(tasks).set({ branch }).where(eq(tasks.id, task.id));
+      await db.update(agentSessions).set({ status: "running", sdkSessionId: null, deliveryVersion: 2,
+        branch: null, worktreePath: null }).where(eq(agentSessions.id, run.id));
+      await setFakeRunLiveness(run.id, { status: "dead", detail: "service running pid 1452 is absent from procfs" }, "2026-09-13#1452");
+      const turnId = randomUUID();
+      await db.insert(runTurns).values({ id: turnId, runId: run.id, ordinal: 1, state: "active" });
+      const [message] = await db.insert(agentMessages).values({ runId: run.id, role: "user", content: "[]" }).returning({ id: agentMessages.id });
+      const [pendingMessage] = await db.insert(agentMessages).values({ runId: run.id, role: "user", content: "[]" }).returning({ id: agentMessages.id });
+      await db.insert(runInputs).values([
+        { id: randomUUID(), runId: run.id, inputSeq: 100, messageId: message.id, kind: "user", status: "assigned", assignedTurnId: turnId },
+        { id: randomUUID(), runId: run.id, inputSeq: 101, messageId: pendingMessage.id, kind: "user", status: "pending" },
+      ]);
+      if (reaper === "reconcile") await reconcileOrphanedRuns();
+      else await handleWorkerDeath(run.id, { exitCode: 1, oomKilled: false, containerName: `fake-runner-${run.id}` });
+      expect(spy).toHaveBeenCalledWith(run.id);
+      expect((await get(run.id))?.status).not.toBe("failed");
+      expect((await get(run.id))?.workerScope).toBeNull();
+      // The fresh dispatch owns logical-turn recovery under its generation CAS.
+      // Reaping the dead process must not consume a pending user follow-up.
+      expect((await db.select().from(runInputs).where(eq(runInputs.messageId, pendingMessage.id)))[0]?.status).toBe("pending");
+      expect((await db.select().from(runTurns).where(eq(runTurns.id, turnId)))[0]?.state).toBe("active");
+    } finally {
+      vi.unstubAllEnvs();
       vi.restoreAllMocks();
     }
   });

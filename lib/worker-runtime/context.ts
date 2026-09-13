@@ -39,6 +39,7 @@ import type { BackendDiagnostics, RunTurnArgs } from "../agent-backend/types";
 import type { RunEnvelope } from "../pi-event-mapper";
 import { config } from "../config";
 import { runWithTurnWatchdog } from "./turn-watchdog";
+import { WorkerShutdownError } from "./worker-shutdown";
 import { parseProviderQualifiedModel } from "../model-id";
 import { buildWorkerToolInvoker } from "./tools";
 import { coerceRunStatus, isTerminalStatus, type SessionStatus } from "../run-state";
@@ -1062,6 +1063,7 @@ async function driveSingleTurn(context: WorkerRunContext): Promise<void> {
     turn = await runModelTurn(context, prompt);
   } catch (err) {
     if (session.abortSignal?.aborted) {
+      inputLoop.stop();
       await emitCancelled(context, "");
       return;
     }
@@ -1128,6 +1130,10 @@ async function driveSingleTurn(context: WorkerRunContext): Promise<void> {
  *  disconnect grace expiry can close it before the commit round-trips). */
 async function emitCancelled(context: WorkerRunContext, requestId: string): Promise<void> {
   const reason = ((context.session.abortSignal as AbortSignal | undefined)?.reason);
+  // Controller loss leaves the assigned inputs/turn outstanding. A replacement
+  // generation recovers them under the control plane's CAS fences. Persisting
+  // run.cancelled here would misclassify infrastructure loss as user intent.
+  if (reason instanceof WorkerShutdownError) return;
   try {
     const fin = await context.session.emit("run.cancelled", {
       // A single-turn drive has no command-loop tracking the cancel request id;

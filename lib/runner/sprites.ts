@@ -27,6 +27,7 @@ import { cloneUrlFromRemote } from "../repo-checkout";
 import { recycleCompletedSprite } from "./sprites-reuse";
 import { SpriteCapacityError } from "./sprites-capacity";
 import { logSpritePhase, spriteLog, spriteErrorFields } from "./sprites-log";
+import { inspectSpriteProcess, isSpriteScopeQuiescent } from "./sprites-process-probe";
 
 function envValue(key: string): string | undefined {
   const v = process.env[key];
@@ -94,6 +95,10 @@ function ownedWorkerGeneration(serviceName: string): number | null {
 function serviceIsQuiescent(service: SpriteService | null): boolean {
   return service == null
     || (service.state.status === "stopped" && service.state.nextRestartAt === undefined);
+}
+
+function serviceUsesContainment(service: SpriteService | null): boolean {
+  return service?.args?.some((arg) => /(^|\/)process-supervisor\.py$/.test(arg)) ?? false;
 }
 
 function serviceIsFailedWithoutRestart(service: SpriteService | null): boolean {
@@ -269,6 +274,9 @@ export async function buildSpritesWorkerEnv(
     // for a custom Sprite image that already provisions Codex elsewhere.
     TASK_ORCH_CODEX_BINARY: envValue("TASK_ORCH_SPRITES_CODEX_BINARY") ?? SPRITE_CODEX_BINARY,
     TASK_ORCH_QUICKJS_WASM: "/home/user/worker/codeact/emscripten-module.wasm",
+    TASK_ORCH_PROCESS_MEMORY_MAX_BYTES: envValue("TASK_ORCH_PROCESS_MEMORY_MAX_BYTES"),
+    TASK_ORCH_PROCESS_SWAP_MAX_BYTES: envValue("TASK_ORCH_PROCESS_SWAP_MAX_BYTES"),
+    TASK_ORCH_PROCESS_PIDS_MAX: envValue("TASK_ORCH_PROCESS_PIDS_MAX"),
     TASK_ORCH_CODEACT_THREAD_WORKER: "/home/user/worker/codeact/thread-worker.js",
     RUN_ID: String(runId),
     ...(opts.workerGeneration != null ? { TASK_ORCH_WORKER_GENERATION: String(opts.workerGeneration) } : {}),
@@ -444,10 +452,16 @@ export class SpritesRunnerProvider implements RunnerProvider {
       ref.providerHandle,
       ref.providerServiceName ?? (ref.generation === 1 ? "worker" : workerServiceName(ref.generation)),
       ref.storedIncarnation,
+      ref.instanceId === "legacy" ? undefined : { instanceId: ref.instanceId, generation: ref.generation },
     );
   }
 
-  private async inspectService(handle: string, serviceName: string, storedIncarnation?: string): Promise<RunnerObservation> {
+  private async inspectService(
+    handle: string,
+    serviceName: string,
+    storedIncarnation?: string,
+    identity?: { instanceId: string; generation: number },
+  ): Promise<RunnerObservation> {
     try {
       const sprite = await this.spritesClient.getSprite(handle);
       if (!sprite) return { status: "dead", detail: "sprite gone" };
@@ -465,6 +479,16 @@ export class SpritesRunnerProvider implements RunnerProvider {
       if (s!.status === "failed") return { status: "dead", detail: s!.error ?? "failed" };
       if (s!.nextRestartAt) return { status: "unknown" };
       if (s!.status !== "running" || s!.pid == null || !s!.startedAt) return { status: "unknown" };
+      // A suspended Sprite can retain stale service state after the worker
+      // exited. Observe the service PID (the supervisor on new bundles), never
+      // infer death from hibernation, a disconnected channel or a local exit
+      // marker: the supervisor may still be reaping descendants.
+      const process = await inspectSpriteProcess(this.spritesClient, handle, s!.pid, identity);
+      if (process === "unknown") return { status: "unknown" };
+      if (process !== "alive") return {
+        status: "dead",
+        detail: `service ${serviceName} reports running but pid ${s!.pid} is ${process === "missing" ? "absent from procfs" : "owned by a different worker identity"}`,
+      };
       return { status: "alive", incarnation: `${s!.startedAt}#${s!.pid}`, pid: s!.pid };
     } catch {
       return { status: "unknown" };
@@ -515,7 +539,7 @@ export class SpritesRunnerProvider implements RunnerProvider {
       .sort((a, b) => a.generation - b.generation);
     const explicitlyDisabledFailures = new Set<string>();
     for (const { service } of older) {
-      if (!serviceIsQuiescent(service)) {
+      if (!serviceIsQuiescent(service) || serviceUsesContainment(service)) {
         const result = await this.stopServiceAndConfirm(spriteName, service.name);
         if (result === "failed-disabled") explicitlyDisabledFailures.add(service.name);
       }
@@ -703,8 +727,8 @@ export class SpritesRunnerProvider implements RunnerProvider {
         "sprites_service_define",
         () =>
           this.spritesClient.putService(spriteName, serviceName, {
-            cmd: "node",
-            args: ["dist/run-worker.js", String(input.runId)],
+            cmd: "python3",
+            args: ["process-supervisor.py", "worker", "--instance", channelInstanceId, "--", "node", "dist/run-worker.js", String(input.runId)],
             env: workerEnv,
             dir: "/home/user/worker",
           }),
@@ -927,8 +951,8 @@ export class SpritesRunnerProvider implements RunnerProvider {
         console.warn(`[SpritesRunnerProvider] redefining the worker service on ${spriteName} (${staleBundle ? "new bundle" : "worker env changed"})`);
         await this.stopServiceAndConfirm(spriteName, serviceName);
         await this.spritesClient.putService(spriteName, serviceName, {
-          cmd: "node",
-          args: ["dist/run-worker.js", String(runId)],
+          cmd: "python3",
+          args: ["process-supervisor.py", "worker", "--instance", channelInstanceId, "--", "node", "dist/run-worker.js", String(runId)],
           env: desiredEnv,
           dir: "/home/user/worker",
         });
@@ -969,6 +993,23 @@ export class SpritesRunnerProvider implements RunnerProvider {
     serviceName: string,
   ): Promise<"stopped" | "failed-disabled"> {
     const deadline = Date.now() + 30_000;
+    // A provider can report the outer supervisor stopped while its inner
+    // guardian is still reaping. Capture the exact service identity before
+    // stopping, since the provider may subsequently remove the definition.
+    let containedIdentity: { instanceId: string; generation: number } | null | undefined;
+    const rememberContainment = (service: SpriteService | null) => {
+      if (!service || !serviceUsesContainment(service)) return;
+      const instanceId = service.env?.TASK_ORCH_WORKER_INSTANCE_ID;
+      const generation = Number(service.env?.TASK_ORCH_WORKER_GENERATION);
+      containedIdentity = instanceId && Number.isSafeInteger(generation) && generation > 0
+        ? { instanceId, generation } : null;
+    };
+    rememberContainment(await this.spritesClient.getService(spriteName, serviceName));
+    const scopeQuiescent = async (service: SpriteService | null) => {
+      rememberContainment(service);
+      if (containedIdentity === null) return false;
+      return !containedIdentity || await isSpriteScopeQuiescent(this.spritesClient, spriteName, containedIdentity);
+    };
     let lastError: unknown;
     let lastState: SpriteService["state"] | undefined;
     for (;;) {
@@ -994,13 +1035,13 @@ export class SpritesRunnerProvider implements RunnerProvider {
       try {
         const service = await this.spritesClient.getService(spriteName, serviceName);
         lastState = service?.state;
-        if (serviceIsQuiescent(service)) return "stopped";
+        if (serviceIsQuiescent(service) && await scopeQuiescent(service)) return "stopped";
         if (providerConfirmedNotRunning && serviceIsFailedWithoutRestart(service)) {
           await new Promise((resolve) => setTimeout(resolve, 100));
           const confirmed = await this.spritesClient.getService(spriteName, serviceName);
           lastState = confirmed?.state;
-          if (serviceIsQuiescent(confirmed)) return "stopped";
-          if (serviceIsFailedWithoutRestart(confirmed)) return "failed-disabled";
+          if (serviceIsQuiescent(confirmed) && await scopeQuiescent(confirmed)) return "stopped";
+          if (serviceIsFailedWithoutRestart(confirmed) && await scopeQuiescent(confirmed)) return "failed-disabled";
         }
       } catch (err) {
         // An observation failure is unknown, never proof that teardown

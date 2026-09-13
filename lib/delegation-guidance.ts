@@ -43,7 +43,8 @@ Delegation guidance:
 - A child run (start_session / spawn__spawn_agent) is a whole container, checkout, budget and supervision chain. Start one per unit of work that owns its own branch and PR — one child run per task, never one per step.
 - Do NOT start a run for sub-work inside the job you already hold: searching the codebase, reading an unfamiliar area, reproducing a failure, reviewing your own diff, digesting long output. That is delegation you can do where you stand, and a run is the expensive way to do it.
 - Start a child run only when the work genuinely needs its own run: a DIFFERENT task with its own branch, acceptance criteria and PR; a tool surface or persona you do not have; or work that must outlive your turn under its own supervision.
-- Before starting one, check state: a task that already has an active run does not need a second one — resume it, or send it the context it is missing.`;
+- Before starting one, check state: a task that already has an active run does not need a second one — resume it, or send it the context it is missing.
+- Agents sharing a checkout also share its process and memory budget. Assign full-repository typecheck/build/test execution to one owner, run those checks sequentially with bounded test workers, and let reviewers reuse the results. Use focused checks for independent sub-work. A background command still consumes the shared budget; await it and clean it up before starting another heavy check.`;
 
 /** Claude Agent SDK: `Agent`, with `Task` as the legacy wire name. */
 export const CLAUDE_SUBAGENT_GUIDANCE = `

@@ -15,6 +15,7 @@ import {
 } from "../lib/worker-runtime/context";
 import type { MessageSnapshot, RunInput, RunStart } from "../lib/worker-channel/protocol";
 import type { WorkerSessionCommand } from "../lib/worker-channel/worker-session";
+import { WorkerShutdownError } from "../lib/worker-runtime/worker-shutdown";
 
 function msg(id: number, role: MessageSnapshot["role"], text = `m${id}`): MessageSnapshot {
   return { id, role, content: [{ type: "text", text }] };
@@ -241,6 +242,37 @@ describe("driveWorkerRun", () => {
     await driveWorkerRun({ start, session });
 
     expect(emitted.some((e) => e.type === "run.finished")).toBe(true);
+  });
+
+  it.each(["<implement>", "<chat>"])("does not cancel or checkpoint an active %s turn on controller loss", async (goal) => {
+    const abort = new AbortController();
+    let started!: () => void;
+    const backendStarted = new Promise<void>((resolve) => { started = resolve; });
+    let observedAbort: AbortSignal | undefined;
+    vi.spyOn(backend, "getBackend").mockResolvedValue({
+      id: "fake", listProviders: () => [],
+      runTurn(args: any) {
+        observedAbort = args.abort.signal;
+        started();
+        return new Promise(() => {});
+      },
+    } as any);
+    const { session, emitted } = recordingSession();
+    const input = { ...msg(1, "user", "original assigned input"), inputId: "input-295", turnId: "turn-295" };
+    const driving = driveWorkerRun({
+      session: { ...session, abortSignal: abort.signal },
+      start: makeStart({
+        run: { id: 295, status: "running", goal },
+        turnId: "turn-295", inputManifest: [{ id: "input-295" } as any],
+        transcript: [], pendingInput: [input],
+      }),
+    });
+    await backendStarted;
+    abort.abort(new WorkerShutdownError("controller_lost"));
+    await driving;
+    expect(observedAbort?.aborted).toBe(true);
+    expect(emitted.filter((event) => ["run.cancelled", "run.failed", "run.finished", "run.checkpoint"].includes(event.type)))
+      .toEqual([]);
   });
 
   it("fails an unbounded backend turn at the hard wall-clock deadline", async () => {

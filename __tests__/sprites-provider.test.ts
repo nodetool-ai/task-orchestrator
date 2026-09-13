@@ -56,7 +56,7 @@ function fakeSpritesClient(overrides: Partial<SpritesClient> = {}): SpritesClien
     }),
     restartService: vi.fn(async () => {}),
     getServiceLogs: vi.fn(async () => ""),
-    exec: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" })),
+    exec: vi.fn(async (_spriteName: string, input: { cmd: string }) => ({ exitCode: 0, stdout: input.cmd.startsWith("python3 -c") ? "task-orch-process-v1:alive\n" : "", stderr: "" })),
     checkpoint: vi.fn(async () => ({ id: "cp1" })),
     listCheckpoints: vi.fn(async () => []),
     restoreCheckpoint: vi.fn(async () => {}),
@@ -240,6 +240,47 @@ describe("idle generation quiescence", () => {
 });
 
 describe("SpritesRunnerProvider.inspect", () => {
+  it.each([295, 298])("detects run %i's stale running service PID on a suspended Sprite", async (runId) => {
+    const client = fakeSpritesClient({
+      getSprite: vi.fn(async (name: string) => ({ name, status: "suspended" })),
+      getService: vi.fn(async () => ({ name: "worker", cmd: "node", state: {
+        status: "running", pid: 1452, startedAt: "2026-09-13T00:00:00Z",
+      } })),
+      exec: vi.fn(async () => ({ exitCode: 0, stdout: "task-orch-process-v1:missing\n", stderr: "" })),
+    });
+    await expect(new SpritesRunnerProvider(client).inspectGeneration({
+      runId, generation: 1, instanceId: "wi_0123456789abcdef0123456789abcdef",
+      providerHandle: `to-run-${runId}`, storedIncarnation: "2026-09-13T00:00:00Z#1452",
+    })).resolves.toEqual({ status: "dead", detail: "service worker reports running but pid 1452 is absent from procfs" });
+    expect(client.exec).toHaveBeenCalledWith(`to-run-${runId}`, expect.objectContaining({ timeoutMs: 5_000, maxOutputBytes: 1_024 }));
+    expect(client.stopService).not.toHaveBeenCalled();
+    expect(client.deleteSprite).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["unreadable procfs", "task-orch-process-v1:unknown\n", 0],
+    ["malformed probe response", "", 0],
+    ["failed probe", "task-orch-process-v1:missing\n", 1],
+  ])("does not trust stale metadata or infer death with %s", async (_label, stdout, exitCode) => {
+    const client = fakeSpritesClient({ exec: vi.fn(async () => ({ exitCode: Number(exitCode), stdout: String(stdout), stderr: "" })) });
+    await expect(new SpritesRunnerProvider(client).inspect("to-run-295")).resolves.toEqual({ status: "unknown" });
+  });
+
+  it("leaves timed-out suspended VM probes unknown", async () => {
+    const client = fakeSpritesClient({
+      getSprite: vi.fn(async (name: string) => ({ name, status: "cold" })),
+      exec: vi.fn(async () => { throw new Error("exec timed out"); }),
+    });
+    await expect(new SpritesRunnerProvider(client).inspect("to-run-298")).resolves.toEqual({ status: "unknown" });
+  });
+
+  it("rejects a reused PID carrying a different channel identity", async () => {
+    const client = fakeSpritesClient({ exec: vi.fn(async () => ({ exitCode: 0, stdout: "task-orch-process-v1:replaced\n", stderr: "" })) });
+    await expect(new SpritesRunnerProvider(client).inspectGeneration({
+      runId: 42, generation: 1, instanceId: "wi_0123456789abcdef0123456789abcdef", providerHandle: "to-run-42",
+    })).resolves.toMatchObject({ status: "dead", detail: expect.stringContaining("different worker identity") });
+  });
+
   it("returns a stable service incarnation and never throws", async () => {
     const provider = new SpritesRunnerProvider(fakeSpritesClient({
       getService: vi.fn(async () => ({ name: "worker", cmd: "node", state: { status: "running", pid: 42, startedAt: "2026-08-27T10:00:00Z" } })),
@@ -315,6 +356,25 @@ describe("SpritesRunnerProvider.inspect", () => {
     });
     expect(stopService).toHaveBeenCalledWith("to-run-42", "worker-g16");
     expect(getService).toHaveBeenCalledWith("to-run-42", "worker-g16");
+  });
+
+  it.each([false, true])("requires descendant quiescence after supervisor metadata stops (populated=%s)", async (populated) => {
+    const client = fakeSpritesClient({
+      getService: vi.fn(async (_spriteName: string, name: string) => ({
+        name, cmd: "python3", args: ["process-supervisor.py", "worker"],
+        env: { TASK_ORCH_WORKER_INSTANCE_ID: "wi_0123456789abcdef0123456789abcdef", TASK_ORCH_WORKER_GENERATION: "16" },
+        state: { status: "stopped" },
+      })),
+      exec: vi.fn(async () => ({ exitCode: 0, stdout: `task-orch-process-v1:${populated ? "unknown" : "missing"}\n`, stderr: "" })),
+    });
+    if (populated) vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(30_001);
+    const stop = new SpritesRunnerProvider(client).stopGeneration({
+      runId: 42, generation: 16, instanceId: "wi_0123456789abcdef0123456789abcdef",
+      providerHandle: "to-run-42", providerServiceName: "worker-g16",
+    });
+    if (populated) await expect(stop).rejects.toThrow("did not reach sticky stopped state");
+    else await expect(stop).resolves.toBeUndefined();
+    expect(client.exec).toHaveBeenCalledWith("to-run-42", expect.objectContaining({ cmd: expect.stringContaining(" 0 ") }));
   });
 
   it.each([

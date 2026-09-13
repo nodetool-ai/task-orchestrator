@@ -202,7 +202,7 @@ const canonical=${canonical.toString()};
 const stored=JSON.parse(fs.readFileSync(${JSON.stringify(SPRITE_BASELINE_DIR + '/manifest.json')},'utf8'));
 if(canonical(stored)!==canonical(expected)) throw Error('baseline manifest mismatch');
 const bundleHash=crypto.createHash('sha1');
-for(const [name,file] of [['dist/run-worker.js','/home/user/worker/dist/run-worker.js'],['codeact/emscripten-module.wasm','/home/user/worker/codeact/emscripten-module.wasm'],['codeact/emscripten-module.wasm.sha256','/home/user/worker/codeact/emscripten-module.wasm.sha256'],['codeact/thread-worker.js','/home/user/worker/codeact/thread-worker.js']]) bundleHash.update(name).update('\\0').update(fs.readFileSync(file));
+for(const [name,file] of [['dist/run-worker.js','/home/user/worker/dist/run-worker.js'],['codeact/emscripten-module.wasm','/home/user/worker/codeact/emscripten-module.wasm'],['codeact/emscripten-module.wasm.sha256','/home/user/worker/codeact/emscripten-module.wasm.sha256'],['codeact/thread-worker.js','/home/user/worker/codeact/thread-worker.js'],['process-supervisor.py','/home/user/worker/process-supervisor.py']]) bundleHash.update(name).update('\\0').update(fs.readFileSync(file));
 if(bundleHash.digest('hex')!==expected.workerBundleSha) throw Error('worker bundle digest mismatch');
 const wasm=fs.readFileSync('/home/user/worker/codeact/emscripten-module.wasm');
 if(!WebAssembly.validate(wasm)) throw Error('CodeAct WASM is not executable');
@@ -213,7 +213,7 @@ fs.accessSync('/home/user/session',fs.constants.R_OK|fs.constants.W_OK);`;
   await execChecked(client, spriteName, nodeCommand(program), "baseline verification");
   // Versioned recipe v1 relies on these base-image tools; changing the recipe
   // requires a new systemToolsVersion and rebuilds unused entries.
-  await execChecked(client, spriteName, "set -eu\ncommand -v git\ncommand -v curl\ncommand -v tar\ncommand -v npm", "system tools verification");
+  await execChecked(client, spriteName, "set -eu\ncommand -v git\ncommand -v curl\ncommand -v tar\ncommand -v npm\ncommand -v python3", "system tools verification");
   if (manifest.dependency) {
     await execChecked(client, spriteName, nodeCommand(dependencyVerificationProgram(manifest.dependency)), "dependency verification");
   }
