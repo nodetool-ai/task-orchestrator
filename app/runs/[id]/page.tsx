@@ -3,6 +3,7 @@ import { auth } from "@/auth";
 import * as runs from "@/lib/runs";
 import * as repo from "@/lib/repo";
 import { RunView } from "@/components/runs/run-view";
+import { runGitStatus, type RunGitStatus } from "@/lib/run-git-status";
 
 export const dynamic = "force-dynamic";
 
@@ -67,6 +68,16 @@ export default async function RunPage({
   // Persona for the header display.
   const persona = run.personaId ? await repo.getPersona(run.personaId) : null;
 
+  // Git snapshot of the run's checkout (files touched, lines added/removed).
+  // Best-effort: a checkout that lives on a remote worker, or a git that
+  // misbehaves, must not take the run page down with it.
+  let gitStatus: RunGitStatus | null = null;
+  try {
+    gitStatus = await runGitStatus(run);
+  } catch {
+    gitStatus = null;
+  }
+
   // Bound the run view to the viewport (minus the 48px top nav) so its internal
   // flex column scrolls the message stream while the composer stays pinned to
   // the bottom. Without a definite height here, RunView's `h-full` collapses
@@ -84,6 +95,7 @@ export default async function RunPage({
         childRuns={childRuns}
         task={task ? { id: task.id, title: task.title } : null}
         personaName={persona?.name ?? null}
+        gitStatus={gitStatus}
       />
     </div>
   );
