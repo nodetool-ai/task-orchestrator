@@ -278,6 +278,8 @@ describe("Sprite pool provider integration", () => {
     const provider = new SpritesRunnerProvider(c);
     await provider.resume(run.id, { runId: run.id, scope: `run-${run.id}`, workerGeneration: 4, providerOperationId: op, channelInstanceId: "wi_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", providerServiceName: "worker-g4" });
     expect(c.restoreCheckpoint).not.toHaveBeenCalled();
+    expect(vi.mocked(c.exec).mock.calls.some(([, input]) => input.cmd.includes("curl -fsSL") && input.cmd.includes("/home/user/worker"))).toBe(true);
+    expect(vi.mocked(c.putService).mock.calls.at(-1)?.[2].env?.TASK_ORCH_PROCESS_NAMESPACE_ROOT).toBe("1");
   });
 
   it("retires a pool assignment when restore fails without starting a worker", async () => {
