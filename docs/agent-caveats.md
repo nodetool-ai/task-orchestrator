@@ -146,6 +146,14 @@ already cost real time once.
   work stays attached to its stopped Sprite, while a clean published checkout
   may be restored and drained. Run 301 lost its unpublished checkout when the
   old ordering treated “no current target spec” as permission to delete first.
+- A clean completed checkout can outlive its remote task branch: GitHub may
+  delete the branch immediately after squash-merge. Recycling must accept the
+  verified merge SHA staged by webhook handling on every matching active pool
+  assignment when its full head SHA and branch exactly match the checkout/run.
+  Do not depend on the operational inbox receipt: merge notifications
+  intentionally go only to the newest run for a task. Continue to retain dirty
+  work or mismatched receipts; a missing `git ls-remote` branch alone is not
+  evidence that completed work was unpublished.
 - Runs 295/298 combined nested-agent verification fan-out, exhausted swap, and
   orphaned compiler/test processes. A shell's parent exiting is not proof its
   descendants exited. Sprite services now start through `process-supervisor.py`:

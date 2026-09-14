@@ -38,10 +38,23 @@ export async function recycleCompletedSprite(client: SpritesClient, ref: WorkerG
     const reserved = await db.transaction(async (tx) => {
       const [runner] = await tx.select().from(runnerInstances).where(eq(runnerInstances.runId, ref.runId)).for("update");
       const [current] = await tx.select().from(agentSessions).where(eq(agentSessions.id, ref.runId)).for("update");
+      const [assignment] = await tx.select().from(spritePoolAssignments)
+        .where(eq(spritePoolAssignments.leaseToken, entry.leaseToken!)).for("update");
       if (!runner || runner.spriteName !== ref.providerHandle || runner.workerGeneration !== ref.generation
-        || runner.channelInstanceId !== ref.instanceId || current?.status !== "completed") return false;
+        || runner.channelInstanceId !== ref.instanceId || current?.status !== "completed" || !assignment) return false;
       const pending = await tx.execute(sql`SELECT 1 FROM run_inputs WHERE run_id=${ref.runId} AND status IN ('pending','assigned') LIMIT 1`);
       if (pending.length) return false;
+      // GitHub commonly deletes a task branch after squash-merge. The branch
+      // lookup below then cannot prove delivery even though webhook handling
+      // recorded the exact merged head on every matching active pool
+      // assignment. Inbox delivery is deliberately routed only to the newest
+      // run, so it is not proof for older completed assignments. Accept only a
+      // server-owned assignment receipt whose branch and full SHA both match;
+      // arbitrary agent output and task state are not delivery evidence.
+      const mergedHead = assignment.branch === current.branch
+        && typeof assignment.commitSha === "string" && /^[a-f0-9]{40}$/.test(assignment.commitSha)
+        ? assignment.commitSha
+        : null;
       if (!client.listServices) throw new Error("Sprite recycling requires service inspection");
       for (const service of await client.listServices(ref.providerHandle)) await stopService(ref.providerHandle, service.name);
       const repoPath = runner.repoPath;
@@ -54,7 +67,7 @@ export async function recycleCompletedSprite(client: SpritesClient, ref: WorkerG
       const remote = spec?.remote ?? manifest.dependency?.repository ?? "";
       const delivery = await client.exec(ref.providerHandle, { timeoutMs: 30_000, maxOutputBytes: 4096,
         env: { GIT_TERMINAL_PROMPT: "0", ...(process.env.GH_TOKEN ? { GH_TOKEN: process.env.GH_TOKEN } : {}) },
-        cmd: `set -eu\ncd ${quote(repoPath)}\n[ -z "$(git status --porcelain --untracked-files=normal)" ] || exit 3\nhead=$(git rev-parse HEAD)\nif [ "$head" != ${quote(baselineRevision)} ]; then\n[ -n ${quote(remote)} ] || exit 4\nremote=$(git ls-remote --exit-code ${quote(remote)} ${quote("refs/heads/" + (current.branch ?? ""))} | awk 'NR==1 { print $1 }')\n[ "$remote" = "$head" ] || exit 4\nfi\nprintf '%s' "$head"` });
+        cmd: `set -eu\ncd ${quote(repoPath)}\n[ -z "$(git status --porcelain --untracked-files=normal)" ] || exit 3\nhead=$(git rev-parse HEAD)\nif [ "$head" != ${quote(baselineRevision)} ] && [ "$head" != ${quote(mergedHead ?? "")} ]; then\n[ -n ${quote(remote)} ] || exit 4\nremote=$(git ls-remote --exit-code ${quote(remote)} ${quote("refs/heads/" + (current.branch ?? ""))} | awk 'NR==1 { print $1 }')\n[ "$remote" = "$head" ] || exit 4\nfi\nprintf '%s' "$head"` });
       if (delivery.exitCode !== 0 || !/^[a-f0-9]{40}$/.test(delivery.stdout.trim())) {
         await tx.update(runnerInstances).set({ state: "stopped", generationState: "stopped", providerOperationId: null }).where(eq(runnerInstances.runId, ref.runId));
         spriteLog("sprites_pool_reuse_retained", { runId: ref.runId, poolEntryId: entry.id, reason: "unpublished_or_unverified_work" });

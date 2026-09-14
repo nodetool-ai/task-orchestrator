@@ -483,6 +483,8 @@ export const spritePoolAssignments = pgTable("sprite_pool_assignments", {
   assignedAt: ts("assigned_at").notNull().defaultNow(),
   releasedAt: ts("released_at"),
   branch: text("branch"),
+  // Webhook handling may stage the verified merged head here before release;
+  // recycling still proves the clean checkout's exact HEAD matches it.
   commitSha: text("commit_sha"),
 }, (t) => ({ runIdx: index("sprite_pool_assignments_run_idx").on(t.runId) }));
 

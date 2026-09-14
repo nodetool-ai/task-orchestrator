@@ -6,10 +6,10 @@
 // Pure parsing/verification/matching lives in lib/github-webhook.ts; this
 // module owns the DB + agent SDK side effects.
 
-import { isNotNull, or } from "drizzle-orm";
+import { and, inArray, isNotNull, isNull, or } from "drizzle-orm";
 
 import { db } from "@/db";
-import { agentEvents, agentSessions } from "@/db/schema";
+import { agentEvents, agentSessions, spritePoolAssignments } from "@/db/schema";
 import * as repo from "./repo";
 import * as runs from "./runs";
 import { ownerRepoFromRemote } from "./gh-url";
@@ -83,6 +83,17 @@ export async function handleWebhookEvent(
     notifiedTasks.add(run.taskId);
     return true;
   }).map((run) => run.id);
+
+  // A squash merge may delete the remote branch before a completed Sprite is
+  // recycled. Persist the verified merged head on every matching active pool
+  // assignment, independently of the newest-run-only inbox routing below.
+  // The recycler still requires a clean checkout with this exact branch + HEAD.
+  if (event.merged && event.branch && event.headSha && /^[a-f0-9]{40}$/.test(event.headSha)
+    && matchedIds.length > 0) {
+    await db.update(spritePoolAssignments).set({ branch: event.branch, commitSha: event.headSha })
+      .where(and(inArray(spritePoolAssignments.runId, matchedIds),
+        isNull(spritePoolAssignments.releasedAt)));
+  }
 
   // Record the event on every matched run (durable log + best-effort live push).
   for (const id of matchedIds) await recordEvent(id, event, deliveryId);

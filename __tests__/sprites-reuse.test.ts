@@ -4,14 +4,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db";
 import {
   agentMessages,
+  agentEvents,
   agentSessions,
+  inboxEvents,
   repositories,
+  runEventSubscriptions,
   runInputs,
+  runSourceEvents,
   runnerInstances,
   spritePoolAssignments,
   spritePoolEntries,
+  tasks,
   users,
 } from "../db/schema";
+import { parseWebhookEvent } from "../lib/github-webhook";
+import { handleWebhookEvent } from "../lib/github-webhook-handler";
 import type { SpriteBaselineManifest } from "../lib/runner/sprites-baseline";
 import type { SpritesClient } from "../lib/runner/sprites-client";
 import { spritesPoolStore } from "../lib/runner/sprites-pool-store";
@@ -81,6 +88,14 @@ async function reusableAssignment() {
     remote: "https://github.com/acme/reusable.git",
   });
   const branch = `claude/reuse-${suffix}`;
+  const taskId = `T-reuse-${suffix}`;
+  await db.insert(tasks).values({
+    id: taskId,
+    title: `reuse ${suffix}`,
+    state: "passing",
+    repoId: repositoryId,
+    branch,
+  });
   const spriteName = `pool-reuse-${suffix}`;
   const instanceId = crypto.randomUUID();
   const [run] = await db.insert(agentSessions).values({
@@ -89,7 +104,10 @@ async function reusableAssignment() {
     goal: "<implement>",
     toolsProfile: "",
     cwdStrategy: "worktree",
-    branch,
+    // Fresh pool assignments are claimed before the worker checkpoints its
+    // branch, so both the run and assignment start without one.
+    branch: null,
+    taskId,
     repoId: repositoryId,
     userId: owner!.id,
     workerScope: spriteName,
@@ -148,6 +166,7 @@ async function reusableAssignment() {
     expectedWorkerGeneration: 7,
     reuseAffinity: { userId: owner!.id, repositoryId },
   });
+  await db.update(agentSessions).set({ branch }).where(eq(agentSessions.id, run!.id));
   await db.update(runnerInstances).set({ state: "running", generationState: "active" })
     .where(eq(runnerInstances.runId, run!.id));
   return {
@@ -155,6 +174,7 @@ async function reusableAssignment() {
     entry: claimed!,
     owner: owner!,
     repositoryId,
+    taskId,
     branch,
     spriteName,
     ref: { runId: run!.id, providerHandle: spriteName, generation: 7, instanceId },
@@ -165,7 +185,11 @@ beforeEach(async () => {
   await db.delete(spritePoolAssignments);
   await db.delete(spritePoolEntries);
   await db.delete(runnerInstances);
+  await db.delete(inboxEvents);
+  await db.delete(runEventSubscriptions);
+  await db.delete(runSourceEvents);
   await db.delete(agentSessions);
+  await db.delete(tasks);
   vi.stubEnv("TASK_ORCH_SPRITE_POOL_REUSE", "1");
   vi.stubEnv("GH_TOKEN", "test-github-token");
   mocks.baselines = [];
@@ -252,6 +276,87 @@ describe("completed Sprite recycling", () => {
     expect(assignment).toMatchObject({ releasedAt: null, commitSha: null });
     expect(client.restoreCheckpoint).not.toHaveBeenCalled();
     expect(mocks.verifyBaseline).not.toHaveBeenCalled();
+  });
+
+  it("recycles a clean checkout whose task branch was deleted after GitHub confirmed its merged head", async () => {
+    const fixture = await reusableAssignment();
+    expect((await db.select().from(spritePoolAssignments)
+      .where(eq(spritePoolAssignments.runId, fixture.run.id)))[0]).toMatchObject({
+      branch: null,
+      commitSha: null,
+    });
+    const [newerRun] = await db.insert(agentSessions).values({
+      taskId: fixture.taskId,
+      status: "completed",
+      completedAt: new Date(),
+      startedAt: new Date(Date.now() + 1000),
+      goal: "<review>",
+      toolsProfile: "",
+      cwdStrategy: "worktree_at_pr",
+      branch: fixture.branch,
+      repoId: fixture.repositoryId,
+      userId: fixture.owner.id,
+    }).returning();
+    const event = parseWebhookEvent("pull_request", {
+      action: "closed",
+      repository: { full_name: "acme/reusable" },
+      sender: { login: "merger" },
+      pull_request: {
+        html_url: "https://github.com/acme/reusable/pull/42",
+        merged: true,
+        state: "closed",
+        head: { ref: fixture.branch, sha: publishedRevision },
+      },
+    });
+    expect(event).not.toBeNull();
+    await handleWebhookEvent(event!, "merged-delivery", async () => ({
+      merged: true,
+      closed: false,
+      ciConclusion: "success",
+      headSha: publishedRevision,
+    }));
+    expect(await db.select().from(inboxEvents).where(eq(inboxEvents.targetRunId, fixture.run.id))).toHaveLength(0);
+    expect(await db.select().from(inboxEvents).where(eq(inboxEvents.targetRunId, newerRun!.id))).toHaveLength(1);
+    expect(await db.select().from(agentEvents).where(eq(agentEvents.sessionId, fixture.run.id))).toHaveLength(1);
+    expect((await db.select().from(spritePoolAssignments)
+      .where(eq(spritePoolAssignments.runId, fixture.run.id)))[0]).toMatchObject({
+      branch: fixture.branch,
+      commitSha: publishedRevision,
+    });
+    const client = fakeClient({
+      exec: vi.fn(async (_spriteName, input) => input.cmd.includes(publishedRevision)
+        ? { exitCode: 0, stdout: publishedRevision, stderr: "" }
+        : { exitCode: 4, stdout: "", stderr: "branch is not published" }),
+    });
+
+    await expect(recycleCompletedSprite(client, fixture.ref, vi.fn(async () => undefined))).resolves.toBe(true);
+
+    expect(await spritesPoolStore.findBySpriteName(fixture.spriteName)).toMatchObject({
+      state: "ready",
+      runId: null,
+      reuseCount: 1,
+    });
+    expect(client.restoreCheckpoint).toHaveBeenCalledWith(fixture.spriteName, "checkpoint-v1");
+  });
+
+  it("does not trust a merged receipt for a different branch", async () => {
+    const fixture = await reusableAssignment();
+    await db.update(spritePoolAssignments).set({
+      branch: "claude/a-different-task",
+      commitSha: publishedRevision,
+    }).where(eq(spritePoolAssignments.runId, fixture.run.id));
+    const client = fakeClient({
+      exec: vi.fn(async () => ({ exitCode: 4, stdout: "", stderr: "branch is not published" })),
+    });
+
+    await expect(recycleCompletedSprite(client, fixture.ref, vi.fn(async () => undefined))).resolves.toBe(true);
+
+    expect(await spritesPoolStore.findBySpriteName(fixture.spriteName)).toMatchObject({
+      state: "claimed",
+      runId: fixture.run.id,
+      reuseCount: 0,
+    });
+    expect(client.restoreCheckpoint).not.toHaveBeenCalled();
   });
 
   it("retains unpublished work after a deployment retires its pool fingerprint", async () => {
