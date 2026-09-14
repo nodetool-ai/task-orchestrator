@@ -1,5 +1,5 @@
-import { eq, ne } from "drizzle-orm";
-import { beforeEach, describe, expect, it } from "vitest";
+import { eq, ne, sql } from "drizzle-orm";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db";
 import {
   acceptanceCriteria,
@@ -17,6 +17,9 @@ import {
 } from "../db/schema";
 import * as repo from "../lib/repo";
 import * as runs from "../lib/runs";
+import { dispatchRun } from "../lib/run-dispatch";
+
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 import { ORCHESTRATOR_TOOLS } from "../lib/orchestrator-tools";
 import { decideTurnEndStatus } from "../lib/run-state";
 import { buildExecutePrompt } from "../lib/run-templates";
@@ -61,18 +64,31 @@ async function insertRun(
 }
 
 describe("executor persona", () => {
-  it("is registered with the orchestrator + spawn profile", () => {
-    const p = PERSONAS.find((x) => x.id === "executor");
-    expect(p).toBeDefined();
-    expect(p!.toolsProfile).toContain("orchestrator");
-    expect(p!.toolsProfile).toContain("spawn");
-    // The executor only manages tasks and orchestrates the plan — it has no
-    // gh_pr or repo tools. Children own the PR/repo work end-to-end.
-    expect(p!.toolsProfile).not.toContain("gh_pr");
-    expect(p!.toolsProfile).not.toContain("repo_read");
-    expect(p!.systemPrompt).toContain("CI ownership is single-writer");
-    expect(p!.systemPrompt).toContain("Never inspect CI with");
-    expect(p!.systemPrompt).toContain("ci.autofix_exhausted");
+  it("has repository access and delegates within the existing run", () => {
+    const p = PERSONAS.find((x) => x.id === "executor")!;
+    expect(p.toolsProfile).toBe("orchestrator,repo_write,gh_pr,gh_ci");
+    expect(p.systemPrompt).toContain("CI ownership is single-writer");
+    expect(p.systemPrompt).toContain("ci.autofix_exhausted");
+    expect(p.systemPrompt).toContain("ONE active sub-agent");
+  });
+
+  it.each(["executor", "implementor"])("rejects both child-run tools for an execute run with persona %s", async (personaId) => {
+    const plan = await repo.createPlan({ title: "Single worker", date: "2026-09-14" });
+    const task = await repo.createTask({ planId: plan.id, title: "Ready", date: "2026-09-14" });
+    const parent = await insertRun({ goal: "<execute>", personaId, planId: plan.id });
+    const before = await runs.list({});
+    const start = tool("start_session");
+    const spawn = SPAWN_TOOLS.find((t) => t.name === "spawn__spawn_agent")!;
+    for (const result of [
+      await start.execute({ task_id: task.id }, { author: "executor", runId: parent }),
+      await spawn.execute({ goal: "<implement>", persona: "implementor", tools_profile: "orchestrator,repo_write", cwd_strategy: "worktree", task_id: task.id }, { author: "executor", runId: parent }),
+    ]) {
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain("same run");
+    }
+    await expect(runs.create({ goal: "<implement>", taskId: task.id, parentRunId: parent, defer: true })).rejects.toThrow(/cannot create or start child runs/);
+    expect((await runs.list({})).map((r) => r.id)).toEqual(before.map((r) => r.id));
+    expect((await repo.getTask(task.id))?.state).toBe("todo");
   });
 
   it("cannot bypass autofix by appending to or replacing a failing implementor", async () => {
@@ -159,12 +175,13 @@ describe("create({ goal: '<execute>' })", () => {
     await expect(runs.create({ goal: "<execute>" })).rejects.toThrow(/planId/);
   });
 
-  it("defers cleanly with repo cwd and the spawn-enabled default profile", async () => {
+  it("defers with repo cwd and an executor profile that supports local implementation", async () => {
     const plan = await repo.createPlan({ title: "Deferred", date: "2026-06-18" });
     const run = await runs.create({ goal: "<execute>", planId: plan.id, defer: true });
     expect(run.goal).toBe("<execute>");
     expect(run.cwdStrategy).toBe("repo");
-    expect(run.toolsProfile).toContain("spawn");
+    expect(run.toolsProfile).toBe("orchestrator,repo_write,gh_pr,gh_ci");
+    expect(run.personaId).toBe("executor");
     expect(run.planId).toBe(plan.id);
     expect(run.status).toBe("idle");
   });
@@ -257,5 +274,99 @@ describe("runs.list activeOnly filter for <review> runs", () => {
     });
     const active = await runs.list({ goal: "<review>", taskId: task.id, activeOnly: true });
     expect(active).toHaveLength(0);
+  });
+});
+
+
+describe("durable executor task ownership", () => {
+  async function fixture() {
+    const plan = await repo.createPlan({ title: "Owned plan" });
+    const task = await repo.createTask({ planId: plan.id, title: "Owned task" });
+    const executor = await insertRun({ goal: "<execute>", personaId: "executor", planId: plan.id, cwdStrategy: "repo" });
+    return { plan, task, executor };
+  }
+  async function claim(taskId: string, runId: number) {
+    return tool("transition_task").execute({ id: taskId, state: "in_progress", assignee: "executor" }, { author: "executor", runId });
+  }
+
+  it("claims through the existing transition tool and reserves the canonical branch", async () => {
+    const { task, executor } = await fixture();
+    expect((await claim(task.id, executor)).isError).toBeFalsy();
+    expect(await repo.getTask(task.id)).toMatchObject({ executorRunId: executor, branch: `claude/${task.id.toLowerCase()}`, state: "in_progress" });
+    expect((await claim(task.id, executor)).isError).toBeFalsy();
+    expect(await runs.list()).toHaveLength(1);
+    await expect(runs.create({ goal: "<implement>", taskId: task.id, defer: true })).rejects.toMatchObject({ status: 409 });
+    await db.update(agentSessions).set({ status: "failed" }).where(eq(agentSessions.id, executor));
+    await expect(runs.create({ goal: "<implement>", taskId: task.id, defer: true })).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("rejects an executor claim when the task already has an active run", async () => {
+    const { task, executor } = await fixture();
+    await runs.create({ goal: "<implement>", taskId: task.id, defer: true });
+    expect((await claim(task.id, executor)).isError).toBe(true);
+    expect(await repo.getTask(task.id)).toMatchObject({ executorRunId: null, state: "todo" });
+  });
+
+  it("serializes a claim racing task-run creation", async () => {
+    const { task, executor } = await fixture();
+    const [ownership, session] = await Promise.allSettled([
+      repo.transitionTask(task.id, { state: "in_progress", assignee: "executor", actorRunId: executor }),
+      runs.create({ goal: "<implement>", taskId: task.id, defer: true }),
+    ]);
+    expect([ownership, session].filter(r => r.status === "fulfilled")).toHaveLength(1);
+    const current = (await repo.getTask(task.id))!;
+    expect((await runs.list({ taskId: task.id })).length).toBe(current.executorRunId == null ? 1 : 0);
+  });
+
+  it("serializes claims from two executors", async () => {
+    const { plan, task, executor } = await fixture();
+    const other = await insertRun({ goal: "<execute>", personaId: "executor", planId: plan.id });
+    const claims = await Promise.all([claim(task.id, executor), claim(task.id, other)]);
+    expect(claims.filter(r => !r.isError)).toHaveLength(1);
+  });
+
+  it("blocks renewal, local append and dispatch of an older task session", async () => {
+    const { task, executor } = await fixture();
+    const old = await insertRun({ goal: "<implement>", taskId: task.id, status: "failed", cwdStrategy: "worktree", branch: "claude/old", worktreePath: "/tmp/unopened-task" });
+    expect((await claim(task.id, executor)).isError).toBeFalsy();
+    await expect(runs.resumeTaskRunInPlace(old, { defer: true })).rejects.toMatchObject({ status: 409 });
+    const frames = [];
+    for await (const frame of runs.append({ runId: old, text: "continue", role: "user" })) frames.push(frame);
+    expect(frames).toContainEqual(expect.objectContaining({ type: "error" }));
+    expect(await runs.listMessages(old)).toHaveLength(0);
+    await db.update(agentSessions).set({ status: "pending" }).where(eq(agentSessions.id, old));
+    vi.stubEnv("TASK_ORCH_WORKER_IMAGE", "worker:test");
+    const spawn = vi.fn(() => 1);
+    expect(await dispatchRun(old, { spawn, admit: () => "admit" })).toBe("already-claimed");
+    expect(spawn).not.toHaveBeenCalled();
+    expect((await runs.get(old))!.workerScope).toBeNull();
+  });
+
+  it("ordinary channel transitions do not wait on dispatch's task admission lock", async () => {
+    const { task } = await fixture();
+    const session = await runs.create({ goal: "<implement>", taskId: task.id, defer: true });
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${task.id}))`);
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const result = await Promise.race([
+          tool("transition_task").execute({ id: task.id, state: "in_progress", assignee: "implementor" }, { author: "implementor", runId: session.id }),
+          new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error("Transition waited on dispatch task lock")), 1000); }),
+        ]);
+        expect(result.isError).toBeFalsy();
+      } finally {
+        clearTimeout(timeout);
+      }
+    });
+    expect((await repo.getTask(task.id))!.executorRunId).toBeNull();
+  });
+
+  it("keeps ownership while blocked and releases it only when the task is terminal", async () => {
+    const { task, executor } = await fixture();
+    await claim(task.id, executor);
+    await repo.transitionTask(task.id, { state: "blocked" });
+    expect((await repo.getTask(task.id))!.executorRunId).toBe(executor);
+    await repo.transitionTask(task.id, { state: "cancelled" });
+    expect((await repo.getTask(task.id))!.executorRunId).toBeNull();
   });
 });

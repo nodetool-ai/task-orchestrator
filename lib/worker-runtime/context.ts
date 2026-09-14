@@ -16,6 +16,7 @@
 // swap the seam implementations without touching this driver's control flow.
 
 
+import { effectiveRunToolsProfile, planExecutorTurnPrompt } from "../plan-executor-policy";
 import type {
   MessageSnapshot,
   PersonaSnapshot,
@@ -540,10 +541,12 @@ async function runModelTurn(
     repoRemote: (typeof context.repository?.remote === "string" ? context.repository.remote : null),
   };
   const { resolveProfiles, alwaysOnExtensions } = await import("../profiles");
-  const profileSpec =
-    (runField(run, "toolsProfile") as string | undefined) ||
-    (context.persona as { toolsProfile?: string }).toolsProfile ||
-    "";
+  const profileSpec = effectiveRunToolsProfile({
+    runtime: runField(run, "runtime") as string | null,
+    goal: runGoal(run),
+    personaId: runField(run, "personaId") as string | null,
+    toolsProfile: runField(run, "toolsProfile") as string | null,
+  }, (context.persona as { toolsProfile?: string }).toolsProfile);
   const extensions = [
     ...(profileSpec ? (await resolveProfiles(profileSpec, profileCtx)).factories : []),
     ...(await alwaysOnExtensions(profileCtx)),
@@ -561,7 +564,11 @@ async function runModelTurn(
     codeActInvoker: invoke,
     resumeToken: sdkSessionId,
     abort,
-    prompt: modelPrompt,
+    prompt: planExecutorTurnPrompt({
+      goal: runGoal(run),
+      personaId: runField(run, "personaId") as string | null,
+      runtime: runField(run, "runtime") as string | null,
+    }, modelPrompt),
     onEvent,
     // Extra fields the channel turn exposes to the backend (not part of the
     // legacy RunTurnArgs surface): the live cancel signal and the tool router.

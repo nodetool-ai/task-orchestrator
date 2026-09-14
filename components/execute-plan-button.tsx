@@ -24,14 +24,9 @@ interface Props {
 
 /**
  * Execute-plan button on the plan page. Kicks off a single long-running plan
- * executor agent (goal=<execute>) that implements every open task, reviews each
- * PR, auto-fixes on request_changes, and squash-merges approved PRs into the
- * default branch. POSTs to /api/runs and redirects to /runs/[id], where the
- * executor's progress (and its spawned child runs) stream live.
- *
- * The executor is the budget-tree root: child implement/review runs share the
- * cap budget × TASK_ORCH_TREE_BUDGET_MULT (default ×3), so the default maxUsd
- * is sized to cover all open tasks (~$25 each).
+ * executor agent (goal=<execute>) that delegates within its worker, delivers
+ * task PRs and tracks merges. POSTs to /api/runs and opens the run's log.
+ * The default budget covers all open tasks (~$25 each) within that run.
  */
 export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
   const router = useRouter();
@@ -117,10 +112,9 @@ export function ExecutePlanButton({ planId, openTaskCount, className }: Props) {
             <div className="px-5 py-4 space-y-4">
               <p className="text-xs leading-relaxed text-muted-foreground">
                 Launches a plan-executor agent that implements all {openTaskCount} open
-                task{openTaskCount === 1 ? "" : "s"} (running independent tasks in parallel).
-                Each task gets its own implementor that opens a PR and arms GitHub
-                auto-merge; the executor orchestrates the fan-out and parks between
-                wakes.
+                task{openTaskCount === 1 ? "" : "s"} in one worker, using harness sub-agents
+                when available. Work starts sequentially to limit memory use.
+                The executor verifies changes, delivers task PRs and tracks merges.
               </p>
 
               <div className="grid grid-cols-2 gap-4 text-xs">

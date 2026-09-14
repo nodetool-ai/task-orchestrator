@@ -337,6 +337,13 @@
       "when": 1789230000000,
       "tag": "0047_sprite_pool_reuse",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1789369200000,
+      "tag": "0048_executor_task_ownership",
+      "breakpoints": true
     }
   ]
 }

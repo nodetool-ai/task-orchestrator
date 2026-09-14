@@ -13,6 +13,7 @@
 //
 // Pure helpers re-exported for direct unit testing.
 
+import { isPlanExecutor, EXECUTOR_CHILD_RUN_ERROR } from "../plan-executor-policy";
 import { Type } from "typebox";
 import { asc, eq } from "drizzle-orm";
 
@@ -519,6 +520,7 @@ export const SPAWN_TOOLS: OrchestratorTool[] = [
           spawnTask?.state ?? null
         );
         if (ciOwnershipError) return errResult(ciOwnershipError);
+        if (isPlanExecutor(runRow)) return errResult(EXECUTOR_CHILD_RUN_ERROR);
 
         // 2. Depth check.
         const parentChain = await walkParentChain(runRow.parentRunId, MAX_DEPTH + 2);

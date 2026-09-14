@@ -23,6 +23,7 @@
 // All imports are lazy: each registry module pulls in repo/runs/inbox, and
 // this module is reachable from lib/runs.ts via the transport.
 
+import { effectiveRunToolsProfile } from "../plan-executor-policy";
 import type { OrchestratorTool } from "../orchestrator-tools";
 import { dispatchTool } from "../app-api/dispatcher";
 import { bindOperationImplementation } from "../app-api/registry";
@@ -51,7 +52,7 @@ async function currentCodeActContext(base: AppApiContext): Promise<AppApiContext
     const persona = await dbTransport.getPersona(run.personaId ?? "implementor");
     if (!persona) throw new Error(`Persona '${run.personaId ?? "implementor"}' not found.`);
     capabilities = appCapabilitiesForTools(
-      await allowedServerTools(run.toolsProfile || persona.toolsProfile),
+      await allowedServerTools(effectiveRunToolsProfile(run, persona.toolsProfile)),
     );
   }
   return {

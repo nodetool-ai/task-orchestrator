@@ -1,3 +1,5 @@
+import { isPlanExecutor } from "./plan-executor-policy";
+import { reserveTaskBranch } from "./task-execution-ownership";
 import { and, asc, count, desc, eq, inArray, isNotNull, like, notInArray, or, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
@@ -213,6 +215,7 @@ function hydrateTask(
     repoId: row.repoId,
     prUrl: row.prUrl ?? inferredPrUrl ?? null,
     branch: row.branch ?? null,
+    executorRunId: row.executorRunId ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     dependencies: deps,
@@ -1016,6 +1019,8 @@ export async function updateTask(
 }
 
 export interface TransitionInput {
+  /** Trusted tool caller, never taken from task-transition request parameters. */
+  actorRunId?: number;
   state: TaskState;
   assignee?: string;
   note?: string;
@@ -1043,10 +1048,40 @@ export async function transitionTask(id: string, input: TransitionInput): Promis
   // transition that's no longer legal (e.g. the task already left `review`)
   // is rejected instead of silently applied.
   await db.transaction(async (tx) => {
+    const caller = input.actorRunId == null ? null : (await tx.select().from(agentSessions)
+      .where(eq(agentSessions.id, input.actorRunId)))[0];
+    const executorClaim = isPlanExecutor(caller) && input.state === "in_progress";
+    if (executorClaim) {
+      // Task-run dispatch takes task admission before generation authority;
+      // channel tools already hold their caller's authority. Only taskless
+      // executor claims may acquire admission here: their own dispatch never
+      // takes a task lock. Ordinary transitions retain the row lock alone.
+      if (caller!.taskId != null) {
+        throw new RepoError("Executor claims require a taskless plan run; task sessions already own their task", 409);
+      }
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${id}))`);
+    }
     const row = (
       await tx.select().from(tasks).where(eq(tasks.id, id)).for("update")
     )[0];
     if (!row) throw new RepoError(`Task ${id} not found`, 404);
+    if (isPlanExecutor(caller) && row.executorRunId != null && row.executorRunId !== caller!.id) {
+      throw new RepoError(`Task ${id} is owned by executor #${row.executorRunId}; resume its existing run`, 409);
+    }
+    if (executorClaim) {
+      if (["completed", "failed", "budget_exhausted", "cancelled", "closed"].includes(caller!.status)) {
+        throw new RepoError(`Executor #${caller!.id} must be active before claiming a task`, 409);
+      }
+      if (caller!.planId !== row.planId) {
+        throw new RepoError(`Task ${id} does not belong to this executor's plan`, 409);
+      }
+      const [rival] = await tx.select({ id: agentSessions.id }).from(agentSessions).where(and(
+        eq(agentSessions.taskId, id), eq(agentSessions.cwdStrategy, "worktree"),
+        sql`${agentSessions.goal} <> '<chat>'`, sql`${agentSessions.id} <> ${caller!.id}`,
+        notInArray(agentSessions.status, ["completed", "failed", "budget_exhausted", "cancelled", "closed"])
+      )).limit(1);
+      if (rival) throw new RepoError(`Task ${id} already has an active session (#${rival.id})`, 409);
+    }
     const prev = row.state as TaskState;
     if (input.state !== prev) {
       const allowed = TASK_TRANSITIONS[prev];
@@ -1080,9 +1115,13 @@ export async function transitionTask(id: string, input: TransitionInput): Promis
         );
       }
     }
+    if (executorClaim) await reserveTaskBranch(tx, id);
     const now = new Date();
     await tx.update(tasks)
-      .set({ state: input.state, assignee: assignee ?? null, updatedAt: now })
+      .set({ state: input.state, assignee: assignee ?? null, updatedAt: now,
+        ...(executorClaim ? { executorRunId: caller!.id } : {}),
+        ...(["merged", "cancelled"].includes(input.state) ? { executorRunId: null } : {}),
+      })
       .where(eq(tasks.id, id));
     if (input.note || input.state !== prev) {
       const body = input.note ?? `→ ${input.state}`;

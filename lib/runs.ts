@@ -28,6 +28,8 @@
 //      cleanup), runs.append() runs `git worktree add <path> <branch>` to
 //      restore it before invoking the SDK.
 
+import { executorOwnerForTask, reserveTaskBranch } from "./task-execution-ownership";
+import { effectiveRunToolsProfile, isPlanExecutor, EXECUTOR_CHILD_RUN_ERROR, planExecutorTurnPrompt } from "./plan-executor-policy";
 import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
 import { mkdir, rm } from "node:fs/promises";
@@ -664,14 +666,18 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
       : goal === "<execute>"
         ? "repo"
         : "worktree");
-  const toolsProfile =
-    input.toolsProfile ??
-    (goal === "<execute>"
-      ? "orchestrator,spawn"
-      : "orchestrator,repo_write");
+  const toolsProfile = effectiveRunToolsProfile(
+    { ...input, goal }, "orchestrator,repo_write"
+  );
+  if (input.parentRunId != null && isPlanExecutor(await get(input.parentRunId))) {
+    throw new repo.RepoError(EXECUTOR_CHILD_RUN_ERROR, 400);
+  }
   const initialStatus: SessionStatus =
     input.defer || goal === "<chat>" || goal === "<plan>" ? "idle" : "pending";
   const runtime: "worker" | "server" = input.runtime ?? "worker";
+  if (runtime === "server" && isPlanExecutor({ ...input, goal })) {
+    throw new repo.RepoError("Plan executors require a worker runtime for same-run implementation.", 400);
+  }
   const toolCallingMode = resolveToolCallingMode(
     [input.taskId, input.planId, input.repoId, goal, input.parentRunId ?? ""].join(":"),
     input.toolCallingMode,
@@ -800,7 +806,7 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   // e.g. OpenRouter ids. When omitted, inherit the selected persona's pin and
   // then the deployment default. This lets operators control child-run models
   // by persona without requiring the parent to pass a model every time.
-  const personaId = input.personaId ?? "implementor";
+  const personaId = input.personaId ?? (goal === "<execute>" ? "executor" : "implementor");
   const persona = await repo.getPersona(personaId);
   if (!persona) {
     // persona_id is a foreign key; surface a clear 404 instead of letting the
@@ -928,6 +934,10 @@ export async function create(input: CreateRunInput): Promise<RunRow> {
   const inserted = isTaskImplement
     ? await db.transaction(async (tx) => {
         await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${input.taskId!}))`);
+        const executorOwner = await executorOwnerForTask(tx, input.taskId!);
+        if (executorOwner != null) {
+          throw new repo.RepoError(`Task ${input.taskId} is owned by executor #${executorOwner}; resume its existing run`, 409);
+        }
         const active = await tx
           .select({ id: agentSessions.id })
           .from(agentSessions)
@@ -1374,6 +1384,17 @@ export async function* append(input: AppendInput): AsyncGenerator<AppendStreamEv
           : `is in terminal status '${run.status}'; cannot resume`;
       yield { type: "error", error: `Run ${input.runId} ${why}.` };
       return;
+    }
+
+    // Local/composer renewal uses the same task lock as creation and executor
+    // claims. Reserve the writer before persisting input or preparing files.
+    if (run.taskId && run.goal !== "<chat>" && run.cwdStrategy === "worktree" &&
+        ["idle", "completed", "failed", "budget_exhausted"].includes(run.status)) {
+      if (!(await claimTaskFollowUp(run, "running", undefined, "resume")).accepted) {
+        yield { type: "error", error: `Task ${run.taskId} already has an active writer or executor owner` };
+        return;
+      }
+      run = (await get(run.id))!;
     }
 
     // ── Server-runtime turns take the SAME single-owner claim the wake path
@@ -2120,6 +2141,8 @@ async function findRivalTaskRun(run: {
   cwdStrategy: string;
 }): Promise<number | null> {
   if (run.goal === "<chat>" || !run.taskId || run.cwdStrategy !== "worktree") return null;
+  const executorOwner = await executorOwnerForTask(db, run.taskId);
+  if (executorOwner != null && executorOwner !== run.id) return executorOwner;
   const siblings = await db
     .select()
     .from(agentSessions)
@@ -2147,7 +2170,8 @@ async function claimTaskFollowUp(
   message?: { text: string; toolsProfile?: string },
   mode: "corrective" | "resume" = "corrective"
 ): Promise<{ accepted: boolean; messageId: number | null }> {
-  if (!run.taskId || run.goal === "<chat>" || run.cwdStrategy !== "worktree") {
+  const taskWriter = !!run.taskId && run.goal !== "<chat>" && run.cwdStrategy === "worktree";
+  if (!taskWriter && !isPlanExecutor(run)) {
     if (message?.toolsProfile && message.toolsProfile !== run.toolsProfile) {
       await db.update(agentSessions).set({ toolsProfile: message.toolsProfile })
         .where(eq(agentSessions.id, run.id));
@@ -2155,19 +2179,27 @@ async function claimTaskFollowUp(
     return { accepted: true, messageId: null };
   }
   return db.transaction(async (tx) => {
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${run.taskId!}))`);
+    if (taskWriter) {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${run.taskId!}))`);
+      const owner = await executorOwnerForTask(tx, run.taskId!);
+      if (owner != null && owner !== run.id) return { accepted: false, messageId: null };
+    }
     await lockSourceTx(tx, run.id);
     await tx.select({ id: agentSessions.id }).from(agentSessions)
       .where(eq(agentSessions.id, run.id)).for("update");
-    const [rival] = await tx.select({ id: agentSessions.id }).from(agentSessions).where(and(
+    const [rival] = taskWriter ? await tx.select({ id: agentSessions.id }).from(agentSessions).where(and(
       eq(agentSessions.taskId, run.taskId!), sql`${agentSessions.id} <> ${run.id}`,
       eq(agentSessions.cwdStrategy, "worktree"), sql`${agentSessions.goal} <> '<chat>'`,
       notInArray(agentSessions.status, TERMINAL_STATUS_LIST)
-    )).limit(1);
+    )).limit(1) : [];
     if (rival) return { accepted: false, messageId: null };
     const renew = run.deliveryVersion === 2 && ["completed", "failed", "budget_exhausted"].includes(run.status);
     const resumedAt = new Date();
     const changed = await tx.update(agentSessions).set({ status,
+      // Legacy coordinator rows can carry the old column default without ever
+      // having owned a worktree. Preserve real paths, normalize only empty ones.
+      ...(isPlanExecutor(run) && !run.taskId && run.cwdStrategy === "worktree" &&
+          !run.branch && !run.worktreePath ? { cwdStrategy: "repo" } : {}),
       ...(message?.toolsProfile ? { toolsProfile: message.toolsProfile } : {}),
       ...(renew ? {
         attempt: run.attempt + 1,
@@ -2241,6 +2273,14 @@ export async function resumeTaskRunInPlace(
   if (!run.taskId || run.goal !== "<implement>" || run.cwdStrategy !== "worktree") {
     throw new repo.RepoError(`Session #${runId} is not a task implementation session`, 400);
   }
+  return resumeWorkerRunInPlace(run, opts);
+}
+
+async function resumeWorkerRunInPlace(
+  run: RunRow,
+  opts: { prompt?: string; toolsProfile?: string; defer?: boolean }
+): Promise<RunRow> {
+  const runId = run.id;
   if (run.deliveryVersion !== 2) {
     throw new repo.RepoError(`Session #${runId} uses the legacy delivery protocol and cannot be resumed in place`, 409);
   }
@@ -2285,7 +2325,12 @@ export async function resumeTaskRunInPlace(
     );
   }
 
-  if (!opts.defer) {
+  if (!opts.defer && isPlanExecutor(run) && !runDispatch.detachedRunsEnabled() && !runDispatch.remoteRunnerEnabled()) {
+    // Local execution retains the same run/cwd just as remote dispatch retains
+    // its runner mapping. The admission CAS above already queued the input.
+    void withServerClaim(runId, () => runExecute(runId, run.planId!, null))
+      .catch((error) => setError(runId, error instanceof Error ? error.message : String(error)));
+  } else if (!opts.defer) {
     const dispatch = await runDispatch.dispatchRun(runId);
     if (dispatch === "not-found" || dispatch === "spawn-failed") {
       throw new repo.RepoError(`Session #${runId} could not resume its retained runner`, 409);
@@ -2608,8 +2653,8 @@ export function isResumableRun(run: {
  * (e.g. a Discord conversation) get a private worktree purely for filesystem
  * isolation: no auto-push, no PR, and they stay `idle`/resumable like any chat.
  */
-export function isImplementWorktree(run: { cwdStrategy: string; goal: string }): boolean {
-  return run.cwdStrategy === "worktree" && run.goal !== "<chat>";
+export function isImplementWorktree(run: { cwdStrategy: string; goal: string; personaId?: string | null }): boolean {
+  return run.cwdStrategy === "worktree" && run.goal !== "<chat>" && !isPlanExecutor(run);
 }
 
 /**
@@ -2630,40 +2675,6 @@ export function taskBranchName(taskId: string): string {
 export function worktreeBranchName(run: { id: number; taskId: string | null }): string {
   if (run.taskId) return taskBranchName(run.taskId);
   return `claude/chat-${run.id}`;
-}
-
-/**
- * Reserve the task's canonical branch inside create()'s admission transaction.
- * First reservation wins and sticks: prefer an already-set tasks.branch, then
- * adopt the attached run's branch (legacy `claude/<task>-<run>` continuity, so
- * pre-migration tasks keep their pushed branch + open PR), else mint
- * `claude/<taskid>`.
- */
-async function reserveTaskBranch(
-  tx: Pick<typeof db, "select" | "update">,
-  taskId: string
-): Promise<string | null> {
-  const row = (
-    await tx
-      .select({ branch: tasks.branch, attachedRunId: tasks.attachedRunId })
-      .from(tasks)
-      .where(eq(tasks.id, taskId))
-  )[0];
-  if (!row) return null; // missing task → the insert's FK surfaces the real error
-  if (row.branch) return row.branch;
-  let branch: string | null = null;
-  if (row.attachedRunId != null) {
-    const attached = (
-      await tx
-        .select({ branch: agentSessions.branch })
-        .from(agentSessions)
-        .where(eq(agentSessions.id, row.attachedRunId))
-    )[0];
-    branch = attached?.branch ?? null;
-  }
-  branch ??= taskBranchName(taskId);
-  await tx.update(tasks).set({ branch }).where(eq(tasks.id, taskId));
-  return branch;
 }
 
 /** The base branch a task's worktree branches from / merges in. */
@@ -3169,8 +3180,8 @@ async function runExecute(
     // park_reason and result before this turn runs (this is how a parked
     // executor woken by the pump sweep starts clean).
     await transport.patchRun(runId, { parkReason: null, result: null });
-    // No worktree of its own — operate at the repo root so gh_pr tools shell
-    // out against the real checkout. Children create their own worktrees.
+    // Start at the repository checkout. Task worktrees stay inside this worker
+    // and are managed by the executor, without child runs.
     const cwd = await prepareCwd(run);
     // The execute scaffold (orchestration loop + task list) always runs; an
     // operator-supplied prompt is appended as steering guidance rather than
@@ -3724,70 +3735,30 @@ async function* yieldDispatchFailure(runId: number): AsyncGenerator<AppendStream
   };
 }
 
-/**
- * Fork-resume for a plan executor: start a FRESH <execute> generation on the
- * prior run's plan. A replaced executor reconstructs progress from durable
- * state — list_tasks, child runs, task notes — so the new generation needs no
- * transcript from the old one (docs/agent-events.md §8); the kickoff prompt
- * carries a resume note naming the prior run and its landing so the agent
- * knows it is picking up mid-plan. Used by POST /api/sessions/[id]/resume,
- * whose implement-run path (agent.startSession) requires a taskId that
- * executors never have — the route used to 404 on every executor.
- *
- * Only a settled prior may be forked: a live/parked/idle executor resumes IN
- * PLACE via a message (sendMessageToRun/append), and a second generation
- * racing the first would double-dispatch children.
- */
+/** Resume the same executor identity so its retained worker, local task
+ * worktrees, SDK conversation and task claims stay together. */
 export async function resumeExecutorRun(
   priorId: number,
-  overrides: { model?: string | null; backend?: "pi" | "claude" | "codex" | null } = {}
+  overrides: { model?: string | null; backend?: "pi" | "claude" | "codex" | null; defer?: boolean } = {}
 ): Promise<RunRow> {
   const prior = await get(priorId);
   if (!prior) throw new repo.RepoError(`Run ${priorId} not found`, 404);
   if (prior.goal !== "<execute>" || !prior.planId) {
-    throw new repo.RepoError(
-      `Run ${priorId} is not a plan-executor run (goal=${prior.goal}); this resume path only forks executors.`,
-      400
-    );
+    throw new repo.RepoError(`Run ${priorId} is not a plan-executor run`, 400);
   }
   if (!isTerminalStatus(prior.status)) {
-    throw new repo.RepoError(
-      `Executor run ${priorId} is still '${prior.status}' — send it a message to resume it in place instead of forking a new generation.`,
-      409
-    );
+    throw new repo.RepoError(`Executor run ${priorId} is still '${prior.status}' — send it a message to continue`, 409);
   }
-  const note =
-    `You are a fresh executor generation resuming plan ${prior.planId}: the prior executor ` +
-    `run #${priorId} ended with status '${prior.status}'` +
-    (prior.error ? ` (error: ${prior.error})` : "") +
-    `. Reconstruct current progress from list_tasks, task notes, and child runs before ` +
-    `starting any children, and never re-dispatch tasks that are already merged or in flight.`;
-  return create({
-    goal: "<execute>",
-    planId: prior.planId,
-    repoId: prior.repoId,
-    personaId: prior.personaId ?? "executor",
-    toolsProfile: prior.toolsProfile,
-    // cwdStrategy deliberately NOT inherited: create() derives the executor
-    // default ('repo'), and a legacy row carrying the column default
-    // ('worktree') would otherwise trip the worktree-requires-taskId invariant.
-    // An explicit override wins; otherwise inherit the prior generation's
-    // model/backend (mirroring agent.startSession's resume inheritance).
-    model: overrides.model ?? prior.model ?? undefined,
-    backend: overrides.backend ?? prior.backend,
-    thinkingLevel: prior.thinkingLevel,
-    // Nested executors retain their supervisor. A root executor stays in its
-    // prior tree so it can still observe children from the previous generation.
-    parentRunId: prior.parentRunId ?? priorId,
-    resumeOf: priorId,
-    userId: prior.userId,
-    title: prior.title,
-    budget: {
-      maxTurns: prior.budgetMaxTurns ?? undefined,
-      maxUsd: prior.budgetMaxUsd ?? undefined,
-      maxSeconds: prior.budgetMaxSeconds ?? undefined,
-    },
-    initialPrompt: note,
+  if (overrides.model != null && overrides.model !== prior.model) {
+    throw new repo.RepoError("An in-place resume cannot change model", 400);
+  }
+  if (overrides.backend != null && overrides.backend !== prior.backend) {
+    throw new repo.RepoError("An in-place resume cannot change agent backend", 400);
+  }
+  return resumeWorkerRunInPlace(prior, {
+    defer: overrides.defer,
+    toolsProfile: effectiveRunToolsProfile(prior),
+    prompt: "Resume this plan in the same run and retained worker. Inspect your existing task claims, worktrees, checkpoints and conversation before assigning native sub-agents. Preserve unpublished work and never create child runs.",
   });
 }
 
@@ -3981,7 +3952,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
   const rawModel = run.model ?? DEFAULT_MODEL;
   const { provider: resolvedProvider, id: resolvedModelId } =
     parseProviderQualifiedModel(rawModel);
-  const profileSpec = run.toolsProfile ?? persona.toolsProfile;
+  const profileSpec = effectiveRunToolsProfile(run, persona.toolsProfile);
 
   const profileCtx: ProfileContext = {
     runId: run.id, run, author, taskId: run.taskId, planId: run.planId, cwd,
@@ -4175,13 +4146,8 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
     cwd,
     contextSource,
     model: { provider: resolvedProvider, id: resolvedModelId },
-    // Executors coordinate through orchestrator/spawn tools only. Their profile
-    // never included repo/GitHub tools, but full SDK backends also expose native
-    // Bash/file tools outside profiles; run 248 used that escape hatch to read
-    // CI logs and bypass the autofix repair budget.
-    nativeToolPolicy: run.personaId === "executor"
-      ? "orchestration-only" as const
-      : "default" as const,
+    // Plan executors implement in this worker and need native harness tools.
+    nativeToolPolicy: "default" as const,
     // Reasoning is a per-run property (migration 0031). create() already folded
     // in the deployment default; a null column leaves the model's own default.
     thinkingLevel: (run.thinkingLevel ?? undefined) as
@@ -4198,7 +4164,7 @@ async function runOneTurn(args: RunOneTurnArgs): Promise<TurnResult> {
       defaultPlanId: run.planId ?? undefined,
     }),
     abort,
-    prompt: promptWithMemory,
+    prompt: planExecutorTurnPrompt(run, promptWithMemory),
     onEvent,
   };
   // FIX 6 (M8): a resume token references state local to the container/worktree

@@ -32,13 +32,13 @@ export async function POST(
     const input = startSessionSchema.parse(raw);
     // Plan-executor runs have a planId but no taskId, so the task-session path
     // below can't represent them (agent.getSession used to 404 here). They keep
-    // their separate executor-generation behavior for now.
+    // their run identity and retained worker, just like task sessions.
     if (prior.goal === "<execute>") {
       const run = await runs.resumeExecutorRun(priorId, {
         model: input.model ?? null,
         backend: null,
       });
-      return NextResponse.json(run, { status: 201 });
+      return NextResponse.json(run, { status: 200 });
     }
     if (prior.taskId == null) {
       // Task-less non-executor runs (chats) resume in place via their own

@@ -112,6 +112,8 @@ export interface TaskFull {
   state: TaskState;
   /** Null denotes a deliberately standalone task. */
   planId: string | null;
+  /** Same-run executor ownership, retained until the task is terminal. */
+  executorRunId?: number | null;
   assignee: string | null;
   body: string;
   estimate: string | null;

@@ -168,34 +168,13 @@ describe("runs.create() placement", () => {
     expect(deferred.runtime).toBe("server");
   });
 
-  it("rejects a server-runtime plan executor too — it does NOT self-drive when detached", async () => {
-    // There used to be a carve-out here for goal '<execute>' + planId, on the
-    // theory that create()'s executor branch takes the turn itself. It only does
-    // so in the NON-detached branch: with TASK_ORCH_DETACHED_RUNS on (forced on
-    // fly/box) the same branch goes launchDetached → dispatchRun → wakeServerRun,
-    // which finds no pending inbox events on a fresh run and no-ops — leaving a
-    // true-server row at 'pending' outside every belt. Same 400 as any other
-    // pending-producing goal now.
+  it("rejects server-runtime plan executors, even when deferred", async () => {
     const plan = await repo.createPlan({ title: "Server Executor", date: "2026-07-31" });
-    await expect(
-      create({ ...SERVER_CHAT, goal: "<execute>", planId: plan.id })
-    ).rejects.toThrow(/pending/);
-
-    process.env.TASK_ORCH_DETACHED_RUNS = "1";
-    await expect(
-      create({ ...SERVER_CHAT, goal: "<execute>", planId: plan.id })
-    ).rejects.toThrow(/pending/);
-
-    // No ghost row was inserted for either attempt.
-    expect(
-      await db.select().from(agentSessions).where(eq(agentSessions.planId, plan.id))
-    ).toHaveLength(0);
-
-    // defer:true remains the way to make one: it lands 'idle' and waits for a
-    // message, which the server tier can actually drive.
-    const deferred = await create({ ...SERVER_CHAT, goal: "<execute>", planId: plan.id, defer: true });
-    expect(deferred.status).toBe("idle");
-    expect(deferred.runtime).toBe("server");
+    for (const defer of [false, true]) {
+      await expect(create({ ...SERVER_CHAT, goal: "<execute>", planId: plan.id, defer }))
+        .rejects.toThrow(/worker runtime/);
+    }
+    expect(await db.select().from(agentSessions).where(eq(agentSessions.planId, plan.id))).toHaveLength(0);
   });
 
   it("rejects a server-runtime run that would need a checkout", async () => {

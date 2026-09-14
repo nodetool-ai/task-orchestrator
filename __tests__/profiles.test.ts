@@ -6,6 +6,8 @@
 // while the pre-existing gh_pr profile (implementor/executor runs that
 // legitimately manage their own PR) must stay exactly as it was.
 
+import { effectiveRunToolsProfile, planExecutorTurnPrompt } from "../lib/plan-executor-policy";
+import { allowedServerTools } from "../lib/worker/server-policy";
 import { describe, expect, it } from "vitest";
 import { alwaysOnExtensions, listProfiles, resolveProfiles } from "../lib/profiles";
 import { makeRegistrar } from "./helpers/fake-registrar";
@@ -135,5 +137,35 @@ describe("alwaysOnExtensions", () => {
 
     expect(r.tools.has("timer__sleep")).toBe(true);
     expect(r.tools.has("brave__web_search")).toBe(true);
+  });
+});
+
+
+describe("effective executor profile", () => {
+  it("upgrades an old worker coordinator profile consistently for native and server tools", async () => {
+    const run = makeRun({ personaId: "executor", toolsProfile: "orchestrator,spawn" });
+    const profile = effectiveRunToolsProfile(run);
+    const resolved = await resolveProfiles(profile, { ...baseCtx, run, repoRemote: null });
+    expect(resolved.allowsRepoWrite).toBe(true);
+    const r = makeRegistrar();
+    for (const factory of resolved.factories) await factory(r.reg);
+    expect(r.tools.has("gh_pr__pr_merge")).toBe(true);
+    expect(r.tools.has("spawn__spawn_agent")).toBe(false);
+    expect(await allowedServerTools(profile)).not.toContain("spawn__spawn_agent");
+  });
+
+  it("never adds filesystem capabilities to a retained server persona", () => {
+    const run = makeRun({ personaId: "executor", runtime: "server", toolsProfile: "orchestrator,spawn" });
+    expect(effectiveRunToolsProfile(run)).toBe("orchestrator,spawn");
+    expect(planExecutorTurnPrompt(run, "continue")).toBe("continue");
+  });
+
+  it("reminds resumed executor threads without replaying the full persona", () => {
+    const prompt = planExecutorTurnPrompt(makeRun({ goal: "<execute>" }), "Operator follow-up");
+    expect(prompt).toContain("overriding older coordination-only instructions");
+    expect(prompt).toContain("one active sub-agent");
+    expect(prompt).toContain("Serialize heavy checks");
+    expect(prompt.endsWith("Operator follow-up")).toBe(true);
+    expect(planExecutorTurnPrompt(makeRun(), "review")).toBe("review");
   });
 });

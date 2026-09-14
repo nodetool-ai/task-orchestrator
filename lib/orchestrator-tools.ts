@@ -3,6 +3,7 @@
 // Internal handlers shared by the orchestrator extension and application SDK.
 // Backend adapters expose them to agents only through CodeAct.
 
+import { isPlanExecutor, EXECUTOR_CHILD_RUN_ERROR } from "./plan-executor-policy";
 import { Type, type TSchema } from "typebox";
 import * as repo from "./repo";
 import * as agentLib from "./agent";
@@ -687,7 +688,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       const taskId = resolveTaskId(id, ctx);
       if (!taskId) return errResult("Error: task id required");
       const result = await safe(() =>
-        repo.transitionTask(taskId, { state: state as TaskState, assignee, note, enforceCriteria: true })
+        repo.transitionTask(taskId, { state: state as TaskState, assignee, note, enforceCriteria: true, actorRunId: ctx.runId })
       );
       if ("_error" in result) return errResult(`Error: ${result._error}`);
       return ok(`Task ${result.id} → ${result.state}.`);
@@ -1083,6 +1084,7 @@ export const ORCHESTRATOR_TOOLS: OrchestratorTool[] = [
       ]);
       const ciOwnershipError = checkExecutorCiRepairOwnership(caller?.personaId ?? null, task?.state ?? null);
       if (ciOwnershipError) return errResult(ciOwnershipError);
+      if (isPlanExecutor(caller)) return errResult(EXECUTOR_CHILD_RUN_ERROR);
       const userId = await resolveSpawnerUserId(ctx);
       const result = await safe(() =>
         agentLib.startSession({

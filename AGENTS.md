@@ -87,7 +87,35 @@ REST: `POST /api/tasks/:id/sessions`. SSE log:
 `GET /api/sessions/:id/events`. Web: "Run agent" button on the
 task detail page → live log at `/sessions/:id`.
 
+### Plan executors stay in one run
+
+Plan executors (goal `<execute>` or persona `executor`) implement tasks using
+native harness sub-agents inside their existing worker. They must not call
+`start_session` or `spawn__spawn_agent`; the server rejects those calls. A
+harness without native sub-agents implements sequentially inline. Keep one
+sub-agent active by default, forbid nested fan-out, and increase to at most two
+only for disjoint work with measured memory headroom. Give full-repository
+checks one owner, run heavy commands sequentially with bounded test workers,
+and drain background processes before starting another heavy check. Task
+worktrees and sub-agents share the worker's process and memory limits.
+
+Claim tasks through `transition_task` to `in_progress` before editing. The
+server records `executorRunId` and the canonical branch under the same task
+lock used by run creation and dispatch. Ownership survives failed/paused runs
+and blocks competing sessions until the task is merged or cancelled. Resume
+renews the same executor run and retained worker, preserving task worktrees,
+SDK context and unfinished inputs; a missing retained remote runner is an
+explicit recovery error, never permission to start a fresh environment.
+
+The executor owns task notes, criteria, PR delivery and the final run result;
+sub-agents return through harness tools without ending or parking the parent
+run. Existing CI repair owners retain ownership. Task PRs implemented within
+the executor have no separate session for platform autofix: report CI failures
+as blockers instead of creating fixer runs.
+
 ### One run per task, not per step
+
+For other agents that need to delegate an independently supervised task:
 
 A child run is a whole container, checkout, budget and supervision chain. It is
 worth minting for a task that owns its own branch and PR — not for a step inside
@@ -125,8 +153,8 @@ reaches the containerized worker path, the in-process postgres turn and the
 legacy runner alike). Each run gets its OWN backend's flavour — `Agent` with its
 call shape, `spawn_agent` with its own, or, on pi, that there is no sub-agent
 tool and the sub-work is inline. Runs with no native tool surface at all — the
-coordination-only executor, the server-runtime concierge — get the child-run
-economy rule alone rather than being pointed at a tool they were never given.
+server-runtime concierge — get the child-run economy rule alone rather than
+being pointed at a tool they were never given.
 The same cost note rides on the descriptions of the two tools that mint a run,
 `start_session` and `spawn__spawn_agent`.
 

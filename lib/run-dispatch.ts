@@ -1,4 +1,5 @@
 // lib/run-dispatch.ts
+import { executorOwnerForTask } from "./task-execution-ownership";
 import { and, eq, exists, inArray, isNotNull, isNull, notInArray, sql } from "drizzle-orm";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -604,6 +605,8 @@ async function dispatchRunInner(
         // Take the task lock first, matching runs.create and CI autofix. Taking
         // it after the run/generation locks would invert their lock order.
         await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${run.taskId}))`);
+        const owner = await executorOwnerForTask(tx, run.taskId);
+        if (owner != null && owner !== runId) return null;
         const [rival] = await tx.select({ id: agentSessions.id }).from(agentSessions).where(and(
           eq(agentSessions.taskId, run.taskId),
           sql`${agentSessions.id} <> ${runId}`,

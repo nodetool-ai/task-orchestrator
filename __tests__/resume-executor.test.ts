@@ -1,19 +1,9 @@
-// Resuming a plan-executor run.
-//
-// Two mechanisms, both previously broken for executors:
-//  1. In-place resume (composer follow-up → sendMessageToRun → append on
-//     non-remote deployments): append's terminal-resume gate admitted only
-//     worktree runs, so a completed/failed executor (cwd_strategy='repo')
-//     erred with "cannot resume" — while the same action worked on remote
-//     deployments via the dispatch path. Fixed via isResumableRun.
-//  2. Fork-resume (POST /api/sessions/[id]/resume, the mobile ResumeSheet):
-//     the route resolved the prior run through agent.getSession, which returns
-//     null for any run without a taskId — every executor 404'd. Fixed via
-//     runs.resumeExecutorRun (a fresh <execute> generation on the same plan).
+import { randomUUID } from "node:crypto";
+// Executor recovery retains one run, workspace and conversation across attempts.
 
 import { NextRequest } from "next/server";
 import { and, eq, ne } from "drizzle-orm";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db";
 import {
   acceptanceCriteria,
@@ -28,8 +18,13 @@ import {
   inboxEvents,
   runEventSubscriptions,
   runSourceEvents,
+  runnerInstances,
+  runInputs,
+  runTurns,
 } from "../db/schema";
 import { seedPersonas } from "../db/seed-personas";
+
+const h = vi.hoisted(() => ({ prompts: [] as string[] }));
 
 // Same fake backend as executor-sidebar-history.test.ts: both executor paths
 // drive through runOneTurn → getBackend().runTurn, so one stub covers the
@@ -41,8 +36,10 @@ vi.mock("../lib/agent-backend", () => ({
     id: "pi",
     listProviders: () => [],
     runTurn: async (args: {
+      prompt: string;
       onEvent: (env: Record<string, unknown>) => void | Promise<void>;
     }) => {
+      h.prompts.push(args.prompt);
       await args.onEvent({ type: "system", subtype: "init", session_id: "sess-1" });
       await args.onEvent({
         type: "assistant",
@@ -73,9 +70,13 @@ vi.mock("../auth", () => ({
 
 import * as repo from "../lib/repo";
 import * as runs from "../lib/runs";
+import * as dispatch from "../lib/run-dispatch";
+
+afterEach(() => vi.restoreAllMocks());
 import { POST as resumeRoute } from "../app/api/sessions/[id]/resume/route";
 
 beforeEach(async () => {
+  h.prompts.length = 0;
   await seedPersonas();
   await db.delete(agentMessages);
   await db.delete(agentEvents);
@@ -94,7 +95,7 @@ beforeEach(async () => {
 async function waitFor(
   runId: number,
   statuses: string[],
-  timeoutMs = 5000
+  timeoutMs = 2000
 ): Promise<string> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -106,7 +107,8 @@ async function waitFor(
     if (r && statuses.includes(r.status) && !runs.isLive(runId)) return r.status;
     await new Promise((res) => setTimeout(res, 20));
   }
-  throw new Error(`run ${runId} did not reach ${statuses.join("/")} in ${timeoutMs}ms`);
+  const latest = await runs.get(runId);
+  throw new Error(`run ${runId} did not reach ${statuses.join("/")} in ${timeoutMs}ms (status=${latest?.status}, live=${runs.isLive(runId)}, error=${latest?.error})`);
 }
 
 async function settledExecutor(): Promise<runs.RunRow> {
@@ -175,65 +177,114 @@ describe("in-place resume of a terminal plan executor", () => {
   });
 });
 
-describe("runs.resumeExecutorRun (fork a fresh generation)", () => {
-  it("starts a new <execute> run on the same plan, linked to and briefed on the prior", async () => {
-    const plan = await repo.createPlan({ title: "Fork Me", date: "2026-07-19" });
-    const [prior] = await db
-      .insert(agentSessions)
-      .values({ goal: "<execute>", status: "failed", planId: plan.id, error: "worker died" })
-      .returning();
-
-    const next = await runs.resumeExecutorRun(prior.id);
-    expect(next.goal).toBe("<execute>");
-    expect(next.planId).toBe(plan.id);
-    expect(next.parentRunId).toBe(prior.id);
-    expect(next.resumeOf).toBe(prior.id);
-    await waitFor(next.id, ["completed", "failed"]);
-
-    // The kickoff prompt carries the resume note (prior run + its error) as
-    // operator instructions on top of the execute scaffold.
-    const kickoff = JSON.stringify((await runs.listMessages(next.id))[0].content);
-    expect(kickoff).toContain(`#${prior.id}`);
-    expect(kickoff).toContain("worker died");
-    expect(kickoff).toContain("list_tasks");
+describe("runs.resumeExecutorRun (same run and retained workspace)", () => {
+  it("renews the same run repeatedly without creating descendants", async () => {
+    const prior = await settledExecutor();
+    const countBefore = (await runs.list()).length;
+    for (const expectedAttempt of [prior.attempt + 1, prior.attempt + 2]) {
+      const resumed = await runs.resumeExecutorRun(prior.id);
+      expect(resumed.id).toBe(prior.id);
+      expect(resumed.parentRunId).toBe(prior.parentRunId);
+      expect(resumed.resumeOf).toBe(prior.resumeOf);
+      await waitFor(prior.id, ["completed", "failed"]);
+      expect((await runs.get(prior.id))!.attempt).toBe(expectedAttempt);
+    }
+    expect((await runs.list()).length).toBe(countBefore);
   });
 
-  it("retains a nested executor's supervisor and registers the replacement there", async () => {
+  it("retains a nested executor's supervisor and renews its subscription", async () => {
     const plan = await repo.createPlan({ title: "Nested executor", date: "2026-07-19" });
-    const [parent] = await db.insert(agentSessions).values({ goal: "<chat>", status: "running", workerScope: "test-supervisor" }).returning();
+    const [parent] = await db.insert(agentSessions).values({ goal: "<chat>", status: "running" }).returning();
     const [prior] = await db.insert(agentSessions).values({ goal: "<execute>", planId: plan.id, status: "failed", parentRunId: parent.id }).returning();
-    const next = await runs.resumeExecutorRun(prior.id);
+    const next = await runs.resumeExecutorRun(prior.id, { defer: true });
+    expect(next.id).toBe(prior.id);
     expect(next.parentRunId).toBe(parent.id);
-    expect(next.resumeOf).toBe(prior.id);
-    const [subscription] = await db.select().from(runEventSubscriptions).where(eq(runEventSubscriptions.sourceRunId, next.id));
+    expect(next.resumeOf).toBeNull();
+    const [subscription] = await db.select().from(runEventSubscriptions).where(eq(runEventSubscriptions.sourceRunId, prior.id));
     expect(subscription.subscriberRunId).toBe(parent.id);
-    await waitFor(next.id, ["completed", "failed"]);
+    expect(subscription.resolvedAttempt).toBe(next.attempt);
   });
 
-  it("refuses to fork while the prior generation is not settled", async () => {
-    const plan = await repo.createPlan({ title: "Live", date: "2026-07-19" });
-    const [prior] = await db
-      .insert(agentSessions)
-      .values({
-        goal: "<execute>",
-        status: "running",
-        planId: plan.id,
-      })
-      .returning();
-    await expect(runs.resumeExecutorRun(prior.id)).rejects.toThrow(/send it a message/);
+  it("preserves the remote runner, task claim, SDK token and unfinished inputs", async () => {
+    vi.spyOn(dispatch, "remoteRunnerEnabled").mockReturnValue(true);
+    const kick = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
+    const plan = await repo.createPlan({ title: "Retained executor" });
+    const task = await repo.createTask({ planId: plan.id, title: "Unpublished work" });
+    const [prior] = await db.insert(agentSessions).values({ goal: "<execute>", planId: plan.id,
+      personaId: "executor", status: "failed", sdkSessionId: "codex:retained-thread",
+      cwdStrategy: "repo", worktreePath: "/retained/repo", branch: "claude/executor", attempt: 3 }).returning();
+    await db.update(tasks).set({ executorRunId: prior.id, state: "in_progress", branch: "claude/task-work" }).where(eq(tasks.id, task.id));
+    await db.insert(runnerInstances).values({ runId: prior.id, provider: "sprites", state: "ready", spriteName: "retained-executor", workerGeneration: 7 });
+    const [turn] = await db.insert(runTurns).values({ id: randomUUID(), runId: prior.id, ordinal: 1, attempt: 3, state: "active" }).returning();
+    const [message] = await db.insert(agentMessages).values({ runId: prior.id, role: "user", content: "[]" }).returning();
+    const [input] = await db.insert(runInputs).values({ id: randomUUID(), runId: prior.id, inputSeq: 1,
+      messageId: message.id, kind: "user", status: "assigned", assignedTurnId: turn.id }).returning();
+    const resumed = await runs.resumeExecutorRun(prior.id);
+    expect(kick).toHaveBeenCalledWith(prior.id);
+    expect(resumed).toMatchObject({ id: prior.id, attempt: 4, sdkSessionId: prior.sdkSessionId,
+      worktreePath: prior.worktreePath, branch: prior.branch });
+    const [retained] = await db.select().from(runnerInstances).where(eq(runnerInstances.runId, prior.id));
+    expect(retained).toMatchObject({ spriteName: "retained-executor", workerGeneration: 7 });
+    expect((await repo.getTask(task.id))!.executorRunId).toBe(prior.id);
+    const [requeued] = await db.select().from(runInputs).where(eq(runInputs.id, input.id));
+    expect(requeued).toMatchObject({ status: "pending", assignedTurnId: null });
+    const [oldTurn] = await db.select().from(runTurns).where(eq(runTurns.id, turn.id));
+    expect(oldTurn.state).toBe("superseded");
+    expect(await runs.list({ goal: "<execute>" })).toHaveLength(1);
+  });
+
+  it("consumes unfinished user steering when resuming locally", async () => {
+    const plan = await repo.createPlan({ title: "Local input recovery" });
+    const [prior] = await db.insert(agentSessions).values({ goal: "<execute>", planId: plan.id,
+      personaId: "executor", status: "failed", cwdStrategy: "repo" }).returning();
+    const [turn] = await db.insert(runTurns).values({ id: randomUUID(), runId: prior.id, ordinal: 1,
+      attempt: 1, state: "active" }).returning();
+    const [message] = await db.insert(agentMessages).values({ runId: prior.id, role: "user",
+      content: JSON.stringify([{ type: "text", text: "Retained instruction: preserve the legacy API" }]) }).returning();
+    const [input] = await db.insert(runInputs).values({ id: randomUUID(), runId: prior.id, inputSeq: 1,
+      messageId: message.id, kind: "user", status: "assigned", assignedTurnId: turn.id }).returning();
+    await runs.resumeExecutorRun(prior.id);
+    await waitFor(prior.id, ["completed", "failed"]);
+    expect(h.prompts[0]).toContain("Retained instruction: preserve the legacy API");
+    const [consumed] = await db.select().from(runInputs).where(eq(runInputs.id, input.id));
+    expect(consumed.status).toBe("completed");
+    const [oldTurn] = await db.select().from(runTurns).where(eq(runTurns.id, turn.id));
+    expect(oldTurn.state).toBe("superseded");
+  });
+
+  it("refuses remote recovery without a retained runner", async () => {
+    const prior = await settledExecutor();
+    vi.spyOn(dispatch, "remoteRunnerEnabled").mockReturnValue(true);
+    const kick = vi.spyOn(dispatch, "dispatchRun").mockResolvedValue("spawned");
+    await expect(runs.resumeExecutorRun(prior.id)).rejects.toThrow(/no retained runner/);
+    expect(kick).not.toHaveBeenCalled();
+    expect((await runs.get(prior.id))!.attempt).toBe(prior.attempt);
+  });
+
+  it("allows only one concurrent renewal", async () => {
+    const prior = await settledExecutor();
+    const results = await Promise.allSettled([
+      runs.resumeExecutorRun(prior.id, { defer: true }),
+      runs.resumeExecutorRun(prior.id, { defer: true }),
+    ]);
+    expect(results.filter(r => r.status === "fulfilled")).toHaveLength(1);
+    expect((await runs.get(prior.id))!.attempt).toBe(prior.attempt + 1);
+  });
+
+  it.each(["running", "cancelled", "closed"])("refuses a %s executor", async (status) => {
+    const plan = await repo.createPlan({ title: "Not resumable" });
+    const [prior] = await db.insert(agentSessions).values({ goal: "<execute>", planId: plan.id, status }).returning();
+    await expect(runs.resumeExecutorRun(prior.id, { defer: true })).rejects.toMatchObject({ status: 409 });
   });
 
   it("refuses non-executor runs", async () => {
-    const [chat] = await db
-      .insert(agentSessions)
-      .values({ goal: "<chat>", status: "failed" })
-      .returning();
+    const [chat] = await db.insert(agentSessions).values({ goal: "<chat>", status: "failed" }).returning();
     await expect(runs.resumeExecutorRun(chat.id)).rejects.toThrow(/not a plan-executor run/);
   });
 });
 
 describe("POST /api/sessions/[id]/resume on an executor", () => {
-  it("no longer 404s: forks a fresh generation and returns it", async () => {
+  it("returns the same executor identity", async () => {
     const plan = await repo.createPlan({ title: "Route", date: "2026-07-19" });
     const [prior] = await db
       .insert(agentSessions)
@@ -244,12 +295,15 @@ describe("POST /api/sessions/[id]/resume on an executor", () => {
       new NextRequest(`http://test/api/sessions/${prior.id}/resume`, { method: "POST" }),
       { params: Promise.resolve({ id: String(prior.id) }) }
     );
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(200);
     const body = (await res.json()) as { id: number; goal: string; parentRunId: number };
     expect(body.goal).toBe("<execute>");
-    expect(body.parentRunId).toBe(prior.id);
-    expect(body).toHaveProperty("resumeOf", prior.id);
-    // Let the forked generation's kickoff turn settle before the test ends.
+    expect(body.id).toBe(prior.id);
+    expect(body).toHaveProperty("cwdStrategy", "repo");
+    expect(runs.isImplementWorktree({ goal: "<execute>", cwdStrategy: "worktree" })).toBe(false);
+    expect(body.parentRunId).toBeNull();
+    expect(body).toHaveProperty("resumeOf", null);
+    // Let the renewed attempt settle before the test ends.
     await waitFor(body.id, ["completed", "failed"]);
   });
 });

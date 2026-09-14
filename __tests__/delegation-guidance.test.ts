@@ -111,10 +111,10 @@ describe("hasNativeToolSurface / hasHarnessSubagents", () => {
     expect(hasHarnessSubagents(run({ backend: "pi" }))).toBe(false);
   });
 
-  it("withholds both from the executor — its native tools are blocked", () => {
+  it("gives worker executors their harness sub-agent surface", () => {
     const executor = run({ personaId: "executor", toolsProfile: "orchestrator,spawn" });
-    expect(hasNativeToolSurface(executor)).toBe(false);
-    expect(hasHarnessSubagents(executor)).toBe(false);
+    expect(hasNativeToolSurface(executor)).toBe(true);
+    expect(hasHarnessSubagents(executor)).toBe(true);
   });
 
   it("withholds both from a server-runtime run — the in-process loop mounts no native tools", () => {
@@ -162,12 +162,25 @@ describe("delegationGuidanceFor", () => {
     expect(text).not.toMatch(/Agent\(subagent_type/);
   });
 
-  it("gives a coordinator with no native tools the economy rule alone", () => {
-    const text = delegationGuidanceFor(run({ personaId: "executor", backend: "claude" }));
+  it.each(["claude", "codex", "pi"] as const)("keeps %s executors in the same run, even with an old stored profile", (backend) => {
+    const text = delegationGuidanceFor(run({ personaId: "executor", backend, toolsProfile: "orchestrator,spawn" }));
+    expect(text).toContain("supersedes conflicting older persona instructions");
+    expect(text).toContain("never use start_session or spawn__spawn_agent");
+    expect(text).toContain("ONE active sub-agent");
+    expect(text).toContain("at most TWO");
+    expect(text).toContain("unknown, stay serial");
+    expect(text).not.toContain(CHILD_RUN_ECONOMY_RULE.trim());
+    expect(text).toContain(backend === "claude" ? CLAUDE_SUBAGENT_GUIDANCE.trim()
+      : backend === "codex" ? CODEX_SUBAGENT_GUIDANCE.trim() : NO_NATIVE_SUBAGENT_GUIDANCE.trim());
+  });
+
+  it("applies executor policy by goal even with another persona", () => {
+    expect(delegationGuidanceFor(run({ goal: "<execute>" }))).toContain("ONE active sub-agent");
+  });
+
+  it("gives server conversations guidance without native tools", () => {
+    const text = delegationGuidanceFor(run({ personaId: "concierge", runtime: "server", toolsProfile: "orchestrator,spawn" }));
     expect(text).toContain(COORDINATOR_DELEGATION_GUIDANCE.trim());
-    // Never point an agent at a tool it was not given.
-    expect(text).not.toMatch(/Agent\(subagent_type/);
-    expect(text).not.toContain("spawn_agent(task_name");
   });
 });
 
@@ -208,11 +221,12 @@ describe("alwaysOnExtensions", () => {
     expect(await composeFor(run({ backend: "pi" }))).toContain(NO_NATIVE_SUBAGENT_GUIDANCE.trim());
   });
 
-  it("carries the coordinator flavour for a run with no native tools", async () => {
+  it("carries the native executor policy for an old coordinator profile", async () => {
     const text = await composeFor(
       run({ personaId: "executor", toolsProfile: "orchestrator,spawn" })
     );
-    expect(text).toContain(COORDINATOR_DELEGATION_GUIDANCE.trim());
+    expect(text).toContain(CLAUDE_SUBAGENT_GUIDANCE.trim());
+    expect(text).toContain("ONE active sub-agent");
   });
 });
 

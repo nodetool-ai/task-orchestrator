@@ -66,10 +66,13 @@ export function buildExecutePrompt(plan: PlanFull, tasks: TaskFull[]): string {
   const lines: string[] = [
     `# Execute plan ${plan.id}: ${plan.title}`,
     "",
-    "Drive this plan to completion: spawn one implementor per task (each child",
-    "implements, opens its own PR, and arms GitHub auto-merge so a green CI run",
-    "merges it). Run independent tasks in parallel — start every ready task",
-    "before parking.",
+    "Drive this plan to completion inside this same run and worker. Delegate task",
+    "work to native harness sub-agents; never create child runs with start_session",
+    "or spawn__spawn_agent. If the harness has none, implement sequentially inline.",
+    "Default to one active sub-agent across the plan, no nested fan-out. Only use",
+    "two for disjoint work with measured memory headroom. Serialize heavy checks",
+    "with bounded test workers; ready tasks may wait for capacity.",
+    "Verify and deliver each task PR, then track actual merged task state.",
     "",
     `## Tasks (${open.length} open of ${tasks.length})`,
   ];
@@ -83,8 +86,8 @@ export function buildExecutePrompt(plan: PlanFull, tasks: TaskFull[]): string {
   }
   lines.push(
     "",
-    "Use list_tasks to refresh state as you go (it reflects child runs' transitions).",
-    "When every task is done or cancelled, transition the plan to done and summarise."
+    "Use list_tasks to refresh state as you go before assigning work.",
+    "When every task is merged or cancelled, transition the plan to done and summarise."
   );
   return lines.join("\n");
 }

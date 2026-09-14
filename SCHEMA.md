@@ -26,6 +26,12 @@ tasks                    one row per task
   body        TEXT  default ''  free-form markdown
   estimate    TEXT
   tags        TEXT  default '[]'  JSON array
+  executor_run_id INTEGER      FK → agent_runs.id ON DELETE SET NULL;
+                               same-run executor task ownership. Acquired by
+                               transition_task under the task advisory lock;
+                               retained through failure/parking and cleared on
+                               merged/cancelled. Creation, renewal and dispatch
+                               reject competing task writers.
   branch      TEXT             canonical git branch (claude/<taskid>); reserved
                                when the first implement run is created and
                                shared by every later run on the task

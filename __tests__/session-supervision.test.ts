@@ -69,7 +69,7 @@ describe("replacement supervision", () => {
   });
 
   it("denies model-driven destructive cancellation of a task worktree", async () => {
-    const parent = await runs.create({ goal: "<execute>", defer: true });
+    const parent = await runs.create({ goal: "<chat>", defer: true });
     const task = await repo.createTask({
       planId: null,
       repoId: "R-default",

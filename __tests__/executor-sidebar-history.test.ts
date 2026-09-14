@@ -37,8 +37,12 @@ vi.mock("../lib/agent-backend", () => ({
     id: "pi",
     listProviders: () => [],
     runTurn: async (args: {
+      nativeToolPolicy?: string;
+      prompt: string;
       onEvent: (env: Record<string, unknown>) => void | Promise<void>;
     }) => {
+      expect(args.nativeToolPolicy).toBe("default");
+      expect(args.prompt).toContain("one active sub-agent");
       await args.onEvent({ type: "system", subtype: "init", session_id: "sess-1" });
       await args.onEvent({
         type: "assistant",

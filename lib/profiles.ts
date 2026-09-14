@@ -246,6 +246,7 @@ export async function alwaysOnExtensions(ctx: ProfileContext): Promise<Extension
       toolsProfile: ctx.run?.toolsProfile ?? null,
       personaId: ctx.run?.personaId ?? null,
       backend: ctx.run?.backend ?? null,
+      goal: ctx.run?.goal ?? null,
     }),
   ];
 }

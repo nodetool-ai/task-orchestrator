@@ -1,3 +1,4 @@
+import { effectiveRunToolsProfile } from "../plan-executor-policy";
 import { dbTransport } from "../worker/db-transport";
 import { enqueueUserInputTx, materializeAndClaimRunTurn } from "../run-inputs";
 import { db } from "../../db";
@@ -106,7 +107,7 @@ export async function buildRunStart(
   // without a model turn receipt.
   const [memoryContext, toolNames] = await Promise.all([
     ambientMemory(runId),
-    allowedServerTools(run.toolsProfile || persona.toolsProfile),
+    allowedServerTools(effectiveRunToolsProfile(run, persona.toolsProfile)),
   ]);
   let messages = durableTurn ? await dbTransport.listMessages(runId) : initialMessages;
   let { transcript: rawTranscript, pendingInput } = pendingMessages(messages);
