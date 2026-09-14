@@ -16,9 +16,9 @@ import type { InboundMessage, PipeConfig } from "../lib/pipe/types";
 // stop path without actually spawning an agent turn.
 
 // Persona bots are runtime='server' runs, so the persona under test must carry
-// a server-safe tools profile (lib/profiles.ts) — 'executor' is orchestration
-// only. 'implementor' would be rejected by the create-time guardrail.
-const PERSONA = "executor";
+// a server-safe tools profile (lib/profiles.ts). Concierge has orchestration
+// tools; executor and implementor require a worker for repository access.
+const PERSONA = "concierge";
 
 const config: PipeConfig = {
   bots: [

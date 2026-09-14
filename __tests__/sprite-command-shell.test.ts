@@ -14,7 +14,8 @@ vi.mock("@/lib/sprite-access", () => ({
   withOwnedSprite: vi.fn(async (_ctx, _target, action) => action(mocks.runner)),
 }));
 
-vi.mock("@/lib/runner/sprites-client", () => ({
+vi.mock("@/lib/runner/sprites-client", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/runner/sprites-client")>(),
   makeSpritesClient: () => ({ exec: mocks.exec }),
 }));
 

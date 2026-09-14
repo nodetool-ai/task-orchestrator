@@ -96,10 +96,10 @@ function fakeRunRow(overrides: { id: number; taskId: string }) {
 
 describe("start_session userId propagation", () => {
   it("threads the spawner's userId through startSession into runs.create", async () => {
-    const userId = await insertUser("executor@example.com");
+    const userId = await insertUser("concierge@example.com");
     const plan = await repo.createPlan({ title: "Attribution 2", date: "2026-07-04" });
     const task = await repo.createTask({ planId: plan.id, title: "Task", date: "2026-07-04" });
-    const spawnerId = await insertRun({ goal: "<execute>", planId: plan.id, userId });
+    const spawnerId = await insertRun({ goal: "<chat>", planId: plan.id, userId });
     createSpy.mockResolvedValue(fakeRunRow({ id: 4244, taskId: task.id }));
 
     const res = await tool("start_session").execute(
@@ -134,7 +134,7 @@ describe("start_session model resolution", () => {
     });
     const plan = await repo.createPlan({ title: "Model resolution", date: "2026-07-04" });
     const task = await repo.createTask({ planId: plan.id, title: "Task", date: "2026-07-04" });
-    const spawnerId = await insertRun({ goal: "<execute>", planId: plan.id });
+    const spawnerId = await insertRun({ goal: "<chat>", planId: plan.id });
     createSpy.mockResolvedValue(fakeRunRow({ id: 5001, taskId: task.id }));
 
     await tool("start_session").execute(
@@ -157,7 +157,7 @@ describe("start_session model resolution", () => {
     });
     const plan = await repo.createPlan({ title: "Explicit model", date: "2026-07-04" });
     const task = await repo.createTask({ planId: plan.id, title: "Task", date: "2026-07-04" });
-    const spawnerId = await insertRun({ goal: "<execute>", planId: plan.id });
+    const spawnerId = await insertRun({ goal: "<chat>", planId: plan.id });
     createSpy.mockResolvedValue(fakeRunRow({ id: 5002, taskId: task.id }));
 
     await tool("start_session").execute(
@@ -173,8 +173,8 @@ describe("start_session model resolution", () => {
 
 describe("runs.list parentRunId filter", () => {
   it("returns only the children of the given run, not siblings or the parent", async () => {
-    const parentId = await insertRun({ goal: "<execute>", status: "running" });
-    const otherParentId = await insertRun({ goal: "<execute>", status: "running" });
+    const parentId = await insertRun({ goal: "<chat>", status: "running" });
+    const otherParentId = await insertRun({ goal: "<chat>", status: "running" });
     const childA = await insertRun({ parentRunId: parentId, status: "completed" });
     const childB = await insertRun({ parentRunId: parentId, status: "running" });
     await insertRun({ parentRunId: otherParentId, status: "running" });

@@ -41,7 +41,7 @@ import type { Channel, InboundMessage, OutboundDraft, PipeConfig } from "../lib/
 
 // Server-safe persona: a Discord conversation is a runtime='server' run, and
 // runs.create rejects a shell/fs/repo-write profile on that placement.
-const PERSONA = "executor";
+const PERSONA = "concierge";
 
 const config: PipeConfig = {
   bots: [

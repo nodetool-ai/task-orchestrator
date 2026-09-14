@@ -15,13 +15,13 @@ import { personaPromptFactory } from "../lib/extensions/persona-prompt";
 import { personaMemoryFactory, MEMORY_SYSTEM_GUIDANCE } from "../lib/extensions/persona-memory";
 import type { Extension } from "../lib/agent-backend/types";
 
-const PERSONA_PROMPT = "You are the test implementor persona.";
+const PERSONA_PROMPT = "You are the test persona.";
 
 beforeEach(async () => {
   await db.delete(personasTable);
-  await repo.upsertPersona({
-    id: "implementor",
-    name: "Implementor",
+  for (const id of ["implementor", "executor"]) await repo.upsertPersona({
+    id,
+    name: id,
     description: null,
     systemPrompt: PERSONA_PROMPT,
     toolsProfile: "orchestrator",
@@ -38,16 +38,15 @@ async function composedPromptFor(goal: "<chat>" | "<execute>"): Promise<string> 
     goal === "<execute>"
       ? (await repo.createPlan({ title: "Prompt Plan", date: "2026-07-02" })).id
       : undefined;
-  const run = await runs.create({ goal, planId, defer: true } as any);
+  const run = await runs.create({ goal, planId, defer: true });
   const full = (await runs.get(run.id))!;
+  const stored = (await repo.getPersona(full.personaId!))!;
   const persona = {
-    id: "implementor",
-    name: "Implementor",
-    description: "",
-    systemPrompt: PERSONA_PROMPT,
-    toolsProfile: "orchestrator",
-    skillPaths: [] as string[],
+    ...stored,
+    description: stored.description ?? "",
+    skillPaths: JSON.parse(stored.skillPaths) as string[],
   };
+  expect(persona.id).toBe(goal === "<execute>" ? "executor" : "implementor");
   const extensions: Extension[] = [
     personaPromptFactory(persona),
     personaMemoryFactory(persona, full, "/tmp"),
@@ -63,7 +62,7 @@ describe("postgres-mode system prompt composition", () => {
     expect(composed).toContain(MEMORY_SYSTEM_GUIDANCE);
   });
 
-  it("a lightweight executor's composed prompt carries the persona prompt and memory guidance", async () => {
+  it("an executor worker's composed prompt carries the persona prompt and memory guidance", async () => {
     const composed = await composedPromptFor("<execute>");
     expect(composed).toContain(PERSONA_PROMPT);
     expect(composed).toContain(MEMORY_SYSTEM_GUIDANCE);
